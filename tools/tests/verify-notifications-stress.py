@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+import base64
+import fcntl
+import hashlib
+import http.server
+import json
+import os
+import pathlib
+import re
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+KT_SRC = (REPO / 'apps/gui/app/src/main/java/io/github/modao7067/luma/gui/runtime/RootBackgroundNotifications.kt').read_text(encoding='utf-8')
+m = re.search(r'internal val watcherScript = """\n(.*?)\n""".trimIndent\(\)', KT_SRC, re.S)
+assert m, 'watcherScript not found in RootBackgroundNotifications.kt'
+WATCHER_CODE = m.group(1)
+assert '.resolve(' not in WATCHER_CODE, 'Forbidden Path.resolve() found in watcherScript!'
+
+def ws_accept_key(sec_key: str) -> str:
+    magic = (sec_key.strip() + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode('ascii')
+    return base64.b64encode(hashlib.sha1(magic).digest()).decode('ascii')
+
+def ws_encode_frame(payload: bytes, opcode: int = 1) -> bytes:
+    header = bytearray([0x80 | opcode])
+    n = len(payload)
+    if n < 126:
+        header.append(n)
+    elif n < 65536:
+        header.append(126)
+        header.extend(struct.pack('!H', n))
+    else:
+        header.append(127)
+        header.extend(struct.pack('!Q', n))
+    return bytes(header) + payload
+
+def ws_read_frame(conn: socket.socket, buf: bytearray):
+    while True:
+        if len(buf) >= 2:
+            b0, b1 = buf[0], buf[1]
+            opcode = b0 & 0x0F
+            masked = (b1 & 0x80) != 0
+            length = b1 & 0x7F
+            idx = 2
+            if length == 126 and len(buf) >= 4:
+                length = struct.unpack('!H', buf[2:4])[0]
+                idx = 4
+            elif length == 126:
+                idx = -1
+            elif length == 127 and len(buf) >= 10:
+                length = struct.unpack('!Q', buf[2:10])[0]
+                idx = 10
+            elif length == 127:
+                idx = -1
+            if idx != -1:
+                if masked:
+                    idx += 4
+                if len(buf) >= idx + length:
+                    payload = bytes(buf[idx:idx + length])
+                    if masked:
+                        mask = buf[idx - 4:idx]
+                        payload = bytes(b ^ mask[i & 3] for i, b in enumerate(payload))
+                    del buf[:idx + length]
+                    return opcode, payload
+        chunk = conn.recv(16384)
+        if not chunk:
+            return None, b''
+        buf.extend(chunk)
+
+class MockCodexWsServer:
+    def __init__(self, unix_path: str = '', expected_token: str = ''):
+        self.unix_path = unix_path
+        self.expected_token = expected_token
+        self.clients = []
+        self.lock = threading.Lock()
+        self.running = True
+        self.pongs_received = 0
+        if unix_path:
+            self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.srv.bind(unix_path)
+            self.port = 0
+        else:
+            self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.srv.bind(('127.0.0.1', 0))
+            self.port = self.srv.getsockname()[1]
+        self.srv.listen(16)
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                break
+            threading.Thread(target=self._client_loop, args=(conn,), daemon=True).start()
+
+    def _client_loop(self, conn: socket.socket):
+        try:
+            raw = b''
+            while b'\r\n\r\n' not in raw:
+                c = conn.recv(4096)
+                if not c:
+                    conn.close()
+                    return
+                raw += c
+            head, rest = raw.split(b'\r\n\r\n', 1)
+            headers = {}
+            for line in head.decode('latin1').splitlines()[1:]:
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    headers[k.strip().lower()] = v.strip()
+            if self.expected_token:
+                assert headers.get('authorization') == f'Bearer {self.expected_token}', headers
+            accept = ws_accept_key(headers['sec-websocket-key'])
+            resp = (
+                'HTTP/1.1 101 Switching Protocols\r\n'
+                'Upgrade: websocket\r\n'
+                'Connection: Upgrade\r\n'
+                f'Sec-WebSocket-Accept: {accept}\r\n\r\n'
+            )
+            conn.sendall(resp.encode('ascii'))
+            with self.lock:
+                self.clients.append(conn)
+            buf = bytearray(rest)
+            while self.running:
+                opcode, payload = ws_read_frame(conn, buf)
+                if opcode is None or opcode == 8:
+                    break
+                if opcode == 10:
+                    with self.lock:
+                        self.pongs_received += 1
+                    continue
+                if opcode == 1:
+                    msg = json.loads(payload.decode('utf-8'))
+                    method = msg.get('method')
+                    if method == 'initialize':
+                        conn.sendall(ws_encode_frame(b'ping-check', opcode=9))
+                        reply = json.dumps({'id': msg['id'], 'result': {'serverInfo': {'name': 'mock'}}}).encode('utf-8')
+                        frame = ws_encode_frame(reply)
+                        for i in range(0, len(frame), 7):
+                            conn.sendall(frame[i:i + 7])
+                    elif method == 'thread/resume':
+                        tid = msg['params']['threadId']
+                        reply = json.dumps({
+                            'id': msg['id'],
+                            'result': {'thread': {'id': tid, 'status': {'type': 'running'}}},
+                        }).encode('utf-8')
+                        conn.sendall(ws_encode_frame(reply))
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def broadcast_json(self, obj: dict):
+        frame = ws_encode_frame(json.dumps(obj).encode('utf-8'))
+        with self.lock:
+            targets = list(self.clients)
+        for c in targets:
+            try:
+                mid = max(1, len(frame) // 2)
+                c.sendall(frame[:mid])
+                c.sendall(frame[mid:])
+            except OSError:
+                pass
+
+    def close(self):
+        self.running = False
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+        with self.lock:
+            for c in self.clients:
+                try:
+                    c.close()
+                except OSError:
+                    pass
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+def main():
+    with tempfile.TemporaryDirectory(prefix='luma_bg_stress_') as tmp:
+        base = pathlib.Path(tmp)
+        script_path = base / 'bg-notify-watch.py'
+        script_path.write_text(WATCHER_CODE, encoding='utf-8')
+
+        wake_token = 'a1' * 32
+        bridge_token = 'b2' * 32
+        oc_password = 'c3' * 32
+        codex_token = 'd4' * 32
+        (base / 'bg-watch-token').write_text(wake_token, encoding='utf-8')
+        (base / 'cli-bridge-token').write_text(bridge_token, encoding='utf-8')
+        (base / 'opencode-password').write_text(oc_password, encoding='utf-8')
+        (base / 'capability-token').write_text(codex_token, encoding='utf-8')
+
+        log_file = base / 'bg-watch.log'
+        log_file.write_bytes(b'X' * 102400)
+        initial_inode = log_file.stat().st_ino
+
+        wakes_log = base / 'wakes.jsonl'
+        mock_android_sh = base / 'mock-android-sh'
+        mock_android_sh.write_text(
+            f"""#!{sys.executable}
+import json, pathlib, sys, fcntl
+p = pathlib.Path({str(wakes_log)!r})
+with open(p, 'a', encoding='utf-8') as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    f.write(json.dumps(sys.argv[1:]) + '\\n')
+""",
+            encoding='utf-8',
+        )
+        mock_android_sh.chmod(0o755)
+
+        state_lock = threading.Lock()
+        bridged_state = {f'br-{i}': {'running': True, 'requests': []} for i in range(8)}
+        oc_active = {f'ses_oc_{i}': True for i in range(6)}
+        oc_perms = {f'ses_oc_{i}': [] for i in range(6)}
+        oc_forms = {f'ses_oc_{i}': [] for i in range(6)}
+
+        class MockHttpHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_GET(self):
+                with state_lock:
+                    if self.path.startswith('/sessions/'):
+                        sid = self.path.split('/sessions/', 1)[1]
+                        payload = bridged_state.get(sid, {'running': False, 'requests': []})
+                    elif self.path == '/api/session/active':
+                        payload = {'data': dict(oc_active)}
+                    elif self.path.startswith('/api/session/') and self.path.endswith('/permission'):
+                        tid = self.path.split('/')[3]
+                        payload = {'data': list(oc_perms.get(tid, []))}
+                    elif self.path.startswith('/api/session/') and self.path.endswith('/form'):
+                        tid = self.path.split('/')[3]
+                        payload = {'data': list(oc_forms.get(tid, []))}
+                    else:
+                        payload = {}
+                body = json.dumps(payload).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        http_srv = ThreadedHTTPServer(('127.0.0.1', 0), MockHttpHandler)
+        http_port = http_srv.server_address[1]
+        threading.Thread(target=http_srv.serve_forever, daemon=True).start()
+
+        ws_tcp = MockCodexWsServer(expected_token=codex_token)
+        unix_sock_path = str(base / 'ext-codex.sock')
+        ws_unix = MockCodexWsServer(unix_path=unix_sock_path)
+
+        sessions = []
+        for i in range(8):
+            sessions.append({
+                'id': f'br-{i}', 'epoch': 1, 'protocol': 'bridged', 'task': 'luma-native-cli-gui-v3',
+                'endpointUrl': f'http://127.0.0.1:{http_port}', 'running': True,
+                'userStopped': (i == 7), 'requestIds': [],
+            })
+        for i in range(6):
+            sessions.append({
+                'id': f'oc-{i}', 'epoch': 1, 'protocol': 'opencode', 'threadId': f'ses_oc_{i}',
+                'endpointUrl': f'http://127.0.0.1:{http_port}', 'running': True,
+                'userStopped': False, 'requestIds': [],
+            })
+        for i in range(5):
+            sessions.append({
+                'id': f'cx-tcp-{i}', 'epoch': 1, 'protocol': 'codex', 'threadId': f'tid_tcp_{i}',
+                'endpointUrl': f'ws://127.0.0.1:{ws_tcp.port}', 'running': True,
+                'userStopped': (i == 4), 'requestIds': [],
+            })
+        for i in range(5):
+            sessions.append({
+                'id': f'cx-uds-{i}', 'epoch': 1, 'protocol': 'codex', 'threadId': f'tid_uds_{i}',
+                'externalSocket': unix_sock_path, 'running': True,
+                'userStopped': False, 'requestIds': [],
+            })
+
+        spec = {
+            'active': True,
+            'packageName': 'io.github.modao7067.luma',
+            'updatedAt': int(time.time() * 1000),
+            'sessions': sessions,
+        }
+        (base / 'bg-watch-spec.json').write_text(json.dumps(spec), encoding='utf-8')
+
+        env = dict(os.environ)
+        env['LUMA_BG_ANDROID_SH'] = str(mock_android_sh)
+        env['LUMA_BG_TICK_SEC'] = '0.15'
+
+        procs = [
+            subprocess.Popen([sys.executable, '-I', '-B', str(script_path), str(base)], env=env)
+            for _ in range(8)
+        ]
+        for p in procs:
+            assert p.wait(timeout=5) == 0
+
+        time.sleep(0.8)
+        assert log_file.stat().st_ino == initial_inode, 'Log inode changed (must truncate in-place)!'
+        assert log_file.stat().st_size < 16384, f'Log file was not truncated: {log_file.stat().st_size}'
+        assert ws_tcp.pongs_received >= 1 and ws_unix.pongs_received >= 1, 'WebSocket Ping/Pong failed!'
+
+        check_fd = os.open(str(base / 'bg-watch.lock'), os.O_RDWR)
+        locked = False
+        try:
+            fcntl.flock(check_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            locked = True
+        finally:
+            os.close(check_fd)
+        assert locked, 'Singleton watcher daemon should hold flock!'
+
+        with state_lock:
+            for i in range(4):
+                bridged_state[f'br-{i}']['running'] = False
+            for i in (4, 5):
+                bridged_state[f'br-{i}']['requests'] = [{'id': f'r-{i}'}]
+            bridged_state['br-6']['requests'] = [{'id': 'rq-6', 'questions': [{'id': 'q1'}]}]
+            bridged_state['br-7']['running'] = False
+
+            for i in range(3):
+                oc_active.pop(f'ses_oc_{i}', None)
+            for i in (3, 4):
+                oc_perms[f'ses_oc_{i}'] = [{'id': f'p-{i}'}]
+            oc_forms['ses_oc_5'] = [{'id': 'f-5'}]
+
+        ws_tcp.broadcast_json({'method': 'turn/completed', 'params': {'threadId': 'tid_tcp_0'}})
+        ws_tcp.broadcast_json({'method': 'turn/completed', 'params': {'threadId': 'tid_tcp_1'}})
+        ws_tcp.broadcast_json({'id': 'srv-2', 'method': 'execCommandApproval', 'params': {'threadId': 'tid_tcp_2'}})
+        ws_tcp.broadcast_json({'id': 'srv-3', 'method': 'item/tool/requestUserInput', 'params': {'threadId': 'tid_tcp_3'}})
+        ws_tcp.broadcast_json({'method': 'turn/completed', 'params': {'threadId': 'tid_tcp_4'}})
+
+        for i in range(3):
+            ws_unix.broadcast_json({'method': 'turn/completed', 'params': {'threadId': f'tid_uds_{i}'}})
+        ws_unix.broadcast_json({'id': 'uds-3', 'method': 'applyPatchApproval', 'params': {'threadId': 'tid_uds_3'}})
+        ws_unix.broadcast_json({
+            'method': 'item/started',
+            'params': {'threadId': 'tid_uds_4', 'item': {'id': 'item-q4', 'delivery': 'async', 'questions': [{'id': 'q'}]}},
+        })
+
+        time.sleep(0.75)
+
+        assert wakes_log.is_file(), 'No wake broadcasts emitted!'
+        lines = [json.loads(line) for line in wakes_log.read_text(encoding='utf-8').splitlines() if line.strip()]
+        assert 1 <= len(lines) <= 3, f'Expected batched broadcasts (1..3), got {len(lines)}'
+
+        delivered = {}
+        for argv in lines:
+            assert '--es' in argv
+            tok_idx = argv.index('token') + 1
+            assert argv[tok_idx] == wake_token
+            ev_idx = argv.index('events') + 1
+            events = json.loads(argv[ev_idx])
+            for item in events:
+                sid = item['sessionId']
+                assert sid not in delivered, f'Duplicate wake fired for {sid}!'
+                delivered[sid] = item['kind']
+
+        expected = {
+            'br-0': 'completed', 'br-1': 'completed', 'br-2': 'completed', 'br-3': 'completed',
+            'br-4': 'approval', 'br-5': 'approval', 'br-6': 'question',
+            'oc-0': 'completed', 'oc-1': 'completed', 'oc-2': 'completed',
+            'oc-3': 'approval', 'oc-4': 'approval', 'oc-5': 'question',
+            'cx-tcp-0': 'completed', 'cx-tcp-1': 'completed', 'cx-tcp-2': 'approval', 'cx-tcp-3': 'question',
+            'cx-uds-0': 'completed', 'cx-uds-1': 'completed', 'cx-uds-2': 'completed',
+            'cx-uds-3': 'approval', 'cx-uds-4': 'question',
+        }
+        assert 'br-7' not in delivered, 'userStopped bridged session must NOT fire wake!'
+        assert 'cx-tcp-4' not in delivered, 'userStopped codex session must NOT fire wake!'
+        assert delivered == expected, f'Mismatch:\nGot:      {sorted(delivered.items())}\nExpected: {sorted(expected.items())}'
+
+        (base / 'bg-watch-spec.json').write_text(json.dumps({'active': False}), encoding='utf-8')
+        deadline = time.monotonic() + 1.5
+        released = False
+        while time.monotonic() < deadline:
+            fd = os.open(str(base / 'bg-watch.lock'), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                released = True
+                os.close(fd)
+                break
+            except BlockingIOError:
+                os.close(fd)
+                time.sleep(0.05)
+        assert released, 'Daemon did not exit promptly after disarm!'
+
+        ws_tcp.close()
+        ws_unix.close()
+        http_srv.shutdown()
+        print(f'PASS notifications stress: 8x flock spawn, 24 sessions / 4 protocols, {len(lines)} batched broadcast(s), 0 duplicates, instant disarm')
+
+if __name__ == '__main__':
+    main()

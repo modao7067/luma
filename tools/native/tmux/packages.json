@@ -1,0 +1,5 @@
+[
+ {"name":"tmux","version":"3.5a-3","url":"https://deb.debian.org/debian/pool/main/t/tmux/tmux_3.5a-3_arm64.deb","sha256":"835d23b320f5d0457f7a695d90d1c5cca5c2b4a6481fa28b06ad14b18dcabff2"},
+ {"name":"libevent-core-2.1-7t64","version":"2.1.12-stable-10+b1","url":"https://deb.debian.org/debian/pool/main/libe/libevent/libevent-core-2.1-7t64_2.1.12-stable-10+b1_arm64.deb","sha256":"84a27a752d520df78bab24a499f66db21d5274803eb9a2e4d7f88554210f7dea"},
+ {"name":"libjemalloc2","version":"5.3.0-3","url":"https://deb.debian.org/debian/pool/main/j/jemalloc/libjemalloc2_5.3.0-3_arm64.deb","sha256":"437c48a6d591579bc812fc583ff0f28ac34a7d5c36b7d4e9f4f8809650430f3e"}
+]

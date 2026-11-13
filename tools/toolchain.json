@@ -1,0 +1,31 @@
+{
+  "java": "$JAVA_HOME (JDK 21; falls back to /usr/lib/jvm/java-21-openjdk-arm64, then PATH)",
+  "javaMajor": 21,
+  "gradle": "9.8.2",
+  "agp": "9.5.0",
+  "compileSdk": "37.2",
+  "buildTools": "37.0.0",
+  "aapt2": "$AAPT2 (default /opt/eta-aapt2/aapt2 on the device build host, else the SDK build-tools aapt2)",
+  "offlineMaven": "artifacts/maven (relative to repository root, optional)",
+  "lumaBuild": ":apps:gui:assembleRelease (existing NoRoot release certificate; luma is a compatibility alias)",
+  "artifactSha256": {
+    "$AAPT2": "a5018f64ecab4ac0446495c7c04da285a3f203f9bad773f84ade5dbaaa099835",
+    "$ANDROID_HOME/platforms/android-35/android.jar": "4566663c3876e022b4fa4ced8c8697c4ab1688267f090114fd92d027b32e619b",
+    "$ANDROID_HOME/build-tools/35.0.0/lib/d8.jar": "305622ad00535684534eb8f742cbf5e628a9abc09d8ea4d39d1babb95bf0cee5",
+    "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar": "00ef9948f843fe395d2440ae3ef41405b8040a6d5d46493bd1902ac0ee6deae7",
+    "$LUMA_ROOT/artifacts/maven/org/tukaani/xz/1.12/xz-1.12.jar": "3e158a87bd73d8afb4b6e8239c013b7d049c48563f45860ce99cd2e448cf4a6b",
+    "$LUMA_ROOT/artifacts/maven/org/tukaani/xz/1.12/xz-1.12.pom": "937b44d869c059c39f07ae194d8cd6219f5aebf2200ef9707f0b50b7837da281",
+    "$ANDROID_HOME/build-tools/37.0.0/lib/d8.jar": "a26ee56252adcff6752c379ae255a0ad538ebec60189e078ec6855487107637d",
+    "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar": "2defad215d7ff52968a409cde528cdaef7918b115e276b8e3378ca7a178e4180",
+    "$ANDROID_HOME/platforms/android-37.2/android.jar": "2507cf762abe2171a8cb3c289837fc71f2e66e598f396f1cc10bb7dc10020329"
+  },
+  "kotlin": "2.4.21",
+  "composeBom": "2026.09.00",
+  "composeRuntime": "1.12.1",
+  "composeRuntimeSaveable": "1.12.1",
+  "composeRuntimeFix": "https://android.googlesource.com/platform/frameworks/support/+/420bc818bded76fc5be283bdf149117cbbb78404",
+  "composeUiTest": "1.12.1",
+  "robolectric": "4.17",
+  "composeMaterial3": "1.4.0",
+  "_note": "artifactSha256 keys: $ANDROID_HOME = Android SDK root, $LUMA_ROOT = repository root, $AAPT2 = aapt2 binary; resolved by tools/toolenv.py. Missing files are reported (WARN) unless LUMA_STRICT_TOOLCHAIN=1."
+}

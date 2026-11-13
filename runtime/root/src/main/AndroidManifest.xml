@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <application>
+        <activity android:name="io.github.modao7067.luma.root.MainActivity" android:exported="false" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden">
+            </activity>
+        <service android:name="io.github.modao7067.luma.root.ShellService" android:exported="false" />
+    </application>
+</manifest>

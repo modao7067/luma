@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+apply from: rootProject.file('gradle/gui-app.gradle')
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+android {
+    namespace 'io.github.modao7067.luma.gui'
+    defaultConfig { applicationId 'io.github.modao7067.luma'; targetSdk 35; versionCode 80; versionName '1.0.0'; resValue 'bool', 'root_gui_managed', 'true'; ndk { abiFilters 'arm64-v8a' } }
+    sourceSets.main.java.srcDir('src/noroot/java')
+    sourceSets.main.kotlin.srcDir('src/noroot/java')
+}
+
+abstract class GenerateGuiKeeperAssets extends DefaultTask {
+    @InputDirectory abstract DirectoryProperty getSourceDirectory()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+    @javax.inject.Inject abstract org.gradle.api.file.FileSystemOperations getFileSystemOperations()
+    @TaskAction void generate() {
+        fileSystemOperations.sync {
+            from(sourceDirectory) { include 'daemon.py', 'mode_state.py'; into 'root-keeper' }
+            into(outputDirectory)
+        }
+    }
+}
+def keeperAssets = tasks.register('generateKeeperAssets', GenerateGuiKeeperAssets) {
+    sourceDirectory.set(rootProject.layout.projectDirectory.dir('backend/root'))
+    outputDirectory.set(layout.buildDirectory.dir('generated/keeper-assets'))
+}
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.buildConfigFields.put('DEFAULT_ENVIRONMENT',
+        new com.android.build.api.variant.BuildConfigField('String', '"noroot"', 'Default runtime'))
+    variant.sources.assets.addGeneratedSourceDirectory(keeperAssets) { it.outputDirectory }
+}
+dependencies { implementation project(':runtime:noroot') }
+apply from: rootProject.file('gradle/gui-dependencies.gradle')

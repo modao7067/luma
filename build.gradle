@@ -1,0 +1,12 @@
+buildscript {
+    repositories {
+        if (gradle.ext.offlineMaven != null) maven { url = gradle.ext.offlineMaven }
+        google(); mavenCentral()
+    }
+    dependencies { classpath libs.kotlin.gradle.plugin }
+}
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.android.library) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+}

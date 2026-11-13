@@ -1,0 +1,52 @@
+# Everything downloaded, built outside Gradle, or too large for Git lives under artifacts/
+# (offline Maven mirror, toolchain downloads, unpacked rootfs, content-addressed store).
+# tools/bootstrap.py checks/restores it.
+/artifacts/
+/archive/
+/backups/
+/verification/
+/.claude/worktrees/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/signing/
+**/local.properties
+**/src/main/assets/*
+!**/src/main/assets/runtime/
+!**/src/main/assets/workspace/
+!**/src/main/assets/root-mode/
+!**/src/main/assets/licenses/
+!/apps/gui/app/src/main/assets/cli_bridge/
+!/apps/gui/app/src/main/assets/browser/
+!**/src/main/assets/*LICENSE.txt
+!**/src/main/assets/*OFL.txt
+!**/src/main/assets/*-manifest.json
+# generated together with debian-arm64.zip.xz (tools/bootstrap.py pins it)
+**/src/main/assets/rootfs-manifest.json
+!**/src/main/assets/managed-workspace.json
+!**/src/main/assets/sessions/
+!**/src/main/assets/debian-packages.tsv
+**/src/main/jniLibs/
+*.apk
+*.jks
+*.keystore
+*.pem
+*.key
+*release.properties
+__pycache__/
+*.class
+*.log
+**/status-check/
+**/ime-check/
+**/input-check/
+**/root-hook-classes/
+/tools/tests/*/*-check.txt
+**/root-startup.sh
+**/root-hook-check.json
+**/.bash_history
+/tools/*.tar.gz
+/tools/source-baseline.json
+/tools/provenance.json
+/tools/delivery.json
+/tools/changes.json
+root-backend.token

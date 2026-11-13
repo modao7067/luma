@@ -1,0 +1,12 @@
+plugins { id 'com.android.library' }
+apply from: rootProject.file('gradle/android-common.gradle')
+android {
+    enableKotlin = false
+    namespace 'com.termux.view'
+    sourceSets.main.java.srcDir('java')
+    lint { baseline = file('lint-baseline.xml') }
+}
+dependencies {
+    implementation libs.androidx.annotation
+    api project(':shared:terminal-emulator')
+}

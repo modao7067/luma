@@ -1,0 +1,25 @@
+import javax.inject.Inject
+import org.gradle.api.file.FileSystemOperations
+
+abstract class GenerateSharedUi extends DefaultTask {
+    @InputDirectory abstract DirectoryProperty getSourceDirectory()
+    @Input abstract Property<String> getTargetNamespace()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+    @Inject abstract FileSystemOperations getFileSystemOperations()
+    @TaskAction void generate() {
+        def namespace = targetNamespace.get()
+        fileSystemOperations.sync {
+            from(sourceDirectory)
+            into(outputDirectory)
+            filter { line -> line.replace('io.github.modao7067.luma.shared', namespace) }
+        }
+    }
+}
+def generateSharedUi = tasks.register('generateSharedUi', GenerateSharedUi) {
+    sourceDirectory.set(rootProject.layout.projectDirectory.dir('shared/ui/java'))
+    targetNamespace.set(provider { android.namespace })
+    outputDirectory.set(layout.buildDirectory.dir('generated/shared-ui'))
+}
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.sources.java.addGeneratedSourceDirectory(generateSharedUi) { it.outputDirectory }
+}

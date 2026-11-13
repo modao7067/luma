@@ -1,0 +1,88 @@
+diff -ruN patch-base/src/extension/fake_id0/fake_id0.c patch-min/src/extension/fake_id0/fake_id0.c
+--- patch-base/src/extension/fake_id0/fake_id0.c	2026-10-30 15:00:03.403835392 +0800
++++ patch-min/src/extension/fake_id0/fake_id0.c	2026-10-30 15:34:54.445917056 +0800
+@@ -37,6 +37,11 @@
+ #include <sys/socket.h>  /* cmsghdr, */
+ #include <linux/net.h>   /* SYS_SENDMSG, */
+ 
++/* Older libc headers may lack this. */
++#ifndef AT_EMPTY_PATH
++#define AT_EMPTY_PATH 0x1000
++#endif
++
+ #include "extension/extension.h"
+ #include "syscall/syscall.h"
+ #include "syscall/sysnum.h"
+@@ -452,14 +457,17 @@
+ 
+ 		case PR_fchmodat2: {
+ 			struct stat link;
++			word_t flags = peek_reg(tracee, ORIGINAL, SYSARG_4);
+ 
+-			/* The mode of a symlink can't be changed: with
+-			 * AT_SYMLINK_NOFOLLOW the syscall fails with EOPNOTSUPP
+-			 * and leaves everything as is.  Don't hand the new mode
+-			 * over to the target of the symlink, which is the file
+-			 * stat(2) above looked at; restore its previous mode.  */
+-			if ((peek_reg(tracee, ORIGINAL, SYSARG_4) & AT_SYMLINK_NOFOLLOW) != 0
+-			    && lstat(path, &link) == 0 && S_ISLNK(link.st_mode))
++			/* An unsupported flag makes the syscall fail with
++			 * EINVAL.  AT_SYMLINK_NOFOLLOW on a symlink fails with
++			 * EOPNOTSUPP and leaves everything as is.  In both
++			 * cases restore the previous mode instead of handing
++			 * the requested one to the target that stat(2) above
++			 * followed.  */
++			if (   (flags & ~(word_t) (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0
++			    || (   (flags & AT_SYMLINK_NOFOLLOW) != 0
++			        && lstat(path, &link) == 0 && S_ISLNK(link.st_mode)))
+ 				node->mode = perms.st_mode;
+ 			else
+ 				node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
+diff -ruN patch-base/src/syscall/enter.c patch-min/src/syscall/enter.c
+--- patch-base/src/syscall/enter.c	2026-10-30 15:00:03.403835392 +0800
++++ patch-min/src/syscall/enter.c	2026-10-30 15:00:26.603835392 +0800
+@@ -173,6 +173,30 @@
+ 	return set_sysarg_path(tracee, translated_path, reg);
+ }
+ 
++/* Older kernel headers may lack this. */
++#ifndef AT_EMPTY_PATH
++#define AT_EMPTY_PATH 0x1000
++#endif
++
++/**
++ * With AT_EMPTY_PATH in @flags, an empty @path makes the kernel act on
++ * @dir_fd itself, that is on the current working directory when @dir_fd is
++ * AT_FDCWD.  The tracee's actual cwd is still the host directory PRoot was
++ * launched from (the guest one is only emulated), so replace @path with "."
++ * in that case: it is then translated against the guest cwd like any other
++ * relative path.  A NULL pointer, which get_sysarg_path() also reports as an
++ * empty @path, is left as is for the kernel to reject with EFAULT.
++ */
++static void empty_path_at_cwd(const Tracee *tracee, int dir_fd,
++		char path[PATH_MAX], Reg reg, word_t flags)
++{
++	if (   path[0] == '\0'
++	    && dir_fd == AT_FDCWD
++	    && (flags & AT_EMPTY_PATH) != 0
++	    && peek_reg(tracee, CURRENT, reg) != 0)
++		strcpy(path, ".");
++}
++
+ /**
+  * A helper, see the comment of the function above.
+  */
+@@ -2500,6 +2524,13 @@
+ 			? peek_reg(tracee, CURRENT, SYSARG_5)
+ 			: peek_reg(tracee, CURRENT, SYSARG_4);
+ 
++		/* fchmodat2(AT_FDCWD, "", mode, AT_EMPTY_PATH) names the
++		 * emulated guest cwd, not the tracee's real (host) cwd.  Keep
++		 * the fix local to fchmodat2.  A NULL path stays empty and is
++		 * rejected by the kernel with EFAULT.  */
++		if (syscall_number == PR_fchmodat2)
++			empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
++
+ 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
+ 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+ 		else

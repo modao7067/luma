@@ -1,0 +1,23 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+    </queries>
+    <application android:name="io.github.modao7067.luma.gui.LumaApplication" android:enableOnBackInvokedCallback="true" android:networkSecurityConfig="@xml/agent_network_security" android:appComponentFactory="io.github.modao7067.luma.LumaAppComponentFactory" tools:replace="android:appComponentFactory" android:label="Luma" android:theme="@style/AppTheme" android:icon="@mipmap/luma_launcher" android:roundIcon="@mipmap/luma_launcher" android:allowBackup="false" android:dataExtractionRules="@xml/agent_data_extraction" android:extractNativeLibs="true" android:hardwareAccelerated="true" android:supportsRtl="true">
+        <provider android:name="io.github.modao7067.luma.TerminalArtifactProvider" android:authorities="${applicationId}.terminal-files" android:exported="false" android:grantUriPermissions="true"/>
+        <provider android:name="io.github.modao7067.luma.gui.camera.PhotoCaptureProvider" android:authorities="${applicationId}.capture-files" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/photo_capture_paths" />
+        </provider>
+        <activity android:name="io.github.modao7067.luma.gui.MainActivity" android:enableOnBackInvokedCallback="true" android:exported="true" android:windowSoftInputMode="adjustResize">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <activity android:name="io.github.modao7067.luma.gui.browser.BrowserActivity" android:enableOnBackInvokedCallback="true" android:exported="false" android:windowSoftInputMode="adjustResize"/>
+        <activity android:name="io.github.modao7067.luma.root.MainActivity" android:enableOnBackInvokedCallback="true" android:process=":root" android:theme="@style/RootTerminalTheme"/>
+        <service android:name="io.github.modao7067.luma.root.ShellService" android:process=":root"/>
+        <receiver android:name="io.github.modao7067.luma.gui.session.SessionWakeReceiver" android:exported="true" android:permission="android.permission.DUMP"/>
+    </application>
+</manifest>

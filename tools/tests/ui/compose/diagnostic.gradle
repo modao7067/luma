@@ -1,0 +1,6 @@
+gradle.afterProject { project, state ->
+    if (project.path == ':apps:gui') {
+        project.android.sourceSets.test.java.srcDir(
+            project.rootProject.file('tools/tests/ui/compose/diagnostic'))
+    }
+}

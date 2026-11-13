@@ -1,0 +1,152 @@
+{
+  "source": "OpenCode 2.1.4 + deterministic localhost chat-completions model",
+  "paidInference": false,
+  "parentSessionId": "ses_e62401cf0ffejL7QiiuGOjxGcm",
+  "messages": [
+    {
+      "id": "msg_19dbfe4230017Zo8HsnvAEGegm",
+      "time": {
+        "created": 1793647961244
+      },
+      "text": "LUMA_START_PARENT",
+      "type": "user"
+    },
+    {
+      "id": "msg_19dbfe4b0001bRt1DAkM5ehSlM",
+      "time": {
+        "created": 1793647961275,
+        "streamed": 1793647961298,
+        "completed": 1793647961370
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture",
+        "providerID": "fixture",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call-luma-subagent-failure",
+          "name": "subagent",
+          "executed": false,
+          "state": {
+            "status": "error",
+            "input": {
+              "agent": "explore",
+              "description": "Failure fixture",
+              "prompt": "LUMA_CHILD_FAIL_ONLY",
+              "background": false
+            },
+            "error": {
+              "type": "tool.execution",
+              "message": "Subagent failed (sessionID: ses_e62401b25ffefle62t8wh4aZnS): LUMA_INTENTIONAL_CHILD_PROVIDER_ERROR"
+            },
+            "metadata": {
+              "sessionID": "ses_e62401b25ffefle62t8wh4aZnS",
+              "status": "running"
+            }
+          },
+          "time": {
+            "created": 1793647961290,
+            "ran": 1793647961296,
+            "completed": 1793647961368
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_19dbfe525001omoF889SClF1Sp",
+      "time": {
+        "created": 1793647961389,
+        "streamed": 1793647961404,
+        "completed": 1793647961405
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture",
+        "providerID": "fixture",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "LUMA_PARENT_SETTLED"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_19dbfe53f001ZedSM2K6YeV02H",
+      "time": {
+        "created": 1793647961407
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ],
+  "child": {
+    "id": "ses_e62401b25ffefle62t8wh4aZnS",
+    "parentID": "ses_e62401cf0ffejL7QiiuGOjxGcm",
+    "projectID": "746dfd882cc2944934917948d2c20f9ebff395ba",
+    "agent": "explore",
+    "model": {
+      "id": "fixture",
+      "providerID": "fixture",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "outcome": "failed",
+    "time": {
+      "created": 1793647961307,
+      "updated": 1793647961362,
+      "idle": 1793647961365
+    },
+    "title": "Failure fixture",
+    "permissions": [
+      {
+        "action": "subagent",
+        "resource": "*",
+        "effect": "allow"
+      }
+    ],
+    "location": {
+      "directory": "/tmp/luma-opencode-child-failure-tpfaa9mr/work"
+    }
+  },
+  "active": {}
+}

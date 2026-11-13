@@ -1,0 +1,360 @@
+{
+  "gui": {
+    "project": "apps/gui",
+    "apk": "apps/gui/app/build/outputs/apk/release/gui-release.apk",
+    "referenceApk": "artifacts/Luma-0.3.8-arm64.apk",
+    "package": "io.github.modao7067.luma",
+    "signerSha256": [
+      "2b57fac51a035a5c9d8aa297fc6027b49df5fbe3a25b312a9021f714a8f240c5"
+    ],
+    "allowedPermissions": [
+      "android.permission.ACCESS_NETWORK_STATE",
+      "android.permission.FOREGROUND_SERVICE",
+      "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+      "android.permission.INTERNET",
+      "android.permission.MANAGE_EXTERNAL_STORAGE",
+      "android.permission.POST_NOTIFICATIONS",
+      "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+      "android.permission.WAKE_LOCK",
+      "android.permission.REQUEST_INSTALL_PACKAGES",
+      "moe.shizuku.manager.permission.API_V23",
+      "io.github.modao7067.luma.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+    ],
+    "assetRoots": [
+      "apps/gui/app/src/main/",
+      "runtime/root/src/main/",
+      "runtime/noroot/src/main/",
+      "shared/terminal-emulator/src/main/",
+      "shared/terminal-ghostty/"
+    ],
+    "generatedAssets": {
+      "assets/dexopt/baseline.prof": "apps/gui/app/build/intermediates/binary_art_profile/release/compileReleaseArtProfile/baseline.prof",
+      "assets/dexopt/baseline.profm": "apps/gui/app/build/intermediates/binary_art_profile_metadata/release/compileReleaseArtProfile/baseline.profm"
+    },
+    "dependencyAssets": {
+      "lib/arm64-v8a/libandroidx.graphics.path.so": {
+        "archive": "artifacts/maven/androidx/graphics/graphics-path/1.0.1/graphics-path-1.0.1.aar",
+        "member": "jni/arm64-v8a/libandroidx.graphics.path.so"
+      },
+      "assets/org/scilab/forge/jlatexmath/DefaultTeXFont.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/DefaultTeXFont.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/GlueSettings.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/GlueSettings.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/TeXFormulaSettings.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/TeXFormulaSettings.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/TeXSymbols.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/TeXSymbols.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_amsfonts.map.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_amsfonts.map.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_amssymb.map.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_amssymb.map.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_base.map.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_base.map.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmex10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmex10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmex10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmex10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10_unchanged.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmi10_unchanged.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10_unchanged.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_cmmib10_unchanged.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_moustache.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/base/jlm_moustache.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufb10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufb10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufb10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufb10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufm10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufm10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufm10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/euler/jlm_eufm10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_cmr10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_cmr10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_cmr10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_cmr10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbx10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbx10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbx10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmbx10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10_unchanged.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmr10_unchanged.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsb10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsb10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsb10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsb10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsbi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsbi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsbi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsbi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmsi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmss10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmss10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmss10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmss10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmtt10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmtt10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmtt10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/jlm_jlmtt10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbx10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbx10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbx10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbx10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbxti10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbxti10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbxti10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmbxti10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmss10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmss10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmss10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmss10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssbx10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssbx10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssbx10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssbx10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssi10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssi10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssi10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmssi10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10_unchanged.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmti10_unchanged.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmtt10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmtt10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmtt10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/latin/optional/jlm_cmtt10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/licences/Knuth_License.txt": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/licences/Knuth_License.txt"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/licences/License_for_dsrom.txt": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/licences/License_for_dsrom.txt"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/licences/OFL.txt": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/licences/OFL.txt"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmbsy10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmbsy10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmbsy10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmbsy10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmsy10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmsy10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmsy10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_cmsy10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msam10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msam10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msam10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msam10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msbm10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msbm10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msbm10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_msbm10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_rsfs10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_rsfs10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_rsfs10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_rsfs10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.map.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.map.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_special.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmary10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmary10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmary10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmary10.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmaryrd.map.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/jlm_stmaryrd.map.xml"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/optional/jlm_dsrom10.ttf": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/optional/jlm_dsrom10.ttf"
+      },
+      "assets/org/scilab/forge/jlatexmath/fonts/maths/optional/jlm_dsrom10.xml": {
+        "archive": "artifacts/maven/ru/noties/jlatexmath-android/0.2.0/jlatexmath-android-0.2.0.aar",
+        "member": "assets/org/scilab/forge/jlatexmath/fonts/maths/optional/jlm_dsrom10.xml"
+      },
+      "assets/PublicSuffixDatabase.list": {
+        "archive": "artifacts/maven/com/squareup/okhttp3/okhttp-android/5.5.1/okhttp-android-5.5.1.aar",
+        "member": "assets/PublicSuffixDatabase.list"
+      }
+    },
+    "sourceAssets": {
+      "assets/root-keeper/daemon.py": "backend/root/daemon.py",
+      "assets/root-keeper/mode_state.py": "backend/root/mode_state.py"
+    },
+    "requiredResourceFiles": [
+      "apps/gui/app/src/main/res/raw/provider_codebuddy_license.txt"
+    ]
+  }
+}

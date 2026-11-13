@@ -1,0 +1,30 @@
+apply from: rootProject.file('gradle/android-common.gradle')
+
+def signingHome = rootProject.file('apps/gui')
+def releasePropsFile = new File(signingHome, 'signing/luma-release.properties')
+def releaseProps = new Properties()
+if (releasePropsFile.isFile()) releasePropsFile.withInputStream { releaseProps.load(it) }
+
+android {
+    buildFeatures { compose true; buildConfig true; resValues true }
+    signingConfigs {
+        release {
+            if (releasePropsFile.isFile()) {
+                storeFile new File(signingHome, releaseProps.getProperty('storeFile'))
+                storePassword releaseProps.getProperty('storePassword')
+                keyAlias releaseProps.getProperty('keyAlias')
+                keyPassword releaseProps.getProperty('keyPassword')
+                enableV1Signing false; enableV2Signing true; enableV3Signing true
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled true; shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), rootProject.file('apps/gui/app/proguard-rules.pro')
+            if (releasePropsFile.isFile()) signingConfig signingConfigs.release
+        }
+    }
+    androidResources { noCompress += ['zip', 'xz']; ignoreAssetsPattern = '!.svn:!.git:!.DS_Store:!*~:!__pycache__:!*.pyc:!*.pyo' }
+    packaging { jniLibs { useLegacyPackaging = true } }
+}

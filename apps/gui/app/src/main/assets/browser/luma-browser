@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+import json, os, re, socket, sys
+
+HELP = """Luma session browser — CLI subcommands, JSON argument, or JSON on stdin.
+
+Quick commands (auto-uses active session tab; add --tab <id> or --json if needed):
+  luma-browser open <https-or-localhost-url> [--background] [-i|--interactive] [-u|--urls]
+  luma-browser read [-i|--interactive] [-u|--urls] [-s|--selector <sel>] [--offset N] [--max-chars N]
+  luma-browser snapshot [-i|--interactive] [-u|--urls] [-s|--selector <sel>]
+  luma-browser diff [-u|--urls] [-s|--selector <sel>]
+  luma-browser screenshot [-a|--annotate]
+  luma-browser tabs | navigate <url> | back | forward | reload | close [tabId]
+  luma-browser click <@ref | selector | text=... | label=... | x,y> [--submit]
+  luma-browser hover <@ref | selector | x,y>
+  luma-browser press <Key> [<@ref | selector>] [--submit]
+  luma-browser fill <target> <text> [<target2> <text2> ...]
+                    [--check <target>] [--uncheck <target>]
+                    [--select <target>=<option>] [--click <target>] [--submit]
+  luma-browser type <target> <text> [--clear] [--submit]
+  luma-browser select <target> <optionTextOrValue>
+  luma-browser check <target> | uncheck <target>
+  luma-browser find <role|text|label|placeholder|testid> <value> [click|fill|type|hover|check|uncheck] [arg]
+  luma-browser scroll [down|up|left|right|top|bottom] [px] [--target <@ref|selector>]
+  luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]
+  luma-browser wait [ready | url=<url> | <selector>] [--state visible|actionable|hidden] [--timeout ms]
+  luma-browser console [--clear] [--limit N]
+  luma-browser errors [--clear] [--limit N]
+  luma-browser dialog [status | accept [promptText] | dismiss]
+
+Raw JSON mode (single JSON argument or stdin):
+  Actions: open, tabs, navigate, back, forward, reload, read, diff, click, hover, press,
+           fill, type, select, check, uncheck, scroll, swipe, screenshot, console, errors,
+           dialog, close, wait, batch.
+"""
+
+def wrap_untrusted(text):
+    nonce = os.urandom(6).hex()
+    marker = f"UNTRUSTED_WEB_CONTENT_{nonce}"
+    safe = str(text or '').replace(marker, f"UNTRUSTED_WEB_CONTENT_ESCAPED_{nonce}")
+    return f"<<<{marker}\n{safe}\n{marker}>>>"
+
+def load_credentials():
+    config = os.environ.get('LUMA_BROWSER_CONFIG')
+    if not config:
+        thread = os.environ.get('OPENCODE_SESSION_ID') or os.environ.get('CODEX_THREAD_ID', '')
+        if re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', thread):
+            config = '/opt/luma/agent/browser/threads/' + thread + '.json'
+    if not config:
+        raise RuntimeError('当前会话未绑定 Luma 浏览器，请从 Luma 会话启动 CLI')
+    with open(config, encoding='utf-8') as f:
+        credentials = json.load(f)
+    if credentials.get('host') != '127.0.0.1':
+        raise RuntimeError('非法浏览器接口地址')
+    return credentials
+
+def send_request(request):
+    credentials = load_credentials()
+    payload_obj = dict(request)
+    payload_obj['token'] = credentials['token']
+    payload = (json.dumps(payload_obj, ensure_ascii=False) + '\n').encode('utf-8')
+    if len(payload) > 262145:
+        raise RuntimeError('浏览器请求过大（最多 256 KiB）')
+    with socket.create_connection(('127.0.0.1', credentials['port']), timeout=28) as connection:
+        connection.sendall(payload)
+        response = connection.makefile('rb').readline(8 * 1024 * 1024)
+        if not response or not response.endswith(b'\n'):
+            raise RuntimeError('浏览器接口响应不完整')
+        value = json.loads(response)
+        if isinstance(value, dict):
+            value.pop('token', None)
+        return value
+
+def parse_target(raw):
+    text = raw.strip()
+    if re.fullmatch(r'@[1-9][0-9]*', text):
+        return {'ref': text}
+    m = re.fullmatch(r'(?:x=)?(-?[0-9]+(?:\.[0-9]+)?),(?:y=)?(-?[0-9]+(?:\.[0-9]+)?)', text)
+    if m:
+        return {'x': float(m.group(1)), 'y': float(m.group(2))}
+    if not text:
+        raise RuntimeError('目标不能为空，请提供 @N、CSS/语义选择器或 x,y 坐标')
+    return {'selector': text}
+
+def format_element_line(el):
+    parts = [el.get('ref', '?'), f"<{el.get('tag', '')}>"]
+    if el.get('type'):
+        parts.append(f"type={el['type']}")
+    if el.get('role') and el.get('role') != el.get('tag'):
+        parts.append(f"role={el['role']}")
+    label = (el.get('text') or el.get('label') or '').strip()
+    if label:
+        parts.append(json.dumps(label[:80], ensure_ascii=False))
+    if el.get('label') and el.get('label') != el.get('text'):
+        parts.append(f"label={json.dumps(el['label'][:60], ensure_ascii=False)}")
+    if 'value' in el and el['value'] not in (None, ''):
+        parts.append(f"value={json.dumps(str(el['value'])[:60], ensure_ascii=False)}")
+    if 'checked' in el and el['checked'] is not None:
+        parts.append('checked=true' if el['checked'] else 'checked=false')
+    if el.get('href'):
+        parts.append(f"href={el['href']}")
+    if el.get('options'):
+        opts = [o.get('text') or o.get('value') or '' for o in el['options'][:8]]
+        parts.append('options=[' + ', '.join(opts) + ('...' if len(el['options']) > 8 else '') + ']')
+    if el.get('disabled'):
+        parts.append('[disabled]')
+    if el.get('inViewport') is False:
+        parts.append('[offscreen]')
+    b = el.get('bounds')
+    if isinstance(b, dict):
+        parts.append(f"@({b.get('x', 0)},{b.get('y', 0)} {b.get('width', 0)}x{b.get('height', 0)})")
+    return ' '.join(parts)
+
+def format_dialog_banner(dialog):
+    if not isinstance(dialog, dict):
+        return None
+    kind = dialog.get('kind', 'dialog')
+    msg = (dialog.get('message') or '').replace('\n', ' ')[:200]
+    return f"⚠ Pending JS {kind}: {json.dumps(msg, ensure_ascii=False)} — run `luma-browser dialog accept` or `luma-browser dialog dismiss`"
+
+def format_page_summary(page, tab_info=None):
+    meta_lines = []
+    tab_id = (tab_info or {}).get('id')
+    header = f"[{tab_id}] " if tab_id else ""
+    title = page.get('title') or (tab_info or {}).get('title') or ''
+    url = page.get('url') or (tab_info or {}).get('url') or ''
+    meta_lines.append(f"{header}{title} — {url}".strip(' —'))
+    dlg = format_dialog_banner(page.get('pendingDialog'))
+    if dlg:
+        meta_lines.append(dlg)
+    err_count = int(page.get('errorCount') or 0)
+    if err_count > 0:
+        recent = page.get('recentErrors') or []
+        previews = [f"[{e.get('kind')}] {e.get('message', '')[:80]}" for e in recent[:3] if isinstance(e, dict)]
+        suffix = (' | ' + '; '.join(previews)) if previews else ''
+        meta_lines.append(f"⚠ Page errors ({err_count}): run `luma-browser errors` for details{suffix}")
+    untrusted_lines = []
+    elements = page.get('elements') or []
+    untrusted_lines.append(f"Interactive controls ({len(elements)}{'+' if page.get('elementsTruncated') else ''}):")
+    for el in elements[:120]:
+        untrusted_lines.append('  ' + format_element_line(el))
+    if len(elements) > 120:
+        untrusted_lines.append(f"  ... ({len(elements) - 120} more in --json)")
+    body = (page.get('markdown') or page.get('text') or '').strip()
+    if body:
+        untrusted_lines.append('\nPage content:')
+        untrusted_lines.append(body[:6000] + ('\n... [truncated; use `luma-browser read --offset N`]' if len(body) > 6000 or page.get('truncated') else ''))
+    meta_lines.append(wrap_untrusted('\n'.join(untrusted_lines)))
+    return '\n'.join(meta_lines)
+
+def build_cli_request(argv):
+    tab_id = None
+    json_out = False
+    cleaned = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '--json':
+            json_out = True
+            i += 1
+        elif arg == '--tab' and i + 1 < len(argv):
+            tab_id = argv[i + 1]
+            i += 2
+        elif arg.startswith('--tab='):
+            tab_id = arg.split('=', 1)[1]
+            i += 1
+        else:
+            cleaned.append(arg)
+            i += 1
+    if not cleaned:
+        raise RuntimeError('缺少子命令；运行 luma-browser --help 查看用法')
+    cmd = cleaned[0]
+    rest = cleaned[1:]
+
+    def attach_tab(req):
+        if tab_id:
+            req['tab'] = tab_id
+        return req
+
+    if cmd == 'tabs':
+        return {'action': 'tabs'}, json_out
+    if cmd == 'open':
+        url = None
+        bg = False
+        interactive = False
+        urls = False
+        for tok in rest:
+            if tok in ('--background', '-b'):
+                bg = True
+            elif tok in ('--interactive', '-i'):
+                interactive = True
+            elif tok in ('--urls', '-u'):
+                urls = True
+            elif url is None and not tok.startswith('-'):
+                url = tok
+            else:
+                raise RuntimeError('用法: luma-browser open <url> [--background] [-i] [-u]')
+        if not url:
+            raise RuntimeError('用法: luma-browser open <url> [--background] [-i] [-u]')
+        req = {'action': 'open', 'url': url, 'waitAfter': True, 'returnRead': True}
+        if bg:
+            req['background'] = True
+        if interactive:
+            req['interactiveOnly'] = True
+        if urls:
+            req['includeUrls'] = True
+        return req, json_out
+    if cmd == 'navigate':
+        if len(rest) != 1:
+            raise RuntimeError('用法: luma-browser navigate <url>')
+        return attach_tab({'action': 'navigate', 'url': rest[0], 'waitAfter': True, 'returnRead': True}), json_out
+    if cmd in ('back', 'forward', 'reload'):
+        return attach_tab({'action': cmd, 'waitAfter': True, 'returnRead': True}), json_out
+    if cmd == 'close':
+        req = {'action': 'close'}
+        if rest:
+            req['tab'] = rest[0]
+        else:
+            attach_tab(req)
+        return req, json_out
+    if cmd == 'screenshot':
+        req = attach_tab({'action': 'screenshot'})
+        if any(tok in ('--annotate', '-a') for tok in rest):
+            req['annotate'] = True
+        return req, json_out
+    if cmd in ('read', 'snapshot'):
+        req = attach_tab({'action': 'read'})
+        if cmd == 'snapshot':
+            req['interactiveOnly'] = True
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok == '--offset' and j + 1 < len(rest):
+                req['offset'] = int(rest[j + 1]); j += 2
+            elif tok == '--max-chars' and j + 1 < len(rest):
+                req['maxChars'] = int(rest[j + 1]); j += 2
+            elif tok in ('-i', '--interactive'):
+                req['interactiveOnly'] = True; j += 1
+            elif tok == '--full':
+                req['interactiveOnly'] = False; j += 1
+            elif tok in ('-u', '--urls'):
+                req['includeUrls'] = True; j += 1
+            elif tok in ('-s', '--selector') and j + 1 < len(rest):
+                req['scopeSelector'] = rest[j + 1]; j += 2
+            elif tok in ('-c', '--compact'):
+                j += 1
+            else:
+                j += 1
+        return req, json_out
+    if cmd == 'diff':
+        req = attach_tab({'action': 'diff'})
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok in ('-u', '--urls'):
+                req['includeUrls'] = True; j += 1
+            elif tok in ('-s', '--selector') and j + 1 < len(rest):
+                req['scopeSelector'] = rest[j + 1]; j += 2
+            else:
+                j += 1
+        return req, json_out
+    if cmd in ('console', 'errors'):
+        req = attach_tab({'action': cmd})
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok == '--clear':
+                req['clear'] = True; j += 1
+            elif tok == '--limit' and j + 1 < len(rest):
+                req['limit'] = int(rest[j + 1]); j += 2
+            else:
+                j += 1
+        return req, json_out
+    if cmd == 'dialog':
+        decision = rest[0] if rest else 'status'
+        if decision not in ('status', 'accept', 'dismiss'):
+            raise RuntimeError('用法: luma-browser dialog [status | accept [promptText] | dismiss]')
+        req = attach_tab({'action': 'dialog', 'decision': decision})
+        if decision == 'accept' and len(rest) >= 2:
+            req['promptText'] = rest[1]
+        if decision in ('accept', 'dismiss'):
+            req['waitAfter'] = True
+            req['returnRead'] = True
+        return req, json_out
+    if cmd == 'click':
+        if not rest:
+            raise RuntimeError('用法: luma-browser click <@ref|selector|x,y> [--submit]')
+        submit = '--submit' in rest[1:]
+        req = attach_tab({'action': 'click', **parse_target(rest[0]), 'waitAfter': True, 'returnRead': True})
+        if submit:
+            req['submit'] = True
+        return req, json_out
+    if cmd == 'hover':
+        if len(rest) != 1:
+            raise RuntimeError('用法: luma-browser hover <@ref|selector|x,y>')
+        return attach_tab({'action': 'hover', **parse_target(rest[0]), 'waitAfter': True, 'returnRead': True}), json_out
+    if cmd == 'press':
+        if not rest:
+            raise RuntimeError('用法: luma-browser press <Key> [<@ref|selector>] [--submit]')
+        key = rest[0]
+        submit = '--submit' in rest[1:]
+        others = [x for x in rest[1:] if x != '--submit']
+        req = attach_tab({'action': 'press', 'key': key, 'waitAfter': True, 'returnRead': True})
+        if others:
+            req.update(parse_target(others[0]))
+        if submit:
+            req['submit'] = True
+        return req, json_out
+    if cmd == 'find':
+        if len(rest) < 2:
+            raise RuntimeError('用法: luma-browser find <role|text|label|placeholder|testid> <value> [click|fill|type|hover|check|uncheck] [arg]')
+        kind = rest[0].lower()
+        if kind not in ('role', 'text', 'label', 'placeholder', 'testid'):
+            raise RuntimeError('find 仅支持 role/text/label/placeholder/testid')
+        val = rest[1]
+        act = rest[2].lower() if len(rest) >= 3 and not rest[2].startswith('--') else 'click'
+        name_override = None
+        extra_args = []
+        k = 3
+        while k < len(rest):
+            if rest[k] == '--name' and k + 1 < len(rest):
+                name_override = rest[k + 1]; k += 2
+            else:
+                extra_args.append(rest[k]); k += 1
+        selector = f"role={val}:{name_override}" if (kind == 'role' and name_override) else f"{kind}={val}"
+        if act in ('click', 'hover', 'check', 'uncheck'):
+            return attach_tab({'action': act, 'selector': selector, 'waitAfter': True, 'returnRead': act in ('click', 'hover')}), json_out
+        if act in ('fill', 'type', 'select'):
+            if not extra_args:
+                raise RuntimeError(f'find ... {act} 需要提供输入文本')
+            return attach_tab({'action': act, 'selector': selector, 'text': extra_args[0], 'waitAfter': True, 'returnRead': True}), json_out
+        raise RuntimeError(f'不支持的 find 动作: {act}')
+    if cmd == 'type':
+        if len(rest) < 2:
+            raise RuntimeError('用法: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]')
+        flags = set(rest[2:])
+        req = attach_tab({
+            'action': 'type',
+            **parse_target(rest[0]),
+            'text': rest[1],
+            'clear': '--clear' in flags,
+            'submit': '--submit' in flags,
+            'waitAfter': '--submit' in flags,
+            'returnRead': '--submit' in flags,
+        })
+        return req, json_out
+    if cmd == 'select':
+        if len(rest) < 2:
+            raise RuntimeError('用法: luma-browser select <@ref|selector> <option>')
+        return attach_tab({'action': 'select', **parse_target(rest[0]), 'text': rest[1], 'waitAfter': True, 'returnRead': True}), json_out
+    if cmd in ('check', 'uncheck'):
+        if len(rest) != 1:
+            raise RuntimeError(f'用法: luma-browser {cmd} <@ref|selector|x,y>')
+        return attach_tab({'action': cmd, **parse_target(rest[0])}), json_out
+    if cmd == 'fill':
+        steps = []
+        submit = False
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok == '--submit':
+                submit = True; j += 1
+            elif tok in ('--check', '--uncheck') and j + 1 < len(rest):
+                steps.append({'action': tok[2:], **parse_target(rest[j + 1]), 'reuseSnapshot': True})
+                j += 2
+            elif tok == '--select' and j + 1 < len(rest) and '=' in rest[j + 1]:
+                tgt, val = rest[j + 1].split('=', 1)
+                steps.append({'action': 'select', **parse_target(tgt), 'text': val, 'reuseSnapshot': True})
+                j += 2
+            elif tok == '--click' and j + 1 < len(rest):
+                steps.append({'action': 'click', **parse_target(rest[j + 1]), 'reuseSnapshot': True})
+                j += 2
+            elif j + 1 < len(rest) and not tok.startswith('--'):
+                steps.append({'action': 'fill', **parse_target(tok), 'text': rest[j + 1], 'reuseSnapshot': True})
+                j += 2
+            else:
+                raise RuntimeError(f'无法解析 fill 参数: {tok}')
+        if not steps:
+            raise RuntimeError('用法: luma-browser fill <@ref|selector> <text> [...] [--submit]')
+        if submit:
+            steps[-1]['submit'] = True
+        if len(steps) == 1:
+            single = attach_tab(dict(steps[0]))
+            if submit:
+                single['waitAfter'] = True
+                single['returnRead'] = True
+            return single, json_out
+        return attach_tab({
+            'action': 'batch',
+            'reuseSnapshot': True,
+            'steps': steps,
+            'waitAfter': True,
+            'returnRead': True,
+        }), json_out
+    if cmd == 'scroll':
+        direction = 'down'
+        amount = None
+        target = None
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok in ('up', 'down', 'left', 'right', 'top', 'bottom'):
+                direction = tok; j += 1
+            elif tok == '--target' and j + 1 < len(rest):
+                target = parse_target(rest[j + 1]); j += 2
+            elif re.fullmatch(r'[0-9]+', tok):
+                amount = int(tok); j += 1
+            else:
+                j += 1
+        req = attach_tab({'action': 'scroll', 'direction': direction, 'returnRead': True})
+        if amount is not None:
+            req['amount'] = amount
+        if target:
+            req.update(target)
+        return req, json_out
+    if cmd == 'swipe':
+        if len(rest) < 4:
+            raise RuntimeError('用法: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]')
+        req = attach_tab({
+            'action': 'swipe',
+            'fromX': float(rest[0]),
+            'fromY': float(rest[1]),
+            'toX': float(rest[2]),
+            'toY': float(rest[3]),
+            'waitAfter': True,
+        })
+        if len(rest) >= 5:
+            req['durationMs'] = int(rest[4])
+        return req, json_out
+    if cmd == 'wait':
+        req = attach_tab({'action': 'wait'})
+        j = 0
+        while j < len(rest):
+            tok = rest[j]
+            if tok == 'ready':
+                req['state'] = 'ready'; j += 1
+            elif tok.startswith('url='):
+                req['state'] = 'url'; req['url'] = tok.split('=', 1)[1]; j += 1
+            elif tok == '--state' and j + 1 < len(rest):
+                req['state'] = rest[j + 1]; j += 2
+            elif tok == '--timeout' and j + 1 < len(rest):
+                req['timeoutMs'] = int(rest[j + 1]); j += 2
+            elif not tok.startswith('--'):
+                req['selector'] = tok; j += 1
+            else:
+                j += 1
+        return req, json_out
+    raise RuntimeError(f'未知子命令: {cmd}；运行 luma-browser --help 查看用法')
+
+def main():
+    args = sys.argv[1:]
+    if args in (['--help'], ['-h']):
+        print(HELP)
+        return 0
+
+    if len(args) == 0 or (len(args) == 1 and args[0].lstrip().startswith('{')):
+        request = json.loads(args[0]) if len(args) == 1 else json.load(sys.stdin)
+        if not isinstance(request, dict):
+            raise RuntimeError('浏览器请求必须是 JSON 对象')
+        value = send_request(request)
+        print(json.dumps(value, ensure_ascii=False))
+        return 0 if value.get('ok') else 1
+
+    request, json_out = build_cli_request(args)
+    value = send_request(request)
+    if json_out or not value.get('ok'):
+        print(json.dumps(value, ensure_ascii=False))
+        return 0 if value.get('ok') else 1
+
+    action = request.get('action')
+    if action == 'read':
+        print(format_page_summary(value))
+    elif value.get('dialogOpened') and value.get('pendingDialog'):
+        print(format_dialog_banner(value['pendingDialog']))
+    elif 'page' in value and isinstance(value['page'], dict) and value['page'].get('ok'):
+        print(format_page_summary(value['page'], value.get('tab')))
+    elif action == 'diff':
+        lines = value.get('diffLines') or []
+        summary = f"{value.get('added', 0)} added, {value.get('removed', 0)} removed, {value.get('unchanged', 0)} unchanged"
+        body = '\n'.join(lines) if lines else '(no changes since last snapshot)'
+        print(summary + '\n' + wrap_untrusted(body))
+    elif action == 'console':
+        entries = value.get('entries') or []
+        if not entries:
+            print('No console messages.')
+        else:
+            rows = [f"[{e.get('level', 'log')}] {e.get('message', '')}" + (f" ({e['source']}:{e.get('line', 0)})" if e.get('source') else '') for e in entries]
+            print(wrap_untrusted('\n'.join(rows)))
+    elif action == 'errors':
+        errs = value.get('errors') or []
+        if not errs:
+            print('No page or network errors.')
+        else:
+            rows = [f"[{e.get('kind')}] {e.get('message', '')}" + (f" — {e['url']}" if e.get('url') else '') for e in errs]
+            print(wrap_untrusted('\n'.join(rows)))
+    elif action == 'dialog':
+        if request.get('decision') == 'status':
+            dlg = format_dialog_banner(value.get('pendingDialog'))
+            print(dlg or 'No pending JS dialog.')
+        else:
+            print(f"Dialog {value.get('handled')}: {value.get('kind')}")
+    elif action == 'tabs':
+        tabs = value.get('tabs') or []
+        if not tabs:
+            print('No open tabs.')
+        for t in tabs:
+            mark = '*' if t.get('active') else '-'
+            print(f"{mark} [{t.get('id')}] {t.get('title')} — {t.get('url')}")
+    elif action == 'screenshot':
+        tag = ', annotated' if value.get('annotated') else ''
+        print(f"Screenshot saved: {value.get('path')} ({value.get('width')}x{value.get('height')}{tag})")
+        anns = value.get('annotations') or []
+        if anns:
+            rows = []
+            for a in anns:
+                ref = a.get('ref', '')
+                num = ref.lstrip('@')
+                desc = a.get('text') or a.get('label') or ''
+                rows.append(f"  [{num}] {ref} <{a.get('tag', '')}> {json.dumps(desc, ensure_ascii=False) if desc else ''}".rstrip())
+            print(wrap_untrusted('\n'.join(rows)))
+    else:
+        print(json.dumps(value, ensure_ascii=False))
+    return 0
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
+        sys.exit(1)

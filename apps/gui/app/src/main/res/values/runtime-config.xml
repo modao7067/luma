@@ -1,0 +1,4 @@
+<resources>
+    <string name="root_appearance_preferences" translatable="false">root-appearance</string>
+    <style name="RootTerminalTheme" parent="AppTheme"><item name="android:windowBackground">#141824</item></style>
+</resources>

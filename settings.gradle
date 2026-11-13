@@ -1,0 +1,19 @@
+pluginManagement {
+    repositories {
+        def mirror = new File(settingsDir, 'artifacts/maven')
+        if (mirror.isDirectory()) maven { url = mirror.toURI() }
+        google(); mavenCentral(); gradlePluginPortal()
+    }
+}
+def offlineMaven = new File(settingsDir, 'artifacts/maven')
+gradle.ext.offlineMaven = offlineMaven.isDirectory() ? offlineMaven.toURI() : null
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        if (gradle.ext.offlineMaven != null) maven { url = gradle.ext.offlineMaven }
+        google(); mavenCentral()
+    }
+}
+rootProject.name = 'Luma'
+include ':apps:gui', ':runtime:noroot', ':runtime:root', ':shared:terminal-emulator', ':shared:terminal-view'
+project(':apps:gui').projectDir = file('apps/gui/app')

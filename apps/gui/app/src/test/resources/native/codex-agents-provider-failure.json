@@ -1,0 +1,524 @@
+{
+  "source": "Real isolated Codex 0.166.0 + official MiMo mimo-v2.6-flash, 2026-11-03; native child provider failure retained",
+  "parentThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+  "queue": [
+    {
+      "input": [
+        {
+          "text": "Continue waiting for exactly the same two children. Include LUMA_STEER_CONFIRMED in your final short reply. No extra agents or tools.",
+          "type": "text",
+          "text_elements": []
+        }
+      ],
+      "clientUserMessageId": "luma-agents-queued-7a5dec57526a4f7fbac0439522d4408d",
+      "id": "01a19dad-9668-7832-b349-6a591f5bfc51"
+    }
+  ],
+  "events": [
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "status": {
+          "activeFlags": [],
+          "type": "active"
+        }
+      },
+      "emittedAtMs": 1793646729512
+    },
+    {
+      "method": "turn/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turn": {
+          "completedAt": null,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "notLoaded",
+          "startedAt": 1793646729,
+          "id": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "error": null,
+          "items": [],
+          "durationMs": null,
+          "status": "inProgress"
+        }
+      },
+      "emittedAtMs": 1793646729513
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [],
+          "completedAtMs": null,
+          "model": "mimo-v2.6-flash",
+          "id": "call_b0004820e1ac4fe0a33014c3",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_A; then reply only LUMA_CHILD_A_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646746404,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646746404
+      },
+      "emittedAtMs": 1793646746411
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [],
+          "completedAtMs": null,
+          "model": "mimo-v2.6-flash",
+          "id": "call_192cc7c5cd9f4b8886ee8c76",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_B; then reply only LUMA_CHILD_B_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646746422,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646746422
+      },
+      "emittedAtMs": 1793646746425
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [],
+          "completedAtMs": null,
+          "model": "",
+          "id": "call_6ac7f02d0ade4022afc1f449",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_A; then reply only LUMA_CHILD_A_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646761337,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646761337
+      },
+      "emittedAtMs": 1793646761350
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-958b-7982-a9a9-a3082763bc65"
+          ],
+          "completedAtMs": 1793646761389,
+          "model": "mimo-v2.6-flash",
+          "id": "call_6ac7f02d0ade4022afc1f449",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {
+            "01a19dad-958b-7982-a9a9-a3082763bc65": {
+              "message": null,
+              "status": "pendingInit"
+            }
+          },
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_A; then reply only LUMA_CHILD_A_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646761337,
+          "status": "completed"
+        },
+        "completedAtMs": 1793646761389
+      },
+      "emittedAtMs": 1793646761401
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-958b-7982-a9a9-a3082763bc65",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "emittedAtMs": 1793646761402
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [],
+          "completedAtMs": null,
+          "model": "",
+          "id": "call_c03bab4839804bea852b5c74",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_B; then reply only LUMA_CHILD_B_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646761412,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646761412
+      },
+      "emittedAtMs": 1793646761415
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-958b-7982-a9a9-a3082763bc65",
+        "status": {
+          "activeFlags": [],
+          "type": "active"
+        }
+      },
+      "emittedAtMs": 1793646761417
+    },
+    {
+      "method": "turn/started",
+      "params": {
+        "threadId": "01a19dad-958b-7982-a9a9-a3082763bc65",
+        "turn": {
+          "completedAt": null,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "notLoaded",
+          "startedAt": 1793646761,
+          "id": "01a19dad-9598-76d3-983e-6c86e84b6ea0",
+          "error": null,
+          "items": [],
+          "durationMs": null,
+          "status": "inProgress"
+        }
+      },
+      "emittedAtMs": 1793646761417
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-95ce-79a2-836f-39d1a1314dcd",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "emittedAtMs": 1793646761448
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd"
+          ],
+          "completedAtMs": 1793646761445,
+          "model": "mimo-v2.6-flash",
+          "id": "call_c03bab4839804bea852b5c74",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": "medium",
+          "type": "collabAgentToolCall",
+          "agentsStates": {
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd": {
+              "message": null,
+              "status": "pendingInit"
+            }
+          },
+          "prompt": "Work only in /tmp/luma-mimo-native-une1wm4u/codex/work. Use the shell command tool exactly once with login=false to run: sleep 12; printf LUMA_CHILD_B; then reply only LUMA_CHILD_B_DONE. Do not read files, environment, configuration, login, network, or access any other directories. Do not use any other tools. Keep all output short.",
+          "tool": "spawnAgent",
+          "startedAtMs": 1793646761412,
+          "status": "completed"
+        },
+        "completedAtMs": 1793646761445
+      },
+      "emittedAtMs": 1793646761449
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-95ce-79a2-836f-39d1a1314dcd",
+        "status": {
+          "activeFlags": [],
+          "type": "active"
+        }
+      },
+      "emittedAtMs": 1793646761462
+    },
+    {
+      "method": "turn/started",
+      "params": {
+        "threadId": "01a19dad-95ce-79a2-836f-39d1a1314dcd",
+        "turn": {
+          "completedAt": null,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "notLoaded",
+          "startedAt": 1793646761,
+          "id": "01a19dad-95de-7fc1-860f-582093ff3a2d",
+          "error": null,
+          "items": [],
+          "durationMs": null,
+          "status": "inProgress"
+        }
+      },
+      "emittedAtMs": 1793646761462
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "completedAtMs": 1793646761995,
+          "clientId": "luma-agents-steer-0684e8141ad840f4b2a4961fe9e6afa1",
+          "id": "01a19dad-9801-7a33-90a7-edf78debdc68",
+          "type": "userMessage",
+          "content": [
+            {
+              "text": "Continue waiting for exactly the same two children. Include LUMA_STEER_CONFIRMED in your final short reply. No extra agents or tools.",
+              "type": "text",
+              "text_elements": []
+            }
+          ],
+          "startedAtMs": 1793646761995
+        },
+        "completedAtMs": 1793646761995
+      },
+      "emittedAtMs": 1793646762009
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-958b-7982-a9a9-a3082763bc65",
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd"
+          ],
+          "completedAtMs": null,
+          "model": null,
+          "id": "call_d989eb7625d84c5ab1a739b7",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": null,
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": null,
+          "tool": "wait",
+          "startedAtMs": 1793646767407,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646767407
+      },
+      "emittedAtMs": 1793646767413
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-958b-7982-a9a9-a3082763bc65",
+        "status": {
+          "type": "systemError"
+        }
+      },
+      "emittedAtMs": 1793646777010
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-958b-7982-a9a9-a3082763bc65"
+          ],
+          "completedAtMs": 1793646777012,
+          "model": null,
+          "id": "call_d989eb7625d84c5ab1a739b7",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": null,
+          "type": "collabAgentToolCall",
+          "agentsStates": {
+            "01a19dad-958b-7982-a9a9-a3082763bc65": {
+              "message": "stream disconnected before completion: failed to parse ResponseCompleted: missing field `cached_tokens`",
+              "status": "errored"
+            }
+          },
+          "prompt": null,
+          "tool": "wait",
+          "startedAtMs": 1793646767407,
+          "status": "failed"
+        },
+        "completedAtMs": 1793646777012
+      },
+      "emittedAtMs": 1793646777027
+    },
+    {
+      "method": "turn/completed",
+      "params": {
+        "threadId": "01a19dad-958b-7982-a9a9-a3082763bc65",
+        "turn": {
+          "completedAt": 1793646777,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "notLoaded",
+          "startedAt": 1793646761,
+          "id": "01a19dad-9598-76d3-983e-6c86e84b6ea0",
+          "error": {
+            "misalignment": null,
+            "codexErrorInfo": "other",
+            "message": "stream disconnected before completion: failed to parse ResponseCompleted: missing field `cached_tokens`",
+            "additionalDetails": null
+          },
+          "items": [],
+          "durationMs": 15633,
+          "status": "failed"
+        }
+      },
+      "emittedAtMs": 1793646777028
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-95ce-79a2-836f-39d1a1314dcd",
+        "status": {
+          "type": "systemError"
+        }
+      },
+      "emittedAtMs": 1793646777198
+    },
+    {
+      "method": "turn/completed",
+      "params": {
+        "threadId": "01a19dad-95ce-79a2-836f-39d1a1314dcd",
+        "turn": {
+          "completedAt": 1793646777,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "notLoaded",
+          "startedAt": 1793646761,
+          "id": "01a19dad-95de-7fc1-860f-582093ff3a2d",
+          "error": {
+            "misalignment": null,
+            "codexErrorInfo": "other",
+            "message": "stream disconnected before completion: failed to parse ResponseCompleted: missing field `cached_tokens`",
+            "additionalDetails": null
+          },
+          "items": [],
+          "durationMs": 15760,
+          "status": "failed"
+        }
+      },
+      "emittedAtMs": 1793646777210
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-958b-7982-a9a9-a3082763bc65",
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd"
+          ],
+          "completedAtMs": null,
+          "model": null,
+          "id": "call_8ab2fa1f863e45b7953dc48d",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": null,
+          "type": "collabAgentToolCall",
+          "agentsStates": {},
+          "prompt": null,
+          "tool": "wait",
+          "startedAtMs": 1793646785036,
+          "status": "inProgress"
+        },
+        "startedAtMs": 1793646785036
+      },
+      "emittedAtMs": 1793646785042
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+        "item": {
+          "receiverThreadIds": [
+            "01a19dad-958b-7982-a9a9-a3082763bc65",
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd"
+          ],
+          "completedAtMs": 1793646785044,
+          "model": null,
+          "id": "call_8ab2fa1f863e45b7953dc48d",
+          "senderThreadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+          "reasoningEffort": null,
+          "type": "collabAgentToolCall",
+          "agentsStates": {
+            "01a19dad-958b-7982-a9a9-a3082763bc65": {
+              "message": "stream disconnected before completion: failed to parse ResponseCompleted: missing field `cached_tokens`",
+              "status": "errored"
+            },
+            "01a19dad-95ce-79a2-836f-39d1a1314dcd": {
+              "message": "stream disconnected before completion: failed to parse ResponseCompleted: missing field `cached_tokens`",
+              "status": "errored"
+            }
+          },
+          "prompt": null,
+          "tool": "wait",
+          "startedAtMs": 1793646785036,
+          "status": "failed"
+        },
+        "completedAtMs": 1793646785044
+      },
+      "emittedAtMs": 1793646785049
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "emittedAtMs": 1793646788068
+    },
+    {
+      "method": "turn/completed",
+      "params": {
+        "threadId": "01a19dad-17ac-7240-8164-1539bb41d51e",
+        "turn": {
+          "completedAt": 1793646788,
+          "rootTurnId": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "itemsView": "summary",
+          "startedAt": 1793646729,
+          "id": "01a19dad-18f3-7771-b95b-9208d8b4a15f",
+          "error": null,
+          "items": [
+            {
+              "phase": null,
+              "delivery": null,
+              "completedAtMs": 1793646787997,
+              "questions": null,
+              "id": "msg_eaac6de827884797b75ab8790b744a18",
+              "text": "LUMA_PARENT_DONE LUMA_STEER_CONFIRMED",
+              "type": "agentMessage",
+              "memoryCitation": null,
+              "startedAtMs": 1793646787377
+            }
+          ],
+          "durationMs": 58565,
+          "status": "completed"
+        }
+      },
+      "emittedAtMs": 1793646788068
+    }
+  ]
+}

@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 9.5.0" type="baseline" client="gradle" dependencies="false" name="AGP (9.5.0)" variant="all" version="9.5.0">
+
+    <issue
+        id="ScopedStorage"
+        message="The Google Play store has a policy that limits usage of MANAGE_EXTERNAL_STORAGE"
+        errorLine1="    &lt;uses-permission android:name=&quot;android.permission.MANAGE_EXTERNAL_STORAGE&quot; />"
+        errorLine2="                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="7"
+            column="36"/>
+    </issue>
+
+    <issue
+        id="ApplySharedPref"
+        message="Consider using `apply()` instead; `commit` writes its data to persistent storage immediately, whereas `apply` will handle it in the background"
+        errorLine1="        context.getApplicationContext().getSharedPreferences(WAKE_LOCK_PREFS,MODE_PRIVATE).edit().putBoolean(WAKE_LOCK_ENABLED,enabled).commit();"
+        errorLine2="                                                                                                                                        ~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShellService.java"
+            line="160"
+            column="137"/>
+    </issue>
+
+    <issue
+        id="DefaultLocale"
+        message="Implicitly using the default locale is a common source of bugs: Use `toLowerCase(Locale)` instead. For strings meant to be internal use `Locale.ROOT`, otherwise `Locale.getDefault()`."
+        errorLine1="            String iface=lp.getInterfaceName()==null?&quot;&quot;:lp.getInterfaceName().toLowerCase();"
+        errorLine2="                                                                              ~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/LinuxEnvironment.java"
+            line="170"
+            column="79"/>
+    </issue>
+
+    <issue
+        id="IntentReset"
+        message="Calling `setType` after setting URI in `Intent` constructor will clear the data: Call `setDataAndType` instead?"
+        errorLine1="                fallback.setType(&quot;image/*&quot;);"
+        errorLine2="                         ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="731"
+            column="26"/>
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="730"
+            column="66"
+            message="Originally set here"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 31): `java.io.OutputStream#nullOutputStream`"
+        errorLine1="                    os = pfd != null ? new ParcelFileDescriptor.AutoCloseOutputStream(pfd) : OutputStream.nullOutputStream();"
+        errorLine2="                                                                                                          ~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="501"
+            column="107"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 31): `java.io.InputStream#nullInputStream`"
+        errorLine1="                    is = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();"
+        errorLine2="                                                                                                        ~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="514"
+            column="105"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 31): `java.io.InputStream#nullInputStream`"
+        errorLine1="                    es = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();"
+        errorLine2="                                                                                                        ~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="527"
+            column="105"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="        else if(path.equals(&quot;/sdcard&quot;) || path.startsWith(&quot;/sdcard/&quot;)){"
+        errorLine2="                            ~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/NativeBridge.java"
+            line="185"
+            column="29"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="        else if(path.equals(&quot;/sdcard&quot;) || path.startsWith(&quot;/sdcard/&quot;)){"
+        errorLine2="                                                          ~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/NativeBridge.java"
+            line="185"
+            column="59"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="        if(arg.startsWith(&quot;/workspace/&quot;) || arg.equals(&quot;/workspace&quot;) || arg.startsWith(&quot;/sdcard/&quot;) || arg.equals(&quot;/sdcard&quot;) || arg.startsWith(&quot;/root/&quot;) || arg.startsWith(&quot;/tmp/&quot;))return mapGuestPath(context,arg).getPath();"
+        errorLine2="                                                                                       ~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/NativeBridge.java"
+            line="195"
+            column="88"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="        if(arg.startsWith(&quot;/workspace/&quot;) || arg.equals(&quot;/workspace&quot;) || arg.startsWith(&quot;/sdcard/&quot;) || arg.equals(&quot;/sdcard&quot;) || arg.startsWith(&quot;/root/&quot;) || arg.startsWith(&quot;/tmp/&quot;))return mapGuestPath(context,arg).getPath();"
+        errorLine2="                                                                                                                 ~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/NativeBridge.java"
+            line="195"
+            column="114"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="            if (cwd.equals(&quot;/sdcard&quot;) || cwd.startsWith(&quot;/sdcard/&quot;)) {"
+        errorLine2="                           ~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="795"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="            if (cwd.equals(&quot;/sdcard&quot;) || cwd.startsWith(&quot;/sdcard/&quot;)) {"
+        errorLine2="                                                        ~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="795"
+            column="57"/>
+    </issue>
+
+    <issue
+        id="SdCardPath"
+        message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
+        errorLine1="            return &quot;/sdcard&quot;;"
+        errorLine2="                   ~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
+            line="798"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="UnusedAttribute"
+        message="Attribute `enableOnBackInvokedCallback` is only used in API level 33 and higher (current min is 31)"
+        errorLine1="        &lt;activity android:name=&quot;io.github.modao7067.luma.MainActivity&quot; android:enableOnBackInvokedCallback=&quot;true&quot; android:exported=&quot;false&quot; android:windowSoftInputMode=&quot;adjustResize&quot; android:configChanges=&quot;orientation|screenSize|keyboardHidden&quot; />"
+        errorLine2="                                                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="25"
+            column="72"/>
+    </issue>
+
+    <issue
+        id="BatteryLife"
+        message="Use of `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` violates the Play Store Content Policy regarding acceptable use cases, as described in https://developer.android.com/training/monitoring-device-state/doze-standby.html"
+        errorLine1="                startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse(&quot;package:&quot; + getPackageName())));"
+        errorLine2="                                                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="1057"
+            column="68"/>
+    </issue>
+
+    <issue
+        id="BatteryLife"
+        message="Use of `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` violates the Play Store Content Policy regarding acceptable use cases, as described in https://developer.android.com/training/monitoring-device-state/doze-standby.html"
+        errorLine1="                    startActivityForResult(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse(&quot;package:&quot; + getPackageName())), 31);"
+        errorLine2="                                                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/SetupActivity.java"
+            line="275"
+            column="64"/>
+    </issue>
+
+    <issue
+        id="WakelockTimeout"
+        message="Provide a timeout when requesting a wakelock with `PowerManager.Wakelock.acquire(long timeout)`. This will ensure the OS will cleanup any wakelocks that last longer than you intend, and will save your user&apos;s battery."
+        errorLine1="        if(wakeLockEnabled)wakeLock.acquire();"
+        errorLine2="                           ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/ShellService.java"
+            line="110"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="UsableSpace"
+        message="Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data"
+        errorLine1="        if(stage.getUsableSpace()&lt;total+128L*1024*1024)throw new IOException(&quot;存储空间不足，至少需要 &quot;+((total+128L*1024*1024)/1024/1024)+&quot; MiB 可用空间&quot;);"
+        errorLine2="                 ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/EnvironmentInstaller.java"
+            line="83"
+            column="18"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `TerminalHeader` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="final class TerminalHeader extends LinearLayout {"
+        errorLine2="            ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/TerminalHeader.java"
+            line="14"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            emptySub.setText(&quot;可在终端通过 lumactl start --port 0 -- &lt;命令> 启动常驻 Web 界面或本地 API 网关。&quot;);"
+        errorLine2="                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="800"
+            column="30"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="        coreDetail.setText(&quot;工作区目录：/workspace\n共享存储映射：/sdcard\n本机局域网 IPv4：&quot; + lanText);"
+        errorLine2="                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="963"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        stDesc.setText(&quot;允许终端通过 /sdcard 读写手机共享存储。修改系统授权后，新建窗口即可生效。&quot;);"
+        errorLine2="                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="995"
+            column="24"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="            &quot;电池优化白名单：&quot; + (batteryIgnored ? &quot;已允许忽略电池优化&quot; : &quot;尚未忽略电池优化&quot;) + &quot;\n&quot; +"
+        errorLine2="            ^">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="1042"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="        accessibilityDesc.setText((accessibilityConnected ? &quot;服务已连接。&quot; : accessibilityEnabled ? &quot;已开启，等待系统连接。&quot; : &quot;在系统无障碍设置中开启“Luma 后台保活”。&quot;)"
+        errorLine2="                                  ^">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="1099"
+            column="35"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            + &quot;帮助后台终端与 Web 服务保持可响应，效果取决于系统。仅接收 Luma 自身窗口事件，不读取窗口内容或操作屏幕。&quot;);"
+        errorLine2="              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
+            line="1100"
+            column="15"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="                    status.setText(&quot;环境准备未完成：&quot; + service.preparationError);"
+        errorLine2="                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/SetupActivity.java"
+            line="38"
+            column="36"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        title.setText(&quot;Luma&quot;);"
+        errorLine2="                      ~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/SetupActivity.java"
+            line="105"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        status.setText(&quot;准备 Debian 环境…&quot;);"
+        errorLine2="                       ~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/io/github/modao7067/luma/SetupActivity.java"
+            line="197"
+            column="24"/>
+    </issue>
+
+</issues>

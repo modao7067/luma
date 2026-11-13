@@ -1,0 +1,139 @@
+[
+  {
+    "file": "MapleMonoNL-NF-CN-Regular.ttf",
+    "family": "Maple Mono NL NF CN",
+    "style": "Regular",
+    "version": "7.9",
+    "source": "https://github.com/subframe7536/maple-font/releases/tag/v7.9",
+    "sourceArchive": "https://github.com/subframe7536/maple-font/releases/download/v7.9/MapleMonoNL-NF-CN.zip",
+    "sourceArchiveSha256": "6103d3a73d0095de6b34e709f3ecaf1147e35ab7717c03068e07c0bb0a8efa2e",
+    "sha256": "721086d7074799bd1cefcf5ddc376102355aca6580740318c37feda3be3ed9b1",
+    "bytes": 20624708,
+    "license": "SIL Open Font License 1.1; MapleMono-OFL.txt"
+  },
+  {
+    "file": "JetBrainsMonoNLNerdFontMono-Regular.ttf",
+    "source": "https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.5.1",
+    "sha256": "d9a80146bbf2ff23b187316a3e82ee2a2ceab8220267fe09ac150ca46ab2c3bd",
+    "bytes": 2491088,
+    "license": "SIL Open Font License 1.1"
+  },
+  {
+    "file": "NotoSansMono-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansMono",
+    "sha256": "d9e2b23d19f8230be7146f409a52b1d23117e635e28f2e2892cf91b7382f325b",
+    "bytes": 512836,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansSymbols-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansSymbols",
+    "sha256": "8f02f31959bbdf6061547a188248e13f84dc5fdd940326ec494675f453f072bb",
+    "bytes": 258156,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansMath-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansMath",
+    "sha256": "80b61fd613d3519197e64fff6f7e71fdc7f3e6526440ea4115b554ef7fd59af7",
+    "bytes": 590904,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoMusic-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoMusic",
+    "sha256": "5982f8c6a10c50809f879a28911a214a066197871ee8caa544a86121d0452fd5",
+    "bytes": 81392,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoColorEmoji.ttf",
+    "source": "https://github.com/googlefonts/noto-emoji/tree/99701e07d3d1fe1bdbcdb14964547f0fd592966f/2D/fonts",
+    "sha256": "15671215ab769fdc7162a045d56fd7d7e477c51b04e6b3c761d914d8fdd6cc44",
+    "bytes": 10730124,
+    "license": "SIL Open Font License 1.1; NotoColorEmoji-OFL.txt"
+  },
+  {
+    "file": "NotoSansSymbols2-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansSymbols2",
+    "sha256": "630846d528dbe4c4981370a4d0a9475a1fd1491a129bb411f8e157cdb5de13c6",
+    "bytes": 656852,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "LumaCjkForms-Regular.otf",
+    "source": "Noto Sans CJK SC 2.004, full declared Unicode-block subset; https://github.com/notofonts/noto-cjk",
+    "sourceCollectionSha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+    "sourceFace": 2,
+    "sha256": "abf7775352578569cc4edd42e795d3f74ffc27edb67eaf3e4c8b7fa9c8c2d343",
+    "bytes": 272768,
+    "license": "SIL Open Font License 1.1; LumaCjkForms-OFL.txt",
+    "blocks": [
+      {
+        "name": "General Punctuation",
+        "start": "2000",
+        "end": "206F"
+      },
+      {
+        "name": "Miscellaneous Technical",
+        "start": "2300",
+        "end": "23FF"
+      },
+      {
+        "name": "CJK Symbols and Punctuation",
+        "start": "3000",
+        "end": "303F"
+      },
+      {
+        "name": "Hiragana",
+        "start": "3040",
+        "end": "309F"
+      },
+      {
+        "name": "Katakana",
+        "start": "30A0",
+        "end": "30FF"
+      },
+      {
+        "name": "Bopomofo",
+        "start": "3100",
+        "end": "312F"
+      },
+      {
+        "name": "Hangul Compatibility Jamo",
+        "start": "3130",
+        "end": "318F"
+      },
+      {
+        "name": "Katakana Phonetic Extensions",
+        "start": "31F0",
+        "end": "31FF"
+      },
+      {
+        "name": "Enclosed CJK Letters and Months",
+        "start": "3200",
+        "end": "32FF"
+      },
+      {
+        "name": "Vertical Forms",
+        "start": "FE10",
+        "end": "FE1F"
+      },
+      {
+        "name": "CJK Compatibility Forms",
+        "start": "FE30",
+        "end": "FE4F"
+      },
+      {
+        "name": "Small Form Variants",
+        "start": "FE50",
+        "end": "FE6F"
+      },
+      {
+        "name": "Halfwidth and Fullwidth Forms",
+        "start": "FF00",
+        "end": "FFEF"
+      }
+    ]
+  }
+]

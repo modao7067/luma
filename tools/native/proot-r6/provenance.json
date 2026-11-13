@@ -1,0 +1,63 @@
+{
+  "component": "PRoot 5.1.107.92 + talloc 2.4.3 + libandroid-shmem 0.7",
+  "candidate": "R6 native hard links first, with old L2 fallback and R5 fchmodat2 retained",
+  "baseline": "The source archives and r5-fchmodat2 entries shipped in Luma before this change",
+  "upstream_proot_reference": "b27d81a68d765f3462e807f4a14e01a03f8e89ea",
+  "android_target": "aarch64-linux-android34",
+  "compiler": "Ubuntu clang 21.1.8; NDK r27c sysroot and compiler-rt",
+  "userland": false,
+  "build_environment": {
+    "LP_LAZY_LIBANDROID": "1",
+    "LP_EXTRA_LIBS": "-llog"
+  },
+  "patch_order": [
+    "recipe/patches/proot-bionic-headers.patch",
+    "patches/0001-r5-fchmodat2.patch",
+    "patches/0002-r5-fchmodat2-min.patch",
+    "patches/0004-l2-native-hardlinks.patch"
+  ],
+  "source_archives": [
+    "proot.tgz",
+    "shmem.tgz",
+    "talloc.tgz"
+  ],
+  "outputs": {
+    "libproot_exec.so": {
+      "bytes": 258216
+    },
+    "libproot_loader.so": {
+      "bytes": 17800
+    }
+  },
+  "acceptance": {
+    "report": "verification/gui-cli-live-20261103/proot-fix/README.md",
+    "tested_abi": "arm64-v8a",
+    "seccomp_modes": [
+      0,
+      2
+    ],
+    "native_checks": [
+      "atomic publish then remove staging",
+      "legacy L2 read/link/nlink/unlink/rename/replace/last-unlink",
+      "native same-inode nlink 2 to 1",
+      "EEXIST preserves source and destination",
+      "fchmodat2 dirfd relative path"
+    ],
+    "live_model": "mimo-v2.6-flash",
+    "dsh_roundtrip": "passed with link2symlink retained",
+    "other_filesystems": "not measured"
+  },
+  "distribution_files": [
+    "README.md",
+    "provenance.json",
+    "package-sources.py",
+    "compiler-wrapper.sh",
+    "recipe/build.sh",
+    "recipe/patches/proot-bionic-headers.patch",
+    "recipe/patches/shmem-app-temp.patch",
+    "patches/0001-r5-fchmodat2.patch",
+    "patches/0002-r5-fchmodat2-min.patch",
+    "patches/0003-r2-lazy-libandroid.patch",
+    "patches/0004-l2-native-hardlinks.patch"
+  ]
+}

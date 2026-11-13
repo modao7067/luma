@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+base=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=$(dirname -- "$base")
+if [[ -z "${JAVA_HOME:-}" ]]; then
+ if [[ -d /usr/lib/jvm/java-21-openjdk-arm64 ]]; then JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+ elif command -v java >/dev/null 2>&1; then JAVA_HOME=$(dirname -- "$(dirname -- "$(readlink -f -- "$(command -v java)")")")
+ fi
+fi
+export JAVA_HOME
+offline=(--offline); [[ -z "${LUMA_ONLINE:-}" ]] || offline=()
+case "${1:-}" in
+ git) shift; exec git -C "$repo" "$@" ;;
+ build|lint)
+  action=$1; target=${2:-all}; [[ "$target" != luma ]] || target=gui
+  case "$target" in all|gui) ;; *) echo "Invalid target: $target" >&2; exit 2 ;; esac
+  if [[ "$action" == lint ]]; then
+   tasks=(:apps:gui:lintDebug :runtime:noroot:lintDebug :runtime:root:lintDebug :shared:terminal-view:lintDebug :shared:terminal-emulator:lintDebug)
+  else
+   tasks=(:apps:gui:assembleRelease)
+  fi
+  exec "$repo/gradlew" -p "$repo" "${tasks[@]}" ${offline[@]+"${offline[@]}"} --console=plain ;;
+ test-ui)
+  if (( $# > 2 )); then echo 'Usage: luma test-ui [TEST_PATTERN]' >&2; exit 2; fi
+  exec "$repo/gradlew" -p "$repo" -I "$base/tests/ui/compose/compose-tests.gradle" \
+    :apps:gui:testDebugUnitTest --tests "${2:-io.github.modao7067.luma.gui.ui.*}" ${offline[@]+"${offline[@]}"} --console=plain ;;
+ verify) exec python3 "$base/verify.py" ;;
+ assets) exec python3 "$base/assets.py" "${2:-check}" ;;
+ *) echo 'Usage: luma {build|lint} [gui|luma|all] | test-ui [TEST_PATTERN] | verify | assets {check|record} | git ARGS' >&2; exit 2 ;;
+esac

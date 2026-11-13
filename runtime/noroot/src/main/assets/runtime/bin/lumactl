@@ -1,0 +1,337 @@
+#!/usr/bin/env node
+'use strict';
+
+const net = require('node:net');
+const fs = require('node:fs');
+const path = require('node:path');
+const dns = require('node:dns');
+
+function getSocketName() {
+  if (process.env.LUMA_NATIVE_SOCKET) return process.env.LUMA_NATIVE_SOCKET;
+  return fs.readFileSync('/opt/luma/socket-name', 'utf8').trim();
+}
+
+function callBridge(request, onStdout) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: '\0' + getSocketName() });
+    let pending = '';
+    let result = null;
+    let lastOffset = 0;
+    let completed = false;
+    socket.on('connect', () => {
+      socket.write(JSON.stringify(request) + '\n');
+    });
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      pending += chunk;
+      let at;
+      while ((at = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, at);
+        pending = pending.slice(at + 1);
+        if (!line.trim()) continue;
+        let ev;
+        try {
+          ev = JSON.parse(line);
+        } catch (e) {
+          reject(new Error('Invalid bridge JSON: ' + e.message));
+          socket.destroy();
+          return;
+        }
+        if (ev.stdout !== undefined && onStdout) {
+          onStdout(Buffer.from(ev.stdout, 'base64'), ev.offset);
+        }
+        if (ev.offset !== undefined) lastOffset = ev.offset;
+        if (ev.result !== undefined) result = ev.result;
+        if (ev.error !== undefined) {
+          const err = new Error(ev.error);
+          err.exitCode = ev.exit || 1;
+          socket.destroy();
+          reject(err);
+          return;
+        }
+        if (ev.exit !== undefined) {
+          completed = true;
+          socket.end();
+          resolve({ exit: ev.exit, result, offset: lastOffset });
+          return;
+        }
+      }
+    });
+    socket.on('error', (err) => reject(err));
+    socket.on('close', () => {
+      if (!completed) reject(new Error('Luma bridge disconnected before completing the response'));
+    });
+  });
+}
+
+function parseEnvFile(filePath) {
+  const out = {};
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
+function printServiceSummary(svc, asJson) {
+  if (asJson) {
+    console.log(JSON.stringify(svc, null, 2));
+    return;
+  }
+  const base = svc.baseUrl ? `  url=${svc.baseUrl}` : '';
+  const exitStr = svc.phase === 'exited' && svc.exit ? `  exit=${svc.exit.code}(${svc.exit.reason || ''})` : '';
+  console.log(`${svc.id}  phase=${svc.phase}  ready=${svc.ready}  pid=${svc.pid}${base}${exitStr}`);
+  if (Array.isArray(svc.access) && svc.access.length > 1) {
+    for (const ep of svc.access) {
+      console.log(`  [${ep.scope}] ${ep.url}`);
+    }
+  }
+}
+
+async function cmdStart(args) {
+  const req = {
+    op: 'svc.start',
+    cwd: process.cwd(),
+    backend: 'linux',
+    env: {},
+    listen: {},
+    probe: {}
+  };
+  let asJson = false;
+  let explicitWait = null;
+  const cmdArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') {
+      cmdArgs.push(...args.slice(i + 1));
+      break;
+    } else if (a === '--id') req.id = args[++i];
+    else if (a === '--name') req.name = args[++i];
+    else if (a === '--cwd') req.cwd = path.resolve(args[++i]);
+    else if (a === '--backend') req.backend = args[++i];
+    else if (a === '--port') req.listen.port = parseInt(args[++i], 10);
+    else if (a === '--host') req.listen.host = args[++i];
+    else if (a === '--lan') { req.lan = true; if (!req.listen.host) req.listen.host = '0.0.0.0'; }
+    else if (a === '--base-path') req.listen.basePath = args[++i];
+    else if (a === '--probe') req.probe.type = args[++i];
+    else if (a === '--probe-path') req.probe.path = args[++i];
+    else if (a === '--probe-status') req.probe.okStatus = args[++i];
+    else if (a === '--probe-regex') req.probe.regex = args[++i];
+    else if (a === '--timeout') {
+      const t = parseInt(args[++i], 10);
+      req.probe.startupTimeoutMs = t;
+      req.waitTimeoutMs = t;
+    } else if (a === '--restart') req.restartPolicy = args[++i];
+    else if (a === '--max-restarts') req.maxRestarts = parseInt(args[++i], 10);
+    else if (a === '--grace') req.gracePeriodMs = parseInt(args[++i], 10);
+    else if (a === '--env') {
+      const kv = args[++i] || '';
+      const eq = kv.indexOf('=');
+      if (eq > 0) req.env[kv.slice(0, eq)] = kv.slice(eq + 1);
+    } else if (a === '--env-file') {
+      Object.assign(req.env, parseEnvFile(args[++i]));
+    } else if (a === '--wait') explicitWait = true;
+    else if (a === '--no-wait') explicitWait = false;
+    else if (a === '--json') asJson = true;
+    else {
+      cmdArgs.push(...args.slice(i));
+      break;
+    }
+  }
+  if (cmdArgs.length === 0) {
+    throw new Error('用法: lumactl start [--id ID] [--port PORT] [--base-path /v1] [--probe http|tcp|log|none] -- <command> [args...]');
+  }
+  req.args = cmdArgs;
+  req.wait = explicitWait !== null ? explicitWait : (req.listen.port !== undefined || req.probe.type !== undefined);
+  const { result } = await callBridge(req);
+  printServiceSummary(result, asJson);
+  if (req.wait && (result.phase === 'exited' || result.ready === 'no')) {
+    process.exitCode = 1;
+  }
+}
+
+async function cmdList(args) {
+  const asJson = args.includes('--json');
+  const { result } = await callBridge({ op: 'svc.list' });
+  const list = (result && result.services) || [];
+  if (asJson) {
+    console.log(JSON.stringify(list, null, 2));
+    return;
+  }
+  if (list.length === 0) {
+    console.log('无托管服务');
+    return;
+  }
+  for (const svc of list) printServiceSummary(svc, false);
+}
+
+async function cmdStatus(args) {
+  const id = args.find((a) => !a.startsWith('-'));
+  const asJson = args.includes('--json');
+  if (!id) throw new Error('用法: lumactl status <id> [--json]');
+  const { result } = await callBridge({ op: 'svc.status', id });
+  printServiceSummary(result, asJson);
+}
+
+async function cmdStop(args) {
+  const id = args.find((a) => !a.startsWith('-'));
+  const asJson = args.includes('--json');
+  let grace = -1;
+  const gIdx = args.indexOf('--grace');
+  if (gIdx >= 0 && args[gIdx + 1]) grace = parseInt(args[gIdx + 1], 10);
+  if (!id) throw new Error('用法: lumactl stop <id> [--grace ms] [--json]');
+  const { result } = await callBridge({ op: 'svc.stop', id, gracePeriodMs: grace });
+  printServiceSummary(result, asJson);
+}
+
+async function cmdWait(args) {
+  const id = args.find((a) => !a.startsWith('-'));
+  const asJson = args.includes('--json');
+  let waitFor = 'ready';
+  let timeoutMs = 60000;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--for') waitFor = args[++i];
+    else if (args[i] === '--timeout') timeoutMs = parseInt(args[++i], 10);
+  }
+  if (!id) throw new Error('用法: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]');
+  const { result } = await callBridge({ op: 'svc.wait', id, waitFor, timeoutMs });
+  printServiceSummary(result, asJson);
+  if (!result.waitSatisfied) process.exitCode = 1;
+}
+
+async function cmdLogs(args) {
+  const id = args.find((a) => !a.startsWith('-'));
+  let follow = false;
+  let tail = 0;
+  let offset = 0;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-f' || args[i] === '--follow') follow = true;
+    else if (args[i] === '--tail') tail = parseInt(args[++i], 10);
+    else if (args[i] === '--offset') offset = parseInt(args[++i], 10);
+  }
+  if (!id) throw new Error('用法: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]');
+  await callBridge({ op: 'svc.logs', id, follow, tail, offset }, (buf) => {
+    process.stdout.write(buf);
+  });
+}
+
+async function cmdOpen(args) {
+  const target = args.find((a) => !a.startsWith('-'));
+  if (!target) throw new Error('用法: lumactl open <id|url>');
+  const { result } = await callBridge({ op: 'svc.open', target });
+  console.log('Opened:', result.opened);
+}
+
+async function testLoopbackSelfConnect() {
+  return new Promise((resolve) => {
+    const srv = net.createServer((c) => c.end('ok'));
+    srv.on('error', (e) => resolve({ ok: false, error: e.message }));
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      const t0 = Date.now();
+      const client = net.createConnection({ host: '127.0.0.1', port, timeout: 1500 }, () => {
+        client.end();
+        srv.close(() => resolve({ ok: true, latencyMs: Date.now() - t0 }));
+      });
+      client.on('timeout', () => {
+        client.destroy();
+        srv.close(() => resolve({ ok: false, error: 'loopback_timeout (possible OEM background firewall/Hans freeze)' }));
+      });
+      client.on('error', (e) => {
+        client.destroy();
+        srv.close(() => resolve({ ok: false, error: e.message }));
+      });
+    });
+  });
+}
+
+async function cmdDoctor(args) {
+  const asJson = args.includes('--json');
+  const { result: hostNet } = await callBridge({ op: 'svc.netinfo' });
+  let resolvLines = [];
+  try {
+    resolvLines = fs.readFileSync('/etc/resolv.conf', 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith('nameserver '))
+      .map((l) => l.replace('nameserver ', '').trim());
+  } catch {}
+  const caFile = '/etc/ssl/certs/ca-certificates.crt';
+  const caExists = fs.existsSync(caFile);
+  const loopback = await testLoopbackSelfConnect();
+  let pnpmImportMethod = 'default';
+  try {
+    const cfg = fs.readFileSync('/root/.config/pnpm/config.yaml', 'utf8');
+    const m = cfg.match(/packageImportMethod:\s*(\S+)/);
+    if (m) pnpmImportMethod = m[1];
+  } catch {}
+  const report = {
+    uid: hostNet.uid,
+    loopback,
+    resolvConf: resolvLines,
+    cAresServers: dns.getServers(),
+    hostDnsServers: hostNet.dnsServers || [],
+    lanIpv4: hostNet.lanIpv4 || [],
+    caBundle: { path: caFile, exists: caExists },
+    env: {
+      NO_PROXY: process.env.NO_PROXY || '',
+      HTTP_PROXY: process.env.HTTP_PROXY || '',
+      HTTPS_PROXY: process.env.HTTPS_PROXY || '',
+      pnpmImportMethod
+    }
+  };
+  if (asJson) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`UID: ${report.uid}`);
+    console.log(`Loopback 127.0.0.1: ${loopback.ok ? 'OK (' + loopback.latencyMs + 'ms)' : 'FAIL - ' + loopback.error}`);
+    console.log(`DNS (/etc/resolv.conf): ${resolvLines.join(', ') || 'none'}`);
+    console.log(`LAN IPv4: ${report.lanIpv4.join(', ') || 'none'}`);
+    console.log(`CA Bundle (${caFile}): ${caExists ? 'OK' : 'MISSING'}`);
+    console.log(`NO_PROXY: ${report.env.NO_PROXY}`);
+    console.log(`pnpm import method: ${report.env.pnpmImportMethod}`);
+  }
+  if (!loopback.ok) process.exitCode = 1;
+}
+
+async function main() {
+  const sub = process.argv[2];
+  const rest = process.argv.slice(3);
+  switch (sub) {
+    case 'start': return await cmdStart(rest);
+    case 'list':
+    case 'ls': return await cmdList(rest);
+    case 'status': return await cmdStatus(rest);
+    case 'stop': return await cmdStop(rest);
+    case 'wait': return await cmdWait(rest);
+    case 'logs': return await cmdLogs(rest);
+    case 'open': return await cmdOpen(rest);
+    case 'doctor': return await cmdDoctor(rest);
+    default:
+      console.log([
+        '用法: lumactl <command> [options]',
+        '  start [--id ID] [--port PORT] [--lan] [--base-path /v1] [--probe http|tcp|log|none] -- <cmd> [args...]',
+        '  list [--json]',
+        '  status <id> [--json]',
+        '  logs <id> [-f|--follow] [--tail bytes]',
+        '  stop <id> [--grace ms]',
+        '  wait <id> [--for ready|exited] [--timeout ms]',
+        '  open <id|url>',
+        '  doctor [net] [--json]'
+      ].join('\n'));
+      if (sub && sub !== '--help' && sub !== '-h') process.exitCode = 1;
+  }
+}
+
+main().catch((err) => {
+  process.stderr.write((err && err.message ? err.message : String(err)) + '\n');
+  process.exitCode = (err && err.exitCode) || 1;
+});

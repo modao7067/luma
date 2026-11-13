@@ -1,0 +1,168 @@
+diff --git a/src/extension/fake_id0/chmod.c b/src/extension/fake_id0/chmod.c
+index e1accbc..f49dd9a 100644
+--- a/src/extension/fake_id0/chmod.c
++++ b/src/extension/fake_id0/chmod.c
+@@ -6,9 +6,9 @@
+ 
+ #include "extension/fake_id0/helper_functions.h"
+ 
+-/** Handles chmod, fchmod, and fchmodat syscalls. Changes meta files to the new
+- *  permissions if the meta file exists. See chmod(2) for returned permission
+- *  errors. 
++/** Handles chmod, fchmod, fchmodat, and fchmodat2 syscalls. Changes meta files
++ *  to the new permissions if the meta file exists. See chmod(2) for returned
++ *  permission errors.
+  */
+ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg, 
+ 	Reg fd_sysarg, Reg dirfd_sysarg, Config *config)
+diff --git a/src/extension/fake_id0/fake_id0.c b/src/extension/fake_id0/fake_id0.c
+index 9bd8dad..b30af5a 100644
+--- a/src/extension/fake_id0/fake_id0.c
++++ b/src/extension/fake_id0/fake_id0.c
+@@ -321,6 +321,7 @@ static FilteredSysnum filtered_sysnums[] = {
+ 	{ PR_execve,		FILTER_SYSEXIT },
+ 	{ PR_fchmod,		FILTER_SYSEXIT },
+ 	{ PR_fchmodat,		FILTER_SYSEXIT },
++	{ PR_fchmodat2,		FILTER_SYSEXIT },
+ 	{ PR_fchown,		FILTER_SYSEXIT },
+ 	{ PR_fchown32,		FILTER_SYSEXIT },
+ 	{ PR_fchownat,		FILTER_SYSEXIT },
+@@ -449,6 +450,22 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
+ 			node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
+ 			break;
+ 
++		case PR_fchmodat2: {
++			struct stat link;
++
++			/* The mode of a symlink can't be changed: with
++			 * AT_SYMLINK_NOFOLLOW the syscall fails with EOPNOTSUPP
++			 * and leaves everything as is.  Don't hand the new mode
++			 * over to the target of the symlink, which is the file
++			 * stat(2) above looked at; restore its previous mode.  */
++			if ((peek_reg(tracee, ORIGINAL, SYSARG_4) & AT_SYMLINK_NOFOLLOW) != 0
++			    && lstat(path, &link) == 0 && S_ISLNK(link.st_mode))
++				node->mode = perms.st_mode;
++			else
++				node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
++			break;
++		}
++
+ 		/* For stat syscalls: don't touch the mode of the final component.  */
+ 		case PR_fstatat64:
+ 		case PR_lstat:
+@@ -641,7 +658,9 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
+ 		return handle_chmod_enter_end(tracee, IGNORE_SYSARG, SYSARG_2, 
+ 			SYSARG_1, IGNORE_SYSARG, config);
+ 	/* int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags (unused)) */
++	/* int fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags) */
+ 	case PR_fchmodat:
++	case PR_fchmodat2:
+ 		return handle_chmod_enter_end(tracee, SYSARG_2, SYSARG_3, 
+ 			IGNORE_SYSARG, SYSARG_1, config);
+ 
+@@ -1035,6 +1054,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
+ 	case PR_fchown32:
+ 	case PR_lchown32:
+ 	case PR_fchmodat:
++	case PR_fchmodat2:
+ 	case PR_fchownat: 
+ 		return handle_perm_err_exit_end(tracee, config, false);
+ 
+diff --git a/src/syscall/enter.c b/src/syscall/enter.c
+index 93f4306..ee18959 100644
+--- a/src/syscall/enter.c
++++ b/src/syscall/enter.c
+@@ -2484,6 +2484,7 @@ int translate_syscall_enter(Tracee *tracee)
+ 		break;
+ 
+ 	case PR_fchownat:
++	case PR_fchmodat2:
+ 	case PR_fstatat64:
+ 	case PR_newfstatat:
+ 	case PR_utimensat:
+diff --git a/src/syscall/seccomp.c b/src/syscall/seccomp.c
+index 2f8930e..5959ba8 100644
+--- a/src/syscall/seccomp.c
++++ b/src/syscall/seccomp.c
+@@ -356,6 +356,7 @@ static FilteredSysnum proot_sysnums[] = {
+ 	{ PR_faccessat2,	FILTER_SYSEXIT },
+ 	{ PR_fchdir,		FILTER_SYSEXIT },
+ 	{ PR_fchmodat,		0 },
++	{ PR_fchmodat2,		0 },
+ 	{ PR_fchownat,		0 },
+ 	{ PR_fstatat64,		0 },
+ 	{ PR_futimesat,		0 },
+diff --git a/src/syscall/sysnums-arm.h b/src/syscall/sysnums-arm.h
+index 3d05974..e3f6f6b 100644
+--- a/src/syscall/sysnums-arm.h
++++ b/src/syscall/sysnums-arm.h
+@@ -359,4 +359,5 @@ static const Sysnum sysnums_arm[] = {
+ 	[ 439 ] = PR_faccessat2,
+ 	[ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
++	[ 452 ] = PR_fchmodat2,
+ };
+diff --git a/src/syscall/sysnums-arm64.h b/src/syscall/sysnums-arm64.h
+index 15cfe4f..b257339 100644
+--- a/src/syscall/sysnums-arm64.h
++++ b/src/syscall/sysnums-arm64.h
+@@ -281,4 +281,5 @@ static const Sysnum sysnums_arm64[] = {
+ 	[ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
+ 	[ 439 ] = PR_faccessat2,
++	[ 452 ] = PR_fchmodat2,
+ };
+diff --git a/src/syscall/sysnums-i386.h b/src/syscall/sysnums-i386.h
+index 2dfee95..f30f969 100644
+--- a/src/syscall/sysnums-i386.h
++++ b/src/syscall/sysnums-i386.h
+@@ -384,4 +384,5 @@ static const Sysnum sysnums_i386[] = {
+ 	[ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
+ 	[ 439 ] = PR_faccessat2,
++	[ 452 ] = PR_fchmodat2,
+ };
+diff --git a/src/syscall/sysnums-sh4.h b/src/syscall/sysnums-sh4.h
+index 5081c8a..4b2a927 100644
+--- a/src/syscall/sysnums-sh4.h
++++ b/src/syscall/sysnums-sh4.h
+@@ -342,4 +342,5 @@ static const Sysnum sysnums_sh4[] = {
+ 	[ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
+ 	[ 439 ] = PR_faccessat2,
++	[ 452 ] = PR_fchmodat2,
+ };
+diff --git a/src/syscall/sysnums-x32.h b/src/syscall/sysnums-x32.h
+index 524b7c0..68bd2d4 100644
+--- a/src/syscall/sysnums-x32.h
++++ b/src/syscall/sysnums-x32.h
+@@ -275,6 +275,7 @@ static const Sysnum sysnums_x32[] = {
+ 	[ 316 ] = PR_renameat2,
+ 	[ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
++	[ 452 ] = PR_fchmodat2,
+ 	[ 512 ] = PR_rt_sigaction,
+ 	[ 513 ] = PR_rt_sigreturn,
+ 	[ 514 ] = PR_ioctl,
+diff --git a/src/syscall/sysnums-x86_64.h b/src/syscall/sysnums-x86_64.h
+index b4601c1..5bec0e0 100644
+--- a/src/syscall/sysnums-x86_64.h
++++ b/src/syscall/sysnums-x86_64.h
+@@ -337,4 +337,5 @@ static const Sysnum sysnums_x86_64[] = {
+         [ 435 ] = PR_clone3,
+ 	[ 437 ] = PR_openat2,
+ 	[ 439 ] = PR_faccessat2,
++	[ 452 ] = PR_fchmodat2,
+ };
+diff --git a/src/syscall/sysnums.list b/src/syscall/sysnums.list
+index d99e231..c221ddd 100644
+--- a/src/syscall/sysnums.list
++++ b/src/syscall/sysnums.list
+@@ -72,6 +72,7 @@ SYSNUM(fanotify_mark)
+ SYSNUM(fchdir)
+ SYSNUM(fchmod)
+ SYSNUM(fchmodat)
++SYSNUM(fchmodat2)
+ SYSNUM(fchown)
+ SYSNUM(fchown32)
+ SYSNUM(fchownat)

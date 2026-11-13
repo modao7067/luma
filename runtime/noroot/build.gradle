@@ -1,0 +1,14 @@
+plugins { id 'com.android.library' }
+apply from: rootProject.file('gradle/android-common.gradle')
+android {
+    enableKotlin = false
+    namespace 'io.github.modao7067.luma'
+    lint { baseline = file('lint-baseline.xml') }
+    androidResources { ignoreAssetsPattern = '!.svn:!.git:!.DS_Store:!*~' }
+}
+apply from: rootProject.file('gradle/terminal-ui.gradle')
+dependencies {
+    api project(':shared:terminal-view')
+    implementation libs.androidx.annotation
+    implementation libs.xz
+}
