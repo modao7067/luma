@@ -1,0 +1,22 @@
+dependencies {
+    implementation project(':runtime:root')
+    implementation libs.okhttp
+    implementation libs.kotlinx.coroutines.android
+    implementation libs.androidsvg
+    implementation libs.commonmark
+    implementation libs.commonmark.gfm.tables
+    implementation libs.commonmark.gfm.strikethrough
+    implementation libs.jlatexmath.android
+    implementation libs.highlights
+    implementation libs.kotlinx.serialization.json
+    implementation platform(libs.compose.bom)
+    implementation libs.compose.runtime
+    implementation libs.compose.runtime.saveable
+    implementation libs.androidx.activity.compose
+    implementation libs.compose.material3
+    implementation libs.compose.material.icons.core
+    implementation libs.compose.ui.tooling.preview
+    debugImplementation libs.compose.ui.tooling
+    testImplementation libs.junit
+    testImplementation libs.org.json
+}

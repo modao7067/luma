@@ -1,0 +1,140 @@
+{
+  "description": "Full-block coverage contract for terminal punctuation, CJK forms, kana and common CLI symbols; not a claim of universal Unicode coverage.",
+  "blocks": [
+    {
+      "name": "General Punctuation",
+      "start": "2000",
+      "end": "206F"
+    },
+    {
+      "name": "Miscellaneous Technical",
+      "start": "2300",
+      "end": "23FF"
+    },
+    {
+      "name": "CJK Symbols and Punctuation",
+      "start": "3000",
+      "end": "303F"
+    },
+    {
+      "name": "Hiragana",
+      "start": "3040",
+      "end": "309F"
+    },
+    {
+      "name": "Katakana",
+      "start": "30A0",
+      "end": "30FF"
+    },
+    {
+      "name": "Bopomofo",
+      "start": "3100",
+      "end": "312F"
+    },
+    {
+      "name": "Hangul Compatibility Jamo",
+      "start": "3130",
+      "end": "318F"
+    },
+    {
+      "name": "Katakana Phonetic Extensions",
+      "start": "31F0",
+      "end": "31FF"
+    },
+    {
+      "name": "Enclosed CJK Letters and Months",
+      "start": "3200",
+      "end": "32FF"
+    },
+    {
+      "name": "Vertical Forms",
+      "start": "FE10",
+      "end": "FE1F"
+    },
+    {
+      "name": "CJK Compatibility Forms",
+      "start": "FE30",
+      "end": "FE4F"
+    },
+    {
+      "name": "Small Form Variants",
+      "start": "FE50",
+      "end": "FE6F"
+    },
+    {
+      "name": "Halfwidth and Fullwidth Forms",
+      "start": "FF00",
+      "end": "FFEF"
+    },
+    {
+      "name": "Arrows",
+      "start": "2190",
+      "end": "21FF"
+    },
+    {
+      "name": "Mathematical Operators",
+      "start": "2200",
+      "end": "22FF"
+    },
+    {
+      "name": "Enclosed Alphanumerics",
+      "start": "2460",
+      "end": "24FF"
+    },
+    {
+      "name": "Box Drawing",
+      "start": "2500",
+      "end": "257F"
+    },
+    {
+      "name": "Block Elements",
+      "start": "2580",
+      "end": "259F"
+    },
+    {
+      "name": "Geometric Shapes",
+      "start": "25A0",
+      "end": "25FF"
+    },
+    {
+      "name": "Miscellaneous Symbols",
+      "start": "2600",
+      "end": "26FF"
+    },
+    {
+      "name": "Dingbats",
+      "start": "2700",
+      "end": "27BF"
+    },
+    {
+      "name": "Miscellaneous Mathematical Symbols-A",
+      "start": "27C0",
+      "end": "27EF"
+    },
+    {
+      "name": "Supplemental Arrows-A",
+      "start": "27F0",
+      "end": "27FF"
+    },
+    {
+      "name": "Braille Patterns",
+      "start": "2800",
+      "end": "28FF"
+    },
+    {
+      "name": "Supplemental Arrows-B",
+      "start": "2900",
+      "end": "297F"
+    },
+    {
+      "name": "Miscellaneous Mathematical Symbols-B",
+      "start": "2980",
+      "end": "29FF"
+    },
+    {
+      "name": "Supplemental Mathematical Operators",
+      "start": "2A00",
+      "end": "2AFF"
+    }
+  ]
+}

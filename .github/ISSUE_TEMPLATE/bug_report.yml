@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Security problems: please email the address in SECURITY.md instead of filing an issue. / 安全问题请按 SECURITY.md 发邮件，不要公开提交。"
+  - type: dropdown
+    id: product
+    attributes:
+      label: Product
+      options: [App UI, Linux environment (PRoot / Root Chroot), Terminal, Agent CLI integration, Build / tooling]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: e.g. Pixel 9, Android 16, KernelSU
+  - type: input
+    id: cli
+    attributes:
+      label: Agent CLI involved (if any)
+      placeholder: e.g. Codex 0.x, Claude Code 2.x
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Remove tokens, API keys and private paths before pasting.

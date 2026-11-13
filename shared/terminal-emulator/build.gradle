@@ -1,0 +1,16 @@
+plugins { id 'com.android.library' }
+apply from: rootProject.file('gradle/android-common.gradle')
+android {
+    enableKotlin = false
+    namespace 'com.termux.terminal'
+    sourceSets.main.java.srcDir('java')
+    lint { baseline = file('lint-baseline.xml') }
+}
+dependencies {
+    implementation libs.androidx.annotation
+}
+android.sourceSets.main {
+    java.srcDir('../terminal-ghostty/java')
+    jniLibs.srcDir('../terminal-ghostty/jniLibs')
+    assets.srcDir('../terminal-ghostty/assets')
+}

@@ -1,0 +1,22 @@
+Luma
+Copyright (C) 2026 modao7067 and Luma contributors
+
+This project is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License, version 3 only, as published by
+the Free Software Foundation. The full text is in the file LICENSE.
+
+SPDX-License-Identifier: GPL-3.0-only
+
+Why "only" and not "or later": the terminal emulator and view sources that
+Luma builds on originate from Termux (termux-app), which is licensed
+"GPLv3 only" (with an Apache-2.0 exception for the parts derived from
+Android-Terminal-Emulator). No bundled component requires "or later" for the
+combined work. Components that are available under "GPL-2.0-or-later"
+(PRoot, JLaTeXMath) are used as separate executables or under their own
+terms and are compatible with GPL-3.0-only.
+
+Third-party code, assets and trademarks are listed, with their licenses, in
+THIRD_PARTY_NOTICES.md. Original copyright and license texts of vendored
+components are kept next to the code (see apps/gui/UPSTREAM-LICENSE,
+apps/gui/COPYING, apps/gui/third-party/, shared/terminal-ghostty/assets/ and
+the licenses/ and *-OFL.txt files under the asset directories).

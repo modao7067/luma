@@ -1,0 +1,15 @@
+gradle.afterProject { project, state ->
+    if (project.path == ':apps:gui') {
+        project.android.testOptions.unitTests.includeAndroidResources = true
+        project.android.sourceSets.test.kotlin.srcDir(
+            project.rootProject.file('tools/tests/ui/compose/src'))
+        project.dependencies.add('testImplementation', 'androidx.compose.ui:ui-test-junit4:1.12.1')
+        project.dependencies.add('testImplementation', 'org.robolectric:robolectric:4.17')
+        project.dependencies.add('debugImplementation', 'androidx.compose.ui:ui-test-manifest:1.12.1')
+        project.tasks.withType(Test).configureEach {
+            inputs.property('codexQuestionEndpoint', System.getenv('LUMA_TEST_QUESTION_ENDPOINT') ?: '')
+            maxHeapSize = '1024m'
+            testLogging { events 'passed', 'failed', 'skipped'; showStandardStreams = true }
+        }
+    }
+}

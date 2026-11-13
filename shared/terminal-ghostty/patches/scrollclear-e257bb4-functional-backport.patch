@@ -1,0 +1,13 @@
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -1704,0 +1705,2 @@
++    // Track whether pruning invalidates the page-local cursor references.
++    const old_node = self.cursor.page_pin.node;
+@@ -1706 +1708,6 @@
+-    self.cursorReload();
++    if (self.cursor.page_pin.node != old_node) {
++        self.cursor.page_pin.garbage = false;
++        self.cursorPageReplaced();
++    } else {
++        self.cursorReload();
++    }

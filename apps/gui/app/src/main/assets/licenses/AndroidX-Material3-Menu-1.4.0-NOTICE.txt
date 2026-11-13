@@ -1,0 +1,5 @@
+AndroidX Material3 1.4.0 DropdownMenu shell, MenuContent and standard motion tokens
+Copyright 2021 The Android Open Source Project. Apache License 2.0.
+Adapted only for stationary initial placement, bounded transparent Popup carrier,
+explicit requested width (LazyColumn has no intrinsics), and above-IME Popup flags.
+https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3-android/1.4.0/material3-android-1.4.0-sources.jar

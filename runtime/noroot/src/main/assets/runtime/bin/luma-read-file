@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),cp=require('node:child_process');
+const TEXT=1024*1024,OUTPUT=8*TEXT;
+function output(data){const b=Buffer.isBuffer(data)?data:Buffer.from(data);for(let at=0;at<b.length;){const n=fs.writeSync(1,b,at,b.length-at);if(n<1)throw new Error('文件输出中断');at+=n;}}
+function find(name){for(const dir of (process.env.PATH||'').split(':')){const p=path.join(dir,name);try{fs.accessSync(p,fs.constants.X_OK);return p;}catch{}}return null;}
+function run(tool,args,input,env){const r=cp.spawnSync(tool,args,{input,env,timeout:10000,maxBuffer:OUTPUT,encoding:null,stdio:['pipe','pipe','pipe']});return r.status===0&&!r.error?r.stdout:null;}
+function basic(raw){
+ const inline=s=>s.replace(/!?\[([^\]\n]+)\]\(([^)\n]+)\)/g,'$1 \x1b[34;4m$2\x1b[0m').replace(/\*\*([^*\n]+)\*\*/g,'\x1b[1m$1\x1b[0m').replace(/__([^_\n]+)__/g,'\x1b[1m$1\x1b[0m').replace(/`([^`\n]+)`/g,'\x1b[36m$1\x1b[0m').replace(/\*([^*\n]+)\*/g,'\x1b[3m$1\x1b[0m');
+ const out=[];let fence=null;
+ for(const line of raw.toString('utf8').split(/\r?\n/)){
+  const mark=line.match(/^\s{0,3}(`{3,}|~{3,})/);
+  if(mark){if(!fence){fence=mark[1];out.push('');}else if(mark[1][0]===fence[0]&&mark[1].length>=fence.length){fence=null;out.push('');}else out.push('  '+line);continue;}
+  if(fence){out.push('  \x1b[36m'+line+'\x1b[0m');continue;}
+  let m;
+  if((m=line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*$/)))out.push('','\x1b[1;34m'+inline(m[1])+'\x1b[0m');
+  else if((m=line.match(/^\s{0,3}>\s?(.*)/)))out.push('│ '+inline(m[1]));
+  else if((m=line.match(/^(\s*)[-+*]\s+(.*)/)))out.push(m[1]+'• '+inline(m[2]));
+  else if(/^\s{0,3}(=+|-+)\s*$/.test(line)&&out.length&&out[out.length-1].trim())out[out.length-1]='\x1b[1;34m'+out[out.length-1]+'\x1b[0m';
+  else out.push(inline(line));
+ }
+ return Buffer.from(out.join('\n')+'\x1b[0m\n');
+}
+function soft(raw){
+ const palette=[[100,104,107],[187,155,155],[163,178,160],[185,173,150],[154,171,188],[170,160,181],[158,175,173],[197,195,190]];
+ return Buffer.from(raw.toString('utf8').replace(/\x1b\[([0-9;]*)m/g,(_,params)=>{
+  const values=params.split(';'),out=[];
+  for(let i=0;i<values.length;){const n=Number(values[i]);if(n===38||n===48){const count=values[i+1]==='2'?5:3;out.push(...values.slice(i,i+count));i+=count;continue;}
+   if(n>=30&&n<=37||n>=90&&n<=97)out.push('38','2',...palette[n<38?n-30:n-90].map(String));else out.push(values[i]);i++;
+  }return '\x1b['+out.join(';')+'m';
+ }).replace(/\r\n/g,'\n').replace(/\n/g,'\r\n'));
+}
+function isForbiddenPseudoPath(p){return p==='/proc'||p==='/sys'||p==='/dev'||p.startsWith('/proc/')||p.startsWith('/sys/')||p.startsWith('/dev/');}
+function safeGuestPath(raw){
+ let cur='/';
+ const stack=path.posix.normalize(raw).split('/').filter(s=>s&&s!=='.');
+ let hops=0;
+ while(stack.length){
+  const seg=stack.shift();
+  if(seg==='..'){cur=path.posix.dirname(cur.replace(/\/+$/,''))||'/';continue;}
+  const nxt=path.posix.join(cur,seg);
+  if(isForbiddenPseudoPath(nxt))throw new Error('不允许预览系统伪文件系统路径');
+  let st;
+  try{st=fs.lstatSync(nxt);}catch(e){if(e.code==='ENOENT')throw e;throw e;}
+  if(st.isSymbolicLink()){
+   if(++hops>40)throw new Error('符号链接层级过深');
+   const target=fs.readlinkSync(nxt);
+   const joined=path.posix.isAbsolute(target)?target:path.posix.join(cur,target);
+   const normT=path.posix.normalize(joined);
+   if(isForbiddenPseudoPath(normT))throw new Error('不允许预览系统伪文件系统路径');
+   cur='/';
+   stack.unshift(...normT.split('/').filter(s=>s&&s!=='.'));
+  }else cur=nxt;
+ }
+ const real=fs.realpathSync(cur);
+ if(isForbiddenPseudoPath(real))throw new Error('不允许预览系统伪文件系统路径');
+ return real;
+}
+let requested=process.argv[2]||'',fd;
+try{
+ const limit=Number(process.argv[3]),mode=process.argv[4],columns=Math.max(12,Math.min(1000,Number(process.argv[5])||80));
+ if(!Number.isSafeInteger(limit)||limit<0)throw new Error('无效大小限制');
+ if(requested==='~'||requested.startsWith('~/'))requested=path.join(os.homedir(),requested.slice(1));
+ requested=path.resolve('/workspace',requested);
+ const safeTarget=safeGuestPath(requested);
+ fd=fs.openSync(safeTarget,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK);
+ const info=fs.fstatSync(fd);if(!info.isFile())throw new Error('只能预览普通文件');
+ if(mode==='ansi'){
+  const data=Buffer.alloc(Math.min(TEXT,info.size));let n=0;
+  while(n<data.length){const count=fs.readSync(fd,data,n,data.length-n,null);if(!count)break;n+=count;}let raw=data.subarray(0,n);fs.closeSync(fd);fd=undefined;
+  const env={...process.env,TERM:'xterm-256color',COLORTERM:'truecolor',CLICOLOR_FORCE:'1'};delete env.NO_COLOR;
+  const markdown=/\.(md|markdown)$/i.test(requested);const tool=markdown?find('glow'):(find('bat')||find('batcat'));let rendered=null;
+  if(tool){
+   if(markdown){let tmp;
+    try{tmp=fs.mkdtempSync(path.join(os.tmpdir(),'luma-preview-'));const style=JSON.parse(fs.readFileSync('/opt/luma/shell/glow.json','utf8'));style.document={...style.document,margin:0};const config=path.join(tmp,'style.json');fs.writeFileSync(config,JSON.stringify(style));rendered=run(tool,['--style',config,'--width',String(Math.max(8,columns-4)),'-'],raw,env);}finally{if(tmp)fs.rmSync(tmp,{recursive:true,force:true});}
+   }else{
+    const listing=cp.spawnSync(tool,['--list-themes'],{env,timeout:2000,maxBuffer:64*1024,encoding:'utf8'});
+    const theme=listing.status===0&&listing.stdout.includes('Luma-Morandi')?'Luma-Morandi':'Nord';
+    rendered=run(tool,['--theme='+theme,'--color=always','--paging=never','--style=plain','--wrap=never','--file-name',requested,'-'],raw,env);
+   }
+  }
+  if(rendered)raw=rendered;else if(markdown)raw=basic(raw);
+  output(soft(raw));if(info.size>TEXT)output('\r\n\x1b[0;90m（仅预览前 1 MiB）\x1b[0m\r\n');
+ }else{
+  if(info.size>limit)throw new Error('文件超过预览大小限制');
+  const data=Buffer.alloc(65536);let total=0,n;
+  while((n=fs.readSync(fd,data,0,data.length,null))>0){total+=n;if(total>limit)throw new Error('文件超过预览大小限制');output(data.subarray(0,n));}
+ }
+}catch(error){const message=error.code==='ENOENT'?'找不到文件：'+requested:error.code==='EACCES'?'没有文件读取权限：'+requested:error.message;fs.writeSync(2,message);process.exitCode=2;}
+finally{if(fd!==undefined)fs.closeSync(fd);}

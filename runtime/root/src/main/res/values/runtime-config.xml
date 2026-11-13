@@ -1,0 +1,5 @@
+<resources>
+    <bool name="root_gui_managed">false</bool>
+    <string name="root_appearance_preferences" translatable="false">appearance</string>
+    <style name="RootTerminalTheme" parent="AppTheme"/>
+</resources>

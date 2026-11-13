@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+case "${1:-}" in
+  basic) packages=(python3 python3-venv python3-pip python-is-python3 bash-completion gawk bat glow fzf ripgrep fd-find jq openssh-client wget zip bzip2 zstd file patch psmisc make pkgconf sqlite3 tree rsync iproute2 iputils-ping netcat-openbsd lsof) ;;
+  build) packages=(build-essential cmake ninja-build pkg-config python3 binutils file) ;;
+  reverse) packages=(openjdk-21-jdk-headless apktool binutils file unzip) ;;
+  *) printf '%s\n' 'luma-tools basic    基础命令、高亮、补全与柔和配色' 'luma-tools build    C/C++、CMake、Python' 'luma-tools reverse  JDK、APKTool、二进制工具'; exit 0 ;;
+esac
+apt-get update
+apt-get install --no-install-recommends -y "${packages[@]}"
+
+if [[ ${1:-} == basic ]]; then bash /opt/luma/shell/setup.sh; printf '%s\n' '基础工具已配置，新开终端窗口生效。'; fi

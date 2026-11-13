@@ -1,0 +1,147 @@
+package io.github.modao7067.luma.shared;
+
+import java.io.*;
+import java.util.concurrent.*;
+
+final class TerminalFileTransfer {
+    static final String SCRIPT="import os,stat,sys,subprocess,shutil,tempfile,resource,re,json\n"
+        +"\n"
+        +"def basic_markdown(raw):\n"
+        +" # Dependency-free fallback for guests without glow; never runs fenced code or HTML.\n"
+        +" def inline(text):\n"
+        +"  text=re.sub(r'!?\\[([^\\]\\n]+)\\]\\(([^)\\n]+)\\)',lambda m:m[1]+' \\x1b[34;4m'+m[2]+'\\x1b[0m',text)\n"
+        +"  for pattern,style in [(r'\\*\\*([^*\\n]+)\\*\\*','1'),(r'__([^_\\n]+)__','1'),(r'`([^`\\n]+)`','36'),(r'\\*([^*\\n]+)\\*','3')]:\n"
+        +"   text=re.sub(pattern,lambda m:'\\x1b['+style+'m'+m[1]+'\\x1b[0m',text)\n"
+        +"  return text\n"
+        +" lines=raw.decode('utf-8','replace').splitlines();out=[];fence=None\n"
+        +" for index,line in enumerate(lines):\n"
+        +"  mark=re.match(r'^\\s{0,3}(`{3,}|~{3,})',line)\n"
+        +"  if mark:\n"
+        +"   if fence is None:fence=(mark[1][0],len(mark[1]));out.append('')\n"
+        +"   elif mark[1][0]==fence[0] and len(mark[1])>=fence[1]:fence=None;out.append('')\n"
+        +"   else:out.append('  '+line)\n"
+        +"   continue\n"
+        +"  if fence is not None:out.append('  \\x1b[36m'+line+'\\x1b[0m');continue\n"
+        +"  if re.match(r'^\\s{0,3}(=+|-+)\\s*$',line) and index>0 and lines[index-1].strip():\n"
+        +"   out[-1]='\\x1b[1;34m'+lines[index-1]+'\\x1b[0m';continue\n"
+        +"  heading=re.match(r'^\\s{0,3}#{1,6}\\s+(.+?)\\s*#*$',line)\n"
+        +"  if heading:out.extend(['','\\x1b[1;34m'+inline(heading[1])+'\\x1b[0m']);continue\n"
+        +"  quote=re.match(r'^\\s{0,3}>\\s?(.*)',line)\n"
+        +"  if quote:out.append('│ '+inline(quote[1]));continue\n"
+        +"  bullet=re.match(r'^(\\s*)[-+*]\\s+(.*)',line)\n"
+        +"  if bullet:out.append(bullet[1]+'• '+inline(bullet[2]));continue\n"
+        +"  if re.match(r'^\\s{0,3}([-*_])(?:\\s*\\1){2,}\\s*$',line):out.append('────────');continue\n"
+        +"  out.append(inline(line))\n"
+        +" return ('\\n'.join(out)+'\\x1b[0m\\n').encode()\n"
+        +"\n"
+        +"def safe_guest_path(raw):\n"
+        +" cur='/'\n"
+        +" stack=[s for s in os.path.normpath(raw).split('/') if s and s!='.']\n"
+        +" hops=0\n"
+        +" while stack:\n"
+        +"  seg=stack.pop(0)\n"
+        +"  if seg=='..':cur=os.path.dirname(cur.rstrip('/')) or '/';continue\n"
+        +"  nxt=os.path.join(cur,seg)\n"
+        +"  if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +"  if os.path.islink(nxt):\n"
+        +"   hops+=1\n"
+        +"   if hops>40:raise ValueError('符号链接层级过深')\n"
+        +"   target=os.readlink(nxt)\n"
+        +"   joined=target if os.path.isabs(target) else os.path.join(cur,target)\n"
+        +"   norm_t=os.path.normpath(joined)\n"
+        +"   if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +"   cur='/';stack=[s for s in norm_t.split('/') if s and s!='.']+stack\n"
+        +"  else:cur=nxt\n"
+        +" real=os.path.realpath(cur)\n"
+        +" if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +" return real\n"
+        +"\n"
+        +"try:\n"
+        +" path=os.path.expanduser(sys.argv[1]);limit=int(sys.argv[2]);pid=int(sys.argv[3]) if len(sys.argv)>3 else 0;mode=sys.argv[4] if len(sys.argv)>4 else 'raw';columns=max(12,min(1000,int(sys.argv[5]))) if len(sys.argv)>5 else 80\n"
+        +" if not os.path.isabs(path):\n"
+        +"  base='/workspace'\n"
+        +"  if pid>0:\n"
+        +"   try:base=os.readlink('/proc/%d/cwd'%pid)\n"
+        +"   except OSError:pass\n"
+        +"  path=os.path.normpath(os.path.join(base,path))\n"
+        +" safe_target=safe_guest_path(path)\n"
+        +" fd=os.open(safe_target,os.O_RDONLY|os.O_NONBLOCK);info=os.fstat(fd)\n"
+        +" if not stat.S_ISREG(info.st_mode):raise ValueError('只能预览普通文件')\n"
+        +" if mode=='ansi':\n"
+        +"  with os.fdopen(fd,'rb') as f:raw=f.read(1024*1024)\n"
+        +"  markdown=os.path.splitext(path)[1].lower() in ('.md','.markdown')\n"
+        +"  tool=shutil.which('glow') if markdown else (shutil.which('bat') or shutil.which('batcat'))\n"
+        +"  rendered=False\n"
+        +"  if tool:\n"
+        +"   try:\n"
+        +"    with tempfile.TemporaryDirectory(prefix='luma-preview-') as temporary, tempfile.TemporaryFile() as output:\n"
+        +"     def bounded():resource.setrlimit(resource.RLIMIT_FSIZE,(8*1024*1024,8*1024*1024))\n"
+        +"     env=dict(os.environ,TERM='xterm-256color',COLORTERM='truecolor',CLICOLOR_FORCE='1');env.pop('NO_COLOR',None)\n"
+        +"     if markdown:\n"
+        +"      style={'document':{'margin':0},'heading':{'bold':True,'color':'#9aabbc','block_suffix':'\\n'},'block_quote':{'indent':1,'indent_token':'│ '},'list':{'level_indent':2},'item':{'block_prefix':'• '},'emph':{'italic':True},'strong':{'bold':True},'strikethrough':{'crossed_out':True},'code':{'color':'#9eafad'},'code_block':{'margin':1,'chroma':{'text':{'color':'#c5c3be'},'comment':{'color':'#858888'},'keyword':{'color':'#aaa0b5'},'keyword_reserved':{'color':'#aaa0b5'},'keyword_type':{'color':'#9eafad'},'operator':{'color':'#aaa0b5'},'punctuation':{'color':'#b9b7b2'},'name':{'color':'#c5c3be'},'name_builtin':{'color':'#9aabbc'},'name_function':{'color':'#9aabbc'},'name_class':{'color':'#9eafad'},'literal_string':{'color':'#a3b2a0'},'literal_number':{'color':'#b9ad96'},'error':{'color':'#bb9b9b'}}},'link':{'color':'#9aabbc','underline':True},'link_text':{'bold':True},'hr':{'format':'\\n────────\\n'},'task':{'ticked':'[✓] ','unticked':'[ ] '}}\n"
+        +"      style_path=os.path.join(temporary,'style.json')\n"
+        +"      with open(style_path,'w') as f:json.dump(style,f)\n"
+        +"      command=[tool,'--style',style_path,'--width',str(max(8,columns-4)),'-']\n"
+        +"     else:\n"
+        +"      # The Ubuntu theme is available for normal bat use too. Guests without it\n"
+        +"      # use bat's bundled muted Nord theme, never the vivid Monokai default.\n"
+        +"      theme='Nord'\n"
+        +"      try:\n"
+        +"       themes=subprocess.run([tool,'--list-themes'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=2,env=env).stdout\n"
+        +"       if b'Luma-Morandi' in themes:theme='Luma-Morandi'\n"
+        +"      except (OSError,subprocess.TimeoutExpired):pass\n"
+        +"      command=[tool,'--theme='+theme,'--color=always','--paging=never','--style=plain','--wrap=never','--file-name',path,'-']\n"
+        +"     result=subprocess.run(command,input=raw,stdout=output,stderr=subprocess.DEVNULL,timeout=10,preexec_fn=bounded,env=env)\n"
+        +"     if result.returncode==0:output.seek(0);raw=output.read(8*1024*1024);rendered=True\n"
+        +"   except (OSError,subprocess.TimeoutExpired):pass\n"
+        +"  if markdown and not rendered:raw=basic_markdown(raw)\n"
+        +"  # Glow's piped output can quantize soft RGB styles to ANSI 16. Expand just\n"
+        +"  # those document foregrounds so bold cannot promote them to neon terminal colors.\n"
+        +"  soft=[(100,104,107),(187,155,155),(163,178,160),(185,173,150),(154,171,188),(170,160,181),(158,175,173),(197,195,190)]\n"
+        +"  def soften(match):\n"
+        +"   values=match[1].split(b';');out=[];i=0\n"
+        +"   while i<len(values):\n"
+        +"    part=values[i];value=int(part) if part else 0\n"
+        +"    if value in (38,48):\n"
+        +"     count=5 if i+1<len(values) and values[i+1]==b'2' else 3\n"
+        +"     out.extend(values[i:i+count]);i+=count;continue\n"
+        +"    if 30<=value<=37 or 90<=value<=97:\n"
+        +"     rgb=soft[value-30 if value<38 else value-90];out.extend(str(x).encode() for x in (38,2,*rgb))\n"
+        +"    else:out.append(part)\n"
+        +"    i+=1\n"
+        +"   return b'\\x1b['+b';'.join(out)+b'm'\n"
+        +"  raw=re.sub(rb'\\x1b\\[([0-9;]*)m',soften,raw)\n"
+        +"  raw=raw.replace(b'\\r\\n',b'\\n').replace(b'\\n',b'\\r\\n')\n"
+        +"  sys.stdout.buffer.write(raw)\n"
+        +"  if info.st_size>1024*1024:sys.stdout.buffer.write('\\r\\n\\x1b[0;90m（仅预览前 1 MiB）\\x1b[0m\\r\\n'.encode())\n"
+        +" else:\n"
+        +"  if info.st_size>limit:raise ValueError('文件超过预览大小限制')\n"
+        +"  with os.fdopen(fd,'rb') as f:\n"
+        +"   while True:\n"
+        +"    chunk=f.read(65536)\n"
+        +"    if not chunk:break\n"
+        +"    sys.stdout.buffer.write(chunk)\n"
+        +"except FileNotFoundError:sys.stderr.write('找不到文件：'+path);sys.exit(2)\n"
+        +"except PermissionError:sys.stderr.write('没有文件读取权限：'+path);sys.exit(3)\n"
+        +"except (OSError,ValueError) as error:sys.stderr.write(str(error));sys.exit(4)\n";
+    static String quote(String value){return "'"+value.replace("'","'\"'\"'")+"'";}
+    static void copy(ProcessBuilder builder,File destination,long limit)throws IOException {
+        Process process=builder.start();
+        ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"LumaFileTimeout");t.setDaemon(true);return t;});
+        ScheduledFuture<?> timeout=timer.schedule(process::destroyForcibly,30,TimeUnit.SECONDS);
+        ByteArrayOutputStream detail=new ByteArrayOutputStream();
+        Thread errors=new Thread(()->{try(InputStream in=process.getErrorStream()){byte[]b=new byte[1024];int n;while((n=in.read(b))!=-1){synchronized(detail){if(detail.size()<8192)detail.write(b,0,Math.min(n,8192-detail.size()));}}}catch(IOException ignored){}},"LumaFileErrors");errors.setDaemon(true);errors.start();
+        try(InputStream in=process.getInputStream();OutputStream out=new FileOutputStream(destination)){
+            byte[]data=new byte[65536];long total=0;int n;
+            while((n=in.read(data))!=-1){
+                if(Thread.currentThread().isInterrupted())throw new IOException("已取消");
+                total+=n;if(total>limit)throw new IOException("文件过大");out.write(data,0,n);
+            }
+            if(!process.waitFor(2,TimeUnit.SECONDS)||process.exitValue()!=0){
+                errors.join(100);String message; synchronized(detail){message=detail.toString("UTF-8").trim();}
+                throw new IOException(message.isEmpty() ? "文件读取失败或超时" : message);
+            }
+        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("已取消",e);}
+        finally{timeout.cancel(false);timer.shutdownNow();process.destroy();}
+    }
+}
