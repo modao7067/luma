@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / 'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.antigravity import AntigravitySession
 from luma_cli.antigravity_cli import (AntigravityCliSession, PROTOCOL, FULL_ACCESS,
     invoke_child, child_log_path, project_child_transcript)
+from luma_cli.i18n import tr
 from luma_cli.server import Manager
 from luma_cli.transport import Rejected
 
@@ -57,7 +58,6 @@ for line in sys.stdin:
   emit('result',result={'conversation_id':native,'status':'ERROR','error':'native refused before admission','num_turns':0});continue
  step(index,'user_input')
  if mode=='held':
-  # A backgrounded tool stays ACTIVE and holds back later steps (real agy ordering).
   step(index+1,'agent_response','DONE')
   step(index+2,'tool','ACTIVE',tool_name='run_command',tool_info={'name':'run_command','parameters':{'CommandLine':'sleep 45'}})
   rel=os.environ.get('FIXTURE_RELEASE')
@@ -186,7 +186,7 @@ class AgyTests(unittest.TestCase):
         s=self.connect();a=list(map(json.loads,self.log.read_text().splitlines()))[-1]
         self.assertEqual(a,['--input-format','stream-json','--output-format','stream-json','--add-dir',str(self.root),'--disable-slash-commands','--dangerously-skip-permissions'])
         self.assertEqual(s.data['permission'],FULL_ACCESS);self.assertEqual(s.data['notice'],'')
-        self.assertEqual(s.data['permissions'],[{'id':FULL_ACCESS,'label':'全权限（跳过审批）'}])
+        self.assertEqual(s.data['permissions'],[{'id':FULL_ACCESS,'label':tr('全权限（跳过审批）','Full access (skip approvals)')}])
         self.assertFalse(any(s.data['capabilities'][k] for k in ('queue','steer','images','skills','compact','rename')))
         self.assertFalse(s.pending_requests)
 
@@ -222,8 +222,8 @@ class AgyTests(unittest.TestCase):
 
     def test_repeated_done_usage_is_not_added_to_cumulative_result(self):
         s=self.connect('duplicate-usage');v=self.send(s);self.send(s,'next')
-        self.assertEqual(next(m['value'] for m in v['metrics'] if m['label']=='CLI 累计 · 输入缓存命中'),'0 / 10 · 0.0%')
-        self.assertEqual(next(m['value'] for m in s.data['metrics'] if m['label']=='CLI 累计 · 输入缓存命中'),'0 / 20 · 0.0%')
+        self.assertEqual(next(m['value'] for m in v['metrics'] if m['label']==tr('CLI 累计 · 输入缓存命中','CLI total · input cache hit')),'0 / 10 · 0.0%')
+        self.assertEqual(next(m['value'] for m in s.data['metrics'] if m['label']==tr('CLI 累计 · 输入缓存命中','CLI total · input cache hit')),'0 / 20 · 0.0%')
 
     def test_parent_result_never_completes_missing_tool(self):
         s=self.connect('orphan-tool');v=self.send(s)
@@ -425,30 +425,30 @@ class AgyTests(unittest.TestCase):
         os.environ['FIXTURE_MODE']='wrong-id'
         s=AntigravityCliSession({'cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL,'nativeId':'expected'},lambda:None)
         self.sessions.append(s)
-        with self.assertRaisesRegex(Rejected,'不同原生会话'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('不同原生会话','different native session')):s.connect()
         self.assertEqual(s.config['nativeId'],'expected');self.assertIsNotNone(s.peer.proc.poll())
 
     def test_startup_auth_failure_is_actionable_and_not_unknown_creation(self):
         os.environ['FIXTURE_MODE']='startup-auth'
         s=AntigravityCliSession({'cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL},lambda:None)
         self.sessions.append(s)
-        with self.assertRaisesRegex(Rejected,'原生登录'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('原生登录','sign in')):s.connect()
         self.assertFalse(s.config['creationUnknown']);self.assertIsNotNone(s.peer.proc.poll())
 
     def test_timeout_preserves_unknown_creation_and_no_automatic_second_spawn(self):
         os.environ['FIXTURE_MODE']='startup-stall'
         s=AntigravityCliSession({'cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL},lambda:None)
         s.startup_timeout=.1;self.sessions.append(s)
-        with self.assertRaisesRegex(Rejected,'不要自动重建'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('不要自动重建','do not recreate')):s.connect()
         before=self.log.read_text()
-        with self.assertRaisesRegex(Rejected,'创建结果未知'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('创建结果未知','creation result is unknown')):s.connect()
         self.assertEqual(self.log.read_text(),before);self.assertIsNotNone(s.peer.proc.poll())
 
     def test_wrong_permission_mode_is_not_presented_as_full_access(self):
         os.environ['FIXTURE_MODE']='malformed-init'
         s=AntigravityCliSession({'cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL},lambda:None)
         self.sessions.append(s)
-        with self.assertRaisesRegex(Rejected,'未确认已选全权限'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('未确认已选全权限','did not confirm full-access')):s.connect()
         self.assertEqual(s.data['permissions'],[])
 
     def test_catalog_auth_or_bad_data_never_starts_or_fakes_models(self):
@@ -465,7 +465,7 @@ class AgyTests(unittest.TestCase):
             old=s.peer;s.stop();self.assertIsNotNone(old.proc.poll());self.assertFalse(s.data['running'])
             self.assertEqual(s.config['receipts']['send'],'accepted')
             if mode=='stop-no-result':
-                self.assertIn('未收到原生结算',s.data['error']);self.assertFalse(s.data['connected']);self.assertIs(s.peer,old)
+                self.assertIn(tr('未收到原生结算','turn settled'),s.data['error']);self.assertFalse(s.data['connected']);self.assertIs(s.peer,old)
             else:
                 self.assertIsNone(s.data['error']);self.assertIsNone(s.current_submission);self.assertTrue(s.data['connected']);self.assertIsNot(s.peer,old)
 
@@ -497,9 +497,9 @@ class AgyTests(unittest.TestCase):
         s=self.connect('stop');native=s.data['nativeId']
         s.submit({'submissionId':'first','text':'wait'});self.wait(lambda:s.config['receipts'].get('first')=='accepted')
         os.environ['FIXTURE_MODE']='wrong-id'
-        with self.assertRaisesRegex(Rejected,'不同原生会话'):s.stop()
+        with self.assertRaisesRegex(Rejected,tr('不同原生会话','different native session')):s.stop()
         self.assertEqual(s.data['nativeId'],native);self.assertFalse(s.data['connecting']);self.assertFalse(s.data['connected'])
-        with self.assertRaisesRegex(Rejected,'未连接'):s.submit({'submissionId':'next','text':'next'})
+        with self.assertRaisesRegex(Rejected,tr('未连接','not connected')):s.submit({'submissionId':'next','text':'next'})
         self.assertEqual(len(self.prompts()),1);self.assertNotIn('next',s.config['receipts'])
 
     def test_final_stdout_is_drained_even_when_native_process_exits(self):
@@ -537,9 +537,9 @@ class AgyTests(unittest.TestCase):
         self.assertIs(type(default_s),AntigravityAgyAcpSession);self.assertEqual(default_s.config['nativeProtocol'],AGY_ACP_PROTOCOL)
         s=m.connect({'id':'new','cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL});self.sessions.append(s)
         self.assertIs(type(s),AntigravityCliSession);self.assertEqual(s.config['nativeProtocol'],PROTOCOL)
-        with self.assertRaisesRegex(Rejected,'协议身份不可变更'):
+        with self.assertRaisesRegex(Rejected,tr('协议身份不可变更','protocol identity cannot be changed')):
             m.connect({'id':'new','cli':'Antigravity','cwd':str(self.root),'nativeProtocol':'antigravity-acp'})
-        with self.assertRaisesRegex(Rejected,'未知原生协议'):
+        with self.assertRaisesRegex(Rejected,tr('未知原生协议','Unknown native protocol')):
             m.connect({'id':'other','cli':'Antigravity','cwd':str(self.root),'nativeProtocol':'pretend-acp'})
 
     def test_unknown_receipt_and_partial_projection_survive_without_replay(self):
@@ -548,7 +548,7 @@ class AgyTests(unittest.TestCase):
         saved=json.loads(json.dumps(s.config));saved['receipts']['send']='unknown'
         restored=AntigravityCliSession(saved,lambda:None);restored.restore_projection()
         self.assertEqual(restored.config['receipts']['send'],'unknown')
-        self.assertIn('未重发',restored.data['error']);self.assertEqual(list(restored.rows),['send'])
+        self.assertIn(tr('未重发','without resending'),restored.data['error']);self.assertEqual(list(restored.rows),['send'])
 
     def test_documented_terminal_and_nonterminal_result_statuses_remain_distinct(self):
         s=self.connect()
@@ -566,7 +566,7 @@ class AgyTests(unittest.TestCase):
     def test_projection_identity_mismatch_never_starts_or_relabels_native_history(self):
         s=AntigravityCliSession({'cli':'Antigravity','cwd':str(self.root),'nativeProtocol':PROTOCOL,'nativeId':'native',
             'localProjection':{'version':1,'nativeProtocol':PROTOCOL,'nativeId':'other','messages':[]}},lambda:None)
-        with self.assertRaisesRegex(Rejected,'投影与原生会话身份不匹配'):s.connect()
+        with self.assertRaisesRegex(Rejected,tr('投影与原生会话身份不匹配','projection does not match native session identity')):s.connect()
         self.assertIsNone(s.peer)
 
     def test_failed_local_checkpoint_never_crosses_native_send_boundary(self):

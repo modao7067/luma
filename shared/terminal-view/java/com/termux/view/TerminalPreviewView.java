@@ -5,7 +5,6 @@ import android.graphics.*;
 import android.view.*;
 import java.util.function.IntConsumer;
 
-/** Terminal-native overlay: no Dialog, TextView, ImageView, title bar or close widget. */
 public final class TerminalPreviewView extends View {
     private TerminalPreviewScreen screen;
     private final Runnable dismiss;
@@ -18,7 +17,7 @@ public final class TerminalPreviewView extends View {
     private float remainder,downX,downY;
     private boolean outside;
     public TerminalPreviewView(android.content.Context context,View viewport,Runnable dismiss){
-        super(context);this.dismiss=dismiss;this.viewport=viewport;viewport.addOnLayoutChangeListener(viewportLayout);setContentDescription("文件预览，点击框外退出");
+        super(context);this.dismiss=dismiss;this.viewport=viewport;viewport.addOnLayoutChangeListener(viewportLayout);setContentDescription(com.termux.terminal.LumaLang.tr("文件预览，点击框外退出","File preview, tap outside to dismiss"));
         gestures=new GestureDetector(context,new GestureDetector.SimpleOnGestureListener(){
             @Override public boolean onDown(MotionEvent e){return true;}
             @Override public boolean onScroll(MotionEvent a,MotionEvent b,float dx,float dy){
@@ -27,7 +26,7 @@ public final class TerminalPreviewView extends View {
                 }return true;
             }
             @Override public boolean onFling(MotionEvent a,MotionEvent b,float x,float y){if(page!=null&&Math.abs(b.getX()-a.getX())>Math.abs(b.getY()-a.getY())&&Math.abs(b.getX()-a.getX())>48)page.accept(b.getX()<a.getX()?1:-1);return true;}
-            @Override public void onLongPress(MotionEvent e){if(screen!=null&&!screen.isImage())getContext().getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("预览文本",screen.plainText()));}
+            @Override public void onLongPress(MotionEvent e){if(screen!=null&&!screen.isImage())getContext().getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(com.termux.terminal.LumaLang.tr("预览文本","Preview text"),screen.plainText()));}
         });
     }
     public void pageHandler(IntConsumer handler){page=handler;}

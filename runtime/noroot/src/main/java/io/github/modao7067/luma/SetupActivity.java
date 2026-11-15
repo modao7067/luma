@@ -35,10 +35,10 @@ public final class SetupActivity extends Activity {
             if (isDestroyed() || leaving) return;
             if (service != null) {
                 if (service.preparationError != null) {
-                    status.setText("环境准备未完成：" + service.preparationError);
+                    status.setText(com.termux.terminal.LumaLang.tr("环境准备未完成：", "Environment setup incomplete: ") + service.preparationError);
                     status.setTextColor(LumaUi.DANGER);
                     progress.setVisibility(View.GONE);
-                    start.setText("重新尝试");
+                    start.setText(com.termux.terminal.LumaLang.tr("重新尝试", "Retry"));
                     start.setEnabled(true);
                     start.setAlpha(1f);
                     return;
@@ -110,7 +110,10 @@ public final class SetupActivity extends Activity {
         card.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
         TextView intro = new TextView(this);
-        intro.setText("独立无 Root Debian 13 终端环境\n首次启动将离线解压基础系统与运行组件，卸载应用会清理私有环境数据。");
+        intro.setText(com.termux.terminal.LumaLang.tr(
+            "独立无 Root Debian 13 终端环境\n首次启动将离线解压基础系统与运行组件，卸载应用会清理私有环境数据。",
+            "Standalone rootless Debian 13 terminal environment\nFirst launch unpacks the base system and runtime offline; uninstalling clears private environment data."
+        ));
         intro.setTextColor(LumaUi.TEXT_SECONDARY);
         intro.setTextSize(14.5f);
         intro.setLineSpacing(dp(3), 1f);
@@ -131,13 +134,13 @@ public final class SetupActivity extends Activity {
         statusBox.addView(progress, progLp);
 
         status = new TextView(this);
-        status.setText("就绪，点击下方按钮开始初始化");
+        status.setText(com.termux.terminal.LumaLang.tr("就绪，点击下方按钮开始初始化", "Ready — tap below to initialize"));
         status.setTextColor(LumaUi.TEXT_SECONDARY);
         status.setTextSize(13.5f);
         statusBox.addView(status, new LinearLayout.LayoutParams(0, -2, 1f));
         card.addView(statusBox, new LinearLayout.LayoutParams(-1, -2));
 
-        start = LumaUi.primaryButton(this, "准备环境并开始", v -> begin());
+        start = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("准备环境并开始", "Set up & start"), v -> begin());
         LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(-1, -2);
         startLp.topMargin = dp(20);
         card.addView(start, startLp);
@@ -192,9 +195,9 @@ public final class SetupActivity extends Activity {
         }
         start.setEnabled(false);
         start.setAlpha(0.55f);
-        start.setText("正在解压环境…");
+        start.setText(com.termux.terminal.LumaLang.tr("正在解压环境…", "Extracting environment…"));
         progress.setVisibility(View.VISIBLE);
-        status.setText("准备 Debian 环境…");
+        status.setText(com.termux.terminal.LumaLang.tr("准备 Debian 环境…", "Preparing Debian environment…"));
         status.setTextColor(LumaUi.ACCENT);
         notificationPermission();
         Intent intent = new Intent(this, ShellService.class);
@@ -225,13 +228,15 @@ public final class SetupActivity extends Activity {
         }
         permissionFlow = true;
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "访问手机文件", "开启后可在终端内通过 /sdcard 直接读写手机共享存储；暂不开启也可正常使用私有 /workspace。");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+            com.termux.terminal.LumaLang.tr("访问手机文件", "Access device files"),
+            com.termux.terminal.LumaLang.tr("开启后可在终端内通过 /sdcard 直接读写手机共享存储；暂不开启也可正常使用私有 /workspace。", "Enable to read and write shared storage directly via /sdcard in the terminal; you can still use the private /workspace without it."));
         sheet.setDismissible(false);
-        TextView skipBtn = LumaUi.secondaryButton(this, "暂不开启", v -> {
+        TextView skipBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("暂不开启", "Not now"), v -> {
             sheet.dismiss();
             finishPermission();
         });
-        TextView grantBtn = LumaUi.primaryButton(this, "前往授权", v -> {
+        TextView grantBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("前往授权", "Grant access"), v -> {
             sheet.dismiss();
             try {
                 startActivityForResult(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName())), 30);
@@ -260,15 +265,17 @@ public final class SetupActivity extends Activity {
         if (!getSharedPreferences("setup", 0).getBoolean("batteryExplained", false)
             && !getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName())) {
             dismissActiveSheet();
-            LumaUi.Sheet sheet = new LumaUi.Sheet(this, "允许后台持续运行", "将 Luma 加入电池优化白名单，可减少切到后台或锁屏时终端会话与本地服务被系统冻结中断。");
+            LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+                com.termux.terminal.LumaLang.tr("允许后台持续运行", "Allow background execution"),
+                com.termux.terminal.LumaLang.tr("将 Luma 加入电池优化白名单，可减少切到后台或锁屏时终端会话与本地服务被系统冻结中断。", "Exempting Luma from battery optimization reduces terminal and local service suspension while in background or locked."));
             sheet.setDismissible(false);
-            TextView skipBtn = LumaUi.secondaryButton(this, "暂不设置", v -> {
+            TextView skipBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("暂不设置", "Not now"), v -> {
                 sheet.dismiss();
                 batteryExplained();
                 leaving = false;
                 openTerminal();
             });
-            TextView allowBtn = LumaUi.primaryButton(this, "前往设置", v -> {
+            TextView allowBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("前往设置", "Open settings"), v -> {
                 sheet.dismiss();
                 batteryExplained();
                 try {

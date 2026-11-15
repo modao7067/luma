@@ -1,5 +1,21 @@
 package io.github.modao7067.luma.gui.session
 
+import java.util.IdentityHashMap
+
+internal class ForegroundActivityTracker {
+    private val active = IdentityHashMap<Any, String?>()
+    val isForeground: Boolean get() = active.isNotEmpty()
+    fun start(token: Any, pinnedSessionId: String? = null): Boolean {
+        active[token] = pinnedSessionId
+        return active.isNotEmpty()
+    }
+    fun stop(token: Any): Boolean {
+        active.remove(token)
+        return active.isNotEmpty()
+    }
+    fun isPinned(sessionId: String): Boolean = active.values.any { it == sessionId }
+}
+
 internal object SessionIdlePolicy {
     const val graceMillis = 5 * 60_000L
     fun restoreObservation(record: SessionRecord, commandStates: Collection<String>): Boolean {
@@ -29,4 +45,6 @@ internal object SessionIdlePolicy {
             record.submissions.none { it.state in setOf("local", "pending", "unknown", "queued") ||
                 (!it.dismissed && it.queuePresentation && !it.nativeConsumed && it.state == "accepted") }
     }
+    fun canAutoRelease(record: SessionRecord, view: SessionView): Boolean =
+        record.externalSocket == null && eligible(record, view)
 }

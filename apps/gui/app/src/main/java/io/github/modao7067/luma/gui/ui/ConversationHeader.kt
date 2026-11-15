@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -59,7 +61,7 @@ internal fun ConversationHeader(
             Modifier
                 .size(chromeHeight)
                 .liquidClickable(cornerRadius = chromeRadius, onClick = onDrawer)
-                .semantics { contentDescription = "打开会话侧边栏" },
+                .semantics { contentDescription = tr("打开会话侧边栏", "Open session sidebar") },
             cornerRadius = chromeRadius,
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -75,7 +77,7 @@ internal fun ConversationHeader(
                         dashboard = true
                         if (view?.connected == true) actions.refreshDashboard()
                     }
-                    .semantics { contentDescription = "会话 Dashboard" },
+                    .semantics { contentDescription = tr("会话 Dashboard", "Session dashboard") },
                 cornerRadius = chromeRadius,
             ) {
                 Row(
@@ -87,7 +89,7 @@ internal fun ConversationHeader(
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
                         Text(
-                            view?.summary?.title ?: "新会话",
+                            view?.summary?.title?.let { if (it == "未命名会话" || it == "Untitled session") tr("未命名会话", "Untitled session") else it } ?: tr("新会话", "New session"),
                             style = MaterialTheme.typography.titleSmall.copy(fontSize = 16.sp, lineHeight = 20.sp),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -116,7 +118,7 @@ internal fun ConversationHeader(
                                 .padding(start = 8.dp)
                                 .size(7.dp)
                                 .background(dotColor, CircleShape)
-                                .semantics { stateDescription = if (hasError) "连接异常" else if (view?.connected == true) "已连接" else "连接中" },
+                                .semantics { stateDescription = if (hasError) tr("连接异常", "Connection error") else if (view?.connected == true) tr("已连接", "Connected") else tr("连接中", "Connecting") },
                         )
                     }
                 }
@@ -170,9 +172,9 @@ internal fun ConversationHeader(
                         }
                     }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = colors.outlineVariant.copy(alpha = 0.4f))
-                    ActionMenuItem("刷新", MenuSymbol.REFRESH, iconContainer = true, onClick = actions::reconnect)
+                    ActionMenuItem(tr("刷新", "Reconnect"), MenuSymbol.REFRESH, iconContainer = true, onClick = actions::reconnect)
                 }
-                ActionMenuItem("终端", MenuSymbol.TERMINAL, iconContainer = true, enabled = view?.let { it.canOpenTui } == true, onClick = { dashboard = false; actions.openTui() })
+                ActionMenuItem(tr("终端", "Terminal"), MenuSymbol.TERMINAL, iconContainer = true, enabled = view?.let { it.canOpenTui } == true, onClick = { dashboard = false; actions.openTui() })
             }
         }
         Box {
@@ -180,7 +182,7 @@ internal fun ConversationHeader(
                 Modifier
                     .size(chromeHeight)
                     .liquidClickable(cornerRadius = chromeRadius, onClick = { more = true })
-                    .semantics { contentDescription = "更多" },
+                    .semantics { contentDescription = tr("更多", "More") },
                 cornerRadius = chromeRadius,
             ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -189,41 +191,41 @@ internal fun ConversationHeader(
             }
             OriginMenu(more, { more = false }) {
                 if (bridgeUpdateOffered) {
-                    ActionMenuItem("更新CLI桥服务", MenuSymbol.REFRESH, warning = true, iconContainer = true,
-                        description = if (view?.cliServiceUpdateRequired == true) "CLI 桥需要更新" else "可选 · 新版 CLI 桥可用",
+                    ActionMenuItem(tr("更新CLI桥服务", "Update CLI bridge"), MenuSymbol.REFRESH, warning = true, iconContainer = true,
+                        description = if (view?.cliServiceUpdateRequired == true) tr("CLI 桥需要更新", "CLI bridge update required") else tr("可选 · 新版 CLI 桥可用", "Optional · Newer CLI bridge available"),
                         onClick = { more = false; bridgeUpdateConfirm = true })
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
-                ActionMenuItem("重命名", MenuSymbol.EDIT, iconContainer = true, enabled = view != null, onClick = { more = false; renaming = true })
-                ActionMenuItem("终端", MenuSymbol.TERMINAL, iconContainer = true, enabled = true, onClick = { more = false; onTerminal() })
-                ActionMenuItem("浏览器", MenuSymbol.BROWSER, iconContainer = true, enabled = view != null, onClick = { more = false; actions.openBrowser() })
-                ActionMenuItem("文件", MenuSymbol.FOLDER, iconContainer = true, enabled = view != null, onClick = { more = false; actions.browseFiles(view!!.summary.cwd) })
-                ActionMenuItem("用量", MenuSymbol.SPEED, iconContainer = true, enabled = true, onClick = { more = false; onUsage() })
-                ActionMenuItem("设置", MenuSymbol.SETTINGS, iconContainer = true, enabled = true, onClick = { more = false; onSettings() })
+                ActionMenuItem(tr("重命名", "Rename"), MenuSymbol.EDIT, iconContainer = true, enabled = view != null, onClick = { more = false; renaming = true })
+                ActionMenuItem(tr("终端", "Terminal"), MenuSymbol.TERMINAL, iconContainer = true, enabled = true, onClick = { more = false; onTerminal() })
+                ActionMenuItem(tr("浏览器", "Browser"), MenuSymbol.BROWSER, iconContainer = true, enabled = view != null, onClick = { more = false; actions.openBrowser() })
+                ActionMenuItem(tr("文件", "Files"), MenuSymbol.FOLDER, iconContainer = true, enabled = view != null, onClick = { more = false; actions.browseFiles(view!!.summary.cwd) })
+                ActionMenuItem(tr("用量", "Usage"), MenuSymbol.SPEED, iconContainer = true, enabled = true, onClick = { more = false; onUsage() })
+                ActionMenuItem(tr("设置", "Settings"), MenuSymbol.SETTINGS, iconContainer = true, enabled = true, onClick = { more = false; onSettings() })
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = colors.outlineVariant.copy(alpha = 0.4f))
-                ActionMenuItem("新建会话", MenuSymbol.NEW_CHAT, iconContainer = true, enabled = true, onClick = { more = false; onNew() })
+                ActionMenuItem(tr("新建会话", "New session"), MenuSymbol.NEW_CHAT, iconContainer = true, enabled = true, onClick = { more = false; onNew() })
             }
         }
     }
     if (bridgeUpdateConfirm && bridgeUpdateOffered && view != null) {
         AlertDialog(
             onDismissRequest = { bridgeUpdateConfirm = false },
-            title = { Text("更新CLI桥服务") },
+            title = { Text(tr("更新CLI桥服务", "Update CLI bridge service")) },
             text = {
                 val window = (LocalView.current.parent as? DialogWindowProvider)?.window
                 ActionWindowPolicy(window, enabled = true, filterImeInsets = true)
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (!view.cliServiceUpdateRequired) Text("可选更新：当前运行中的 CLI 桥为旧版，更新后启用新版能力。")
+                    if (!view.cliServiceUpdateRequired) Text(tr("可选更新：当前运行中的 CLI 桥为旧版，更新后启用新版能力。", "Optional update: the running CLI bridge is an older revision; update to enable newer capabilities."))
                     Text(NativeCliRuntimePolicy.restartWarning)
                     if (view.cliServiceUpdateImpact.isNotBlank()) Text(view.cliServiceUpdateImpact)
                 }
             },
             confirmButton = {
                 TextButton(onClick = { bridgeUpdateConfirm = false; actions.restartCliBridge() }) {
-                    Text("停止并更新CLI桥")
+                    Text(tr("停止并更新CLI桥", "Stop & update CLI bridge"))
                 }
             },
-            dismissButton = { TextButton(onClick = { bridgeUpdateConfirm = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { bridgeUpdateConfirm = false }) { Text(tr("取消", "Cancel")) } },
         )
     }
     if (renaming && view != null) SessionRenameDialog(view.summary, actions::renameSession, onDismiss = { renaming = false })

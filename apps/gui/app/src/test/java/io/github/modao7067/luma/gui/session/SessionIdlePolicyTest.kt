@@ -61,4 +61,31 @@ class SessionIdlePolicyTest {
         r.creationUnknown = false; r.submissions += StoredSubmission("accepted-but-not-consumed", "", state = "accepted", queuePresentation = true)
         assertFalse(SessionIdlePolicy.eligible(r, view()))
     }
+    @Test fun foregroundActivityTrackerPreservesForegroundAcrossOverlappingRecreationAndPinnedBrowser() {
+        val tracker = ForegroundActivityTracker()
+        val oldMain = Any()
+        val newMain = Any()
+        val browser = Any()
+        assertFalse(tracker.isForeground)
+        assertTrue(tracker.start(oldMain))
+        assertTrue(tracker.isForeground)
+        assertTrue(tracker.start(newMain))
+        assertTrue(tracker.stop(oldMain))
+        assertTrue(tracker.isForeground)
+        assertTrue(tracker.start(browser, pinnedSessionId = "s-1"))
+        assertTrue(tracker.stop(newMain))
+        assertTrue(tracker.isForeground)
+        assertTrue(tracker.isPinned("s-1"))
+        assertFalse(tracker.isPinned("s-2"))
+        assertFalse(tracker.stop(browser))
+        assertFalse(tracker.isForeground)
+        assertFalse(tracker.isPinned("s-1"))
+    }
+    @Test fun externalSocketCodexIsExcludedFromAutoReleaseWhileStillSettlingObservationIntent() {
+        val managed = record()
+        val external = record().copy(externalSocket = "/tmp/external-codex.sock")
+        assertTrue(SessionIdlePolicy.canAutoRelease(managed, view()))
+        assertFalse(SessionIdlePolicy.canAutoRelease(external, view()))
+        assertFalse(SessionIdlePolicy.observationIntent(external, view(), idleConfirmed = true))
+    }
 }

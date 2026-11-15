@@ -121,4 +121,24 @@ class DshPermissions(unittest.TestCase):
         self.assertTrue(s.data['running'])
         self.assertEqual(s.current_submission,'fg-1')
         self.assertEqual(s.config['receipts']['fg-1'],'unknown')
+    def test_request_permission_correlates_prior_tool_call_when_only_call_id_is_sent(self):
+        s=session();s.current_submission=None;s.chunk_kind=None;s.chunk_id=None
+        raw_input={
+            'command':'echo hi > /workspace/x',
+            'description':'重试写入测试文件以触发审批',
+            'justification':'验证写权限升级',
+            'sandbox_permissions':'workspace-write',
+        }
+        s.event({'method':'session/update','params':{'sessionId':'native','update':{
+            'sessionUpdate':'tool_call','toolCallId':'call-1','title':'bash','kind':'execute','status':'in_progress','rawInput':raw_input,
+        }}})
+        s.event({'id':'perm-1','method':'session/request_permission','params':{
+            'sessionId':'native','toolCall':{'toolCallId':'call-1'},
+            'options':[{'optionId':'allow-once','name':'Allow once','kind':'allow_once'},{'optionId':'reject-once','name':'Reject','kind':'reject_once'}],
+        }})
+        req=s.data['requests'][-1]
+        self.assertEqual(req['title'],'bash')
+        self.assertIn('echo hi > /workspace/x',req['body'])
+        self.assertIn('验证写权限升级',req['body'])
+        self.assertIn('workspace-write',req['body'])
 if __name__=='__main__':unittest.main(verbosity=2)

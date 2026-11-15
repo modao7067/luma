@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import android.system.Os
 import androidx.compose.animation.AnimatedVisibility
@@ -191,7 +193,7 @@ internal fun SessionSidebar(
                                         expansion[cli] = !expanded
                                         preferences?.edit()?.putBoolean(expansionKey, !expanded)?.apply()
                                     }
-                                    .semantics { stateDescription = if (expanded) "已展开" else "已折叠" }
+                                    .semantics { stateDescription = if (expanded) tr("已展开", "Expanded") else tr("已折叠", "Collapsed") }
                                     .padding(horizontal = 10.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
@@ -234,7 +236,7 @@ internal fun SessionSidebar(
                                     .liquidClickable(cornerRadius = 19.dp) {
                                         onNew(cli)
                                     }
-                                    .semantics { contentDescription = "新建 $cli 会话" },
+                                    .semantics { contentDescription = tr("新建 $cli 会话", "New $cli session") },
                                 cornerRadius = 19.dp,
                                 tonalTint = colors.surfaceContainerHigh,
                             ) {
@@ -247,7 +249,7 @@ internal fun SessionSidebar(
                 }
                 if (children.isEmpty()) item(key = "empty:$cli") {
                     SidebarChildReveal(expanded) {
-                        Text("暂无会话", Modifier.padding(start = 48.dp, top = 12.dp, bottom = 12.dp),
+                        Text(tr("暂无会话", "No sessions"), Modifier.padding(start = 48.dp, top = 12.dp, bottom = 12.dp),
                             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
                 }
@@ -272,14 +274,14 @@ internal fun SessionSidebar(
                                             )
                                             .semantics {
                                                 this.selected = active
-                                                if (session.hasUnreadDot) stateDescription = "未读"
+                                                if (session.hasUnreadDot) stateDescription = tr("未读", "Unread")
                                             },
                                     ) {
                                         SidebarSessionRowContent(session, active = active, nowMs = liveNowMs)
                                     }
                                     OriginMenu(expanded = menuOpen, onDismiss = { menuOpen = false }) {
                                         ActionMenuItem(
-                                            label = "重命名",
+                                            label = tr("重命名", "Rename"),
                                             icon = MenuSymbol.EDIT,
                                             iconContainer = true,
                                             onClick = {
@@ -288,7 +290,7 @@ internal fun SessionSidebar(
                                             },
                                         )
                                         ActionMenuItem(
-                                            label = "归档",
+                                            label = tr("归档", "Archive"),
                                             icon = MenuSymbol.DELETE,
                                             destructive = true,
                                             iconContainer = true,

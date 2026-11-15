@@ -1,8 +1,10 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.agent.CodexAsyncQuestions
 
-internal class SubmissionPersistenceFailure(cause: Exception) : java.io.IOException("无法保存发送状态，输入与待发已保留", cause)
+internal class SubmissionPersistenceFailure(cause: Exception) : java.io.IOException(tr("无法保存发送状态，输入与待发已保留", "Failed to save send state; draft and queue preserved"), cause)
 
 internal object SubmissionLedger {
     const val confirmationWindowMs = 30_000L
@@ -30,7 +32,7 @@ internal object SubmissionLedger {
     }
     fun begin(record: SessionRecord, id: String, elapsedRealtimeMs: Long = 0, externalText: String? = null, settings: Map<String, String> = emptyMap(), busy: Boolean = false) {
         migrate(record)
-        check(record.submissions.none { it.id == id }) { "发送标识已存在" }
+        check(record.submissions.none { it.id == id }) { tr("发送标识已存在", "Submission ID already exists") }
         record.submissions += StoredSubmission(id, externalText ?: record.draft,
             if (externalText == null) record.images.toList() else emptyList(),
             if (externalText == null) record.skills.toList() else emptyList(), externalText != null, record.draftRevision, settings = settings, queuePresentation = busy)
@@ -67,25 +69,25 @@ internal object SubmissionLedger {
         migrate(record)
         val index = record.submissions.indexOfFirst { it.id == id }
         val message = record.submissions.getOrNull(index)
-        check(message != null && isLocal(message)) { "消息已交给后台，不能再修改本地待发" }
+        check(message != null && isLocal(message)) { tr("消息已交给后台，不能再修改本地待发", "Message already handed to backend; cannot edit local queue item") }
         checkpoint(record, id, persist) { change(message, index) }
     }
     fun changeLocal(record: SessionRecord, id: String, text: String? = null, cancel: Boolean = false, persist: () -> Unit) =
         localMutation(record, id, persist) { message, index ->
             if (cancel) message.state = "cancelled"
             else {
-                check(text != null && (text.isNotBlank() || message.images.isNotEmpty() || message.skills.isNotEmpty())) { "消息不能为空" }
+                check(text != null && (text.isNotBlank() || message.images.isNotEmpty() || message.skills.isNotEmpty())) { tr("消息不能为空", "Message cannot be empty") }
                 record.submissions[index] = message.copy(text = text)
             }
         }
     fun rejectLocal(record: SessionRecord, id: String, persist: () -> Unit) = localMutation(record, id, persist) { _, _ -> rejected(record, id) }
     fun restoreLocalToComposer(record: SessionRecord, id: String, persist: () -> Unit) {
-        val message = find(record, id) ?: error("消息已离开本地待发队列")
-        check(isLocal(message) || HostQueueTakeback.ready(message)) { "消息已交给后台，不能再修改本地待发" }
+        val message = find(record, id) ?: error(tr("消息已离开本地待发队列", "Message is no longer in local queue"))
+        check(isLocal(message) || HostQueueTakeback.ready(message)) { tr("消息已交给后台，不能再修改本地待发", "Message already handed to backend; cannot edit local queue item") }
         checkpoint(record, id, persist) {
-            check(id !in record.receiptRecoveryRequired) { "此消息仍需核对原生送达状态，不能返回输入框重发" }
+            check(id !in record.receiptRecoveryRequired) { tr("此消息仍需核对原生送达状态，不能返回输入框重发", "Delivery status still needs verification; cannot restore to composer") }
             check(record.draft.isEmpty() && record.images.isEmpty() && record.skills.isEmpty()) {
-                "输入框已有内容，请先处理当前输入，再编辑待发消息；两边内容均保留"
+                tr("输入框已有内容，请先处理当前输入，再编辑待发消息；两边内容均保留", "Composer already has text; handle current draft before editing queued message (both are kept)")
             }
             record.draft = message.text
             record.images.addAll(message.images); record.skills.addAll(message.skills)
@@ -108,11 +110,11 @@ internal object SubmissionLedger {
     fun canRecoverStored(message: StoredSubmission) = !message.dismissed && message.state in setOf("pending", "unknown", "queued", "accepted")
 
     fun recoverStoredToComposer(record: SessionRecord, id: String, entry: QueueEntry, persist: () -> Unit) {
-        val message = find(record, id) ?: error("原待发正文和附件不在本地索引中，无法无损恢复")
-        check(canRecoverStored(message)) { "此待发项已在本地处理，请使用当前输入框" }
-        check(entry.clientUserMessageId == id || entry.id == "submission-$id") { "待发身份不一致，无法恢复" }
+        val message = find(record, id) ?: error(tr("原待发正文和附件不在本地索引中，无法无损恢复", "Queued text and attachments are missing from local index; cannot restore losslessly"))
+        check(canRecoverStored(message)) { tr("此待发项已在本地处理，请使用当前输入框", "This queued item was already handled locally; use the composer") }
+        check(entry.clientUserMessageId == id || entry.id == "submission-$id") { tr("待发身份不一致，无法恢复", "Queued item identity mismatch; cannot restore") }
         check(record.draft.isEmpty() && record.images.isEmpty() && record.skills.isEmpty()) {
-            "输入框已有内容，请先处理当前输入，再编辑待发消息；两边内容均保留"
+            tr("输入框已有内容，请先处理当前输入，再编辑待发消息；两边内容均保留", "Composer already has text; handle current draft before editing queued message (both are kept)")
         }
         checkpoint(record, id, persist) {
             record.draft = message.text; record.images.addAll(message.images); record.skills.addAll(message.skills)
@@ -220,7 +222,7 @@ internal object SubmissionLedger {
         migrate(record)
         val message = id?.let { find(record, it) } ?: return
         if (titleEligible) SessionTitlePolicy.firstMessage(record, UserMessageContent(message.text,
-            message.images.map { SessionTitlePolicy.attachment("图片", it.path, it.name) } + message.skills.map { SessionTitlePolicy.attachment("Skill", it.path, it.name) }))
+            message.images.map { SessionTitlePolicy.attachment(tr("图片", "Image"), it.path, it.name) } + message.skills.map { SessionTitlePolicy.attachment("Skill", it.path, it.name) }))
         message.state = "accepted"; record.deliveryResults[message.id] = ""
         syncLegacy(record)
     }
@@ -265,11 +267,11 @@ internal object SubmissionLedger {
         val local = record.submissions.filter { !it.dismissed && !it.nativeConsumed && it.id !in displayedIds &&
             ((it.takebackState in setOf("pending", "ready")) || ((it.queuePresentation || it.state == "local") && it.state !in setOf("rejected", "cancelled"))) }.map {
             QueueEntry("submission-${it.id}", display(record, it.text), when {
-                HostQueueTakeback.ready(it) -> "已取回 · 点击编辑"
-                it.takebackState == "pending" -> "取回结果待核对"
-                it.state == "local" -> "本地待发"
-                it.state == "accepted" -> "已接收 · 待同步"
-                else -> "发送中" },
+                HostQueueTakeback.ready(it) -> tr("已取回 · 点击编辑", "Taken back · Tap to edit")
+                it.takebackState == "pending" -> tr("取回结果待核对", "Takeback awaiting check")
+                it.state == "local" -> tr("本地待发", "Queued locally")
+                it.state == "accepted" -> tr("已接收 · 待同步", "Accepted · Syncing")
+                else -> tr("发送中", "Sending") },
                 canEdit = isLocal(it) || HostQueueTakeback.ready(it) || canRecoverStored(it), canSteer = false, canRemove = isLocal(it),
                 clientUserMessageId = it.id, localSubmission = true, canDismiss = true, localRecovery = canRecoverStored(it))
         }

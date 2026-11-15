@@ -53,18 +53,38 @@ public final class MainActivity extends Activity {
     private float terminalFrameRate = 60f;
     private ManagedTerminalRequest managedTerminalRequest;
     private boolean legacyLaunchApplied;
+    private final String foregroundToken = java.util.UUID.randomUUID().toString();
+    private boolean activityStarted;
+    private final Handler foregroundHandler = new Handler(Looper.getMainLooper());
+    private final Runnable foregroundHeartbeat = new Runnable() {
+        public void run() {
+            if (activityStarted && isSessionTerminal() && !isFinishing()) {
+                ForegroundTerminalTracker.record(MainActivity.this, foregroundToken, managedTerminalRequest);
+                foregroundHandler.postDelayed(this, 60_000L);
+            }
+        }
+    };
+    private void syncForegroundTerminal() {
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        if (activityStarted && isSessionTerminal() && !isFinishing()) {
+            ForegroundTerminalTracker.record(this, foregroundToken, managedTerminalRequest);
+            foregroundHandler.postDelayed(foregroundHeartbeat, 60_000L);
+        } else {
+            ForegroundTerminalTracker.clear(this, foregroundToken);
+        }
+    }
 
     private final ServiceConnection connection = new ServiceConnection() {
         public void onServiceConnected(ComponentName n, IBinder b) {
             service = ((ShellService.LocalBinder) b).get();
             if (service.isClosing()) {
-                Toast.makeText(MainActivity.this,"正在关闭，请稍后重新打开",Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this,com.termux.terminal.LumaLang.tr("正在关闭，请稍后重新打开","Closing; please reopen shortly"),Toast.LENGTH_SHORT).show();
                 finish(); return;
             }
             service.registerListener(MainActivity.this, new ShellService.Listener() {
                 public void onEnvironmentReady(){openTerminalIfReady();}
                 public void onTerminalError(String message){
-                    if (service != null && !service.environmentReady && title != null) title.setText("环境准备失败");
+                    if (service != null && !service.environmentReady && title != null) title.setText(com.termux.terminal.LumaLang.tr("环境准备失败", "Environment setup failed"));
                     Toast.makeText(MainActivity.this,message,Toast.LENGTH_LONG).show();
                 }
                 public void onScreenChanged(TerminalSession session) {
@@ -89,9 +109,9 @@ public final class MainActivity extends Activity {
             });
             if (service.environmentReady) openTerminalIfReady();
             else if (service.preparationError != null) {
-                title.setText("环境准备失败");
-                Toast.makeText(MainActivity.this, "环境准备失败：" + service.preparationError, Toast.LENGTH_LONG).show();
-            } else title.setText("准备环境…");
+                title.setText(com.termux.terminal.LumaLang.tr("环境准备失败", "Environment setup failed"));
+                Toast.makeText(MainActivity.this, com.termux.terminal.LumaLang.tr("环境准备失败：", "Environment setup failed: ") + service.preparationError, Toast.LENGTH_LONG).show();
+            } else title.setText(com.termux.terminal.LumaLang.tr("准备环境…", "Preparing environment…"));
         }
         public void onServiceDisconnected(ComponentName n) {
             service = null;
@@ -115,6 +135,7 @@ public final class MainActivity extends Activity {
                 ?service.openOrdinarySession(null):service.openManagedSession(managedTerminalRequest);
             selectWindow(opened);
             if(opened!=null)legacyLaunchApplied=true;
+            syncForegroundTerminal();
         }catch(IllegalStateException error){Toast.makeText(this,error.getMessage(),Toast.LENGTH_LONG).show();finish();}
     }
     @Override protected void onSaveInstanceState(Bundle state){
@@ -132,6 +153,7 @@ public final class MainActivity extends Activity {
         takeManagedTerminalRequest(intent);
         if(terminalHeader!=null)terminalHeader.setSessionLocked(isSessionTerminal());
         if(terminal!=null)terminal.setVisibility(View.GONE);
+        syncForegroundTerminal();
         openTerminalIfReady();
     }
 
@@ -220,7 +242,7 @@ public final class MainActivity extends Activity {
                 v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                 service.createSession();
                 selectWindow(service.session);
-                Toast.makeText(this, "已新建 " + service.session.mSessionName, Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("已新建 ", "Created ") + service.session.mSessionName, Toast.LENGTH_SHORT).show();
             }
             return true;
         });
@@ -370,7 +392,7 @@ public final class MainActivity extends Activity {
 
     private static String formatWindowTitle(TerminalSession s) {
         if (s == null) return "";
-        return s.mSessionName + (s.isRunning() ? "" : " · 已结束");
+        return s.mSessionName + (s.isRunning() ? "" : com.termux.terminal.LumaLang.tr(" · 已结束", " · Ended"));
     }
 
     private void dismissActiveSheet() {
@@ -385,7 +407,7 @@ public final class MainActivity extends Activity {
         if (isSessionTerminal() || service == null || !service.environmentReady) return;
         dismissActiveSheet();
         ArrayList<TerminalSession> windows = new ArrayList<>(service.getOrdinarySessions());
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "终端窗口", null);
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("终端窗口", "Terminal windows"), null);
 
         for (int i = 0; i < windows.size(); i++) {
             TerminalSession window = windows.get(i);
@@ -423,7 +445,7 @@ public final class MainActivity extends Activity {
             row.addView(infoCol, new LinearLayout.LayoutParams(0, -2, 1f));
 
             if (!running) {
-                TextView reconnectChip = LumaUi.chipButton(this, "重连", true, v -> {
+                TextView reconnectChip = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("重连", "Reconnect"), true, v -> {
                     sheet.dismiss();
                     TerminalView oldView = terminalViews.remove(window);
                     if (oldView != null) {
@@ -438,7 +460,7 @@ public final class MainActivity extends Activity {
                 row.addView(reconnectChip, rcLp);
             }
 
-            TextView closeChip = LumaUi.chipButton(this, "关闭", false, v -> {
+            TextView closeChip = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("关闭", "Close"), false, v -> {
                 sheet.dismiss();
                 confirmCloseWindow(window);
             });
@@ -453,7 +475,7 @@ public final class MainActivity extends Activity {
             sheet.body.addView(row, LumaUi.vSpace(this, i == 0 ? 0 : 8));
         }
 
-        TextView newWinBtn = LumaUi.primaryButton(this, "+ 新建窗口", v -> {
+        TextView newWinBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("+ 新建窗口", "+ New window"), v -> {
             sheet.dismiss();
             service.createSession();
             selectWindow(service.session);
@@ -468,12 +490,13 @@ public final class MainActivity extends Activity {
     private void renameWindow(TerminalSession target) {
         if (isSessionTerminal() || service == null || !service.allowsSelection(null,target)) return;
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "重命名窗口", "为「" + target.mSessionName + "」设置便于识别的窗口名称");
-        EditText input = LumaUi.inputField(this, target.mSessionName, "输入窗口名称");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("重命名窗口", "Rename window"),
+            com.termux.terminal.LumaLang.isZh() ? ("为「" + target.mSessionName + "」设置便于识别的窗口名称") : ("Set a display name for \"" + target.mSessionName + "\""));
+        EditText input = LumaUi.inputField(this, target.mSessionName, com.termux.terminal.LumaLang.tr("输入窗口名称", "Enter window name"));
         sheet.body.addView(input, LumaUi.vSpace(this, 2));
 
-        TextView cancelBtn = LumaUi.secondaryButton(this, "取消", v -> sheet.dismiss());
-        TextView saveBtn = LumaUi.primaryButton(this, "保存", v -> {
+        TextView cancelBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("取消", "Cancel"), v -> sheet.dismiss());
+        TextView saveBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("保存", "Save"), v -> {
             String name = input.getText().toString().trim();
             if (!name.isEmpty()) {
                 target.mSessionName = name;
@@ -491,11 +514,18 @@ public final class MainActivity extends Activity {
         dismissActiveSheet();
         boolean isLast = service.getOrdinarySessions().size() == 1;
         boolean guiEntry = managedTerminalRequest != null;
-        String desc = "关闭后，「" + closing.mSessionName + "」内的前台进程与终端会话将立即结束。"
-            + (isLast ? (guiEntry ? "\n这是最后一个普通窗口，关闭后返回会话。" : "\n这是最后一个普通窗口，关闭后退出终端。") : "");
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "关闭 " + closing.mSessionName + "？", desc);
-        TextView cancelBtn = LumaUi.secondaryButton(this, "保留窗口", v -> sheet.dismiss());
-        TextView closeBtn = LumaUi.dangerButton(this, isLast ? (guiEntry ? "关闭并返回" : "关闭并退出") : "确认关闭", v -> {
+        String desc = (com.termux.terminal.LumaLang.isZh()
+            ? ("关闭后，「" + closing.mSessionName + "」内的前台进程与终端会话将立即结束。")
+            : ("Closing \"" + closing.mSessionName + "\" immediately terminates its foreground processes and terminal session."))
+            + (isLast ? (guiEntry
+                ? com.termux.terminal.LumaLang.tr("\n这是最后一个普通窗口，关闭后返回会话。", "\nThis is the last regular window; closing it returns to the session.")
+                : com.termux.terminal.LumaLang.tr("\n这是最后一个普通窗口，关闭后退出终端。", "\nThis is the last regular window; closing it exits the terminal.")) : "");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+            com.termux.terminal.LumaLang.isZh() ? ("关闭 " + closing.mSessionName + "？") : ("Close " + closing.mSessionName + "?"), desc);
+        TextView cancelBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("保留窗口", "Keep window"), v -> sheet.dismiss());
+        TextView closeBtn = LumaUi.dangerButton(this, isLast
+            ? (guiEntry ? com.termux.terminal.LumaLang.tr("关闭并返回", "Close & return") : com.termux.terminal.LumaLang.tr("关闭并退出", "Close & exit"))
+            : com.termux.terminal.LumaLang.tr("确认关闭", "Close"), v -> {
             sheet.dismiss();
             TerminalView view = terminalViews.remove(closing);
             if (view != null) {
@@ -541,7 +571,9 @@ public final class MainActivity extends Activity {
         int winCount = service == null ? 0 : service.getOrdinarySessions().size();
         if (windowsIcon != null) windowsIcon.setCount(winCount);
         if (windowsButton != null) {
-            windowsButton.setContentDescription("多窗口，共 " + winCount + " 个窗口，点击切换，长按新建");
+            windowsButton.setContentDescription(com.termux.terminal.LumaLang.isZh()
+                ? ("多窗口，共 " + winCount + " 个窗口，点击切换，长按新建")
+                : ("Windows (" + winCount + "), tap to switch, long-press for new"));
         }
     }
 
@@ -594,12 +626,12 @@ public final class MainActivity extends Activity {
                     temporary = File.createTempFile("wallpaper-", ".tmp", getFilesDir());
                     try (InputStream in = getContentResolver().openInputStream(source);
                          OutputStream out = new FileOutputStream(temporary)) {
-                        if (in == null) throw new IOException("无法读取图片");
+                        if (in == null) throw new IOException(com.termux.terminal.LumaLang.tr("无法读取图片", "Unable to read image"));
                         byte[] bytes = new byte[65536]; long total = 0; int count;
                         while ((count = in.read(bytes)) != -1) {
                             if (Thread.currentThread().isInterrupted() || generation != wallpaperGeneration) return;
                             total += count;
-                            if (total > WallpaperImages.MAX_SOURCE_BYTES) throw new IOException("图片文件过大");
+                            if (total > WallpaperImages.MAX_SOURCE_BYTES) throw new IOException(com.termux.terminal.LumaLang.tr("图片文件过大", "Image file is too large"));
                             out.write(bytes, 0, count);
                         }
                     }
@@ -611,7 +643,7 @@ public final class MainActivity extends Activity {
                         if (decoded != null) decoded.recycle();
                         return;
                     }
-                    if (temporary != null && !temporary.renameTo(custom)) throw new IOException("无法保存图片");
+                    if (temporary != null && !temporary.renameTo(custom)) throw new IOException(com.termux.terminal.LumaLang.tr("无法保存图片", "Failed to save image"));
                 }
                 final Bitmap result = decoded;
                 runOnUiThread(() -> {
@@ -622,7 +654,7 @@ public final class MainActivity extends Activity {
             } catch (Exception | OutOfMemoryError e) {
                 if (decoded != null) decoded.recycle();
                 if (generation == wallpaperGeneration) runOnUiThread(() -> {
-                    if (!isDestroyed()) Toast.makeText(this, "无法加载图片，已保留原背景", Toast.LENGTH_SHORT).show();
+                    if (!isDestroyed()) Toast.makeText(this, com.termux.terminal.LumaLang.tr("无法加载图片，已保留原背景", "Failed to load image; previous background kept"), Toast.LENGTH_SHORT).show();
                 });
             } finally { if (temporary != null) temporary.delete(); }
         });
@@ -633,7 +665,7 @@ public final class MainActivity extends Activity {
             wallpaperGeneration++;
             File custom = new File(getFilesDir(), "wallpaper");
             if (custom.exists() && !custom.delete()) {
-                Toast.makeText(this, "无法删除背景图片", Toast.LENGTH_SHORT).show(); return;
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("无法删除背景图片", "Failed to delete background image"), Toast.LENGTH_SHORT).show(); return;
             }
         }
         loadWallpaper();
@@ -674,9 +706,9 @@ public final class MainActivity extends Activity {
 
         View rowAppearance = LumaUi.menuRow(
             this,
-            "外观设置",
+            com.termux.terminal.LumaLang.tr("外观设置", "Appearance"),
             null,
-            Math.round(fontSize) + "号",
+            Math.round(fontSize) + com.termux.terminal.LumaLang.tr("号", " pt"),
             false,
             v -> {
                 sheet.dismiss();
@@ -688,9 +720,9 @@ public final class MainActivity extends Activity {
         int svcRunning = runningServiceCount();
         View rowServices = LumaUi.menuRow(
             this,
-            "后台服务",
+            com.termux.terminal.LumaLang.tr("后台服务", "Background services"),
             null,
-            svcRunning > 0 ? (svcRunning + " 运行中") : "空闲",
+            svcRunning > 0 ? (svcRunning + com.termux.terminal.LumaLang.tr(" 运行中", " running")) : com.termux.terminal.LumaLang.tr("空闲", "Idle"),
             svcRunning > 0,
             v -> {
                 sheet.dismiss();
@@ -704,9 +736,9 @@ public final class MainActivity extends Activity {
         boolean batteryOk = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
         View rowEnv = LumaUi.menuRow(
             this,
-            "环境信息",
+            com.termux.terminal.LumaLang.tr("环境信息", "Environment info"),
             null,
-            (storageOk && batteryOk) ? "状态完好" : "查看授权",
+            (storageOk && batteryOk) ? com.termux.terminal.LumaLang.tr("状态完好", "Ready") : com.termux.terminal.LumaLang.tr("查看授权", "Check permissions"),
             storageOk && batteryOk,
             v -> {
                 sheet.dismiss();
@@ -731,42 +763,42 @@ public final class MainActivity extends Activity {
                 fallback.setType("image/*");
                 startActivityForResult(fallback, 20);
             } catch (ActivityNotFoundException ignored) {
-                Toast.makeText(this, "未找到可用的相册或文件选择器", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("未找到可用的相册或文件选择器", "No gallery or file picker found"), Toast.LENGTH_SHORT).show();
             }
         }
     }
 
     private void appearance() {
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "外观设置", null);
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("外观设置", "Appearance"), null);
 
-        View opacitySlider = LumaUi.sliderCard(this, "背景深浅", "%", 25, 85, prefs.getInt("opacity", 60), v -> {
+        View opacitySlider = LumaUi.sliderCard(this, com.termux.terminal.LumaLang.tr("背景深浅", "Background tint"), "%", 25, 85, prefs.getInt("opacity", 60), v -> {
             prefs.edit().putInt("opacity", v).apply();
             applyAppearance();
         });
         sheet.body.addView(opacitySlider);
 
-        View blurSlider = LumaUi.sliderCard(this, "背景模糊", " dp", 0, 60, prefs.getInt("blur", 24), v -> {
+        View blurSlider = LumaUi.sliderCard(this, com.termux.terminal.LumaLang.tr("背景模糊", "Background blur"), " dp", 0, 60, prefs.getInt("blur", 24), v -> {
             prefs.edit().putInt("blur", v).apply();
             applyAppearance();
         });
         sheet.body.addView(blurSlider, LumaUi.vSpace(this, 8));
 
         File customWallpaper = new File(getFilesDir(), "wallpaper");
-        TextView changeWp = LumaUi.secondaryButton(this, "更换壁纸", v -> {
+        TextView changeWp = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("更换壁纸", "Change wallpaper"), v -> {
             sheet.dismiss();
             openWallpaperPicker();
         });
         sheet.body.addView(changeWp, LumaUi.vSpace(this, 10));
         if (customWallpaper.isFile()) {
-            TextView resetWp = LumaUi.secondaryButton(this, "恢复默认纯黑背景", v -> {
+            TextView resetWp = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("恢复默认纯黑背景", "Restore pure black background"), v -> {
                 resetWallpaper();
                 sheet.dismiss();
             });
             sheet.body.addView(resetWp, LumaUi.vSpace(this, 10));
         }
 
-        TextView done = LumaUi.primaryButton(this, "完成", v -> sheet.dismiss());
+        TextView done = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("完成", "Done"), v -> sheet.dismiss());
         sheet.body.addView(done, LumaUi.vSpace(this, 12));
 
         activeSheet = sheet;
@@ -775,7 +807,9 @@ public final class MainActivity extends Activity {
 
     private void servicesSheet() {
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "后台托管服务", "由 TaskRegistry 常驻托管的本地网关与 Web 服务");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+            com.termux.terminal.LumaLang.tr("后台托管服务", "Managed background services"),
+            com.termux.terminal.LumaLang.tr("由 TaskRegistry 常驻托管的本地网关与 Web 服务", "Local gateways and web services managed persistently by TaskRegistry"));
 
         JSONArray services = null;
         try {
@@ -790,14 +824,14 @@ public final class MainActivity extends Activity {
             empty.setPadding(dp(16), dp(18), dp(16), dp(18));
             empty.setBackground(LumaUi.roundedRect(LumaUi.BG_CARD, dp(16), 1, 0x12ffffff));
             TextView emptyTitle = new TextView(this);
-            emptyTitle.setText("当前没有托管服务");
+            emptyTitle.setText(com.termux.terminal.LumaLang.tr("当前没有托管服务", "No managed services"));
             emptyTitle.setTextColor(LumaUi.TEXT_PRIMARY);
             emptyTitle.setTextSize(15f);
             emptyTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             empty.addView(emptyTitle);
 
             TextView emptySub = new TextView(this);
-            emptySub.setText("可在终端通过 lumactl start --port 0 -- <命令> 启动常驻 Web 界面或本地 API 网关。");
+            emptySub.setText(com.termux.terminal.LumaLang.tr("可在终端通过 lumactl start --port 0 -- <命令> 启动常驻 Web 界面或本地 API 网关。", "Start persistent web UIs or local API gateways in the terminal via lumactl start --port 0 -- <command>."));
             emptySub.setTextColor(LumaUi.TEXT_SECONDARY);
             emptySub.setTextSize(12.5f);
             emptySub.setPadding(0, dp(4), 0, 0);
@@ -835,7 +869,9 @@ public final class MainActivity extends Activity {
                 idView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 topRow.addView(idView, new LinearLayout.LayoutParams(0, -2, 1f));
 
-                String stateLabel = active ? ("yes".equals(ready) ? "运行中 · 已就绪" : "启动中") : "已退出";
+                String stateLabel = active
+                    ? ("yes".equals(ready) ? com.termux.terminal.LumaLang.tr("运行中 · 已就绪", "Running · Ready") : com.termux.terminal.LumaLang.tr("启动中", "Starting"))
+                    : com.termux.terminal.LumaLang.tr("已退出", "Exited");
                 TextView badge = LumaUi.badge(
                     this,
                     stateLabel,
@@ -846,7 +882,7 @@ public final class MainActivity extends Activity {
                 card.addView(topRow);
 
                 TextView detail = new TextView(this);
-                String meta = (pid > 0 ? ("PID " + pid) : "进程已结束") + (baseUrl.isEmpty() ? "" : ("  ·  " + baseUrl));
+                String meta = (pid > 0 ? ("PID " + pid) : com.termux.terminal.LumaLang.tr("进程已结束", "Process ended")) + (baseUrl.isEmpty() ? "" : ("  ·  " + baseUrl));
                 detail.setText(meta);
                 detail.setTextColor(LumaUi.TEXT_SECONDARY);
                 detail.setTextSize(12.5f);
@@ -857,7 +893,7 @@ public final class MainActivity extends Activity {
                 actions.setOrientation(LinearLayout.HORIZONTAL);
 
                 if (!baseUrl.isEmpty() && active) {
-                    TextView openBtn = LumaUi.chipButton(this, "打开网页", true, v -> {
+                    TextView openBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("打开网页", "Open URL"), true, v -> {
                         try {
                             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(baseUrl)));
                         } catch (Exception ignored) {}
@@ -866,16 +902,16 @@ public final class MainActivity extends Activity {
                     lp.rightMargin = dp(8);
                     actions.addView(openBtn, lp);
 
-                    TextView copyBtn = LumaUi.chipButton(this, "复制地址", false, v -> {
+                    TextView copyBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("复制地址", "Copy URL"), false, v -> {
                         getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("URL", baseUrl));
-                        Toast.makeText(this, "已复制 " + baseUrl, Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, com.termux.terminal.LumaLang.tr("已复制 ", "Copied ") + baseUrl, Toast.LENGTH_SHORT).show();
                     });
                     LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(-2, -2);
                     lp2.rightMargin = dp(8);
                     actions.addView(copyBtn, lp2);
                 }
 
-                TextView logBtn = LumaUi.chipButton(this, "日志", false, v -> {
+                TextView logBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("日志", "Logs"), false, v -> {
                     sheet.dismiss();
                     serviceLogSheet(id);
                 });
@@ -884,7 +920,7 @@ public final class MainActivity extends Activity {
                 actions.addView(logBtn, logLp);
 
                 if (active) {
-                    TextView stopBtn = LumaUi.chipButton(this, "停止", false, v -> {
+                    TextView stopBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("停止", "Stop"), false, v -> {
                         new Thread(() -> {
                             try {
                                 if (service != null && service.tasks() != null) {
@@ -905,7 +941,7 @@ public final class MainActivity extends Activity {
             }
         }
 
-        TextView closeBtn = LumaUi.secondaryButton(this, "关闭", v -> sheet.dismiss());
+        TextView closeBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("关闭", "Close"), v -> sheet.dismiss());
         sheet.body.addView(closeBtn, LumaUi.vSpace(this, 14));
         activeSheet = sheet;
         sheet.show();
@@ -916,8 +952,10 @@ public final class MainActivity extends Activity {
         String logContent = (service != null && service.tasks() != null)
             ? service.tasks().readTailLog(id, 4096)
             : "";
-        if (logContent.trim().isEmpty()) logContent = "（暂无日志输出）";
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "服务日志 · " + id, "显示最近 4 KB 输出");
+        if (logContent.trim().isEmpty()) logContent = com.termux.terminal.LumaLang.tr("（暂无日志输出）", "(No log output yet)");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+            com.termux.terminal.LumaLang.tr("服务日志 · ", "Service logs · ") + id,
+            com.termux.terminal.LumaLang.tr("显示最近 4 KB 输出", "Showing latest 4 KB of output"));
 
         TextView logView = new TextView(this);
         logView.setText(logContent);
@@ -929,7 +967,7 @@ public final class MainActivity extends Activity {
         logView.setTextIsSelectable(true);
         sheet.body.addView(logView);
 
-        TextView backBtn = LumaUi.secondaryButton(this, "返回服务列表", v -> {
+        TextView backBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("返回服务列表", "Back to services"), v -> {
             sheet.dismiss();
             servicesSheet();
         });
@@ -943,7 +981,7 @@ public final class MainActivity extends Activity {
         String version;
         try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; }
         catch (android.content.pm.PackageManager.NameNotFoundException e) { version = ""; }
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "环境信息", "Luma " + version + " · Debian 13 (trixie) ARM64");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("环境信息", "Environment info"), "Luma " + version + " · Debian 13 (trixie) ARM64");
 
         LinearLayout coreCard = new LinearLayout(this);
         coreCard.setOrientation(LinearLayout.VERTICAL);
@@ -951,16 +989,19 @@ public final class MainActivity extends Activity {
         coreCard.setBackground(LumaUi.roundedRect(LumaUi.BG_CARD, dp(16), 1, 0x12ffffff));
 
         TextView coreTitle = new TextView(this);
-        coreTitle.setText("容器与目录映射");
+        coreTitle.setText(com.termux.terminal.LumaLang.tr("容器与目录映射", "Container & path mounts"));
         coreTitle.setTextColor(LumaUi.TEXT_PRIMARY);
         coreTitle.setTextSize(15f);
         coreTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         coreCard.addView(coreTitle);
 
         java.util.List<String> lans = LinuxEnvironment.lanIpv4Addresses(this);
-        String lanText = lans.isEmpty() ? "未连接局域网" : String.join(", ", lans);
+        String lanText = lans.isEmpty() ? com.termux.terminal.LumaLang.tr("未连接局域网", "Not connected to LAN") : String.join(", ", lans);
         TextView coreDetail = new TextView(this);
-        coreDetail.setText("工作区目录：/workspace\n共享存储映射：/sdcard\n本机局域网 IPv4：" + lanText);
+        coreDetail.setText(com.termux.terminal.LumaLang.tr(
+            "工作区目录：/workspace\n共享存储映射：/sdcard\n本机局域网 IPv4：",
+            "Workspace: /workspace\nShared storage: /sdcard\nLAN IPv4: "
+        ) + lanText);
         coreDetail.setTextColor(LumaUi.TEXT_SECONDARY);
         coreDetail.setTextSize(13f);
         coreDetail.setLineSpacing(dp(3), 1f);
@@ -978,32 +1019,35 @@ public final class MainActivity extends Activity {
         stHeader.setOrientation(LinearLayout.HORIZONTAL);
         stHeader.setGravity(Gravity.CENTER_VERTICAL);
         TextView stTitle = new TextView(this);
-        stTitle.setText("手机文件访问");
+        stTitle.setText(com.termux.terminal.LumaLang.tr("手机文件访问", "Device file access"));
         stTitle.setTextColor(LumaUi.TEXT_PRIMARY);
         stTitle.setTextSize(15f);
         stTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         stHeader.addView(stTitle, new LinearLayout.LayoutParams(0, -2, 1f));
         stHeader.addView(LumaUi.badge(
             this,
-            storageGranted ? "已授权" : "未授权",
+            storageGranted ? com.termux.terminal.LumaLang.tr("已授权", "Granted") : com.termux.terminal.LumaLang.tr("未授权", "Not granted"),
             storageGranted ? LumaUi.ACCENT : LumaUi.WARN,
             storageGranted ? LumaUi.ACCENT_SURFACE : LumaUi.WARN_SURFACE
         ));
         storageCard.addView(stHeader);
 
         TextView stDesc = new TextView(this);
-        stDesc.setText("允许终端通过 /sdcard 读写手机共享存储。修改系统授权后，新建窗口即可生效。");
+        stDesc.setText(com.termux.terminal.LumaLang.tr(
+            "允许终端通过 /sdcard 读写手机共享存储。修改系统授权后，新建窗口即可生效。",
+            "Allows reading and writing shared storage via /sdcard in the terminal. Open a new window after changing permission."
+        ));
         stDesc.setTextColor(LumaUi.TEXT_SECONDARY);
         stDesc.setTextSize(12.5f);
         stDesc.setPadding(0, dp(5), 0, dp(10));
         storageCard.addView(stDesc);
 
-        TextView stBtn = LumaUi.chipButton(this, "所有文件访问设置", !storageGranted, v -> {
+        TextView stBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("所有文件访问设置", "All files access"), !storageGranted, v -> {
             sheet.dismiss();
             try {
                 startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName())));
             } catch (ActivityNotFoundException e) {
-                Toast.makeText(this, "请在系统设置中管理所有文件访问权限", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("请在系统设置中管理所有文件访问权限", "Manage All files access in Android Settings"), Toast.LENGTH_LONG).show();
             }
         });
         LinearLayout stBtnRow = new LinearLayout(this);
@@ -1024,14 +1068,14 @@ public final class MainActivity extends Activity {
         bgHeader.setOrientation(LinearLayout.HORIZONTAL);
         bgHeader.setGravity(Gravity.CENTER_VERTICAL);
         TextView bgTitle = new TextView(this);
-        bgTitle.setText("后台运行与通知授权");
+        bgTitle.setText(com.termux.terminal.LumaLang.tr("后台运行与通知授权", "Background execution & notifications"));
         bgTitle.setTextColor(LumaUi.TEXT_PRIMARY);
         bgTitle.setTextSize(15f);
         bgTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         bgHeader.addView(bgTitle, new LinearLayout.LayoutParams(0, -2, 1f));
         bgHeader.addView(LumaUi.badge(
             this,
-            (batteryIgnored && notifEnabled) ? "已授权" : "需关注",
+            (batteryIgnored && notifEnabled) ? com.termux.terminal.LumaLang.tr("已授权", "Granted") : com.termux.terminal.LumaLang.tr("需关注", "Attention"),
             (batteryIgnored && notifEnabled) ? LumaUi.ACCENT : LumaUi.WARN,
             (batteryIgnored && notifEnabled) ? LumaUi.ACCENT_SURFACE : LumaUi.WARN_SURFACE
         ));
@@ -1039,8 +1083,8 @@ public final class MainActivity extends Activity {
 
         TextView bgDesc = new TextView(this);
         bgDesc.setText(
-            "电池优化白名单：" + (batteryIgnored ? "已允许忽略电池优化" : "尚未忽略电池优化") + "\n" +
-            "前台常驻通知：" + (notifEnabled ? "已开启" : "已关闭（建议开启以防系统回收）")
+            com.termux.terminal.LumaLang.tr("电池优化白名单：", "Battery exemption: ") + (batteryIgnored ? com.termux.terminal.LumaLang.tr("已允许忽略电池优化", "Exempted") : com.termux.terminal.LumaLang.tr("尚未忽略电池优化", "Not exempted")) + "\n" +
+            com.termux.terminal.LumaLang.tr("前台常驻通知：", "Foreground notification: ") + (notifEnabled ? com.termux.terminal.LumaLang.tr("已开启", "Enabled") : com.termux.terminal.LumaLang.tr("已关闭（建议开启以防系统回收）", "Disabled (enable to reduce background kills)"))
         );
         bgDesc.setTextColor(LumaUi.TEXT_SECONDARY);
         bgDesc.setTextSize(12.5f);
@@ -1051,25 +1095,25 @@ public final class MainActivity extends Activity {
         LinearLayout bgActions = new LinearLayout(this);
         bgActions.setOrientation(LinearLayout.HORIZONTAL);
 
-        TextView batBtn = LumaUi.chipButton(this, "电池优化设置", !batteryIgnored, v -> {
+        TextView batBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("电池优化设置", "Battery settings"), !batteryIgnored, v -> {
             sheet.dismiss();
             try {
                 startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
             } catch (ActivityNotFoundException e) {
-                Toast.makeText(this, "请在应用信息中设置省电策略为无限制", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("请在应用信息中设置省电策略为无限制", "Set battery usage to Unrestricted in App Info"), Toast.LENGTH_LONG).show();
             }
         });
         LinearLayout.LayoutParams batLp = new LinearLayout.LayoutParams(-2, -2);
         batLp.rightMargin = dp(8);
         bgActions.addView(batBtn, batLp);
 
-        TextView notifBtn = LumaUi.chipButton(this, "通知设置", !notifEnabled, v -> {
+        TextView notifBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("通知设置", "Notifications"), !notifEnabled, v -> {
             sheet.dismiss();
             try {
                 startActivity(new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, getPackageName()));
             } catch (ActivityNotFoundException e) {
-                Toast.makeText(this, "请在应用信息中开启通知", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("请在应用信息中开启通知", "Enable notifications in App Info"), Toast.LENGTH_LONG).show();
             }
         });
         bgActions.addView(notifBtn);
@@ -1085,29 +1129,29 @@ public final class MainActivity extends Activity {
         LinearLayout accessibilityHeader = new LinearLayout(this);
         accessibilityHeader.setGravity(Gravity.CENTER_VERTICAL);
         TextView accessibilityTitle = new TextView(this);
-        accessibilityTitle.setText("无障碍保活");
+        accessibilityTitle.setText(com.termux.terminal.LumaLang.tr("无障碍保活", "Accessibility keep-alive"));
         accessibilityTitle.setTextColor(LumaUi.TEXT_PRIMARY);
         accessibilityTitle.setTextSize(15f);
         accessibilityTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         accessibilityHeader.addView(accessibilityTitle, new LinearLayout.LayoutParams(0, -2, 1f));
         accessibilityHeader.addView(LumaUi.badge(this,
-            accessibilityConnected ? "已授权" : accessibilityEnabled ? "待连接" : "未授权",
+            accessibilityConnected ? com.termux.terminal.LumaLang.tr("已授权", "Active") : accessibilityEnabled ? com.termux.terminal.LumaLang.tr("待连接", "Pending") : com.termux.terminal.LumaLang.tr("未授权", "Inactive"),
             accessibilityConnected ? LumaUi.ACCENT : LumaUi.WARN,
             accessibilityConnected ? LumaUi.ACCENT_SURFACE : LumaUi.WARN_SURFACE));
         accessibilityCard.addView(accessibilityHeader);
         TextView accessibilityDesc = new TextView(this);
-        accessibilityDesc.setText((accessibilityConnected ? "服务已连接。" : accessibilityEnabled ? "已开启，等待系统连接。" : "在系统无障碍设置中开启“Luma 后台保活”。")
-            + "帮助后台终端与 Web 服务保持可响应，效果取决于系统。仅接收 Luma 自身窗口事件，不读取窗口内容或操作屏幕。");
+        accessibilityDesc.setText((accessibilityConnected ? com.termux.terminal.LumaLang.tr("服务已连接。", "Service connected. ") : accessibilityEnabled ? com.termux.terminal.LumaLang.tr("已开启，等待系统连接。", "Enabled; waiting for system connection. ") : com.termux.terminal.LumaLang.tr("在系统无障碍设置中开启“Luma 后台保活”。", "Enable \"Luma Background Keep-Alive\" in Android Accessibility Settings. "))
+            + com.termux.terminal.LumaLang.tr("帮助后台终端与 Web 服务保持可响应，效果取决于系统。仅接收 Luma 自身窗口事件，不读取窗口内容或操作屏幕。", "Helps background terminals and web services stay responsive (system-dependent). Receives only Luma's own window events; never reads screen content or performs actions."));
         accessibilityDesc.setTextColor(LumaUi.TEXT_SECONDARY);
         accessibilityDesc.setTextSize(12.5f);
         accessibilityDesc.setLineSpacing(dp(3), 1f);
         accessibilityDesc.setPadding(0, dp(5), 0, dp(10));
         accessibilityCard.addView(accessibilityDesc);
-        TextView accessibilityButton = LumaUi.chipButton(this, "无障碍保活设置", !accessibilityConnected, v -> {
+        TextView accessibilityButton = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("无障碍保活设置", "Accessibility settings"), !accessibilityConnected, v -> {
             sheet.dismiss();
             try { startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
             catch (ActivityNotFoundException e) {
-                Toast.makeText(this, "请在系统无障碍设置中开启 Luma 后台保活", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("请在系统无障碍设置中开启 Luma 后台保活", "Enable Luma Background Keep-Alive in Android Accessibility Settings"), Toast.LENGTH_LONG).show();
             }
         });
         LinearLayout accessibilityActions = new LinearLayout(this);
@@ -1115,7 +1159,7 @@ public final class MainActivity extends Activity {
         accessibilityCard.addView(accessibilityActions);
         sheet.body.addView(accessibilityCard, LumaUi.vSpace(this, 8));
 
-        TextView closeBtn = LumaUi.primaryButton(this, "知道了", v -> sheet.dismiss());
+        TextView closeBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("知道了", "Got it"), v -> sheet.dismiss());
         sheet.body.addView(closeBtn, LumaUi.vSpace(this, 14));
 
         activeSheet = sheet;
@@ -1132,10 +1176,18 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        activityStarted = true;
+        syncForegroundTerminal();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         resumed = true;
         openTerminalIfReady();
+        syncForegroundTerminal();
         updateTitle();
         if (terminal != null) {
             terminal.updateAccessibilityState();
@@ -1145,7 +1197,7 @@ public final class MainActivity extends Activity {
         boolean granted = LinuxEnvironment.storageGranted();
         if (granted != storageWasGranted) {
             storageWasGranted = granted;
-            Toast.makeText(this, "文件授权已更改，请新建窗口以更新 /sdcard 映射", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, com.termux.terminal.LumaLang.tr("文件授权已更改，请新建窗口以更新 /sdcard 映射", "File access permission changed; open a new window to update /sdcard mount"), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1159,7 +1211,16 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    @Override
+    protected void onStop() {
+        activityStarted = false;
+        syncForegroundTerminal();
+        super.onStop();
+    }
+
     private void leaveTerminal() {
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        ForegroundTerminalTracker.clear(this, foregroundToken);
         if(isSessionTerminal()&&service!=null) {
             service.closeDedicatedWindow(managedTerminalRequest.windowId);
         }
@@ -1189,6 +1250,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        ForegroundTerminalTracker.clear(this, foregroundToken);
         if(Build.VERSION.SDK_INT>=33&&backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         pendingPaste.cancel();
         dismissActiveSheet();

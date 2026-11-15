@@ -58,7 +58,7 @@ final class NativeBridge implements AutoCloseable {
     private static String line(InputStream input)throws IOException {
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();int value;
         while((value=input.read())!=-1 && value!='\n'){
-            if(bytes.size()>=1024*1024)throw new IOException("请求过长");bytes.write(value);
+            if(bytes.size()>=1024*1024)throw new IOException(com.termux.terminal.LumaLang.tr("请求过长","Request too large"));bytes.write(value);
         }
         return bytes.size()==0 && value==-1?null:bytes.toString(StandardCharsets.UTF_8.name());
     }
@@ -116,7 +116,7 @@ final class NativeBridge implements AutoCloseable {
                     JSONObject st=taskRegistry.getStatus(target);
                     url=st.optString("baseUrl","");
                 }
-                if(url.isEmpty())throw new IOException("该服务没有可打开的 URL："+target);
+                if(url.isEmpty())throw new IOException(com.termux.terminal.LumaLang.tr("该服务没有可打开的 URL：","Service has no openable URL: ")+target);
                 String finalUrl=url;
                 new Handler(Looper.getMainLooper()).post(()->{
                     try{
@@ -179,16 +179,16 @@ final class NativeBridge implements AutoCloseable {
         }
     }
     static File mapGuestPath(Context context,String path)throws IOException {
-        if(!path.startsWith("/"))throw new IOException("需要绝对路径");
+        if(!path.startsWith("/"))throw new IOException(com.termux.terminal.LumaLang.tr("需要绝对路径","Absolute path required"));
         File base;String relative;
         if(path.equals("/workspace") || path.startsWith("/workspace/")){base=LinuxEnvironment.workspace(context);relative=path.substring(10);}
         else if(path.equals("/sdcard") || path.startsWith("/sdcard/")){
-            if(!LinuxEnvironment.storageAvailable())throw new IOException("未授权共享存储");
+            if(!LinuxEnvironment.storageAvailable())throw new IOException(com.termux.terminal.LumaLang.tr("未授权共享存储","Shared storage permission not granted"));
             base=LinuxEnvironment.sharedStorage();relative=path.substring(7);
         }else{base=LinuxEnvironment.root(context);relative=path.substring(1);}
         while(relative.startsWith("/"))relative=relative.substring(1);
         File file=new File(base,relative).getCanonicalFile();String boundary=base.getCanonicalPath();
-        if(!file.getPath().equals(boundary) && !file.getPath().startsWith(boundary+"/"))throw new IOException("路径越界："+path);
+        if(!file.getPath().equals(boundary) && !file.getPath().startsWith(boundary+"/"))throw new IOException(com.termux.terminal.LumaLang.tr("路径越界：","Path escapes root: ")+path);
         return file;
     }
     static String mapGuestArgument(Context context,String arg)throws IOException {
@@ -200,7 +200,7 @@ final class NativeBridge implements AutoCloseable {
     private String argument(String arg)throws IOException {return mapGuestArgument(context,arg);}
     private boolean handleAdbShellBuiltin(List<String> arguments,OutputStream output)throws IOException {
         if(arguments.size()==1 && ("--help".equals(arguments.get(0)) || "-h".equals(arguments.get(0)))){
-            String help=
+            String help=com.termux.terminal.LumaLang.isZh() ? (
                 "用法：\n"+
                 "  adb-shell <command> [args...]   通过 Shizuku 在宿主 Android 执行 ADB Shell 命令\n"+
                 "  adb-shell -c \"<script>\"         执行包含管道或复合语句的 Shell 脚本\n"+
@@ -208,7 +208,17 @@ final class NativeBridge implements AutoCloseable {
                 "  adb-shell --help                显示此帮助信息\n\n"+
                 "路径说明：\n"+
                 "  命令中引用的 /workspace、/root、/tmp 路径会自动中转并同步回 Debian 环境；\n"+
-                "  /sdcard 路径将直接访问手机共享存储。\n";
+                "  /sdcard 路径将直接访问手机共享存储。\n"
+            ) : (
+                "Usage:\n"+
+                "  adb-shell <command> [args...]   Run ADB shell commands on host Android via Shizuku\n"+
+                "  adb-shell -c \"<script>\"         Run a shell script with pipes or compound statements\n"+
+                "  adb-shell --status              Show Shizuku installation, running, and authorization state\n"+
+                "  adb-shell --help                Show this help message\n\n"+
+                "Path mapping:\n"+
+                "  /workspace, /root, and /tmp paths are automatically relayed and synced back to Debian;\n"+
+                "  /sdcard paths access device shared storage directly.\n"
+            );
             byte[] bytes=help.getBytes(StandardCharsets.UTF_8);
             try{event(output,new JSONObject().put("stdout",Base64.encodeToString(bytes,Base64.NO_WRAP)));event(output,new JSONObject().put("exit",0));}
             catch(Exception e){throw new IOException(e);}
@@ -239,7 +249,7 @@ final class NativeBridge implements AutoCloseable {
         return false;
     }
     private Job start(String command,List<String> arguments,String cwd)throws Exception {
-        if(closed)throw new IOException("Luma 已停止");
+        if(closed)throw new IOException(com.termux.terminal.LumaLang.tr("Luma 已停止","Luma has stopped"));
         if("adb-shell".equals(command)){
             ShizukuBridge.RelaySession relay=new ShizukuBridge.RelaySession(context);
             try {
@@ -248,7 +258,7 @@ final class NativeBridge implements AutoCloseable {
                 String[] shellCmd=ShizukuBridge.buildShellCommand(rewritten);
                 java.lang.Process proc=ShizukuBridge.newProcess(context,shellCmd,ShizukuBridge.defaultAdbEnvironment(),remoteDir);
                 Job job=new Job(proc,null,false,relay);jobs.add(job);
-                if(closed){job.stop();job.cleanup();throw new IOException("Luma 已停止");}
+                if(closed){job.stop();job.cleanup();throw new IOException(com.termux.terminal.LumaLang.tr("Luma 已停止","Luma has stopped"));}
                 return job;
             }catch(Exception e){relay.close();throw e;}
         }
@@ -263,7 +273,7 @@ final class NativeBridge implements AutoCloseable {
             else if(command.equals("android-run") && !arguments.isEmpty()){
                 String name=arguments.get(0);if(!name.startsWith("/"))name=cwd+"/"+name;
                 executable=mapped(name).getPath();arguments=new ArrayList<>(arguments.subList(1,arguments.size()));
-            } else throw new IOException("未知原生命令");
+            } else throw new IOException(com.termux.terminal.LumaLang.tr("未知原生命令","Unknown native command"));
             launch.add("/system/bin/linker64");launch.add(executable);
             for(String arg:arguments)launch.add(argument(arg));
         }
@@ -275,7 +285,7 @@ final class NativeBridge implements AutoCloseable {
         else environment.put("LD_LIBRARY_PATH",nativeDir);
         try {
             Job job=new Job(builder.start(),pidFile,linux);jobs.add(job);
-            if(closed){job.stop();throw new IOException("Luma 已停止");}return job;
+            if(closed){job.stop();throw new IOException(com.termux.terminal.LumaLang.tr("Luma 已停止","Luma has stopped"));}return job;
         }catch(Exception e){pidFile.delete();throw e;}
     }
     void checkToFile(){

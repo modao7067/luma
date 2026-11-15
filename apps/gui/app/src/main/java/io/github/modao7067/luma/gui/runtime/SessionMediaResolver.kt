@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -85,10 +87,10 @@ internal class SessionMediaResolver(
     private fun verifyExternalContentUri(uri: Uri) {
         val authority = uri.authority?.trim().orEmpty()
         if (authority.isEmpty() || authority == context.packageName || authority.startsWith("${context.packageName}.")) {
-            throw IOException("不允许读取内部附件地址")
+            throw IOException(tr("不允许读取内部附件地址", "Reading internal attachment URI is not allowed"))
         }
         if (context.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
-            throw IOException("未获得该文件的读取授权，请重新选择")
+            throw IOException(tr("未获得该文件的读取授权，请重新选择", "Read permission not granted for this file; please select it again"))
         }
     }
 
@@ -102,11 +104,11 @@ internal class SessionMediaResolver(
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     if (resource.name.isBlank() && !cursor.isNull(0)) name = cursor.getString(0)
-                    if (!cursor.isNull(1) && cursor.getLong(1) > limit) throw IOException("附件超过 ${limit / (1024 * 1024)} MiB")
+                    if (!cursor.isNull(1) && cursor.getLong(1) > limit) throw IOException(tr("附件超过 ${limit / (1024 * 1024)} MiB", "Attachment exceeds ${limit / (1024 * 1024)} MiB"))
                 }
             }
             if (mime == "application/octet-stream") mime = MediaSourcePolicy.mime(name)
-            (context.contentResolver.openInputStream(uri) ?: throw IOException("无法读取附件，请重新选择")).use { MediaByteReader.copy(it, file, limit) }
+            (context.contentResolver.openInputStream(uri) ?: throw IOException(tr("无法读取附件，请重新选择", "Unable to read attachment; please select it again"))).use { MediaByteReader.copy(it, file, limit) }
         } else mime = MediaByteReader.read(resource.source, resource.cwd, file, mime,
             imported = { runtime.importedImageFile(environment, resource.source) },
             guest = { path, target, maximum -> runtime.copyMediaFile(environment, path, target, maximum) },
@@ -165,15 +167,15 @@ internal class SessionMediaResolver(
                             val sourceLength = importedBefore?.length()
                             val sourceLastModified = importedBefore?.lastModified()
                             val result = readOriginal(environment, resource, file, MediaSourcePolicy.MAX_BYTES)
-                            if (file.length() == 0L) throw IOException("附件为空")
+                            if (file.length() == 0L) throw IOException(tr("附件为空", "Attachment is empty"))
                             val finalMedia = if (result.mimeType.startsWith("image/") && result.mimeType != "image/svg+xml") {
                                 val header = file.inputStream().use { input -> ByteArray(4096).let { bytes -> val count = input.read(bytes); bytes.copyOf(count.coerceAtLeast(0)) } }
                                 if (result.mimeType in setOf("image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp") &&
-                                    MediaSourcePolicy.sniff(header, "application/octet-stream") == "application/octet-stream") throw IOException("图片数据损坏")
+                                    MediaSourcePolicy.sniff(header, "application/octet-stream") == "application/octet-stream") throw IOException(tr("图片数据损坏", "Corrupted image data"))
                                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                                 BitmapFactory.decodeFile(file.absolutePath, options)
-                                if (options.outWidth <= 0 || options.outHeight <= 0) throw IOException("图片损坏或系统不支持此格式")
-                                if (options.outWidth.toLong() * options.outHeight > 64_000_000L) throw IOException("图片像素过大，请缩小后查看")
+                                if (options.outWidth <= 0 || options.outHeight <= 0) throw IOException(tr("图片损坏或系统不支持此格式", "Corrupted image or unsupported format"))
+                                if (options.outWidth.toLong() * options.outHeight > 64_000_000L) throw IOException(tr("图片像素过大，请缩小后查看", "Image dimensions are too large to preview"))
                                 result.copy(mimeType = options.outMimeType ?: result.mimeType)
                             } else result
                             val now = clockMs()
@@ -233,9 +235,9 @@ internal class SessionMediaResolver(
             val original = try {
                 readOriginal(environment, resource, file, budget)
             } catch (error: IOException) {
-                if (error.message in setOf("附件超过 ${budget / (1024 * 1024)} MiB", "文件超过预览大小限制", "文件过大")) {
-                    val msg = if (available < MediaDownloads.MAX_BYTES) "可用缓存空间不足，无法保存文件"
-                    else "附件超过 ${MediaDownloads.MAX_BYTES / (1024 * 1024)} MiB"
+                if (error.message in setOf("附件超过 ${budget / (1024 * 1024)} MiB", "Attachment exceeds ${budget / (1024 * 1024)} MiB", "文件超过预览大小限制", "File exceeds preview size limit", "文件过大", "File is too large")) {
+                    val msg = if (available < MediaDownloads.MAX_BYTES) tr("可用缓存空间不足，无法保存文件", "Insufficient cache space to save file")
+                    else tr("附件超过 ${MediaDownloads.MAX_BYTES / (1024 * 1024)} MiB", "Attachment exceeds ${MediaDownloads.MAX_BYTES / (1024 * 1024)} MiB")
                     throw IOException(msg, error)
                 }
                 throw error
@@ -250,18 +252,18 @@ internal class SessionMediaResolver(
             val resolved = openLock.withLock {
                 runInterruptible(Dispatchers.IO) {
                     val directory = File(context.cacheDir, "terminal-open").apply { mkdirs() }
-                    if (!directory.isDirectory) throw IOException("无法创建外部打开缓存目录")
+                    if (!directory.isDirectory) throw IOException(tr("无法创建外部打开缓存目录", "Failed to create external-open cache directory"))
                     directory.listFiles().orEmpty().filter { it.name.startsWith("open-media-") }.forEach { it.delete() }
                     val freeBudget = (directory.usableSpace - MIN_FREE_RESERVE_BYTES).coerceAtLeast(0L)
-                    if (freeBudget <= 0L) throw IOException("可用缓存空间不足")
+                    if (freeBudget <= 0L) throw IOException(tr("可用缓存空间不足", "Insufficient cache space"))
                     val budget = minOf(OPEN_MAX_BYTES, freeBudget)
                     val destination = File(directory, "open-media-${UUID.randomUUID()}")
                     staged = destination
                     try {
                         readOriginal(environment, resource, destination, budget)
                     } catch (error: IOException) {
-                        if (error.message in setOf("附件超过 ${budget / (1024 * 1024)} MiB", "文件超过预览大小限制", "文件过大")) {
-                            val msg = if (freeBudget < OPEN_MAX_BYTES) "可用缓存空间不足" else "外部打开文件超过 512 MiB，请先保存到下载处理"
+                        if (error.message in setOf("附件超过 ${budget / (1024 * 1024)} MiB", "Attachment exceeds ${budget / (1024 * 1024)} MiB", "文件超过预览大小限制", "File exceeds preview size limit", "文件过大", "File is too large")) {
+                            val msg = if (freeBudget < OPEN_MAX_BYTES) tr("可用缓存空间不足", "Insufficient cache space") else tr("外部打开文件超过 512 MiB，请先保存到下载处理", "File exceeds 512 MiB for external open; save to Downloads first")
                             throw IOException(msg, error)
                         }
                         throw error
@@ -285,8 +287,8 @@ internal class SessionMediaResolver(
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             try { context.startActivity(launchIntent) }
-            catch (error: ActivityNotFoundException) { throw IOException("没有可打开此文件的应用", error) }
-            catch (error: SecurityException) { throw IOException("系统未允许打开此文件：${error.message ?: "访问被拒绝"}", error) }
+            catch (error: ActivityNotFoundException) { throw IOException(tr("没有可打开此文件的应用", "No app available to open this file"), error) }
+            catch (error: SecurityException) { throw IOException(tr("系统未允许打开此文件：${error.message ?: "访问被拒绝"}", "System blocked opening this file: ${error.message ?: "Access denied"}"), error) }
             launched = true
             scheduleOpenCacheCleanup(AUTO_CLEAN_DELAY_MS)
         } finally {

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -15,7 +17,7 @@ import io.github.modao7067.luma.gui.session.*
 
 @Composable
 internal fun PluginMenu(catalog: PluginCatalog, view: SessionView, actions: CockpitActions, onBack: () -> Unit) {
-    ActionMenuItem("插件", MenuSymbol.PLUGINS, trailing = MenuSymbol.UP, iconContainer = true, onClick = onBack)
+    ActionMenuItem(tr("插件", "Plugins"), MenuSymbol.PLUGINS, trailing = MenuSymbol.UP, iconContainer = true, onClick = onBack)
     PluginMenuContents(catalog, view, actions)
 }
 
@@ -34,7 +36,7 @@ internal fun PluginMenuContents(
     }
     if (!catalog.loading) {
         if (onRetry != null && (catalog.error != null || (catalog.skills.isEmpty() && catalog.mcp.isEmpty()))) {
-            ActionMenuItem("重试", MenuSymbol.REFRESH, enabled = view.connected, onClick = onRetry)
+            ActionMenuItem(tr("重试", "Retry"), MenuSymbol.REFRESH, enabled = view.connected, onClick = onRetry)
         }
         val maxSkills = view.capabilities.maxSkills
         if (catalog.error == null || catalog.skills.isNotEmpty()) {
@@ -46,7 +48,7 @@ internal fun PluginMenuContents(
             )
         }
         if (catalog.error == null && (!view.capabilities.skills || catalog.skills.isEmpty())) {
-            Text("暂无插件", Modifier.padding(horizontal = 18.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(tr("暂无插件", "No plugins"), Modifier.padding(horizontal = 18.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         catalog.skills.forEach { skill ->
             val isSelected = view.skills.any { it.id == skill.id }
@@ -97,7 +99,7 @@ internal fun PluginMenuContents(
 }
 
 internal fun pluginFetchErrorLabel(error: String): String =
-    if (error.startsWith("MCP", ignoreCase = true)) "无法获取 MCP" else "无法获取插件"
+    if (error.startsWith("MCP", ignoreCase = true)) tr("无法获取 MCP", "Failed to load MCP") else tr("无法获取插件", "Failed to load plugins")
 
 internal fun inventoryFetchErrorLabel(title: String): String =
-    if (title == "MCP") "无法获取 MCP" else "无法获取插件"
+    if (title == "MCP") tr("无法获取 MCP", "Failed to load MCP") else tr("无法获取插件", "Failed to load plugins")

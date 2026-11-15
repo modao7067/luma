@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.runtime.Immutable
 import org.commonmark.node.*
 import org.commonmark.ext.gfm.tables.*
@@ -61,8 +63,8 @@ internal fun summarizeMarkdownCard(code: String): MarkdownCardSummary {
     val trimmed = code.trimEnd('\n', '\r')
     if (trimmed.isBlank()) {
         return MarkdownCardSummary(
-            title = "Markdown 文档",
-            subtitle = "Markdown 文档 · 0 行",
+            title = tr("Markdown 文档", "Markdown document"),
+            subtitle = tr("Markdown 文档 · 0 行", "Markdown document · 0 lines"),
             excerpt = "",
             lineCount = 0,
             codeBlockCount = 0,
@@ -118,7 +120,7 @@ internal fun summarizeMarkdownCard(code: String): MarkdownCardSummary {
         }
     }
     val titleIndex = if (headingTitle != null) headingLineIndex else firstContentLineIndex
-    val rawTitle = headingTitle ?: firstContentTitle ?: "Markdown 文档"
+    val rawTitle = headingTitle ?: firstContentTitle ?: tr("Markdown 文档", "Markdown document")
     val title = if (rawTitle.length > 44) rawTitle.take(44).trimEnd() + "…" else rawTitle
     val excerpt = contentLines
         .asSequence()
@@ -127,13 +129,9 @@ internal fun summarizeMarkdownCard(code: String): MarkdownCardSummary {
         .take(2)
         .joinToString("\n")
     val subtitle = buildString {
-        append("Markdown 文档 · ")
-        append(lineCount)
-        append(" 行")
+        append(tr("Markdown 文档 · $lineCount 行", "Markdown document · $lineCount lines"))
         if (codeBlockCount > 0) {
-            append(" · 含 ")
-            append(codeBlockCount)
-            append(" 个代码块")
+            append(tr(" · 含 $codeBlockCount 个代码块", " · $codeBlockCount code blocks"))
         }
     }
     return MarkdownCardSummary(

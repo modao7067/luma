@@ -2,6 +2,7 @@ import http.client
 import json
 import queue
 import threading
+from .i18n import tr
 from .native_owner import OwnerProcess
 from .transport import Peer, Rejected
 
@@ -24,19 +25,19 @@ class CodeBuddyHttpPeer(Peer):
         connection, response = self.request("GET", "/api/v1/auth/status")
         try:
             if response.status != 200 or json.loads(response.read(1024 * 1024)).get("authEnabled") is not True:
-                raise Rejected("CodeBuddy 原生 HTTP 入口尚未开启认证；不能连接未认证的执行 API")
+                raise Rejected(tr("CodeBuddy 原生 HTTP 入口尚未开启认证；不能连接未认证的执行 API", "CodeBuddy native HTTP endpoint does not have auth enabled; refusing unauthenticated execution API"))
         finally: self.finish(connection)
         if self.connection_id:
             connection,response=self.request("GET","/api/v1/acp")
             if response.status==409:
                 self.finish(connection);self.connection_id=None
             elif response.status!=200:
-                self.finish(connection);raise ConnectionError("CodeBuddy 原生观察连接无法恢复")
+                self.finish(connection);raise ConnectionError(tr("CodeBuddy 原生观察连接无法恢复", "CodeBuddy native observer connection could not be restored"))
             else:self.notification_response=(connection,response);self.resumed_connection=True
         if not self.connection_id:
             connection,response=self.request("POST","/api/v1/acp/connect",{})
             try:
-                if response.status!=200:raise Rejected("CodeBuddy 未开放原生 ACP 连接")
+                if response.status!=200:raise Rejected(tr("CodeBuddy 未开放原生 ACP 连接", "CodeBuddy did not open native ACP connection"))
                 self.connection_id=json.loads(response.read(1024*1024))["connectionId"]
             finally:self.finish(connection)
         self.notification_thread = threading.Thread(target=self.notifications, daemon=True, name="LumaCodeBuddyEvents")
@@ -48,7 +49,12 @@ class CodeBuddyHttpPeer(Peer):
                    "Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         if self.connection_id: headers["acp-connection-id"] = self.connection_id
         with self.lock:
-            if self.closed: raise ConnectionError("CodeBuddy 观察连接已关闭")
+            if self.closed and not (
+                getattr(self, "_closing_thread", None) is threading.current_thread()
+                and method == "DELETE"
+                and path == "/api/v1/acp"
+            ):
+                raise ConnectionError(tr("CodeBuddy 观察连接已关闭", "CodeBuddy observer connection closed"))
             self.connections.add(connection)
         try:
             connection.request(method, path, None if frame is None else json.dumps(frame), headers)
@@ -67,7 +73,7 @@ class CodeBuddyHttpPeer(Peer):
             raise ConnectionError("CodeBuddy ACP HTTP " + str(response.status))
         if not response.getheader("Content-Type", "").startswith("text/event-stream"):
             data = response.read(64 * 1024 * 1024 + 1)
-            if len(data) > 64 * 1024 * 1024: raise ValueError("CodeBuddy ACP 响应过大")
+            if len(data) > 64 * 1024 * 1024: raise ValueError(tr("CodeBuddy ACP 响应过大", "CodeBuddy ACP response too large"))
             if data: self.reader.frames.put(json.loads(data))
             return
         if connection.sock: connection.sock.settimeout(None)
@@ -75,11 +81,11 @@ class CodeBuddyHttpPeer(Peer):
         while not self.closed:
             line = response.readline(64 * 1024 * 1024 + 1)
             if not line: return
-            if len(line) > 64 * 1024 * 1024: raise ValueError("CodeBuddy ACP 单帧过大")
+            if len(line) > 64 * 1024 * 1024: raise ValueError(tr("CodeBuddy ACP 单帧过大", "CodeBuddy ACP frame too large"))
             line = line.rstrip(b"\r\n")
             if line.startswith(b"data:"):
                 data.append(line[5:].lstrip(b" "))
-                if sum(map(len, data)) > 64 * 1024 * 1024: raise ValueError("CodeBuddy ACP 单帧过大")
+                if sum(map(len, data)) > 64 * 1024 * 1024: raise ValueError(tr("CodeBuddy ACP 单帧过大", "CodeBuddy ACP frame too large"))
             elif not line and data:
                 self.reader.frames.put(json.loads(b"\n".join(data))); data = []
 
@@ -88,14 +94,14 @@ class CodeBuddyHttpPeer(Peer):
         try:
             connection,response=getattr(self,"notification_response",None) or self.request("GET","/api/v1/acp")
             self.read_response(connection,response)
-            if not self.closed: raise ConnectionError("CodeBuddy 原生事件通道已关闭")
+            if not self.closed: raise ConnectionError(tr("CodeBuddy 原生事件通道已关闭", "CodeBuddy native event stream closed"))
         except Exception:
             if not self.closed: self.reader.close()
         finally:
             if connection: self.finish(connection)
 
     def send(self, frame):
-        if self.closed: raise ConnectionError("CodeBuddy 观察连接已关闭")
+        if self.closed: raise ConnectionError(tr("CodeBuddy 观察连接已关闭", "CodeBuddy observer connection closed"))
         def dispatch():
             connection = None
             try:
@@ -114,13 +120,16 @@ class CodeBuddyHttpPeer(Peer):
     def close(self):
         with self.lock:
             if self.closed: return
+            self.closed = True
+            self._closing_thread = threading.current_thread()
         try:
             connection, response = self.request("DELETE", "/api/v1/acp")
             self.finish(connection)
         except Exception: pass
-        with self.lock:
-            self.closed = True
-            connections = list(self.connections)
+        finally:
+            with self.lock:
+                self._closing_thread = None
+                connections = list(self.connections)
         for connection in connections:
             try:
                 if connection.sock: connection.sock.shutdown(2)

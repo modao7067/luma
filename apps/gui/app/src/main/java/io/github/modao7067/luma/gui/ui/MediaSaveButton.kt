@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LocalContentColor
@@ -38,16 +40,16 @@ private fun MediaSaveButtonContent(resource: MediaResource?, actions: CockpitAct
                             try {
                                 actions.saveMedia(resource)
                                 saved = true
-                                onFeedback("已保存")
+                                onFeedback(tr("已保存", "Saved"))
                             } catch (cancelled: CancellationException) { throw cancelled }
-                            catch (failure: Exception) { onFeedback(failure.message?.take(120)?.ifBlank { null } ?: "无法保存") }
+                            catch (failure: Exception) { onFeedback(failure.message?.take(120)?.ifBlank { null } ?: tr("无法保存", "Failed to save")) }
                             finally { saving = false }
                         }
                     }
                 })
             .semantics {
-                contentDescription = "保存原文件"
-                stateDescription = when { saving -> "正在保存"; saved -> "已保存"; else -> "" }
+                contentDescription = tr("保存原文件", "Save original file")
+                stateDescription = when { saving -> tr("正在保存", "Saving"); saved -> tr("已保存", "Saved"); else -> "" }
             },
         cornerRadius = FloatingChromeRadius,
     ) {

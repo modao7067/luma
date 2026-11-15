@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -143,9 +145,9 @@ internal fun decodeMediaFrame(context: Context, media: ResolvedMedia, maxDimensi
         val uri = Uri.parse(media.uri)
         val limit = maxDimension.coerceIn(64, 2048)
         if (media.mimeType == "application/pdf") {
-            val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: error("无法读取 PDF")
+            val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: error(tr("无法读取 PDF", "Unable to read PDF"))
             descriptor.use { fd -> PdfRenderer(fd).use { pdf ->
-                require(pdf.pageCount > 0) { "PDF 没有页面" }
+                require(pdf.pageCount > 0) { tr("PDF 没有页面", "PDF has no pages") }
                 pdf.openPage(page.coerceIn(0, pdf.pageCount - 1)).use { sheet ->
                     val size = decodedVectorSize(sheet.width, sheet.height, limit)
                     val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
@@ -157,7 +159,7 @@ internal fun decodeMediaFrame(context: Context, media: ResolvedMedia, maxDimensi
         }
         if (media.mimeType == "image/svg+xml") {
             SVG.setInternalEntitiesEnabled(false)
-            val svg = context.contentResolver.openInputStream(uri)?.use { SVG.getFromInputStream(it) } ?: error("无法读取 SVG")
+            val svg = context.contentResolver.openInputStream(uri)?.use { SVG.getFromInputStream(it) } ?: error(tr("无法读取 SVG", "Unable to read SVG"))
             val box = svg.documentViewBox
             val width = svg.documentWidth.takeIf { it > 0f } ?: box?.width() ?: 512f
             val height = svg.documentHeight.takeIf { it > 0f } ?: box?.height() ?: 512f

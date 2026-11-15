@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import android.system.Os
 import kotlinx.coroutines.CoroutineScope
@@ -41,7 +43,7 @@ internal object RootBackgroundNotifications {
     private val armGeneration = AtomicLong(0L)
     @Volatile internal var forceEnableForTesting = false
 
-    private fun isEnabled(context: Context): Boolean = GuiProduct.usesRootExecution(context) || forceEnableForTesting
+    internal fun isEnabled(context: Context): Boolean = GuiProduct.usesRootExecution(context) || forceEnableForTesting
 
     private fun agentDirectoryPath(context: Context): String = GuiProduct.agentRuntimePath()
 
@@ -58,7 +60,7 @@ internal object RootBackgroundNotifications {
         try {
             temp.writeText(content, StandardCharsets.UTF_8)
             runCatching { Os.chmod(temp.absolutePath, 0x180) }
-            check(temp.renameTo(file)) { "无法更新私有通知监听配置" }
+            check(temp.renameTo(file)) { tr("无法更新私有通知监听配置", "Failed to update private notification watcher config") }
             runCatching { Os.chmod(file.absolutePath, 0x180) }
         } finally {
             if (temp.exists()) temp.delete()
@@ -215,6 +217,7 @@ if devnull>2:os.close(devnull)
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 android_sh=os.environ.get('LUMA_BG_ANDROID_SH','/usr/local/bin/android-sh')
 tick_sleep=float(os.environ.get('LUMA_BG_TICK_SEC','1.5'))
+idle_exit_sec=float(os.environ.get('LUMA_BG_IDLE_EXIT_SEC','15.0'))
 
 def read_text(path):
     try:return path.read_text(encoding='utf-8').strip()
@@ -458,6 +461,7 @@ while time.monotonic()-started<14400:
 
         proto=entry.get('protocol') or ''
         now_running=st['running']
+        now_bg_busy=False
         reqs=[]
         observed=False
 
@@ -466,8 +470,9 @@ while time.monotonic()-started<14400:
                 task=entry.get('task') or ''
                 url=entry.get('endpointUrl') or (read_json(base/f'{task}.json').get('url') or '')
                 if url and bridge_token:
-                    snap=http_json(f'{url}/sessions/{sid}',{'Authorization':f'Bearer {bridge_token}'})
+                    snap=http_json(f'{url}/sessions/{sid}',{'Authorization':f'Bearer {bridge_token}','X-Luma-Watch':'1'})
                     now_running=bool(snap.get('running'))
+                    now_bg_busy=(snap.get('releasable') is False) and bool((snap.get('capabilities') or {}).get('release',True))
                     for r in (snap.get('requests') or []):
                         if isinstance(r,dict) and r.get('id'):
                             reqs.append((str(r['id']),'question' if r.get('questions') else 'approval'))
@@ -531,7 +536,7 @@ while time.monotonic()-started<14400:
             pending_wakes.append((sid,'completed'))
 
         st['running']=now_running
-        if now_running or reqs:any_busy=True
+        if now_running or reqs or now_bg_busy:any_busy=True
 
     if pending_wakes:
         send_wake_batch(pkg,wake_token,pending_wakes)
@@ -543,7 +548,7 @@ while time.monotonic()-started<14400:
         idle_since=None
     else:
         if idle_since is None:idle_since=time.monotonic()
-        elif time.monotonic()-idle_since>=900:break
+        elif time.monotonic()-idle_since>=idle_exit_sec:break
 
     time.sleep(tick_sleep)
 

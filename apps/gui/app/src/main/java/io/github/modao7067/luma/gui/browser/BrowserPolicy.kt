@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.browser
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import java.net.URI
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -36,15 +38,15 @@ object BrowserPolicy {
 
     fun addressUrl(input: String): String {
         val text = input.trim()
-        require(text.isNotEmpty()) { "请输入网址" }
+        require(text.isNotEmpty()) { tr("请输入网址", "Enter a URL") }
         val explicitScheme = text.contains("://")
         val candidate = if (explicitScheme) text else "https://${text.removePrefix("//")}"
-        val parsed = requireNotNull(candidate.toHttpUrlOrNull()) { "网址格式不正确" }
+        val parsed = requireNotNull(candidate.toHttpUrlOrNull()) { tr("网址格式不正确", "Invalid URL format") }
         val url = if (!explicitScheme && parsed.host in loopbackHosts) {
             "http://${text.removePrefix("//")}".toHttpUrl()
         } else parsed
         return url.toString().also {
-            require(allowedUrl(it)) { "仅支持 HTTPS 或本机 HTTP 页面" }
+            require(allowedUrl(it)) { tr("仅支持 HTTPS 或本机 HTTP 页面", "Only HTTPS or localhost HTTP pages are supported") }
         }
     }
 
@@ -53,7 +55,7 @@ object BrowserPolicy {
         uri.userInfo == null && !uri.host.isNullOrBlank() && (uri.scheme.equals("https", true) ||
             (uri.scheme.equals("http", true) && uri.host.lowercase() in setOf("localhost", "127.0.0.1", "[::1]", "::1")))
     }.getOrDefault(false)
-    fun requireOwner(owner: String, session: String) { require(owner == session) { "标签页不属于当前会话" } }
+    fun requireOwner(owner: String, session: String) { require(owner == session) { tr("标签页不属于当前会话", "Tab does not belong to current session") } }
 
     fun sanitizeTelemetryUrl(raw: String): String {
         val trimmed = raw.trim()

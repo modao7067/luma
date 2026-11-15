@@ -1,6 +1,7 @@
 import shutil
 from .acp import AcpSession
 from .base import item, text
+from .i18n import tr
 from .transport import Rejected
 
 class QoderSession(AcpSession):
@@ -13,7 +14,7 @@ class QoderSession(AcpSession):
         if argv == self.argv and argv == ["qoder", "--acp"]:
             command = shutil.which("qoder") or shutil.which("qodercli")
             if not command:
-                raise Rejected("未找到 Qoder CLI：qoder / qodercli")
+                raise Rejected(tr("未找到 Qoder CLI：qoder / qodercli", "Qoder CLI not found: qoder / qodercli"))
             argv = [command, "--acp"]
         return super().start(argv, env_overrides)
 
@@ -35,7 +36,7 @@ class QoderSession(AcpSession):
         result = super().call(method, params, **kwargs)
         if submission and result.get("userMessageId"):
             if not self.remember_user_message(result["userMessageId"], submission):
-                raise Rejected("Qoder 返回了已绑定其它消息的原生 ID")
+                raise Rejected(tr("Qoder 返回了已绑定其它消息的原生 ID", "Qoder returned a native ID already bound to another message"))
         return result
 
     def remember_user_message(self, native_id, submission_id):
@@ -51,7 +52,7 @@ class QoderSession(AcpSession):
         super().validate_prompt(payload)
         words = payload.get("text", "").strip().split(maxsplit=1)
         if words and words[0].lower() in ("/clear", "/reset", "/new", "/rewind"):
-            raise Rejected("此命令会改写托管会话历史；请使用新建会话")
+            raise Rejected(tr("此命令会改写托管会话历史；请使用新建会话", "This command rewrites managed session history; create a new session instead"))
 
     def event(self, frame):
         params = frame.get("params", {})

@@ -47,9 +47,9 @@ public final class PreviewFileCheck {
             String basic=new String(Files.readAllBytes(fallback.toPath()),java.nio.charset.StandardCharsets.UTF_8);
             check(basic.contains("排版标题")&&basic.contains("• ")&&!basic.contains("# ")&&!basic.contains("```")&&!basic.contains("**"),"guest without glow still renders basic Markdown structure");
             String failure="";try{TerminalLinkReader.copy(null,"not-present-file.png",0,relative,1024,false);}catch(IOException error){failure=error.getMessage();}
-            check(failure.contains("找不到文件")&&failure.contains("not-present-file.png"),"actual failing path returned instead of generic permission guess");
+            check(failure.contains(com.termux.terminal.LumaLang.tr("找不到文件","File not found"))&&failure.contains("not-present-file.png"),"actual failing path returned instead of generic permission guess");
             File longText=new File(work,"long.txt");try(OutputStream out=new FileOutputStream(longText)){byte[]b=new byte[TerminalDocuments.MAX_TEXT_BYTES+32];Arrays.fill(b,(byte)'a');out.write(b);}
-            String text=TerminalDocuments.text(longText);check(text.startsWith("aaaa")&&text.contains("仅预览前 1 MiB")&&text.length()<TerminalDocuments.MAX_TEXT_BYTES+100,"large text preview is bounded and labeled");
+            String text=TerminalDocuments.text(longText);check(text.startsWith("aaaa")&&text.contains(com.termux.terminal.LumaLang.tr("仅预览前 1 MiB","showing first 1 MiB"))&&text.length()<TerminalDocuments.MAX_TEXT_BYTES+100,"large text preview is bounded and labeled");
             File binary=new File(work,"binary.txt");Files.write(binary.toPath(),new byte[]{'a',0,'b'});rejects(()->TerminalDocuments.text(binary),"binary content not shown as text");
             check(TerminalDocuments.isText("README.MD")&&TerminalDocuments.isText("trace.jsonl")&&!TerminalDocuments.isText("file.apk"),"document type routing");
             File pdf=new File(work,"input/sample.pdf");TerminalDocuments.PdfPage first=TerminalDocuments.pdf(pdf,0,1080,1600),second=TerminalDocuments.pdf(pdf,1,1080,1600);

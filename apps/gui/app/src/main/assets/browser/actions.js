@@ -2,6 +2,8 @@ function(request) {
   // Composed-tree traversal is adapted from CitroLabs ego-lite (MIT).
   // See ego-lite-MIT.txt. No browser/native bridge code is used here.
   let dispatched = false;
+  const rawLang = String((request && request.__lang) || (typeof navigator !== 'undefined' && navigator.language) || 'zh').trim().toLowerCase();
+  const tr = (zh, en) => (rawLang.startsWith('zh') ? zh : en);
   const fail = (code, message) => { const error = Error(message); error.code = code; throw error; };
   if (request && request.action === '__finalizeTap') {
     const pending = window.__lumaPendingTap;
@@ -234,7 +236,7 @@ function(request) {
   };
   const matchSemanticText = (candidates, getValue, rawSpec) => {
     const {term, exact} = parseQuotedTerm(rawSpec);
-    if (!term) fail('INVALID_SELECTOR', '语义定位值不能为空');
+    if (!term) fail('INVALID_SELECTOR', tr('语义定位值不能为空', 'Semantic selector value cannot be empty'));
     const needle = cleanSpace(term);
     if (exact) return candidates.filter(item => cleanSpace(getValue(item)) === needle);
     const lower = needle.toLowerCase();
@@ -243,9 +245,9 @@ function(request) {
     return candidates.filter(item => cleanSpace(getValue(item)).toLowerCase().includes(lower));
   };
   const query = (state, selector) => {
-    if (typeof selector !== 'string' || !selector.trim()) fail('INVALID_SELECTOR', 'selector 必须是非空选择器');
+    if (typeof selector !== 'string' || !selector.trim()) fail('INVALID_SELECTOR', tr('selector 必须是非空选择器', 'selector must be a non-empty string'));
     for (const {context} of state.roots) {
-      if (!contextValid(context)) fail('STALE_DOCUMENT', 'frame 文档已变化，请重新 read');
+      if (!contextValid(context)) fail('STALE_DOCUMENT', tr('frame 文档已变化，请重新 read', 'Frame document changed; run read again'));
     }
     const trimmed = selector.trim();
     const semantic = /^(text|label|placeholder|testid|role)=(.+)$/s.exec(trimmed);
@@ -290,7 +292,7 @@ function(request) {
           ? matchSemanticText(rolePool, ({node}) => node.innerText || resolveLabelText(node) || '', nameSpec)
           : rolePool;
       }
-      if (matches.length > 1) fail('AMBIGUOUS_TARGET', '语义定位匹配多个元素，请补充更精确文本或使用 read 返回的 @N');
+      if (matches.length > 1) fail('AMBIGUOUS_TARGET', tr('语义定位匹配多个元素，请补充更精确文本或使用 read 返回的 @N', 'Semantic selector matched multiple elements; refine text or use @N from read'));
       return matches[0];
     }
     const matches = [];
@@ -298,8 +300,8 @@ function(request) {
       for (const {root, context} of state.roots) {
         for (const node of root.querySelectorAll(selector)) matches.push({node, context});
       }
-    } catch (error) { if (typeof error.code === 'string') throw error; fail('INVALID_SELECTOR', 'CSS 选择器无效'); }
-    if (matches.length > 1) fail('AMBIGUOUS_TARGET', 'CSS 选择器匹配多个元素，请使用唯一 selector 或 read 返回的 ref/index');
+    } catch (error) { if (typeof error.code === 'string') throw error; fail('INVALID_SELECTOR', tr('CSS 选择器无效', 'Invalid CSS selector')); }
+    if (matches.length > 1) fail('AMBIGUOUS_TARGET', tr('CSS 选择器匹配多个元素，请使用唯一 selector 或 read 返回的 ref/index', 'CSS selector matched multiple elements; use a unique selector or ref/index from read'));
     return matches[0];
   };
 
@@ -467,7 +469,7 @@ function(request) {
     let candidateEntries = state.entries;
     if (typeof scopeSelector === 'string' && scopeSelector.trim()) {
       const scoped = query(state, scopeSelector);
-      if (!scoped?.node?.isConnected) fail('TARGET_MISSING', '未找到限定作用域容器');
+      if (!scoped?.node?.isConnected) fail('TARGET_MISSING', tr('未找到限定作用域容器', 'Scoped container element not found'));
       scopedNode = scoped.node;
       candidateEntries = state.entries.filter(item => contains(scopedNode, item.node));
     }
@@ -482,16 +484,16 @@ function(request) {
 
   const resolvePointTarget = (topX, topY) => {
     if (typeof topX !== 'number' || typeof topY !== 'number' || !Number.isFinite(topX) || !Number.isFinite(topY)) {
-      fail('INVALID_COORDINATES', '坐标 x/y 必须是有限数值');
+      fail('INVALID_COORDINATES', tr('坐标 x/y 必须是有限数值', 'Coordinates x/y must be finite numbers'));
     }
     let doc = document, x = topX, y = topY;
     const frames = [];
     while (true) {
       if (x < 0 || y < 0 || x > (doc.defaultView?.innerWidth || 0) || y > (doc.defaultView?.innerHeight || 0)) {
-        fail('OUT_OF_VIEWPORT', '坐标超出当前可视窗口范围');
+        fail('OUT_OF_VIEWPORT', tr('坐标超出当前可视窗口范围', 'Coordinates are outside the current viewport'));
       }
       const hit = deepHit(doc, x, y);
-      if (!hit) fail('TARGET_MISSING', '该坐标处未命中页面元素');
+      if (!hit) fail('TARGET_MISSING', tr('该坐标处未命中页面元素', 'No page element found at the given coordinates'));
       if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
         let childDoc;
         try { childDoc = hit.contentDocument; } catch (_) {}
@@ -577,7 +579,7 @@ function(request) {
 
   const resolveKeySpec = rawKey => {
     const raw = String(rawKey || '').trim();
-    if (!raw) fail('INVALID_KEY', '按键名称不能为空');
+    if (!raw) fail('INVALID_KEY', tr('按键名称不能为空', 'Key name cannot be empty'));
     const aliases = {
       enter: {key: 'Enter', code: 'Enter', keyCode: 13},
       return: {key: 'Enter', code: 'Enter', keyCode: 13},
@@ -749,7 +751,7 @@ function(request) {
         if (request.selector !== undefined) target = query(collect(), request.selector);
         else if (request.ref !== undefined) target = saved.elements[Number(String(request.ref).slice(1)) - 1];
         else target = saved.elements[Number(request.index)];
-        if (!target?.node?.isConnected) fail('TARGET_MISSING', '滚动目标不存在');
+        if (!target?.node?.isConnected) fail('TARGET_MISSING', tr('滚动目标不存在', 'Scroll target does not exist'));
         const el = target.node;
         if (request.intoView || (el.scrollHeight <= el.clientHeight && el.scrollWidth <= el.clientWidth)) {
           el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
@@ -770,7 +772,7 @@ function(request) {
         else if (dir === 'left') window.scrollBy(-amt, 0);
         else if (dir === 'top') window.scrollTo(0, 0);
         else if (dir === 'bottom') window.scrollTo(0, document.documentElement?.scrollHeight || document.body?.scrollHeight || 0);
-        else fail('INVALID_DIRECTION', 'direction 仅支持 up/down/left/right/top/bottom');
+        else fail('INVALID_DIRECTION', tr('direction 仅支持 up/down/left/right/top/bottom', 'direction must be one of up/down/left/right/top/bottom'));
       }
       return {
         ok: true,
@@ -788,7 +790,7 @@ function(request) {
       if (request.snapshot !== undefined && !liveMode) {
         const read = window.__lumaRead;
         if (!read || request.snapshot !== read.snapshot || read.document !== document || read.url !== location.href) {
-          fail('STALE_SNAPSHOT', '页面快照已过期，请重新 read');
+          fail('STALE_SNAPSHOT', tr('页面快照已过期，请重新 read', 'Page snapshot is stale; run read again'));
         }
       }
       if (!reuseSnapshot) delete window.__lumaRead;
@@ -807,7 +809,7 @@ function(request) {
     }
 
     const MUTATING_ACTIONS = new Set(['click', 'fill', 'type', 'select', 'check', 'uncheck', 'hover', 'press']);
-    if (!MUTATING_ACTIONS.has(request.action)) fail('UNKNOWN_ACTION', '未知页面操作');
+    if (!MUTATING_ACTIONS.has(request.action)) fail('UNKNOWN_ACTION', tr('未知页面操作', 'Unknown page action'));
 
     const coordinateMode = request.x !== undefined && request.y !== undefined;
     const liveMode = request.snapshot === '__live__';
@@ -815,13 +817,13 @@ function(request) {
     let read = window.__lumaRead;
     if (liveMode && (!read || read.document !== document || read.url !== location.href)) {
       if (request.ref !== undefined || request.index !== undefined) {
-        fail('STALE_SNAPSHOT', '页面已变化，请先重新 read 获取最新 @N 编号');
+        fail('STALE_SNAPSHOT', tr('页面已变化，请先重新 read 获取最新 @N 编号', 'Page changed; run read first to get updated @N refs'));
       }
       read = buildSnapshotState();
     }
     if (!coordinateMode || request.snapshot !== undefined) {
       if (!liveMode && (!read || request.snapshot !== read.snapshot || read.document !== document || read.url !== location.href)) {
-        fail('STALE_SNAPSHOT', '页面快照已过期，请重新 read');
+        fail('STALE_SNAPSHOT', tr('页面快照已过期，请重新 read', 'Page snapshot is stale; run read again'));
       }
     }
 
@@ -832,18 +834,18 @@ function(request) {
       coordPoint = resolved.point;
     } else if (request.selector !== undefined) {
       target = query(collect(), request.selector);
-      if (target && !liveMode && !read.identities.has(target.node)) fail('STALE_NODE', 'selector 对应节点在 read 后新增或替换，请重新 read');
+      if (target && !liveMode && !read.identities.has(target.node)) fail('STALE_NODE', tr('selector 对应节点在 read 后新增或替换，请重新 read', 'Element matched by selector was added or replaced after read; run read again'));
     } else if (request.ref !== undefined) {
-      if (typeof request.ref !== 'string' || !/^@[1-9]\d*$/.test(request.ref)) fail('INVALID_REF', 'ref 必须使用 read 返回的 @N');
+      if (typeof request.ref !== 'string' || !/^@[1-9]\d*$/.test(request.ref)) fail('INVALID_REF', tr('ref 必须使用 read 返回的 @N', 'ref must be an @N reference returned by read'));
       target = read.elements[Number(request.ref.slice(1)) - 1];
     } else {
       target = read.elements[request.index];
     }
-    if (!target) fail('TARGET_MISSING', '元素不存在或已移除，请重新 read');
+    if (!target) fail('TARGET_MISSING', tr('元素不存在或已移除，请重新 read', 'Element does not exist or was removed; run read again'));
     const resolvedEntry = (!coordinateMode && read?.identities?.get(target.node)) || target;
     let {node:e, context} = resolvedEntry;
-    if (!contextValid(context) || e.ownerDocument !== context.doc) fail('STALE_DOCUMENT', '元素文档已变化，请重新 read');
-    if (!e.isConnected) fail('STALE_NODE', '元素已移除，请重新 read');
+    if (!contextValid(context) || e.ownerDocument !== context.doc) fail('STALE_DOCUMENT', tr('元素文档已变化，请重新 read', 'Element document changed; run read again'));
+    if (!e.isConnected) fail('STALE_NODE', tr('元素已移除，请重新 read', 'Element was removed; run read again'));
 
     let clickHost = e;
     if (e.tagName === 'INPUT' && (e.type === 'checkbox' || e.type === 'radio') && !shown(e) && e.labels?.length) {
@@ -851,8 +853,8 @@ function(request) {
       if (visLabel) clickHost = visLabel;
     }
     const wrappedCtrl = hiddenWrappedControl(e);
-    if (!visible(clickHost, context)) fail('NOT_VISIBLE', '元素不可见');
-    if (disabled(wrappedCtrl || e)) fail('DISABLED', '元素已禁用');
+    if (!visible(clickHost, context)) fail('NOT_VISIBLE', tr('元素不可见', 'Element is not visible'));
+    if (disabled(wrappedCtrl || e)) fail('DISABLED', tr('元素已禁用', 'Element is disabled'));
 
     if (request.action === 'fill' || request.action === 'type') {
       if (coordinateMode && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName) && !e.isContentEditable) {
@@ -861,14 +863,14 @@ function(request) {
       }
       const editableContent = Boolean(e.isContentEditable);
       if (!editableContent && (!['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName) || e.type === 'file' || e.readOnly)) {
-        fail('NOT_EDITABLE', '不是可输入字段');
+        fail('NOT_EDITABLE', tr('不是可输入字段', 'Target is not an editable input field'));
       }
     }
     if (request.action === 'select') {
       const selNode = wrappedCtrl?.tagName === 'SELECT' ? wrappedCtrl : e;
       const role = selNode.getAttribute('role')?.trim().toLowerCase();
       if (selNode.tagName !== 'SELECT' && role !== 'listbox' && role !== 'combobox') {
-        fail('NOT_SELECTABLE', '目标不是下拉选择控件');
+        fail('NOT_SELECTABLE', tr('目标不是下拉选择控件', 'Target is not a select/dropdown control'));
       }
     }
     if (request.action === 'check' || request.action === 'uncheck') {
@@ -876,7 +878,7 @@ function(request) {
       const role = ctrl.getAttribute('role')?.trim().toLowerCase();
       const isCheckInput = ctrl.tagName === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio');
       const isAriaCheck = role === 'checkbox' || role === 'switch' || role === 'menuitemcheckbox' || role === 'radio';
-      if (!isCheckInput && !isAriaCheck) fail('NOT_CHECKABLE', '目标不是可勾选控件');
+      if (!isCheckInput && !isAriaCheck) fail('NOT_CHECKABLE', tr('目标不是可勾选控件', 'Target is not a checkable control'));
     }
 
     let hitPoint = null;
@@ -884,7 +886,7 @@ function(request) {
       for (const frame of context.frames) frame.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
       clickHost.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
       hitPoint = findHitPoint(clickHost, context);
-      if (!hitPoint) fail('OBSCURED', '元素被遮挡或不在可点击区域');
+      if (!hitPoint) fail('OBSCURED', tr('元素被遮挡或不在可点击区域', 'Element is obscured or outside clickable bounds'));
     }
 
     const consumeSnapshot = () => {
@@ -1022,7 +1024,7 @@ function(request) {
         const opts = Array.from(selNode.options || []);
         const match = opts.find(o => o.value === desired || cleanSpace(o.text) === desired)
           || opts.find(o => o.value.toLowerCase() === desired.toLowerCase() || cleanSpace(o.text).toLowerCase() === desired.toLowerCase());
-        if (!match) fail('OPTION_NOT_FOUND', `未找到下拉选项：${desired}`);
+        if (!match) fail('OPTION_NOT_FOUND', tr(`未找到下拉选项：${desired}`, `Dropdown option not found: ${desired}`));
         selNode.focus();
         setTextFieldValue(selNode, match.value);
         return {ok: true, dispatched: true, value: match.value, text: cleanSpace(match.text)};
@@ -1030,7 +1032,7 @@ function(request) {
       const optionNodes = Array.from(selNode.ownerDocument.querySelectorAll('[role="option"]')).filter(o => shown(o));
       const match = optionNodes.find(o => cleanSpace(o.innerText) === desired || o.getAttribute('data-value') === desired)
         || optionNodes.find(o => cleanSpace(o.innerText).toLowerCase().includes(desired.toLowerCase()));
-      if (!match) fail('OPTION_NOT_FOUND', `未找到下拉选项：${desired}`);
+      if (!match) fail('OPTION_NOT_FOUND', tr(`未找到下拉选项：${desired}`, `Dropdown option not found: ${desired}`));
       dispatchRealisticClick(match);
       return {ok: true, dispatched: true, text: cleanSpace(match.innerText)};
     }

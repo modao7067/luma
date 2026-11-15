@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -116,9 +118,9 @@ internal fun requestDialogPresentation(title: String, body: String): Pair<String
     val cleanTitle = title.trim()
     val firstLine = cleanTitle.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
     val isMultilineOrLong = cleanTitle.contains('\n') || cleanTitle.length > 72
-    if (!isMultilineOrLong) return cleanTitle.ifEmpty { "工具授权" } to body
+    if (!isMultilineOrLong) return cleanTitle.ifEmpty { tr("工具授权", "Tool authorization") } to body
     val header = when {
-        firstLine.isEmpty() -> "工具授权"
+        firstLine.isEmpty() -> tr("工具授权", "Tool authorization")
         firstLine.length > 72 -> firstLine.take(72) + "…"
         cleanTitle.contains('\n') -> "$firstLine…"
         else -> firstLine
@@ -174,7 +176,7 @@ internal fun FilePreviewScreen(preview: FilePreview, actions: CockpitActions, pr
         } else Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             LiquidScaffold(wrapTop = false, wrapBottom = false, edgeToEdgeContent = true,
                 topBar = {
-                    DetailPageHeader(preview.path.substringAfterLast('/'), actions::closePreview, backLabel = "返回来源") {
+                    DetailPageHeader(preview.path.substringAfterLast('/'), actions::closePreview, backLabel = tr("返回来源", "Back")) {
                         MediaSaveButton(preview.sourceResource?.inContext(parentContext), actions) { message ->
                             scope.launch { saveFeedback.showSnackbar(message) }
                         }
@@ -192,10 +194,10 @@ internal fun FilePreviewScreen(preview: FilePreview, actions: CockpitActions, pr
                                     scope.launch {
                                         try { actions.openMediaExternally(source.inContext(parentContext)) }
                                         catch (cancelled: CancellationException) { throw cancelled }
-                                        catch (failure: Exception) { openError = failure.message ?: "无法打开" }
+                                        catch (failure: Exception) { openError = failure.message ?: tr("无法打开", "Unable to open") }
                                         finally { opening = false }
                                     }
-                                }) { MenuIcon(MenuSymbol.OPEN_EXTERNAL, size = 18.dp); Spacer(Modifier.width(8.dp)); Text("用其他应用打开") }
+                                }) { MenuIcon(MenuSymbol.OPEN_EXTERNAL, size = 18.dp); Spacer(Modifier.width(8.dp)); Text(tr("用其他应用打开", "Open in another app")) }
                             } else {
                                 Spacer(Modifier.width(1.dp))
                             }
@@ -203,14 +205,14 @@ internal fun FilePreviewScreen(preview: FilePreview, actions: CockpitActions, pr
                                 val clipboard = LocalClipboardManager.current
                                 TextButton(onClick = {
                                     clipboard.setText(AnnotatedString(preview.text))
-                                    scope.launch { saveFeedback.showSnackbar("已复制全文") }
-                                }) { ComposerGlyph("copy"); Spacer(Modifier.width(6.dp)); Text("复制全文") }
+                                    scope.launch { saveFeedback.showSnackbar(tr("已复制全文", "Copied full text")) }
+                                }) { ComposerGlyph("copy"); Spacer(Modifier.width(6.dp)); Text(tr("复制全文", "Copy all")) }
                             }
                         }
                         openError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
                         when {
                             preview.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-                            preview.text.isEmpty() -> Text(if (preview.path.contains("diff", true)) "没有可显示的差异。" else "文件为空。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            preview.text.isEmpty() -> Text(if (preview.path.contains("diff", true)) tr("没有可显示的差异。", "No diff to display.") else tr("文件为空。", "File is empty."), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             filePreviewIsMarkdown(preview) -> ConversationTypography { NativeMarkdown(preview.text, actions::previewFile) }
                             else -> CodeFileViewer(preview.text, if (preview.path.contains("diff", true)) "diff" else preview.path.substringAfterLast('.', ""))
                         }
@@ -349,7 +351,7 @@ internal fun SettingsScreen(
                         Modifier
                             .size(44.dp)
                             .testTag("settings-back")
-                            .semantics { contentDescription = if (subPage == "main") "关闭设置" else "返回设置" }
+                            .semantics { contentDescription = if (subPage == "main") tr("关闭设置", "Close settings") else tr("返回设置", "Back to settings") }
                             .liquidClickable(cornerRadius = 22.dp) {
                                 if (subPage != "main") go("main") else onDismiss()
                             },
@@ -372,7 +374,7 @@ internal fun SettingsScreen(
                             contentAlignment = Alignment.CenterStart,
                         ) {
                             Text(
-                                when (subPage) { "profile" -> "CLI 工具"; "environment" -> "环境设置"; else -> "设置" },
+                                when (subPage) { "profile" -> tr("CLI 工具", "CLI tools"); "environment" -> tr("环境设置", "Environment"); else -> tr("设置", "Settings") },
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             )
                         }
@@ -415,8 +417,8 @@ internal fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (page == "main") {
-                        SettingsNavigationRow("CLI 工具", MenuSymbol.TERMINAL) { go("profile") }
-                        if (hasEnvironmentSettings) SettingsNavigationRow("环境设置", MenuSymbol.SETTINGS) { go("environment") }
+                        SettingsNavigationRow(tr("CLI 工具", "CLI tools"), MenuSymbol.TERMINAL) { go("profile") }
+                        if (hasEnvironmentSettings) SettingsNavigationRow(tr("环境设置", "Environment"), MenuSymbol.SETTINGS) { go("environment") }
                     } else if (page == "environment" && hasEnvironmentSettings) {
                         EnvironmentSettingsContent(environmentAccess)
                     } else {

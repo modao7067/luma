@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
@@ -185,9 +188,22 @@ private val standardEnglishChoiceMap = mapOf(
     "cancel" to "取消",
 )
 
+private val standardChoiceEnMap = mapOf(
+    "allow" to "Allow", "允许" to "Allow",
+    "allow once" to "Allow once", "allow_once" to "Allow once", "approve once" to "Allow once", "允许一次" to "Allow once", "仅允许一次" to "Allow once",
+    "approve" to "Approve", "批准" to "Approve",
+    "accept" to "Accept", "接受" to "Accept",
+    "allow always" to "Always allow", "always allow" to "Always allow", "allow_always" to "Always allow", "始终允许" to "Always allow",
+    "allow for session" to "Allow for session", "allow for this session" to "Allow for session", "本会话允许" to "Allow for session",
+    "reject" to "Reject", "deny" to "Deny", "decline" to "Decline", "拒绝" to "Reject",
+    "reject once" to "Reject once", "拒绝本次" to "Reject once",
+    "cancel" to "Cancel", "取消" to "Cancel",
+)
+
 private fun normalizeChoiceDisplayLabel(label: String): String {
     val trimmed = label.trim()
-    return standardEnglishChoiceMap[trimmed.lowercase()] ?: trimmed
+    return if (LumaI18n.isZh()) standardEnglishChoiceMap[trimmed.lowercase()] ?: trimmed
+    else standardChoiceEnMap[trimmed.lowercase()] ?: standardChoiceEnMap[trimmed] ?: trimmed
 }
 
 private fun classifyApprovalChoices(choices: List<RequestChoice>): List<ClassifiedChoice> {
@@ -235,7 +251,7 @@ private fun classifyApprovalChoices(choices: List<RequestChoice>): List<Classifi
         val negCount = mapped.count { it.role == ApprovalChoiceRole.Negative || it.role == ApprovalChoiceRole.Destructive }
         if (negCount < 2) return@let mapped
         val withoutLumaCancel = mapped.filterNot {
-            it.raw.id.startsWith("luma:cancel", ignoreCase = true) && it.displayLabel == "取消"
+            it.raw.id.startsWith("luma:cancel", ignoreCase = true) && (it.displayLabel == "取消" || it.displayLabel.equals("Cancel", ignoreCase = true))
         }
         val remainingNeg = withoutLumaCancel.count {
             it.role == ApprovalChoiceRole.Negative || it.role == ApprovalChoiceRole.Destructive
@@ -243,10 +259,10 @@ private fun classifyApprovalChoices(choices: List<RequestChoice>): List<Classifi
         if (remainingNeg < 2) return@let withoutLumaCancel
         val hasNonCancelNeg = withoutLumaCancel.any {
             (it.role == ApprovalChoiceRole.Negative || it.role == ApprovalChoiceRole.Destructive) &&
-                !(it.raw.id.equals("cancel", ignoreCase = true) && it.displayLabel == "取消")
+                !(it.raw.id.equals("cancel", ignoreCase = true) && (it.displayLabel == "取消" || it.displayLabel.equals("Cancel", ignoreCase = true)))
         }
         if (hasNonCancelNeg) {
-            withoutLumaCancel.filterNot { it.raw.id.equals("cancel", ignoreCase = true) && it.displayLabel == "取消" }
+            withoutLumaCancel.filterNot { it.raw.id.equals("cancel", ignoreCase = true) && (it.displayLabel == "取消" || it.displayLabel.equals("Cancel", ignoreCase = true)) }
         } else {
             withoutLumaCancel
         }
@@ -261,7 +277,7 @@ private fun horizontalSortKey(role: ApprovalChoiceRole): Int = when (role) {
     ApprovalChoiceRole.PrimaryAllow -> 4
 }
 
-private data class StructuredApprovalBody(
+internal data class StructuredApprovalBody(
     val leadText: String = "",
     val codeBlock: String = "",
     val cwd: String = "",
@@ -276,6 +292,18 @@ private val fencedBodyWithOptionalLeadRegex =
     Regex("^(?:([\\s\\S]*?)\\n\\s*\\n)?```[^\\n]*\\n([\\s\\S]*?)\\n```\\s*$")
 private val machineQuestionKeyRegex =
     Regex("^(?:\\d+|(?:q|question|item|step|field|prop)_?\\d+)$", RegexOption.IGNORE_CASE)
+private val bareApprovalToolNames = setOf(
+    "bash", "sh", "zsh", "pwsh", "shell", "exec", "execute", "run", "run_command", "run_code",
+    "write", "write_file", "edit", "edit_file", "str_replace_editor", "patch", "apply_patch",
+    "read", "read_file", "tool",
+)
+
+private fun isGenericApprovalTitle(cleanTitle: String): Boolean =
+    cleanTitle.isEmpty() ||
+        cleanTitle == "工具授权" || cleanTitle == "工具权限确认" || cleanTitle == "工具" ||
+        cleanTitle.equals("Tool authorization", ignoreCase = true) ||
+        cleanTitle.equals("Tool permission", ignoreCase = true) ||
+        cleanTitle.lowercase() in bareApprovalToolNames
 
 private fun titleRepeatsTarget(cleanTitle: String, target: String): Boolean {
     if (cleanTitle.isEmpty() || target.isEmpty()) return false
@@ -299,7 +327,10 @@ private fun parseJsonObjectWithTrailing(trimmed: String): Pair<JSONObject, Strin
     return null
 }
 
-private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<String, StructuredApprovalBody> {
+private fun JSONObject.safeTrimmedString(key: String): String =
+    if (isNull(key)) "" else optString(key).trim()
+
+internal fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<String, StructuredApprovalBody> {
     val cleanTitle = title.trim()
     val trimmed = rawBody.trim()
 
@@ -307,29 +338,33 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
         val jsonAndTail = parseJsonObjectWithTrailing(trimmed)
         if (jsonAndTail != null) {
             val (obj, trailingDisplay) = jsonAndTail
-            val command = sequenceOf("command", "CommandLine", "cmd", "script")
-                .map { obj.optString(it).trim() }
+            val command = sequenceOf("command", "CommandLine", "cmd", "script", "code")
+                .map { obj.safeTrimmedString(it) }
                 .firstOrNull { it.isNotEmpty() }.orEmpty()
             val filePath = sequenceOf("file_path", "fileName", "path", "target_file", "TargetFile", "AbsolutePath", "DirectoryPath", "url")
-                .map { obj.optString(it).trim() }
+                .map { obj.safeTrimmedString(it) }
                 .firstOrNull { it.isNotEmpty() }.orEmpty()
             val summary = sequenceOf("toolSummary", "summary")
-                .map { obj.optString(it).trim() }
+                .map { obj.safeTrimmedString(it) }
                 .firstOrNull { it.isNotEmpty() }.orEmpty()
             val description = sequenceOf("description", "reason", "explanation", "intention")
-                .map { obj.optString(it).trim() }
+                .map { obj.safeTrimmedString(it) }
                 .firstOrNull { it.isNotEmpty() }.orEmpty()
+            val justification = obj.safeTrimmedString("justification")
+            val sandboxPermissions = obj.safeTrimmedString("sandbox_permissions")
+            val sandboxNote = if (sandboxPermissions.isNotEmpty()) tr("请求沙箱权限：$sandboxPermissions", "Requested sandbox: $sandboxPermissions") else ""
             val cwd = sequenceOf("cwd", "Cwd", "workdir", "working_directory")
-                .map { obj.optString(it).trim() }
+                .map { obj.safeTrimmedString(it) }
                 .firstOrNull { it.isNotEmpty() }.orEmpty()
             val isDaemon = obj.optBoolean("IsDaemon", false) ||
                 obj.optBoolean("is_background", false) ||
                 obj.optBoolean("run_in_background", false)
             val ignoredKeys = setOf(
-                "command", "CommandLine", "cmd", "script",
+                "command", "CommandLine", "cmd", "script", "code",
                 "file_path", "fileName", "path", "target_file", "TargetFile", "AbsolutePath", "DirectoryPath", "url",
                 "toolSummary", "summary",
                 "description", "reason", "explanation", "intention",
+                "justification", "sandbox_permissions",
                 "cwd", "Cwd", "workdir", "working_directory",
                 "WaitMsBeforeAsync", "timeout", "timeout_ms",
                 "IsDaemon", "is_background", "run_in_background",
@@ -349,23 +384,21 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
                 else -> ""
             }
             if (primaryTarget.isNotEmpty()) {
-                val genericOrRedundantTitle = cleanTitle.isEmpty() ||
-                    cleanTitle == "工具授权" ||
-                    titleRepeatsTarget(cleanTitle, primaryTarget)
+                val genericOrRedundantTitle = isGenericApprovalTitle(cleanTitle) || titleRepeatsTarget(cleanTitle, primaryTarget)
                 val resolvedTitle = if (genericOrRedundantTitle) {
                     when {
                         summary.isNotEmpty() -> summary
                         description.isNotEmpty() && description.length <= 64 && '\n' !in description -> description
-                        command.isNotEmpty() -> if (isDaemon) "后台执行终端命令" else "执行终端命令"
+                        command.isNotEmpty() -> if (isDaemon) tr("后台执行终端命令", "Run background command") else tr("执行终端命令", "Run terminal command")
                         else -> {
                             val base = filePath.trimEnd('/').substringAfterLast('/').ifEmpty { filePath }
-                            "访问路径 · $base"
+                            tr("访问路径 · $base", "Access path · $base")
                         }
                     }
                 } else {
                     if (cleanTitle.length > 80) cleanTitle.take(80) + "…" else cleanTitle
                 }
-                val lead = listOf(summary, description)
+                val lead = listOf(summary, description, justification, sandboxNote)
                     .filter { it.isNotBlank() && it != resolvedTitle }
                     .distinct()
                     .joinToString("\n")
@@ -377,37 +410,44 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
                     kindHint = kindHint,
                 )
             } else {
+                val genericTitle = cleanTitle.isEmpty() ||
+                    cleanTitle == "工具授权" || cleanTitle == "工具" ||
+                    cleanTitle.equals("Tool authorization", ignoreCase = true) ||
+                    cleanTitle.equals("Tool permission", ignoreCase = true)
                 val resolvedTitle = when {
-                    cleanTitle.isEmpty() || cleanTitle == "工具授权" -> summary.ifEmpty { "工具权限确认" }
+                    genericTitle -> summary.ifEmpty { tr("工具权限确认", "Tool permission") }
                     cleanTitle.length > 80 -> cleanTitle.take(80) + "…"
                     else -> cleanTitle
                 }
-                val lead = listOf(summary, description)
+                val lead = listOf(summary, description, justification, sandboxNote)
                     .filter { it.isNotBlank() && it != resolvedTitle }
                     .distinct()
                     .joinToString("\n")
-                val code = (if (restPretty.isNotEmpty()) restPretty else obj.toString(2)).let {
-                    if (trailingDisplay.isNotBlank()) "$it\n\n$trailingDisplay" else it
+                val baseCode = when {
+                    restPretty.isNotEmpty() -> restPretty
+                    lead.isEmpty() -> obj.toString(2)
+                    else -> ""
                 }
+                val code = listOf(baseCode, trailingDisplay).filter { it.isNotBlank() }.joinToString("\n\n")
                 return resolvedTitle to StructuredApprovalBody(leadText = lead, codeBlock = code, cwd = cwd)
             }
         }
-        val fallbackHeader = if (cleanTitle.isEmpty()) "工具权限确认" else if (cleanTitle.length > 80) cleanTitle.take(80) + "…" else cleanTitle
+        val fallbackHeader = if (cleanTitle.isEmpty()) tr("工具权限确认", "Tool permission") else if (cleanTitle.length > 80) cleanTitle.take(80) + "…" else cleanTitle
         return fallbackHeader to StructuredApprovalBody(codeBlock = trimmed)
     }
 
     if (trimmed.isEmpty()) {
         val isCommandLikeTitle = '\n' in cleanTitle || cleanTitle.length > 72
         return if (isCommandLikeTitle) {
-            "执行终端命令" to StructuredApprovalBody(codeBlock = cleanTitle, kindHint = "command")
+            tr("执行终端命令", "Run terminal command") to StructuredApprovalBody(codeBlock = cleanTitle, kindHint = "command")
         } else {
-            cleanTitle.ifEmpty { "工具权限确认" } to StructuredApprovalBody()
+            cleanTitle.ifEmpty { tr("工具权限确认", "Tool permission") } to StructuredApprovalBody()
         }
     }
 
     if (trimmed.startsWith("[")) {
         val prettyArray = runCatching { JSONArray(trimmed).toString(2) }.getOrDefault(trimmed)
-        val header = cleanTitle.ifEmpty { "工具权限确认" }.let { if (it.length > 80) it.take(80) + "…" else it }
+        val header = cleanTitle.ifEmpty { tr("工具权限确认", "Tool permission") }.let { if (it.length > 80) it.take(80) + "…" else it }
         return header to StructuredApprovalBody(codeBlock = prettyArray)
     }
 
@@ -417,7 +457,7 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
         val fencedCode = fencedMatch.groupValues[2].trimEnd()
         val repeats = titleRepeatsTarget(cleanTitle, fencedCode)
         val header = when {
-            repeats || cleanTitle.isEmpty() || cleanTitle == "工具授权" -> "执行终端命令"
+            repeats || cleanTitle.isEmpty() || cleanTitle == "工具授权" || cleanTitle.equals("Tool authorization", ignoreCase = true) -> tr("执行终端命令", "Run terminal command")
             cleanTitle.length > 80 -> cleanTitle.take(80) + "…"
             else -> cleanTitle
         }
@@ -428,7 +468,7 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
         )
     }
 
-    val header = cleanTitle.ifEmpty { "工具权限确认" }.let { if (it.length > 80) it.take(80) + "…" else it }
+    val header = cleanTitle.ifEmpty { tr("工具权限确认", "Tool permission") }.let { if (it.length > 80) it.take(80) + "…" else it }
     val hasMarkdownSyntax = "```" in trimmed || trimmed.startsWith("#") || "\n#" in trimmed || "\n- " in trimmed || "\n* " in trimmed || "**" in trimmed
     return if (hasMarkdownSyntax) {
         header to StructuredApprovalBody(markdownFallback = trimmed)
@@ -440,10 +480,10 @@ private fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<St
 internal fun requestBannerTitle(request: UserRequest): String {
     if (request.questions.isNotEmpty() && request.title.trim().equals("Answer", ignoreCase = true)) {
         val firstQ = request.questions.first()
-        return firstQ.prompt.trim().ifEmpty { firstQ.header.trim() }.ifEmpty { "需要确认选项" }
+        return firstQ.prompt.trim().ifEmpty { firstQ.header.trim() }.ifEmpty { tr("需要确认选项", "Confirmation required") }
     }
     val (dialogTitle, structured) = parseStructuredApprovalBody(request.title, request.body)
-    return if (dialogTitle in setOf("执行终端命令", "后台执行终端命令", "工具权限确认") && structured.codeBlock.isNotBlank()) {
+    return if (dialogTitle in setOf("执行终端命令", "后台执行终端命令", "工具权限确认", "Run terminal command", "Run background command", "Tool permission") && structured.codeBlock.isNotBlank()) {
         val firstLine = structured.codeBlock.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
         if (firstLine.isNotEmpty()) "$dialogTitle · $firstLine" else dialogTitle
     } else {
@@ -456,16 +496,16 @@ private fun approvalEyebrow(
     dialogTitle: String,
     structuredBody: StructuredApprovalBody,
 ): String {
-    if (request.externalUrl != null) return "账号授权"
-    if (structuredBody.kindHint == "command") return "命令审批"
-    if (structuredBody.kindHint == "file") return "文件变更"
+    if (request.externalUrl != null) return tr("账号授权", "Account sign-in")
+    if (structuredBody.kindHint == "command") return tr("命令审批", "Command approval")
+    if (structuredBody.kindHint == "file") return tr("文件变更", "File changes")
     val probe = "${request.title} $dialogTitle".lowercase()
     return when {
-        "命令" in probe || "bash" in probe || "shell" in probe || "exec" in probe || "command" in probe -> "命令审批"
-        "文件" in probe || "edit" in probe || "write" in probe || "patch" in probe || "file" in probe -> "文件变更"
-        "计划" in probe || "plan" in probe -> "计划审阅"
-        "mcp" in probe || "外部工具" in probe -> "外部工具确认"
-        else -> "权限确认"
+        "命令" in probe || "bash" in probe || "shell" in probe || "exec" in probe || "command" in probe -> tr("命令审批", "Command approval")
+        "文件" in probe || "edit" in probe || "write" in probe || "patch" in probe || "file" in probe -> tr("文件变更", "File changes")
+        "计划" in probe || "plan" in probe -> tr("计划审阅", "Plan review")
+        "mcp" in probe || "外部工具" in probe -> tr("外部工具确认", "External tool")
+        else -> tr("权限确认", "Permission")
     }
 }
 
@@ -759,7 +799,8 @@ private fun RequestSheetCard(
     var browserOpened by remember(request.id, request.externalUrl) { mutableStateOf(false) }
     var browserUnavailable by remember(request.id, request.externalUrl) { mutableStateOf(false) }
 
-    val (dialogTitle, structuredBody) = remember(request.title, request.body) {
+    val langCode = LumaI18n.langCode()
+    val (dialogTitle, structuredBody) = remember(request.title, request.body, langCode) {
         parseStructuredApprovalBody(request.title, request.body)
     }
 
@@ -860,16 +901,16 @@ private fun DisconnectedRecoveryBanner(
         ) {
             Text(
                 when {
-                    reconnecting -> "正在重新连接…"
-                    answering -> if (externalLogin) "取消结果待确认，请重连核对。" else "答复结果待确认，请重连核对。"
-                    else -> if (externalLogin) "连接已断开，请重新连接以继续登录。" else "连接已断开，重连后可答复。"
+                    reconnecting -> tr("正在重新连接…", "Reconnecting…")
+                    answering -> if (externalLogin) tr("取消结果待确认，请重连核对。", "Cancellation unconfirmed; reconnect to verify.") else tr("答复结果待确认，请重连核对。", "Reply unconfirmed; reconnect to verify.")
+                    else -> if (externalLogin) tr("连接已断开，请重新连接以继续登录。", "Disconnected; reconnect to continue sign-in.") else tr("连接已断开，重连后可答复。", "Disconnected; reconnect to reply.")
                 },
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp, lineHeight = 17.sp),
                 color = palette.textSecondary,
             )
             SheetCapsuleButton(
-                label = "重新连接",
+                label = tr("重新连接", "Reconnect"),
                 enabled = !reconnecting,
                 containerColor = palette.secondaryPillBg,
                 contentColor = palette.primaryBg,
@@ -947,17 +988,17 @@ private fun ApprovalSheetContent(
     if (externalLogin) {
         when {
             browserIntent == null -> Text(
-                "登录链接无效，请取消后重新连接。",
+                tr("登录链接无效，请取消后重新连接。", "Invalid sign-in URL; cancel and reconnect."),
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
                 color = palette.dangerText,
             )
             browserUnavailable -> Text(
-                "无法打开浏览器，请检查系统浏览器后重试。",
+                tr("无法打开浏览器，请检查系统浏览器后重试。", "Unable to open browser; check system browser and try again."),
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
                 color = palette.dangerText,
             )
             browserOpened && canRespond && !request.answering -> Text(
-                "等待官方 ACP 确认登录…",
+                tr("等待官方 ACP 确认登录…", "Waiting for official ACP to confirm sign-in…"),
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
                 color = palette.textSecondary,
             )
@@ -979,7 +1020,7 @@ private fun ApprovalSheetContent(
                 )
             }
             SheetCapsuleButton(
-                label = "打开 Google 登录",
+                label = tr("打开 Google 登录", "Sign in with Google"),
                 enabled = canRespond && !request.answering && browserIntent != null,
                 containerColor = palette.primaryBg,
                 contentColor = palette.primaryText,
@@ -991,7 +1032,7 @@ private fun ApprovalSheetContent(
         }
         if (request.answering && canRespond) {
             Text(
-                "正在取消登录…",
+                tr("正在取消登录…", "Cancelling sign-in…"),
                 style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
                 color = palette.textMuted,
             )
@@ -1010,7 +1051,7 @@ private fun ApprovalSheetContent(
 
     if (request.answering && canRespond) {
         Text(
-            "正在提交答复…",
+            tr("正在提交答复…", "Submitting reply…"),
             style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
             color = palette.textMuted,
         )
@@ -1158,7 +1199,7 @@ private fun ApprovalBodyBlock(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text(
-                            if (structuredBody.cwd.isNotBlank()) "目录 · ${structuredBody.cwd}" else "参数详情",
+                            if (structuredBody.cwd.isNotBlank()) tr("目录 · ${structuredBody.cwd}", "Dir · ${structuredBody.cwd}") else tr("参数详情", "Parameters"),
                             Modifier.weight(1f),
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontFamily = FontFamily.Monospace,
@@ -1170,7 +1211,7 @@ private fun ApprovalBodyBlock(
                         )
                         if (hasOverflow) {
                             Text(
-                                if (expanded) "收起" else "展开详情",
+                                if (expanded) tr("收起", "Collapse") else tr("展开详情", "Details"),
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontSize = 11.5.sp,
                                     fontWeight = FontWeight.SemiBold,
@@ -1206,7 +1247,8 @@ private fun ApprovalChoicesSection(
     enabled: Boolean,
     onSelect: (String) -> Unit,
 ) {
-    val classified = remember(choices) { classifyApprovalChoices(choices) }
+    val langCode = LumaI18n.langCode()
+    val classified = remember(choices, langCode) { classifyApprovalChoices(choices) }
     val hasMultiline = remember(classified) { classified.any { '\n' in it.displayLabel } }
 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -1424,17 +1466,17 @@ private fun ColumnScope.QuestionSheetContent(
     }
     val humanHeader = rawHeader.takeUnless { machineQuestionKeyRegex.matches(it) }.orEmpty()
     val heroPrompt = rawPrompt.ifBlank { humanHeader }.ifBlank {
-        request.title.takeUnless { it.equals("Answer", ignoreCase = true) }.orEmpty().ifBlank { "请确认以下选项" }
+        request.title.takeUnless { it.equals("Answer", ignoreCase = true) }.orEmpty().ifBlank { tr("请确认以下选项", "Please confirm your choices") }
     }
     val eyebrowLabel = buildString {
         if (total > 1) {
-            append("第 ${stepIndex + 1} / $total 项")
+            append(tr("第 ${stepIndex + 1} / $total 项", "Question ${stepIndex + 1} / $total"))
             if (humanHeader.isNotBlank() && rawPrompt.isNotBlank()) append(" · $humanHeader")
         } else {
-            val tag = if (humanHeader.isNotBlank() && rawPrompt.isNotBlank()) humanHeader else "选项确认"
+            val tag = if (humanHeader.isNotBlank() && rawPrompt.isNotBlank()) humanHeader else tr("选项确认", "Prompt")
             append(tag)
         }
-        if (currentQuestion.multiple) append(" · 可多选")
+        if (currentQuestion.multiple) append(tr(" · 可多选", " · Multi-select"))
     }
 
     Row(
@@ -1593,7 +1635,7 @@ private fun ColumnScope.QuestionSheetContent(
                             InlineAnswerField(
                                 value = freeText(question.id),
                                 onValueChange = { onFreeTextChange(question.id, it) },
-                                placeholder = "输入你的回答…",
+                                placeholder = tr("输入你的回答…", "Type your answer…"),
                                 secret = question.secret,
                                 enabled = !request.answering,
                                 palette = palette,
@@ -1681,7 +1723,7 @@ private fun ColumnScope.QuestionSheetContent(
                                         muted = palette.textMuted,
                                     )
                                     Text(
-                                        "其他（自定义输入）",
+                                        tr("其他（自定义输入）", "Other (custom input)"),
                                         Modifier.weight(1f),
                                         style = MaterialTheme.typography.bodyMedium.copy(
                                             fontSize = 14.sp,
@@ -1708,7 +1750,7 @@ private fun ColumnScope.QuestionSheetContent(
                                         InlineAnswerField(
                                             value = freeText(question.id),
                                             onValueChange = { onFreeTextChange(question.id, it) },
-                                            placeholder = "输入补充或自定义回答…",
+                                            placeholder = tr("输入补充或自定义回答…", "Add notes or custom answer…"),
                                             secret = question.secret,
                                             enabled = !request.answering,
                                             palette = palette,
@@ -1737,7 +1779,7 @@ private fun ColumnScope.QuestionSheetContent(
     ) {
         request.skipChoice?.let { skip ->
             SheetCapsuleButton(
-                label = "跳过",
+                label = tr("跳过", "Skip"),
                 enabled = canRespond && !request.answering,
                 containerColor = palette.secondaryPillBg,
                 contentColor = palette.secondaryPillText,
@@ -1750,7 +1792,7 @@ private fun ColumnScope.QuestionSheetContent(
         FractionalWidthReveal(visible = stepIndex > 0) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SheetCapsuleButton(
-                    label = "上一项",
+                    label = tr("上一项", "Back"),
                     enabled = !request.answering && stepIndex > 0,
                     containerColor = palette.secondaryPillBg,
                     contentColor = palette.secondaryPillText,
@@ -1762,7 +1804,7 @@ private fun ColumnScope.QuestionSheetContent(
             }
         }
         SheetCapsuleButton(
-            label = if (!onLastStep) "下一项" else "提交",
+            label = if (!onLastStep) tr("下一项", "Next") else tr("提交", "Submit"),
             enabled = if (!onLastStep) {
                 !request.answering && questionSatisfied(currentQuestion)
             } else {
@@ -1797,7 +1839,7 @@ private fun ColumnScope.QuestionSheetContent(
 
     if (request.answering && canRespond) {
         Text(
-            "正在提交答复…",
+            tr("正在提交答复…", "Submitting reply…"),
             style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
             color = palette.textMuted,
         )

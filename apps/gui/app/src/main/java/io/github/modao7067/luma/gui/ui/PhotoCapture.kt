@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -57,20 +59,20 @@ internal fun rememberPhotoCapture(
                 if (!success) { store.discard(name) }
                 else if (owner != currentOwner() || !currentEnabled) {
                     store.discard(name)
-                    errorCallback("会话已切换或当前不可添加，照片未添加")
+                    errorCallback(tr("会话已切换或当前不可添加，照片未添加", "Session changed or unavailable; photo was not added"))
                 } else {
                     val uri = store.ready(name)
                     imageCallback(uri.toString())
                 }
             } catch (_: Exception) {
                 store.discard(name)
-                errorCallback("照片添加失败，请重试")
+                errorCallback(tr("照片添加失败，请重试", "Failed to add photo; please try again"))
             }
         }
     }
     return PhotoCaptureHandle(available && enabled, pendingName != null) {
         if (pendingName == null && currentEnabled) {
-            if (!available) errorCallback("未找到相机应用")
+            if (!available) errorCallback(tr("未找到相机应用", "No camera app found"))
             else {
                 var created: String? = null
                 try {
@@ -82,7 +84,7 @@ internal fun rememberPhotoCapture(
                 } catch (_: Exception) {
                     pendingName = null; pendingOwner = null
                     created?.let { revoke(it); store.discard(it) }
-                    errorCallback("无法打开相机，请重试")
+                    errorCallback(tr("无法打开相机，请重试", "Unable to open camera; please try again"))
                 }
             }
         }

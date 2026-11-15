@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
@@ -63,7 +65,7 @@ internal fun BlankConversation(
                     }
                 }) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 28.dp), contentAlignment = Alignment.CenterStart) {
-                    Text("想做点什么？", style = MaterialTheme.typography.headlineMedium)
+                    Text(tr("想做点什么？", "What are we building?"), style = MaterialTheme.typography.headlineMedium)
                 }
             }
         }

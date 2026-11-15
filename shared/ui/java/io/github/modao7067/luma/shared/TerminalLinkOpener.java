@@ -44,7 +44,7 @@ final class TerminalLinkOpener implements AutoCloseable {
         if(TerminalLinks.isSystemUri(target)){openSystem(Uri.parse(target));return true;}
         String path=target;Uri uri=Uri.parse(target);
         if("file".equalsIgnoreCase(uri.getScheme())){
-            String host=uri.getHost();if(host!=null&&!host.isEmpty()&&!host.equalsIgnoreCase("localhost")){message("链接指向其他主机");return true;}path=uri.getPath();
+            String host=uri.getHost();if(host!=null&&!host.isEmpty()&&!host.equalsIgnoreCase("localhost")){message(com.termux.terminal.LumaLang.tr("链接指向其他主机","Link points to another host"));return true;}path=uri.getPath();
         }
         if(path==null||path.isEmpty()||path.indexOf('\0')>=0)return false;
         path=path.replaceFirst("(?::[0-9]+(?::[0-9]+)?(?:[-–][0-9]+(?::[0-9]+)?)?|#L[0-9]+(?:C[0-9]+)?(?:-L?[0-9]+(?:C[0-9]+)?)?)$","");
@@ -52,7 +52,7 @@ final class TerminalLinkOpener implements AutoCloseable {
         dismiss();owner=source;fontSize=source.getTextSize();palette=source.getTerminalPalette();
         active=new TerminalPreviewView(activity,source,this::dismiss);owner.setFilePreview(active);
         ((FrameLayout)activity.findViewById(android.R.id.content)).addView(active,new FrameLayout.LayoutParams(-1,-1));
-        showMessage("正在打开…");final int ticket=++generation;
+        showMessage(com.termux.terminal.LumaLang.tr("正在打开…","Opening…"));final int ticket=++generation;
         final String requested=path,name=new File(path).getName(),lower=name.toLowerCase(Locale.ROOT);
         final boolean image=lower.matches(".*\\.(png|jpe?g|webp|gif|bmp|avif|heic|heif)$"),document=TerminalDocuments.isText(name),isPdf=lower.endsWith(".pdf");
         final int pid=source.getCurrentSession()==null ? 0 : source.getCurrentSession().getPid();
@@ -60,7 +60,7 @@ final class TerminalLinkOpener implements AutoCloseable {
         pending=worker.submit(()->{
             File staged=null;
             try{
-                File dir=new File(activity.getCacheDir(),"terminal-open");if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("无法创建预览缓存");
+                File dir=new File(activity.getCacheDir(),"terminal-open");if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建预览缓存","Failed to create preview cache"));
                 staged=File.createTempFile("open-",".data",dir);
                 reader.copy(requested,pid,staged,image ? WallpaperImages.MAX_SOURCE_BYTES : document ? 9L*1024*1024 : 512L*1024*1024,document,columns);trim(dir,staged);
                 Bitmap bitmap=null;TerminalPreviewScreen.PreparedText text=null;int pages=0;
@@ -78,7 +78,7 @@ final class TerminalLinkOpener implements AutoCloseable {
                 });
             }catch(Exception e){
                 if(staged!=null)staged.delete();
-                activity.runOnUiThread(()->{if(current(ticket))showMessage("\033[31m"+(e.getMessage()==null ? "无法打开文件" : e.getMessage())+"\033[0m");});
+                activity.runOnUiThread(()->{if(current(ticket))showMessage("\033[31m"+(e.getMessage()==null ? com.termux.terminal.LumaLang.tr("无法打开文件","Failed to open file") : e.getMessage())+"\033[0m");});
             }
         });return true;
     }
@@ -96,27 +96,27 @@ final class TerminalLinkOpener implements AutoCloseable {
                 activity.runOnUiThread(()->{if(!current(ticket)||pageTicket!=pageGeneration)return;
                     TerminalPreviewScreen screen=new TerminalPreviewScreen(size,colors);screen.image(result.bitmap);page=index;pageBusy=false;active.show(screen);
                 });
-            }catch(Exception e){activity.runOnUiThread(()->{if(current(ticket)&&pageTicket==pageGeneration){pageBusy=false;requestedPage=page;showMessage("无法预览此页");}});}
+            }catch(Exception e){activity.runOnUiThread(()->{if(current(ticket)&&pageTicket==pageGeneration){pageBusy=false;requestedPage=page;showMessage(com.termux.terminal.LumaLang.tr("无法预览此页","Unable to preview this page"));}});}
         });
     }
     private void openSystem(Uri uri){
         Intent intent=TerminalSystemLinks.intent(uri);
-        try{activity.startActivity(intent);}catch(ActivityNotFoundException|SecurityException e){message("没有可打开此链接的应用，或系统未允许访问");}
+        try{activity.startActivity(intent);}catch(ActivityNotFoundException|SecurityException e){message(com.termux.terminal.LumaLang.tr("没有可打开此链接的应用，或系统未允许访问","No app can open this link, or access was denied"));}
     }
     private void openExternal(File file,String name){
         if(name.toLowerCase(Locale.ROOT).endsWith(".apk")&&!activity.getPackageManager().canRequestPackageInstalls()){
             if(pendingInstall!=null)pendingInstall.delete();pendingInstall=file;pendingInstallName=name;
-            message("请允许 Luma 安装应用，返回后继续打开安装器");
+            message(com.termux.terminal.LumaLang.tr("请允许 Luma 安装应用，返回后继续打开安装器","Allow Luma to install apps, then return to continue"));
             try{activity.startActivityForResult(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+activity.getPackageName())),INSTALL_PERMISSION_REQUEST);}
-            catch(ActivityNotFoundException e){message("无法打开安装权限设置");pendingInstall=null;pendingInstallName=null;file.delete();}return;
+            catch(ActivityNotFoundException e){message(com.termux.terminal.LumaLang.tr("无法打开安装权限设置","Failed to open install permission settings"));pendingInstall=null;pendingInstallName=null;file.delete();}return;
         }
         Uri uri=new Uri.Builder().scheme("content").authority(activity.getPackageName()+".terminal-files").appendPath(file.getName()).appendPath(name).build();
         Intent intent=new Intent(Intent.ACTION_VIEW).setDataAndType(uri,TerminalFileProvider.mime(name)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);intent.setClipData(ClipData.newRawUri(name,uri));
-        try{activity.startActivity(intent);}catch(ActivityNotFoundException|SecurityException e){message("没有可打开此类文件的应用，或系统未允许访问");}
+        try{activity.startActivity(intent);}catch(ActivityNotFoundException|SecurityException e){message(com.termux.terminal.LumaLang.tr("没有可打开此类文件的应用，或系统未允许访问","No app can open this file type, or access was denied"));}
     }
     boolean onActivityResult(int request,int result,Intent data){
         if(request!=INSTALL_PERMISSION_REQUEST)return false;File file=pendingInstall;String name=pendingInstallName;pendingInstall=null;pendingInstallName=null;
-        if(file!=null){if(activity.getPackageManager().canRequestPackageInstalls())openExternal(file,name);else{file.delete();message("未允许安装应用");}}return true;
+        if(file!=null){if(activity.getPackageManager().canRequestPackageInstalls())openExternal(file,name);else{file.delete();message(com.termux.terminal.LumaLang.tr("未允许安装应用","App installation permission not granted"));}}return true;
     }
     private static void trim(File dir,File keep){
         File[]files=dir.listFiles((d,n)->n.startsWith("open-")&&!n.startsWith("open-media-"));

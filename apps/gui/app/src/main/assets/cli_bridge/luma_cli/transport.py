@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import uuid
+from .i18n import tr
 
 class Rejected(Exception):
     pass
@@ -13,7 +14,7 @@ class RpcRejected(Rejected):
     def __init__(self, error):
         self.code = error.get("code")
         self.data = error.get("data")
-        super().__init__(error.get("message", "CLI 拒绝操作"))
+        super().__init__(error.get("message", tr("CLI 拒绝操作", "CLI rejected operation")))
 
 class Conflict(Rejected):
     pass
@@ -72,7 +73,7 @@ class Peer:
         data = (json.dumps(frame, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         with self.write_lock:
             if self.closed or self.proc.poll() is not None:
-                raise ConnectionError("CLI 进程已退出，请重新连接")
+                raise ConnectionError(tr("CLI 进程已退出，请重新连接", "CLI process has exited; please reconnect"))
             self.proc.stdin.write(data)
             self.proc.stdin.flush()
 
@@ -104,14 +105,14 @@ class Peer:
                 except queue.Empty:
                     if not pause_for_user or not self.waiting_for_user(): remaining -= time.monotonic() - started
                     if remaining <= 0:
-                        error = TimeoutError(f"{method} 未收到确认；不要自动重发")
+                        error = TimeoutError(f"{method} " + tr("未收到确认；不要自动重发", "did not receive acknowledgment; do not resend automatically"))
                         if on_uncertain is None: raise error from None
                         on_uncertain(error)
                         remaining = None
             if isinstance(response, Exception):
                 raise response
             if response.get("error") or response.get("success") is False:
-                error = response.get("error", "CLI 拒绝操作")
+                error = response.get("error", tr("CLI 拒绝操作", "CLI rejected operation"))
                 if isinstance(error, dict): raise RpcRejected(error)
                 raise Rejected(str(error))
             return response.get("data", {}) if dialect == "pi" else response.get("result", {})
@@ -123,34 +124,34 @@ class Peer:
         if frame.get("type") == "rpc_chunk":
             if self.chunks is None:
                 if frame.get("index") != 0 or not 0 < frame.get("byteLength", 0) <= 64 * 1024 * 1024:
-                    raise ValueError("RPC 分块起点或长度无效")
+                    raise ValueError(tr("RPC 分块起点或长度无效", "Invalid RPC chunk start or byte length"))
                 self.chunks = [frame["chunkId"], frame["count"], frame["byteLength"], []]
             ident, count, size, blocks = self.chunks
             if (frame.get("chunkId"), frame.get("count"), frame.get("byteLength"), frame.get("index")) != (ident, count, size, len(blocks)):
-                raise ValueError("RPC 分块顺序冲突")
+                raise ValueError(tr("RPC 分块顺序冲突", "RPC chunk sequence mismatch"))
             blocks.append(base64.b64decode(frame["data"], validate=True))
             if sum(map(len, blocks)) > size:
-                raise ValueError("RPC 分块超过声明长度")
+                raise ValueError(tr("RPC 分块超过声明长度", "RPC chunk exceeds declared length"))
             if len(blocks) < count:
                 return None
             raw = b"".join(blocks)
             self.chunks = None
             if len(raw) != size:
-                raise ValueError("RPC 分块不完整")
+                raise ValueError(tr("RPC 分块不完整", "Incomplete RPC chunk"))
             return json.loads(raw.decode("utf-8"))
         if self.chunks is not None:
-            raise ValueError("RPC 分块被其他帧打断")
+            raise ValueError(tr("RPC 分块被其他帧打断", "RPC chunk interrupted by another frame"))
         return frame
 
     def _read(self):
-        error = ConnectionError("CLI 输出已关闭；执行结果需重新同步")
+        error = ConnectionError(tr("CLI 输出已关闭；执行结果需重新同步", "CLI stdout closed; resync required"))
         try:
             while True:
                 line = self.proc.stdout.readline(64 * 1024 * 1024 + 1)
                 if not line:
                     break
                 if len(line) > 64 * 1024 * 1024:
-                    raise ValueError("CLI 单帧超过 64 MiB")
+                    raise ValueError(tr("CLI 单帧超过 64 MiB", "CLI frame exceeds 64 MiB"))
                 if not line.strip():
                     continue
                 frame = self._frame(json.loads(line.decode("utf-8")))
@@ -159,7 +160,7 @@ class Peer:
                 if frame.get("type") == "control_response":
                     response = frame["response"]
                     frame = {"id": response["request_id"], **(
-                        {"error": response.get("error", "Claude Code 拒绝操作")}
+                        {"error": response.get("error", tr("Claude Code 拒绝操作", "Claude Code rejected operation"))}
                         if response.get("subtype") == "error" else {"result": response.get("response", {})})}
                 key = frame.get("id")
                 response = (not frame.get("type") and ("result" in frame or "error" in frame)) or frame.get("type") == "response"
@@ -178,7 +179,7 @@ class Peer:
                     if waiter.empty():
                         waiter.put_nowait(error)
             code = self.proc.poll()
-            if code is not None: error = ConnectionError(f"CLI 进程退出（{code}），请在终端检查安装、模型与登录配置")
+            if code is not None: error = ConnectionError(tr(f"CLI 进程退出（{code}），请在终端检查安装、模型与登录配置", f"CLI process exited ({code}); check installation, model, and sign-in config in terminal"))
             self.exited(error)
 
     def close(self):
@@ -196,5 +197,5 @@ class Peer:
         for stream, thread in ((self.proc.stdout, getattr(self, "reader_thread", None)), (self.proc.stderr, self.stderr_thread)):
             if stream and not stream.closed:
                 if thread and thread is not threading.current_thread() and thread.is_alive():
-                    raise OSError("CLI 输出读取线程尚未退出")
+                    raise OSError(tr("CLI 输出读取线程尚未退出", "CLI stdout reader thread has not exited"))
                 stream.close()

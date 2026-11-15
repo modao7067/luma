@@ -48,7 +48,7 @@ import sys
 sys.path.insert(0,str(REPO/'tools/tests'))
 from reference_java import materialize
 REFERENCE=materialize(REPO)
-files+=list((root/'terminal-emulator/src/main/java').rglob('*.java'))+list(Path(REFERENCE / 'shared/terminal-emulator/java').rglob('*.java'))
+files+=list((root/'terminal-emulator/src/main/java').rglob('*.java'))+list(Path(REFERENCE / 'shared/terminal-emulator/java').rglob('*.java'))+[REPO/'shared/terminal-emulator/java/com/termux/terminal/LumaLang.java']
 for n in ['StatusDot.java','WallpaperImages.java','keys/SpecialButtonState.java']:
     src=Path(REPO / 'shared/ui/java/io/github/modao7067/luma/shared')/n
     dst=work/'production'/n;dst.parent.mkdir(parents=True,exist_ok=True)

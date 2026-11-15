@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.activity.compose.PredictiveBackHandler
 import kotlinx.coroutines.CancellationException
 import androidx.compose.animation.AnimatedVisibility
@@ -181,7 +183,7 @@ internal fun CompactComposer(
                                     .align(Alignment.TopEnd)
                                     .offset(x = 4.dp, y = (-4).dp)
                                     .size(24.dp)
-                                    .semantics { contentDescription = "移除" },
+                                    .semantics { contentDescription = tr("移除", "Remove") },
                             ) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     ComposerGlyph("close")
@@ -244,7 +246,7 @@ internal fun CompactComposer(
                         modifier = Modifier
                             .fillMaxWidth()
                             .onFocusChanged { editing = editing.onFocus(it.isFocused) }
-                            .semantics { contentDescription = "消息草稿" },
+                            .semantics { contentDescription = tr("消息草稿", "Message draft") },
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(if (expanded) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Transparent),
                         singleLine = false,
@@ -285,7 +287,7 @@ internal fun CompactComposer(
                         modifier = Modifier
                             .size(34.dp)
                             .focusProperties { canFocus = false }
-                            .semantics { contentDescription = "添加附件" },
+                            .semantics { contentDescription = tr("添加附件", "Add attachment") },
                     ) {
                         ComposerGlyph("plus")
                     }
@@ -297,19 +299,19 @@ internal fun CompactComposer(
                     ) {
                         Column {
                             onTakePhoto?.let { takePhoto ->
-                                ActionMenuItem("拍照", MenuSymbol.CAMERA, iconContainer = true,
+                                ActionMenuItem(tr("拍照", "Camera"), MenuSymbol.CAMERA, iconContainer = true,
                                     enabled = imagesSupported && !inputBusy && takePhotoEnabled,
                                     onClick = { menus = menus.dismiss(ComposerMenuAnchor.Plus); takePhoto() })
                             }
                             ActionMenuItem(
-                                "照片",
+                                tr("照片", "Photos"),
                                 MenuSymbol.IMAGE,
                                 iconContainer = true,
                                 enabled = imagesSupported && !inputBusy,
                                 onClick = { menus = menus.dismiss(ComposerMenuAnchor.Plus); onPickImages() },
                             )
                             ActionMenuItem(
-                                "引用文件",
+                                tr("引用文件", "Reference files"),
                                 MenuSymbol.FILE,
                                 iconContainer = true,
                                 enabled = !canStartSession && !view.preparingFirstSend,
@@ -321,7 +323,7 @@ internal fun CompactComposer(
                             )
                             val idle = !view.sending && !view.uncertainSubmission && view.connected && view.activeTurnId == null && view.queue.isEmpty()
                             ActionMenuItem(
-                                "压缩上下文",
+                                tr("压缩上下文", "Compact context"),
                                 MenuSymbol.COMPRESS,
                                 iconContainer = true,
                                 enabled = idle && view.capabilities.compact,
@@ -329,7 +331,7 @@ internal fun CompactComposer(
                             )
                             if (view.activeTurnId != null) {
                                 ActionMenuItem(
-                                    "停止任务",
+                                    tr("停止任务", "Stop task"),
                                     MenuSymbol.STOP,
                                     iconContainer = true,
                                     destructive = true,
@@ -357,15 +359,13 @@ internal fun CompactComposer(
                             .focusProperties { canFocus = false }
                             .semantics {
                                 contentDescription = if (view.preparingFirstSend) {
-                                    "正在创建会话"
+                                    tr("正在创建会话", "Creating session…")
                                 } else if (primaryWaiting) {
-                                    "等待送达确认"
+                                    tr("等待送达确认", "Awaiting delivery receipt")
                                 } else if (stopping) {
-                                    if (view.stopping) "停止请求中" else "停止任务"
-                                } else if (view.activeTurnId != null) {
-                                    "发送"
+                                    if (view.stopping) tr("停止请求中", "Stopping…") else tr("停止任务", "Stop task")
                                 } else {
-                                    "发送"
+                                    tr("发送", "Send")
                                 }
                             },
                     ) {
@@ -399,7 +399,7 @@ internal fun CompactComposer(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         ) {
                             Text(
-                                view.summary.modelLabel.ifBlank { view.summary.model }.ifBlank { "默认模型" },
+                                view.summary.modelLabel.ifBlank { view.summary.model }.ifBlank { tr("默认模型", "Default model") },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
@@ -426,14 +426,14 @@ internal fun CompactComposer(
                             modifier = Modifier
                                 .size(34.dp)
                                 .focusProperties { canFocus = false }
-                                .semantics { contentDescription = "权限：${currentPermission.title}" },
+                                .semantics { contentDescription = tr("权限：${currentPermission.title}", "Permissions: ${currentPermission.title}") },
                         ) {
                             MenuIcon(currentPermission.icon, warning = currentPermission.warning)
                         }
                         OriginMenu(permissions, { menus = menus.dismiss(ComposerMenuAnchor.Permission) }, width = 300.dp, preferAbove = true) {
                             if (view.permissions.isEmpty()) {
                                 Text(
-                                    view.capabilityNotice ?: "CLI 未提供可选权限",
+                                    view.capabilityNotice ?: tr("CLI 未提供可选权限", "No selectable permission modes from CLI"),
                                     Modifier.padding(16.dp),
                                     style = MaterialTheme.typography.bodyMedium,
                                 )

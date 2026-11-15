@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.runtime.compositionLocalOf
 import io.github.modao7067.luma.gui.session.*
 
@@ -45,24 +47,24 @@ internal class CurrentSessionActions(
     override fun previewResource(resource: MediaResource) = dispatch { previewResource(resource) }
     override fun previewFile(path: String) = dispatch { previewFile(path) }
     override suspend fun inspectMedia(resource: MediaResource): MediaResource {
-        check(isCurrent()) { "会话已切换" }; return target.inspectMedia(resource)
+        check(isCurrent()) { tr("会话已切换", "Session switched") }; return target.inspectMedia(resource)
     }
     override suspend fun resolveMedia(resource: MediaResource): ResolvedMedia {
-        check(isCurrent()) { "会话已切换" }
+        check(isCurrent()) { tr("会话已切换", "Session switched") }
         return target.resolveMedia(resource)
     }
     override suspend fun resolveMedia(resource: MediaResource, forceRefresh: Boolean): ResolvedMedia {
-        check(isCurrent()) { "会话已切换" }
+        check(isCurrent()) { tr("会话已切换", "Session switched") }
         return target.resolveMedia(resource, forceRefresh)
     }
     override suspend fun saveMedia(resource: MediaResource): String {
-        check(isCurrent()) { "会话已切换" }; return target.saveMedia(resource)
+        check(isCurrent()) { tr("会话已切换", "Session switched") }; return target.saveMedia(resource)
     }
     override suspend fun openMediaExternally(resource: MediaResource) {
-        check(isCurrent()) { "会话已切换" }; target.openMediaExternally(resource)
+        check(isCurrent()) { tr("会话已切换", "Session switched") }; target.openMediaExternally(resource)
     }
     override suspend fun openMediaWithChooser(resource: MediaResource) {
-        check(isCurrent()) { "会话已切换" }; target.openMediaWithChooser(resource)
+        check(isCurrent()) { tr("会话已切换", "Session switched") }; target.openMediaWithChooser(resource)
     }
     override fun closePreview() = dispatch { closePreview() }
     override fun refreshDashboard() = dispatch { refreshDashboard() }

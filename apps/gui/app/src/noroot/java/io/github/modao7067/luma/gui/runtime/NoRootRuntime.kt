@@ -56,6 +56,7 @@ internal object NoRootRuntime {
     }
     fun isReady(app: Context) = GuiRuntimeBridge.isReady(app)
     fun connect(app: Context, token: String) = GuiRuntimeBridge.connect(app, token)
+    fun stopCodexIfIdle(app: Context) = GuiRuntimeBridge.stopCodexIfIdle(app)
     fun connectOpenCode(app: Context, password: String, launcher: String) = GuiRuntimeBridge.connectOpenCode(app, password, launcher)
     fun stopOpenCodeIfIdle(app: Context) = GuiRuntimeBridge.stopOpenCodeIfIdle(app)
     fun connectNativeCli(app: Context, launcher: String, token: String, directory: String, task: String) = GuiRuntimeBridge.connectNativeCli(app, launcher, token, directory, task)

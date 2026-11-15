@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,7 +24,7 @@ object NativeCliProjection {
         val reasoning = optString("kind") == "reasoning"
         val status = optString("status")
         val role = if (reasoning) "tool" else getString("role")
-        val body = if (reasoning) "思考" else if (role == "user") stripPiImageHints(snapshot.optString("cli"), optString("text")) else optString("text")
+        val body = if (reasoning) tr("思考", "Thought") else if (role == "user") stripPiImageHints(snapshot.optString("cli"), optString("text")) else optString("text")
         return ConversationItem(getString("id"), role,
             body,
             detail = if (reasoning) optString("text") else stringOrNull("outcome")?.takeIf { it.isNotBlank() } ?: optString("detail"),
@@ -35,7 +37,7 @@ object NativeCliProjection {
     fun streamedSubAgentDetail(agent: SubAgentState, previous: SubAgentDetailView, models: List<ModelOption>): SubAgentDetailView =
         previous.copy(agent = agent, messages = agent.messages, loading = false, effort = "",
             modelLabel = when (agent.model) {
-                "inherit" -> "继承父代理"
+                "inherit" -> tr("继承父代理", "Inherit parent")
                 else -> models.firstOrNull { it.id == agent.model }?.label ?: agent.model
             })
     private fun projectMessages(rows: List<JSONObject>, snapshot: JSONObject, previous: List<ConversationItem>): List<ConversationItem> {
@@ -84,14 +86,14 @@ object NativeCliProjection {
             metrics = s.rows("metrics").map { Metric(it.getString("label"), it.getString("value")) },
             messages = projectMessages(s.rows("messages"), s, previous.messages),
             subAgents = projectSubAgents(s.rows("subAgents"), s, previous.subAgents),
-            queue = (s.rows("queue") + s.rows("hostQueue")).map { QueueEntry(it.getString("id"), stripPiImageHints(s.optString("cli"), it.getString("text")), it.optString("status", "待发"),
+            queue = (s.rows("queue") + s.rows("hostQueue")).map { QueueEntry(it.getString("id"), stripPiImageHints(s.optString("cli"), it.getString("text")), it.optString("status", tr("待发", "Queued")),
                 canEdit = it.optBoolean("canEdit", false), canSteer = it.optBoolean("canSteer", false), canRemove = it.optBoolean("canRemove", false),
                 clientUserMessageId = it.stringOrNull("clientUserMessageId"), hostOwned = it.optBoolean("hostOwned")) },
             requests = s.rows("requests").map { r ->
                 val questionRows = r.rows("questions")
                 val choices = r.rows("choices").map {
                     val id = it.getString("id")
-                    val label = if (s.optString("cli") == "Kimi Code" && questionRows.isNotEmpty() && id == "cancel") "终止提问" else it.getString("label")
+                    val label = if (s.optString("cli") == "Kimi Code" && questionRows.isNotEmpty() && id == "cancel") tr("终止提问", "Cancel prompt") else it.getString("label")
                     RequestChoice(id, label)
                 }
                 val ids = choices.map { it.id }.toSet()
@@ -103,15 +105,15 @@ object NativeCliProjection {
                     else -> null to null
                 }
                 val nativeTitle = r.getString("title")
-                val legacyDefaultTitle = when (s.optString("cli")) {
-                    "Claude Code" -> "Claude Code 提问"
-                    "Kimi Code" -> "Kimi Code 提问"
-                    "Grok Build" -> "问题"
-                    "pi" -> "CLI 请求"
-                    else -> null
+                val legacyDefaultTitles = when (s.optString("cli")) {
+                    "Claude Code" -> setOf("Claude Code 提问", "Claude Code question")
+                    "Kimi Code" -> setOf("Kimi Code 提问", "Kimi Code question")
+                    "Grok Build" -> setOf("问题", "Question")
+                    "pi" -> setOf("CLI 请求", "CLI request")
+                    else -> emptySet()
                 }
-                val title = if (questionRows.isNotEmpty() && (nativeTitle == "需要你的回答" ||
-                    (!r.has("submitChoice") && nativeTitle == legacyDefaultTitle))) "Answer" else nativeTitle
+                val title = if (questionRows.isNotEmpty() && (nativeTitle == "需要你的回答" || nativeTitle == "Response required" ||
+                    (!r.has("submitChoice") && nativeTitle in legacyDefaultTitles))) "Answer" else nativeTitle
                 UserRequest(r.getString("id"), title, r.optString("body"), choices,
                     questions = questionRows.map { RequestQuestion(it.getString("id"), it.optString("header"), it.optString("prompt"),
                         it.strings("options"), it.optBoolean("multiple"), it.optBoolean("secret"),

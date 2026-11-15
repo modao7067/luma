@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import threading
+from .i18n import tr
 from .transport import spawn_process, start_stderr_drain
 
 class AgyPeer:
@@ -22,15 +23,15 @@ class AgyPeer:
         self.reader_thread.start()
 
     def _read(self):
-        error = ConnectionError("agy 输出已关闭；未确认的执行结果仍为未知")
+        error = ConnectionError(tr("agy 输出已关闭；未确认的执行结果仍为未知", "agy stdout closed; unconfirmed execution outcome remains unknown"))
         try:
             while True:
                 line = self.proc.stdout.readline(64 * 1024 * 1024 + 1)
                 if not line: break
-                if len(line) > 64 * 1024 * 1024: raise ValueError("agy 单帧超过 64 MiB")
+                if len(line) > 64 * 1024 * 1024: raise ValueError(tr("agy 单帧超过 64 MiB", "agy frame exceeds 64 MiB"))
                 if not line.strip(): continue
                 frame = json.loads(line.decode("utf-8"))
-                if not isinstance(frame, dict): raise ValueError("agy 返回了非对象事件")
+                if not isinstance(frame, dict): raise ValueError(tr("agy 返回了非对象事件", "agy returned a non-object event"))
                 self.event(frame)
         except Exception as exc:
             error = exc
@@ -42,7 +43,7 @@ class AgyPeer:
 
     def send(self, frame):
         with self.write_lock:
-            if self.closed or self.proc.poll() is not None: raise ConnectionError("agy 已退出，请重连")
+            if self.closed or self.proc.poll() is not None: raise ConnectionError(tr("agy 已退出，请重连", "agy has exited; please reconnect"))
             self.proc.stdin.write((json.dumps(frame, ensure_ascii=False) + "\n").encode())
             self.proc.stdin.flush()
 

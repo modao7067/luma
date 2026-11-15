@@ -5,8 +5,10 @@ import threading
 import uuid
 from pathlib import Path
 from .base import Session, item, text, user_text, image_blocks
+from .i18n import tr
 from .transport import Peer, Rejected
 from .metrics import pi_usage
+from .native_owner import pi_process_has_live_subprocesses, tmux_pi_has_live_subprocesses
 
 _PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
@@ -39,7 +41,7 @@ def _pi_model_efforts(m, current_levels, is_current):
     return out
 
 def _pi_tool_title(name, raw_args):
-    base = name or "工具"
+    base = name or tr("工具", "Tool")
     if not name:
         return base
     args = raw_args
@@ -78,7 +80,6 @@ def _tool_patch_or_text(container):
     return text((container or {}).get("content"))
 
 def _stream_snapshot(message):
-    """Copy one level so accumulating deltas never mutates the SDK's live message blocks."""
     content = message.get("content")
     if isinstance(content, list):
         return {**message, "content": [dict(block) if isinstance(block, dict) else block for block in content]}
@@ -86,12 +87,14 @@ def _stream_snapshot(message):
 
 class PiSession(Session):
     dialect = "pi"
+    check_peer_background_children = False
 
     def release_mode(self):
         saved = self.config.get("sessionFile")
         has_saved = bool(saved and Path(saved).is_file())
         empty_managed_pi = (
-            bool(self.config.get("nativeId"))
+            (bool(self.config.get("managedIdentity")) or self.config.get("nativeProtocol") == "pi-native-sdk-v1")
+            and bool(self.config.get("nativeId"))
             and self.data.get("connected")
             and not self.rows
             and not self.config.get("receipts")
@@ -99,6 +102,36 @@ class PiSession(Session):
         if not has_saved and not empty_managed_pi: return None
         if getattr(self.peer, "reconnectable", False): return "observer"
         return "process" if getattr(self, "queue_readable", False) else None
+
+    def release_blocker(self):
+        blocker = super().release_blocker()
+        if blocker is not None:
+            return blocker
+        with self.lock:
+            owner = getattr(self, "owner", None)
+            tmux_owner = owner is not None and owner.handle.get("kind") == "tmux"
+            tmux_cmd = tuple(owner.handle.get("tmuxCommand") or ()) if tmux_owner else ()
+            term_sock = owner.handle.get("terminalSocket") if tmux_owner else None
+            proc = getattr(self.peer, "proc", None) if self.peer else None
+            cand = getattr(proc, "pid", None)
+            pid = cand if isinstance(cand, int) and cand > 0 else None
+        if tmux_cmd and term_sock:
+            blocker = self.cached_snapshot_probe(
+                ("pi-tmux-bg", tmux_cmd, term_sock),
+                lambda: tr("后台子进程仍在运行", "Background subprocess is still running")
+                if tmux_pi_has_live_subprocesses(tmux_cmd, term_sock) else None,
+                pending_value=tr("正在确认后台子进程状态", "Checking background subprocess status"),
+            )
+            if blocker is not None:
+                return blocker
+        if pid is not None:
+            return self.cached_snapshot_probe(
+                ("pi-peer-bg", pid),
+                lambda: tr("后台子进程仍在运行", "Background subprocess is still running")
+                if pi_process_has_live_subprocesses(pid) else None,
+                pending_value=tr("正在确认后台子进程状态", "Checking background subprocess status"),
+            )
+        return None
 
     def connect(self):
         self.ready = threading.Event()
@@ -139,10 +172,15 @@ class PiSession(Session):
 
     def capability_notice(self):
         prefix = self.config.get("protocolFallbackNotice", "")
-        base = ("使用 pi 原生行为，不增加工具权限拦截；仅处理 CLI/扩展实际发出的确认。" +
-                "无统一权限档位；官方 TUI 没有此进程的实时接管接口。" +
-                ("Pi 提供原生待发队列快照；不支持逐项编辑、删除或转引导。" if getattr(self, "queue_readable", False)
-                 else "当前 Pi RPC 仅提供待发数量，不提供逐项队列读取或编辑。"))
+        base = (
+            tr("使用 pi 原生行为，不增加工具权限拦截；仅处理 CLI/扩展实际发出的确认。无统一权限档位；官方 TUI 没有此进程的实时接管接口。",
+               "Uses native pi behavior without extra tool permission interception; only handles confirmations emitted by CLI/extensions. No unified permission presets or live official TUI takeover.")
+            + (tr("Pi 提供原生待发队列快照；不支持逐项编辑、删除或转引导。",
+                  " Pi provides native pending queue snapshots; per-item edit, delete, or steer conversion is unsupported.")
+               if getattr(self, "queue_readable", False)
+               else tr("当前 Pi RPC 仅提供待发数量，不提供逐项队列读取或编辑。",
+                       " Current Pi RPC only reports pending count without per-item queue inspection or editing."))
+        )
         return (prefix + " " + base).strip() if prefix else base
 
     def apply_running(self, state, revision):
@@ -225,7 +263,7 @@ class PiSession(Session):
         self.apply_running(state, revision)
         native = state["sessionId"]
         if self.config.get("nativeId") and native != self.config["nativeId"]:
-            raise Rejected("CLI 返回了其他会话，已拒绝接入")
+            raise Rejected(tr("CLI 返回了其他会话，已拒绝接入", "CLI returned a different session; refused to attach"))
         self._record_session_file(state.get("sessionFile"))
         model = state.get("model") or {}
         key = model.get("provider", "") + "/" + model["id"] if model.get("id") else ""
@@ -270,7 +308,7 @@ class PiSession(Session):
             role = "user" if m.get("attribution") == "user" else "assistant"
         if role in ("compactionSummary", "branchSummary"):
             summary = str(m.get("summary") or "")
-            self.row(item(ident, "tool", "上下文压缩" if role == "compactionSummary" else "分支摘要",
+            self.row(item(ident, "tool", tr("上下文压缩", "Context compaction") if role == "compactionSummary" else tr("分支摘要", "Branch summary"),
                           detail=summary, outcome=summary, kind="compaction", status="completed"))
             projected.add(ident)
             return projected
@@ -289,7 +327,7 @@ class PiSession(Session):
             old = self.rows.get(tool_id, {})
             resolved_name = m.get("toolName") or old.get("toolName", "")
             resolved_input = old.get("input", "")
-            label = _pi_tool_title(resolved_name, resolved_input) if resolved_name else old.get("text", "工具")
+            label = _pi_tool_title(resolved_name, resolved_input) if resolved_name else old.get("text", tr("工具", "Tool"))
             out = _tool_patch_or_text(m)
             self.row(item(tool_id, "tool", label,
                           detail=out, outcome=out, media=self.media(m.get("content")),
@@ -466,7 +504,7 @@ class PiSession(Session):
             ident = "tool-" + e["toolCallId"]; old = self.rows.get(ident, {})
             resolved_name = e.get("toolName") or old.get("toolName", "")
             encoded_input = json.dumps(e["args"], ensure_ascii=False) if "args" in e else old.get("input", "")
-            label = _pi_tool_title(resolved_name, e["args"] if "args" in e else encoded_input) if resolved_name else old.get("text", "工具")
+            label = _pi_tool_title(resolved_name, e["args"] if "args" in e else encoded_input) if resolved_name else old.get("text", tr("工具", "Tool"))
             has_result = bool(e.get("result") or e.get("partialResult"))
             result = e.get("result") or e.get("partialResult") or {}
             outcome = _tool_patch_or_text(result) if has_result else old.get("outcome", "")
@@ -489,15 +527,15 @@ class PiSession(Session):
                 body = raw if isinstance(raw, str) else raw.get("message", raw.get("text", ""))
                 ident = next((i for i, pair in previous.items() if pair == (name, body) and i not in self.queue_native), str(uuid.uuid4()))
                 self.queue_native[ident] = (name, body)
-                entries.append({"id": ident, "text": strip_pi_image_hints(body), "status": "引导" if name == "steering" else "待执行",
+                entries.append({"id": ident, "text": strip_pi_image_hints(body), "status": tr("引导", "Steer") if name == "steering" else tr("待执行", "Queued"),
                                 "canEdit": False, "canRemove": False, "canSteer": False})
         self.update(queue=entries)
 
     def validate_prompt(self, p):
         super().validate_prompt(p)
-        if len(p.get("skills", [])) > 1: raise Rejected("此 CLI 每条消息支持一个原生 Skill 命令，请只选一个")
+        if len(p.get("skills", [])) > 1: raise Rejected(tr("此 CLI 每条消息支持一个原生 Skill 命令，请只选一个", "This CLI supports at most one native skill command per message"))
         known = {s["id"] for s in self.data["skills"]}
-        if any(s not in known for s in p.get("skills", [])): raise Rejected("Skill 已不可用，请刷新")
+        if any(s not in known for s in p.get("skills", [])): raise Rejected(tr("Skill 已不可用，请刷新", "Skill is no longer available; please refresh"))
 
     def prompt(self, p):
         message = p["text"]
@@ -512,18 +550,18 @@ class PiSession(Session):
             state = self.call("get_state")
             self.apply_running(state, revision)
         except Exception as exc:
-            self.update(error="输入已接收，状态读取失败，请重新同步：" + str(exc))
+            self.update(error=tr("输入已接收，状态读取失败，请重新同步：", "Input accepted, failed to read state; please resync: ") + str(exc))
         return True
 
     def configure(self, p):
         if p.get("permission") or p.get("speed"): return super().configure(p)
         if p.get("model"):
-            if p["model"] not in {m["id"] for m in self.data["models"]}: raise Rejected("请选择 CLI 返回的模型")
+            if p["model"] not in {m["id"] for m in self.data["models"]}: raise Rejected(tr("请选择 CLI 返回的模型", "Select a model returned by the CLI"))
             provider, model = p["model"].split("/", 1)
             self.call("set_model", {"provider": provider, "modelId": model})
         if p.get("effort"):
             levels = self.call("get_available_thinking_levels").get("levels", [])
-            if p["effort"] not in levels: raise Rejected("当前模型不支持此思考强度")
+            if p["effort"] not in levels: raise Rejected(tr("当前模型不支持此思考强度", "Current model does not support this thinking level"))
             self.call("set_thinking_level", {"level": p["effort"]})
         return self.refresh()
 
@@ -532,7 +570,7 @@ class PiSession(Session):
     def rename(self, title):
         self.call("set_session_name", {"name": title}); return self.refresh()
     def compact(self):
-        if self.data["running"]: raise Rejected("请等待任务结束再压缩")
+        if self.data["running"]: raise Rejected(tr("请等待任务结束再压缩", "Wait for the current turn to finish before compacting"))
         self.call("compact", timeout=300); return self.refresh()
 
     def ui_request(self, e):
@@ -541,17 +579,17 @@ class PiSession(Session):
         if method == "setTitle": return
         if method == "notify": self.update(notice=e.get("message", "")); return
         choices = []; questions = []
-        if method == "confirm": choices = [{"id": "yes", "label": "确认"}, {"id": "no", "label": "拒绝"}]
+        if method == "confirm": choices = [{"id": "yes", "label": tr("确认", "Confirm")}, {"id": "no", "label": tr("拒绝", "Deny")}]
         elif method == "select": choices = [{"id": str(i), "label": value} for i, value in enumerate(e.get("options", []))]
         elif method in ("input", "editor"):
             prompt_text = e.get("placeholder") if e.get("placeholder") is not None else e.get("prefill", "")
-            questions = [{"id": "value", "header": e.get("title", "输入"), "prompt": prompt_text, "secret": e.get("secret", False)}]
+            questions = [{"id": "value", "header": e.get("title", tr("输入", "Input")), "prompt": prompt_text, "secret": e.get("secret", False)}]
         elif method == "ask":
             questions = [{"id": q["id"], "header": q.get("header", ""), "prompt": q["question"],
                           "options": [o["label"] for o in q.get("options", [])], "multiple": q.get("multi", False)} for q in e["questions"]]
         else: return
-        choices.append({"id": "cancel", "label": "取消"})
-        self.request(ident, e, e.get("title", "Answer" if questions else "CLI 请求"), e.get("message", ""), choices, questions, submit_choice="submit", skip_choice="cancel")
+        choices.append({"id": "cancel", "label": tr("取消", "Cancel")})
+        self.request(ident, e, e.get("title", "Answer" if questions else tr("CLI 请求", "CLI request")), e.get("message", ""), choices, questions, submit_choice="submit", skip_choice="cancel")
 
     def answer(self, p):
         raw = self.pending_requests.get(p["id"])
@@ -560,10 +598,10 @@ class PiSession(Session):
         choice = p.get("choice")
         if choice == "cancel": response["cancelled"] = True
         elif raw["method"] == "confirm":
-            if choice not in ("yes", "no"): raise Rejected("无效确认选项")
+            if choice not in ("yes", "no"): raise Rejected(tr("无效确认选项", "Invalid confirmation choice"))
             response["confirmed"] = choice == "yes"
         elif raw["method"] == "select":
-            if choice not in {str(i) for i in range(len(raw["options"]))}: raise Rejected("无效选择")
+            if choice not in {str(i) for i in range(len(raw["options"]))}: raise Rejected(tr("无效选择", "Invalid selection"))
             response["value"] = raw["options"][int(choice)]
         elif raw["method"] == "ask":
             response["answers"] = []

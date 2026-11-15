@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -36,7 +38,13 @@ class SessionController(private val context: Context) : CockpitActions {
     private val mutableState = MutableStateFlow(CockpitState())
     val state: StateFlow<CockpitState> = mutableState
     private var selected: String? = null
-    private var storeError: String? = null
+    private var storeLoadFailed = false
+    private var storeLoadFailureDetail: String? = null
+    private val storeError: String?
+        get() = if (!storeLoadFailed) null else tr(
+            "无法读取会话索引，原文件已保留：${storeLoadFailureDetail.orEmpty()}",
+            "Unable to read session index (original file preserved): ${storeLoadFailureDetail.orEmpty()}",
+        )
     private var saveJob: Job? = null
     private var fileGeneration = 0
     private var previewGeneration = 0
@@ -48,11 +56,35 @@ class SessionController(private val context: Context) : CockpitActions {
         val signals = Channel<Unit>(Channel.CONFLATED)
     }
     private var childObservation: ChildObservation? = null
+    private val foregroundTracker = ForegroundActivityTracker()
+    private val defaultForegroundToken = Any()
     private var foreground = false
+    private var backgrounded = false
     private var idleGraceMillis = SessionIdlePolicy.graceMillis
     private var openCodeIdleJob: Job? = null
+    private var codexIdleJob: Job? = null
     private var lastOpenCodeEndpoint: RuntimeEndpoint? = null
+    private data class ForegroundTerminalSnapshot(
+        val sessionId: String = "",
+        val instanceId: String = "",
+        val updatedAt: Long = -1L,
+    ) {
+        fun isFresh(now: Long = System.currentTimeMillis()): Boolean =
+            updatedAt > 0L && now - updatedAt <= 180_000L
+
+        fun matches(s: Live, now: Long = System.currentTimeMillis()): Boolean {
+            if (!isFresh(now)) return false
+            val sessionMatch = sessionId == s.record.id
+            val instanceIdOwned = s.nativeCli?.ownerInstanceId
+            val instanceMatch = !instanceIdOwned.isNullOrBlank() && instanceId == instanceIdOwned
+            return sessionMatch || instanceMatch
+        }
+    }
+    @Volatile private var foregroundTerminalSnapshot: ForegroundTerminalSnapshot? = null
+    private var foregroundTerminalRefreshJob: Job? = null
+    private var lastForegroundTerminalRefreshMs = 0L
     private val activityClock = SessionActivityClock()
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     internal var notificationSink: SessionNotificationSink = AndroidSessionNotificationSink(context)
     private var lastKeepAliveSummary: String? = null
     private var lastArmedRootSessions: List<WatchedRootSession> = emptyList()
@@ -176,7 +208,7 @@ class SessionController(private val context: Context) : CockpitActions {
         var cachedScopedMessages: List<ConversationItem> = emptyList()
         companion object {
             fun summary(r: SessionRecord) = SessionSummary(
-                r.id, r.title, r.environment, r.cwd, r.model,
+                r.id, if (SessionTitlePolicy.isUnnamed(r.title)) SessionTitlePolicy.unnamed else r.title, r.environment, r.cwd, r.model,
                 threadId = r.threadId, cli = r.cli,
                 lastActiveAt = r.lastActiveAt, hasUnreadDot = r.unread,
             )
@@ -188,17 +220,45 @@ class SessionController(private val context: Context) : CockpitActions {
             it.deleteNotificationChannel("luma-agent-approval")
         }
         try { store.load().forEach { activityClock.seed(it.lastActiveAt); sessions[it.id] = Live(it) } }
-        catch (failure: Exception) { storeError = "无法读取会话索引，原文件已保留：${failure.message}" }
+        catch (failure: Exception) { storeLoadFailed = true; storeLoadFailureDetail = failure.message }
         selected = restoredSelection(store.navigation, sessions.values.map { it.record }, preferences.getString("session", null), environment)
         store.navigation.initialized = true
         store.navigation.selectedId = selected
         publish()
+        refreshForegroundTerminalSnapshot(force = true)
         current()?.let { live -> startObservation(live) }
         val managedStates = commands.entries.values.groupBy({ it.sessionId }, { it.state })
         sessions.values.filter {
             it !== current() && it.record.environment == environment &&
                 SessionIdlePolicy.restoreObservation(it.record, managedStates[it.record.id].orEmpty())
         }.forEach { live -> startObservation(live) }
+    }
+    fun onLocaleChanged() {
+        scope.launch {
+            context.getSystemService(NotificationManager::class.java)?.let(SessionNotifications::ensureChannels)
+            sessions.values.forEach { s ->
+                SessionTitlePolicy.refresh(s.record)
+                val updatedConnection = when {
+                    s.dormant -> tr("休眠", "Dormant")
+                    s.view.connection == "界面已断开 · 后端任务不受影响" || s.view.connection == "UI detached · Backend tasks unaffected" ->
+                        tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected")
+                    s.view.connection == "已连接" || s.view.connection == "Connected" ->
+                        tr("已连接", "Connected")
+                    s.view.connection == "连接中断 · 任务状态待同步" || s.view.connection == "Disconnected · Task state syncing" ->
+                        tr("连接中断 · 任务状态待同步", "Disconnected · Task state syncing")
+                    s.view.connection == "连接运行环境…" || s.view.connection == "Connecting to runtime…" ->
+                        tr("连接运行环境…", "Connecting to runtime…")
+                    else -> null
+                }
+                if (updatedConnection != null && updatedConnection != s.view.connection) {
+                    s.view = s.view.copy(connection = updatedConnection)
+                }
+                s.nativeCli?.onLocaleChanged()
+                s.openCode?.onLocaleChanged()
+            }
+            lastKeepAliveSummary = null
+            publish()
+        }
     }
     private fun scopeMedia(s: Live, item: ConversationItem) = item.withMediaContext(s.record.id, s.record.cwd, s.record.threadId)
     private fun scopeSessionMessages(s: Live, messages: List<ConversationItem>): List<ConversationItem> {
@@ -226,21 +286,21 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     private fun mediaOwner(resource: MediaResource): Pair<Live?, MediaResource> {
         val owner = if (resource.sessionId == null) current() else sessions[resource.sessionId]
-        check(resource.sessionId == null || owner != null) { "来源会话已关闭，请重新打开附件" }
+        check(resource.sessionId == null || owner != null) { tr("来源会话已关闭，请重新打开附件", "Source session was closed; reopen the attachment") }
         return owner to resource.copy(sessionId = resource.sessionId ?: owner?.record?.id,
             cwd = resource.cwd ?: owner?.record?.cwd ?: blank.cwd)
     }
     private suspend fun dereferenceMedia(owner: Live?, resource: MediaResource): MediaResource {
         val params = MediaProjection.mcpParams(resource.source) ?: return resource
-        val connection = owner?.rpc ?: error("请重连来源会话后查看 MCP 资源")
-        if (!params.has("threadId")) params.put("threadId", owner.record.threadId ?: error("来源会话尚未建立"))
+        val connection = owner?.rpc ?: error(tr("请重连来源会话后查看 MCP 资源", "Reconnect source session to view MCP resource"))
+        if (!params.has("threadId")) params.put("threadId", owner.record.threadId ?: error(tr("来源会话尚未建立", "Source session is not created yet")))
         val result = connection.request("mcpServer/resource/read", params)
         val uri = params.getString("uri")
         val content = result.optJSONArray("contents")?.objects().orEmpty().firstOrNull { it.optString("uri") == uri }
-            ?: error("MCP 服务未返回所选资源")
+            ?: error(tr("MCP 服务未返回所选资源", "MCP server did not return the requested resource"))
         val embedded = MediaProjection.blocks(obj("type" to "resource", "resource" to content)).singleOrNull()
-            ?: error("MCP 资源没有可读取内容")
-        check(embedded.source != uri) { "MCP 资源未提供文件内容" }
+            ?: error(tr("MCP 资源没有可读取内容", "MCP resource has no readable content"))
+        check(embedded.source != uri) { tr("MCP 资源未提供文件内容", "MCP resource did not provide file content") }
         return resource.copy(source = embedded.source, mimeType = embedded.mimeType.ifBlank { resource.mimeType })
     }
     override suspend fun inspectMedia(resource: MediaResource): MediaResource {
@@ -292,7 +352,7 @@ class SessionController(private val context: Context) : CockpitActions {
         val clis = CliCatalog.ids.filter { it in CliCatalog.bridged && NativeCliRuntimePolicy.task(it) == task }
         val running = sessions.values.filter { it.record.environment == s.record.environment && it.record.cli in clis &&
             it.view.connected && !it.view.loading && it.view.activeTurnId != null }.map { it.record.cli }
-        return "更新目标：${s.record.environment} · $task。\n" + NativeCliStatePolicy.serviceUpdateImpact(clis, running)
+        return tr("更新目标：${s.record.environment} · $task。\n", "Update target: ${s.record.environment} · $task.\n") + NativeCliStatePolicy.serviceUpdateImpact(clis, running)
     }
     private fun publish() {
         var consumptionChanged = false
@@ -303,7 +363,7 @@ class SessionController(private val context: Context) : CockpitActions {
             if (returned != null && !s.dispatchStorageBlocked && !s.firstSendPending && !s.view.attachments.any { it.busy } &&
                 s.record.draft.isEmpty() && s.record.images.isEmpty() && s.record.skills.isEmpty()) {
                 try { SubmissionLedger.restoreLocalToComposer(s.record, returned.id, ::persistDurable) }
-                catch (failure: SubmissionPersistenceFailure) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = "取回内容已保留，但无法保存到输入框；请稍后点击编辑") }
+                catch (failure: SubmissionPersistenceFailure) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = tr("取回内容已保留，但无法保存到输入框；请稍后点击编辑", "Taken-back content is preserved, but could not be saved to composer; tap Edit shortly")) }
             }
             val consumedBefore = s.record.submissions.count { it.nativeConsumed }
             if (s.firstSendPending && !s.view.loading && !s.view.connected && s.view.error != null) s.firstSendPending = false
@@ -321,7 +381,7 @@ class SessionController(private val context: Context) : CockpitActions {
                             else -> submitCodex(s, false)
                         }
                     } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { s.view = s.view.copy(error = e.message ?: "首次发送失败，输入已保留") }
+                    catch (e: Exception) { s.view = s.view.copy(error = e.message ?: tr("首次发送失败，输入已保留", "Initial send failed; input preserved")) }
                     finally {
                         if (s.firstSendJob === currentCoroutineContext()[Job]) { s.firstSendScheduled = false; s.firstSendJob = null }
                         publish()
@@ -341,7 +401,7 @@ class SessionController(private val context: Context) : CockpitActions {
                                 val message = SubmissionLedger.find(s.record, id)?.takeIf(SubmissionLedger::isLocal) ?: continue
                                 if (message.settings.any { (key, value) -> settings(s)[key] != value }) {
                                     SubmissionLedger.rejectLocal(s.record, id, ::persistDurable)
-                                    s.view = s.view.copy(error = "待发消息的会话设置已改变"); continue
+                                    s.view = s.view.copy(error = tr("待发消息的会话设置已改变", "Session settings changed for queued message")); continue
                                 }
                                 val input = ManagedSubmission(message.id, message.text, message.images, message.skills, true)
                                 try {
@@ -361,7 +421,7 @@ class SessionController(private val context: Context) : CockpitActions {
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) {
                             s.dispatchStorageBlocked = true
-                            s.view = s.view.copy(error = e.message ?: "待发未能保存，消息仍保留")
+                            s.view = s.view.copy(error = e.message ?: tr("待发未能保存，消息仍保留", "Failed to save queue state; message preserved"))
                         } finally {
                             if (s.dispatchJob === currentCoroutineContext()[Job]) { s.dispatchingLocal = false; s.dispatchJob = null }
                             publish()
@@ -409,19 +469,19 @@ class SessionController(private val context: Context) : CockpitActions {
                 SessionNotificationDecision.None -> {}
             }
             diagnostics.observe(s.record.id, s.view.error, s.record.submissions, s.record.queueDismissals)
-            if (s.dormant) s.view = s.view.copy(summary = Live.summary(s.record).copy(status = "休眠"), draft = s.record.draft)
+            if (s.dormant) s.view = s.view.copy(summary = Live.summary(s.record).copy(status = tr("休眠", "Dormant")), draft = s.record.draft)
             else s.view = SubmissionLedger.project(s.record, s.view.copy(preparingFirstSend = s.firstSendPending,
                 cliServiceUpdateImpact = if (s.view.cliServiceUpdateRequired || s.view.cliServiceUpdateAvailable) cliServiceUpdateImpact(s) else "",
                 summary = Live.summary(s.record).copy(
                 modelLabel = s.models.find { it.id == s.record.model }?.label.orEmpty(),
                 hasUnreadDot = s.record.unread || effectiveRequests.isNotEmpty(),
                 status = when {
-                (if (s.record.cli != "Codex") s.view.requests.isNotEmpty() else s.requests.isNotEmpty()) -> "等待处理"
-                s.view.activeTurnId != null -> if (s.view.connected) "执行中" else "执行状态待同步"
-                s.view.connected && codexRequests.isNotEmpty() -> "待回答"
-                s.view.connected -> "空闲"
-                s.dormant -> "休眠"
-                else -> "未连接"
+                (if (s.record.cli != "Codex") s.view.requests.isNotEmpty() else s.requests.isNotEmpty()) -> tr("等待处理", "Action required")
+                s.view.activeTurnId != null -> if (s.view.connected) tr("执行中", "Running") else tr("执行状态待同步", "Run state syncing")
+                s.view.connected && codexRequests.isNotEmpty() -> tr("待回答", "Awaiting reply")
+                s.view.connected -> tr("空闲", "Idle")
+                s.dormant -> tr("休眠", "Dormant")
+                else -> tr("未连接", "Disconnected")
             }), effort = s.record.effort,
                 messages = effectiveMessages,
                 subAgents = if (s.record.cli != "Codex") s.view.subAgents else s.subAgents.values(), requests = effectiveRequests,
@@ -441,7 +501,7 @@ class SessionController(private val context: Context) : CockpitActions {
             consumptionChanged = consumptionChanged || s.record.submissions.count { it.nativeConsumed } != consumedBefore
         }
         if (consumptionChanged || observationChanged || activityChanged) try { persist() } catch (failure: Exception) {
-            current()?.let { it.view = it.view.copy(error = "无法保存会话同步状态：${failure.message}") }
+            current()?.let { it.view = it.view.copy(error = tr("无法保存会话同步状态：${failure.message}", "Failed to save session sync state: ${failure.message}")) }
         }
         if (!GuiProduct.usesRootExecution(context)) {
             var runningCount = 0
@@ -469,26 +529,94 @@ class SessionController(private val context: Context) : CockpitActions {
                 blank.images.map { Attachment(it.id, it.uri, it.name) } + blankImports, blank.skills.toList()),
             error = storeError ?: mutableState.value.error)
     }
-    private fun canReleaseIdle(s: Live, backgroundOnly: Boolean = true): Boolean =
-        (!backgroundOnly || selected != s.record.id) && s.observing && !s.dormant &&
+    private fun readForegroundTerminalSnapshot(): ForegroundTerminalSnapshot? {
+        val file = java.io.File(java.io.File(context.filesDir, "runtime"), "foreground-terminal.json")
+        if (!file.isFile) return null
+        val info = try { JSONObject(file.readText()) } catch (_: Exception) { return null }
+        val updatedAt = info.optLong("updatedAt", -1L)
+        if (updatedAt <= 0L || System.currentTimeMillis() - updatedAt > 180_000L) return null
+        val pid = info.optInt("pid", 0)
+        val expectedStart = info.optString("processStart", "")
+        if (pid > 0 && expectedStart.isNotEmpty()) {
+            val statFile = java.io.File("/proc/$pid/stat")
+            if (statFile.exists()) {
+                val actualStart = try {
+                    val raw = statFile.readText()
+                    val end = raw.lastIndexOf(')')
+                    if (end < 0) "" else raw.substring(end + 1).trim().split(Regex("\\s+")).let {
+                        if (it.size > 19 && it[0] != "Z") it[19] else ""
+                    }
+                } catch (_: Exception) { null }
+                if (actualStart != null && actualStart != expectedStart) return null
+            } else if (java.io.File("/proc/self/stat").exists()) {
+                return null
+            }
+        }
+        return ForegroundTerminalSnapshot(
+            sessionId = info.optString("sessionId", ""),
+            instanceId = info.optString("instanceId", ""),
+            updatedAt = updatedAt,
+        )
+    }
+
+    private fun refreshForegroundTerminalSnapshot(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && foregroundTerminalRefreshJob?.isActive == true) return
+        if (!force && now - lastForegroundTerminalRefreshMs < 2_000L) return
+        lastForegroundTerminalRefreshMs = now
+        if (force) foregroundTerminalRefreshJob?.cancel()
+        foregroundTerminalRefreshJob = scope.launch {
+            val fresh = withContext(ioDispatcher) { readForegroundTerminalSnapshot() }
+            if (fresh != foregroundTerminalSnapshot) {
+                foregroundTerminalSnapshot = fresh
+                publish()
+                syncOpenCodeDaemonIdleTimer()
+                syncCodexDaemonIdleTimer()
+            }
+        }
+    }
+
+    private fun isDisplayedInForegroundTerminal(s: Live): Boolean =
+        foregroundTerminalSnapshot?.matches(s) == true
+
+    private fun canReleaseIdle(
+        s: Live,
+        backgroundOnly: Boolean = true,
+        allowForegroundTerminal: Boolean = false,
+    ): Boolean =
+        (allowForegroundTerminal || !isDisplayedInForegroundTerminal(s)) &&
+            (!backgroundOnly || backgrounded || (selected != s.record.id && !foregroundTracker.isPinned(s.record.id))) &&
+            s.observing && !s.dormant &&
             s.connectJob?.isActive != true && !s.firstSendPending && !s.dispatchingLocal && !s.dismissing &&
-            childObservation?.parentId != s.record.id && SessionIdlePolicy.eligible(s.record, s.view) &&
+            childObservation?.parentId != s.record.id && SessionIdlePolicy.canAutoRelease(s.record, s.view) &&
             when {
                 s.record.cli in CliCatalog.bridged -> s.nativeCli?.releasable == true
-                s.record.cli == "Codex" -> s.idleConfirmed && s.historyResumable
+                s.record.cli == "Codex" -> s.record.externalSocket == null && s.idleConfirmed && s.historyResumable
                 s.record.cli == "OpenCode" -> s.openCode != null
                 else -> false
             }
 
+    private fun canDeferIdleInForegroundTerminal(s: Live): Boolean =
+        (backgrounded || (selected != s.record.id && !foregroundTracker.isPinned(s.record.id))) &&
+            isDisplayedInForegroundTerminal(s) &&
+            canReleaseIdle(s, backgroundOnly = false, allowForegroundTerminal = true)
+
     private fun scheduleIdleRelease(s: Live) {
         if (s.releasing) return
-        if (!canReleaseIdle(s)) { s.idleJob?.cancel(); s.idleJob = null; return }
+        if (backgrounded || foregroundTerminalSnapshot != null) refreshForegroundTerminalSnapshot()
+        if (!canReleaseIdle(s) && !canDeferIdleInForegroundTerminal(s)) { s.idleJob?.cancel(); s.idleJob = null; return }
         if (s.idleJob?.isActive == true) return
         val epoch = s.generation
         s.idleJob = scope.launch {
-            delay(idleGraceMillis)
+            while (true) {
+                delay(idleGraceMillis)
+                if (sessions[s.record.id] !== s || s.generation != epoch) return@launch
+                foregroundTerminalSnapshot = withContext(ioDispatcher) { readForegroundTerminalSnapshot() }
+                if (canDeferIdleInForegroundTerminal(s)) continue
+                if (!canReleaseIdle(s)) return@launch
+                break
+            }
             try {
-                if (sessions[s.record.id] !== s || s.generation != epoch || !canReleaseIdle(s)) return@launch
                 s.releasing = true
                 when {
                     s.record.cli in CliCatalog.bridged -> s.nativeCli!!.releaseIdle()
@@ -496,6 +624,7 @@ class SessionController(private val context: Context) : CockpitActions {
                         val rpc = s.rpc ?: return@launch
                         val thread = rpc.request("thread/read", obj("threadId" to s.record.threadId, "includeTurns" to false)).getJSONObject("thread")
                         if (thread.getString("id") != s.record.threadId || thread.optJSONObject("status")?.optString("type") != "idle") return@launch
+                        foregroundTerminalSnapshot = withContext(ioDispatcher) { readForegroundTerminalSnapshot() }
                         if (!canReleaseIdle(s)) return@launch
                         try { rpc.request("thread/unsubscribe", obj("threadId" to s.record.threadId)) }
                         catch (unsupported: RpcRejected) { if (unsupported.code != -32601) throw unsupported }
@@ -514,31 +643,73 @@ class SessionController(private val context: Context) : CockpitActions {
         }
     }
 
+    private fun isObservingOpenCode(s: Live): Boolean =
+        s.record.environment == environment && s.record.cli == "OpenCode" && (s.observing || s.openCode != null)
+
+    private fun isManagedCodex(s: Live): Boolean =
+        s.record.environment == environment && s.record.cli == "Codex" && s.record.externalSocket == null
+
+    private fun hasForegroundTerminalSession(
+        terminal: ForegroundTerminalSnapshot?,
+        predicate: (Live) -> Boolean,
+    ): Boolean = terminal != null && sessions.values.any { predicate(it) && terminal.matches(it) }
+
+    private fun launchDaemonIdleTimer(
+        currentJob: Job?,
+        isObserving: () -> Boolean,
+        matchesDaemon: (Live) -> Boolean,
+        onClear: (Job?) -> Unit,
+        stopDaemon: suspend () -> Unit,
+    ): Job? {
+        if (isObserving()) {
+            currentJob?.cancel()
+            return null
+        }
+        if (hasForegroundTerminalSession(foregroundTerminalSnapshot, matchesDaemon)) {
+            refreshForegroundTerminalSnapshot()
+        }
+        if (currentJob?.isActive == true) return currentJob
+        return scope.launch {
+            try {
+                while (true) {
+                    delay(idleGraceMillis)
+                    if (isObserving()) return@launch
+                    val terminal = withContext(ioDispatcher) { readForegroundTerminalSnapshot() }
+                    foregroundTerminalSnapshot = terminal
+                    if (hasForegroundTerminalSession(terminal, matchesDaemon)) continue
+                    stopDaemon()
+                    return@launch
+                }
+            } finally {
+                onClear(currentCoroutineContext()[Job])
+            }
+        }
+    }
+
     private fun syncOpenCodeDaemonIdleTimer() {
-        val hasActiveOpenCode = sessions.values.any {
-            it.record.environment == environment && it.record.cli == "OpenCode" && (it.observing || it.openCode != null)
-        }
-        if (hasActiveOpenCode) {
-            openCodeIdleJob?.cancel()
-            openCodeIdleJob = null
-            return
-        }
-        if (openCodeIdleJob?.isActive == true) return
         val knownEndpoint = lastOpenCodeEndpoint
-        openCodeIdleJob = scope.launch {
-            delay(idleGraceMillis)
-            val stillIdle = sessions.values.none {
-                it.record.environment == environment && it.record.cli == "OpenCode" && (it.observing || it.openCode != null)
-            }
-            if (stillIdle) {
-                runtime.stopIdleOpenCode(environment, knownEndpoint)
-            }
-            if (openCodeIdleJob === currentCoroutineContext()[Job]) openCodeIdleJob = null
-        }
+        openCodeIdleJob = launchDaemonIdleTimer(
+            currentJob = openCodeIdleJob,
+            isObserving = { sessions.values.any(::isObservingOpenCode) },
+            matchesDaemon = { it.record.environment == environment && it.record.cli == "OpenCode" },
+            onClear = { finished -> if (openCodeIdleJob === finished) openCodeIdleJob = null },
+            stopDaemon = { runtime.stopIdleOpenCode(environment, knownEndpoint ?: lastOpenCodeEndpoint) },
+        )
+    }
+
+    private fun syncCodexDaemonIdleTimer() {
+        codexIdleJob = launchDaemonIdleTimer(
+            currentJob = codexIdleJob,
+            isObserving = { sessions.values.any { isManagedCodex(it) && (it.observing || it.rpc != null) } },
+            matchesDaemon = ::isManagedCodex,
+            onClear = { finished -> if (codexIdleJob === finished) codexIdleJob = null },
+            stopDaemon = { runtime.stopIdleCodex(environment) },
+        )
     }
 
     private fun dropIdleCache(s: Live) {
         val wasOpenCode = s.record.cli == "OpenCode"
+        val wasManagedCodex = s.record.cli == "Codex" && s.record.externalSocket == null
         if (wasOpenCode && s.endpoint != null) lastOpenCodeEndpoint = s.endpoint
         s.observing = false; s.dormant = true; s.idleConfirmed = false; s.generation++
         s.reconnectJob?.cancel(); s.reconnectJob = null
@@ -554,13 +725,14 @@ class SessionController(private val context: Context) : CockpitActions {
         s.models = emptyList(); s.queueRaw = emptyList(); s.tokens = emptyList(); s.limits = emptyList(); s.rolloutPath = null
         s.settingsWaiter?.cancel(); s.settingsWaiter = null; s.settingsExpected = null
         s.idleJob = null
-        s.view = SessionView(Live.summary(s.record), connection = "休眠", draft = s.record.draft, effort = s.record.effort)
+        s.view = SessionView(Live.summary(s.record), connection = tr("休眠", "Dormant"), draft = s.record.draft, effort = s.record.effort)
         if (wasOpenCode) syncOpenCodeDaemonIdleTimer()
+        if (wasManagedCodex) syncCodexDaemonIdleTimer()
     }
 
     private fun persistDelivery(s: Live) {
         try { persist() }
-        catch (failure: Exception) { s.view = s.view.copy(error = "无法保存发送状态，输入已保留：${failure.message}") }
+        catch (failure: Exception) { s.view = s.view.copy(error = tr("无法保存发送状态，输入已保留：${failure.message}", "Failed to save send state (input preserved): ${failure.message}")) }
     }
     private fun current() = sessions[selected]
     private fun asyncQuestions(s: Live) = CodexAsyncQuestions.pending(s.items.values,
@@ -573,7 +745,7 @@ class SessionController(private val context: Context) : CockpitActions {
             try { block() }
             catch (failure: CancellationException) { throw failure }
             catch (failure: Exception) {
-                val message = failure.message ?: "操作失败，请重试"
+                val message = failure.message ?: tr("操作失败，请重试", "Action failed; please try again")
                 if (s != null) { if (s.generation == epoch) s.view = s.view.copy(error = message, sending = false, loading = false) }
                 else mutableState.value = mutableState.value.copy(error = message, creating = false)
             }
@@ -607,7 +779,7 @@ class SessionController(private val context: Context) : CockpitActions {
             catch (failure: Exception) {
                 if (s.connectJob === currentCoroutineContext()[Job]) {
                     if (!prepared) s.observing = false
-                    s.view = s.view.copy(error = s.view.error ?: failure.message ?: "连接失败", sending = false, loading = false)
+                    s.view = s.view.copy(error = s.view.error ?: failure.message ?: tr("连接失败", "Connection failed"), sending = false, loading = false)
                 }
             } finally {
                 if (s.connectJob === currentCoroutineContext()[Job]) s.connectJob = null
@@ -640,10 +812,10 @@ class SessionController(private val context: Context) : CockpitActions {
                 val externalSocket = request.stringOrNull("externalSocket")
                 io.github.modao7067.luma.gui.runtime.ExternalCodexPolicy.validateAttachment(cli, environment, nativeId, externalSocket)
                 val pattern = when (cli) { "Codex" -> "[A-Za-z0-9-]+"; "OpenCode" -> "ses[a-zA-Z0-9_-]{1,128}"; else -> null }
-                require(pattern == null || nativeId.matches(Regex(pattern))) { "请输入 $cli 原生会话 ID" }
-                require(cli !in CliCatalog.bridged || nativeId.matches(Regex("[a-zA-Z0-9_-]{1,128}"))) { "当前 CLI bridge 仅接收原生 session ID，不接收 sessionFile 路径；请使用 CLI 返回的 nativeId" }
+                require(pattern == null || nativeId.matches(Regex(pattern))) { tr("请输入 $cli 原生会话 ID", "Enter a valid $cli native session ID") }
+                require(cli !in CliCatalog.bridged || nativeId.matches(Regex("[a-zA-Z0-9_-]{1,128}"))) { tr("当前 CLI bridge 仅接收原生 session ID，不接收 sessionFile 路径；请使用 CLI 返回的 nativeId", "CLI bridge expects a native session ID rather than a sessionFile path; pass nativeId") }
                 val repair = request.stringOrNull("id")?.let { id ->
-                    val target = sessions[id]?.takeIf { it.record.environment == environment } ?: error("attach.id 不在当前 App 中")
+                    val target = sessions[id]?.takeIf { it.record.environment == environment } ?: error(tr("attach.id 不在当前 App 中", "attach.id not found in current app"))
                     ManagedSessionPolicy.validateExternalRepair(target.record, cli, nativeId, checkNotNull(externalSocket), target.view.connected, target.view.loading)
                     target
                 }
@@ -663,7 +835,7 @@ class SessionController(private val context: Context) : CockpitActions {
             "send" -> {
                 commands.existing(request)?.let { return commandInfo(it) }
                 val s = managedTarget(request)
-                check(!s.view.configuring && !s.firstSendPending) { "会话正在更新设置" }
+                check(!s.view.configuring && !s.firstSendPending) { tr("会话正在更新设置", "Session is updating settings") }
                 if (s.view.activeTurnId == null) s.userStoppedTurn = false
                 val submissionId = if (s.record.cli == "OpenCode") "msg_" + UUID.randomUUID().toString().replace("-", "") else UUID.randomUUID().toString()
                 val entry = commands.reserve(request, s.record.id, submissionId)
@@ -680,11 +852,11 @@ class SessionController(private val context: Context) : CockpitActions {
             }
             "status" -> if (request.has("requestId")) {
                 check(commands.error == null) { commands.error!! }
-                commandInfo(commands.entries[request.getString("requestId")] ?: error("requestId 不存在；不会自动执行"))
+                commandInfo(commands.entries[request.getString("requestId")] ?: error(tr("requestId 不存在；不会自动执行", "requestId not found; will not auto-execute")))
             } else obj("ok" to true, "session" to managedInfo(managedTarget(request)))
             "read" -> {
                 val s = managedTarget(request); val rows = s.view.messages
-                val end = if (request.has("before")) rows.indexOfFirst { it.id == request.getString("before") }.also { require(it >= 0) { "before 消息不在当前已同步历史中" } } else rows.size
+                val end = if (request.has("before")) rows.indexOfFirst { it.id == request.getString("before") }.also { require(it >= 0) { tr("before 消息不在当前已同步历史中", "before message ID not found in synced history") } } else rows.size
                 val start = (end - request.optInt("limit", 20)).coerceAtLeast(0)
                 obj("ok" to true, "session" to managedInfo(s), "messages" to JSONArray(rows.subList(start, end).map { message ->
                     obj("id" to message.id, "role" to message.role, "text" to message.text.take(16384), "detail" to message.detail.take(16384),
@@ -700,11 +872,11 @@ class SessionController(private val context: Context) : CockpitActions {
                 renameLocal(s, request.getString("title"))
                 obj("ok" to true, "session" to managedInfo(s))
             }
-            else -> error("未知 action")
+            else -> error(tr("未知 action", "Unknown action"))
         }
     }
     private fun managedTarget(request: JSONObject): Live = sessions[request.getString("id")]?.takeIf { it.record.environment == environment }
-        ?: error("当前 App 中不存在此本地 id；先用 list 获取目标")
+        ?: error(tr("当前 App 中不存在此本地 id；先用 list 获取目标", "Local session ID not found; run list first"))
     private fun managedInfo(s: Live): JSONObject = obj("id" to s.record.id, "nativeId" to s.record.threadId, "cli" to s.record.cli,
         "externalSocket" to s.record.externalSocket,
         "nativeProtocol" to (s.record.nativeProtocol ?: "antigravity-acp".takeIf { s.record.cli == "Antigravity" && s.record.threadId != null }),
@@ -738,7 +910,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 else -> entry.state
             }
             try { commands.update(entry, result, if (result in setOf("error", "rejected")) s.view.error else null) }
-            catch (e: Exception) { s.view = s.view.copy(error = "无法保存命令状态：${e.message}") }
+            catch (e: Exception) { s.view = s.view.copy(error = tr("无法保存命令状态：${e.message}", "Failed to save command state: ${e.message}")) }
         }
     }
     private fun commandInfo(entry: SessionCommandStore.Entry): JSONObject {
@@ -754,14 +926,14 @@ class SessionController(private val context: Context) : CockpitActions {
     override fun attachCliSession(cli: String, title: String, environment: String, cwd: String, threadId: String) {
         if (cli == "Codex") { attachSession(title, environment, cwd, threadId); return }
         val pattern = if (cli == "OpenCode") "ses[a-zA-Z0-9_-]{1,128}" else "[a-zA-Z0-9_-]{1,128}"
-        if (cli !in CliCatalog.ids || !threadId.matches(Regex(pattern))) { mutableState.value = mutableState.value.copy(error = "请输入 $cli 原生 session ID"); return }
+        if (cli !in CliCatalog.ids || !threadId.matches(Regex(pattern))) { mutableState.value = mutableState.value.copy(error = tr("请输入 $cli 原生 session ID", "Enter a $cli native session ID")); return }
         addSession(title, environment, cwd, "", threadId, cli)
     }
     override fun createSession(title: String, environment: String, cwd: String, model: String) {
         addSession(title, environment, cwd, model, null)
     }
     override fun attachSession(title: String, environment: String, cwd: String, threadId: String) {
-        if (!threadId.matches(Regex("[A-Za-z0-9-]+"))) { mutableState.value = mutableState.value.copy(error = "请输入原 Codex thread ID"); return }
+        if (!threadId.matches(Regex("[A-Za-z0-9-]+"))) { mutableState.value = mutableState.value.copy(error = tr("请输入原 Codex thread ID", "Enter the Codex thread ID")); return }
         addSession(title, environment, cwd, "", threadId)
     }
     private fun isEmptySession(s: Live): Boolean =
@@ -797,6 +969,7 @@ class SessionController(private val context: Context) : CockpitActions {
             }
         }
         if (cli == "OpenCode") syncOpenCodeDaemonIdleTimer()
+        if (cli == "Codex" && s.record.externalSocket == null) syncCodexDaemonIdleTimer()
     }
 
     private fun prunePreviousIfEmpty(nextId: String?): Boolean {
@@ -809,7 +982,7 @@ class SessionController(private val context: Context) : CockpitActions {
             store.save(sessions.values.filter { it !== previous }.map { it.record })
         } catch (failure: Exception) {
             store.navigation.selectedId = previousSelection
-            previous.view = previous.view.copy(error = "无法清理空会话，原会话已保留：${CodexCapabilities.redact(failure.message ?: "保存失败")}")
+            previous.view = previous.view.copy(error = tr("无法清理空会话，原会话已保留：${CodexCapabilities.redact(failure.message ?: "保存失败")}", "Failed to clean up empty session (preserved): ${CodexCapabilities.redact(failure.message ?: "save failed")}"))
             publish()
             return false
         }
@@ -820,7 +993,7 @@ class SessionController(private val context: Context) : CockpitActions {
     private fun addSession(title: String, environment: String, cwd: String, model: String, threadId: String?, cli: String = "Codex") {
         if (storeError != null) return
         if (cli !in CliCatalog.ids || environment != this.environment || !cwd.startsWith('/') || cwd.contains('\u0000')) {
-            mutableState.value = mutableState.value.copy(error = "请输入内置环境中的绝对工作目录"); return
+            mutableState.value = mutableState.value.copy(error = tr("请输入内置环境中的绝对工作目录", "Enter an absolute working directory inside the environment")); return
         }
         val existing = sessions.values.firstOrNull { it.record.cli == cli && it.record.environment == environment && threadId != null && it.record.threadId == threadId && it.record.externalSocket == null &&
             (cli != "Antigravity" || it.record.nativeProtocol == null || it.record.nativeProtocol == "antigravity-acp") }
@@ -915,7 +1088,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     catch (failure: Exception) {
                         if (ownsChildObservation(observation, parent)) {
                             observation.detail = observation.detail.copy(loading = false)
-                            parent.view = parent.view.copy(error = "子代理读取失败：${CodexCapabilities.redact(failure.message ?: "未知错误")}")
+                            parent.view = parent.view.copy(error = tr("子代理读取失败：${CodexCapabilities.redact(failure.message ?: "未知错误")}", "Failed to load sub-agent: ${CodexCapabilities.redact(failure.message ?: "unknown error")}"))
                             publish()
                         }
                         return@launch
@@ -941,32 +1114,65 @@ class SessionController(private val context: Context) : CockpitActions {
             if (message.optString("method") in setOf("turn/started", "turn/completed", "thread/settings/updated")) observation.signals.trySend(Unit)
         }
     }
+    fun onActivityStarted(token: Any, pinnedSessionId: String? = null) {
+        applyForegroundState(foregroundTracker.start(token, pinnedSessionId), forcePublish = true)
+    }
+
+    fun onActivityStopped(token: Any) {
+        applyForegroundState(foregroundTracker.stop(token), forcePublish = true)
+    }
+
     fun setForeground(visible: Boolean) {
-        if (foreground == visible) return
-        foreground = visible
-        if (visible) {
-            runtime.onAppForegrounded()
-            if (GuiProduct.usesRootExecution(context)) {
-                rootWatcherArmed = false
-                lastArmedRootSessions = emptyList()
-                RootBackgroundNotifications.disarmLocal(context)
+        if (visible) onActivityStarted(defaultForegroundToken) else onActivityStopped(defaultForegroundToken)
+    }
+
+    private fun applyForegroundState(visible: Boolean, forcePublish: Boolean = false) {
+        val changed = foreground != visible
+        if (changed) {
+            foreground = visible
+            backgrounded = !visible
+            refreshForegroundTerminalSnapshot(force = true)
+            if (visible) {
+                runtime.onAppForegrounded()
+                if (RootBackgroundNotifications.isEnabled(context)) {
+                    rootWatcherArmed = false
+                    lastArmedRootSessions = emptyList()
+                    RootBackgroundNotifications.disarmLocal(context)
+                }
+                current()?.let { if (it.dormant && !it.observing) startObservation(it) }
+            } else {
+                childObservation?.let { it.job?.cancel(); it.job = null; it.started = false; it.detail = it.detail.copy(loading = false) }
             }
-        } else {
-            childObservation?.let { it.job?.cancel(); it.job = null; it.started = false; it.detail = it.detail.copy(loading = false) }
         }
-        publish()
-        if (!visible && GuiProduct.usesRootExecution(context)) {
+        if (changed || forcePublish) {
+            publish()
+        }
+        if (changed && !visible && RootBackgroundNotifications.isEnabled(context)) {
             syncRootBackgroundWatcher(forceSpawn = true)
         }
     }
 
     private fun buildWatchedRootSessions(): List<WatchedRootSession> {
-        if (!GuiProduct.usesRootExecution(context)) return emptyList()
+        if (!RootBackgroundNotifications.isEnabled(context)) return emptyList()
         val expectedEnv = if (GuiProduct.isRoot) "root" else environment
         return sessions.values.mapNotNull { s ->
             if (s.record.environment != expectedEnv) return@mapNotNull null
-            val activeObserver = s.observing || s.view.connected || s.view.loading || s.view.activeTurnId != null || s.view.requests.isNotEmpty()
-            if (!activeObserver) return@mapNotNull null
+            val activeSubAgent = s.view.subAgents.any {
+                it.status !in setOf("succeeded", "completed", "failed", "cancelled", "closed", "aborted")
+            }
+            val activeTool = s.view.messages.any {
+                it.kind == "tool" && it.status in setOf("running", "in_progress", "pending")
+            }
+            val needsWatch = s.view.activeTurnId != null ||
+                s.view.requests.isNotEmpty() ||
+                s.view.loading ||
+                s.connectJob?.isActive == true ||
+                s.firstSendPending ||
+                s.dispatchingLocal ||
+                SubmissionLedger.pending(s.record) ||
+                activeSubAgent ||
+                activeTool
+            if (!needsWatch) return@mapNotNull null
             val proto = when {
                 s.record.cli in CliCatalog.bridged -> "bridged"
                 s.record.cli == "OpenCode" -> "opencode"
@@ -990,7 +1196,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
 
     private fun syncRootBackgroundWatcher(forceSpawn: Boolean) {
-        if (!GuiProduct.usesRootExecution(context) || foreground) return
+        if (!RootBackgroundNotifications.isEnabled(context) || foreground) return
         val watched = buildWatchedRootSessions()
         if (watched.isEmpty()) {
             if (rootWatcherArmed || lastArmedRootSessions.isNotEmpty()) {
@@ -1004,7 +1210,7 @@ class SessionController(private val context: Context) : CockpitActions {
         if (!shouldSpawn && watched == lastArmedRootSessions) return
         rootWatcherArmed = true
         lastArmedRootSessions = watched
-        RootBackgroundNotifications.armInBackground(context, scope, watched, spawnLauncher = shouldSpawn)
+        RootBackgroundNotifications.armInBackground(context, scope, watched, spawnLauncher = shouldSpawn && GuiProduct.usesRootExecution(context))
     }
 
     internal fun onBackgroundWake(sessionId: String, kind: SessionNotificationKind, onComplete: () -> Unit) {
@@ -1065,7 +1271,7 @@ class SessionController(private val context: Context) : CockpitActions {
         mutableState.value = mutableState.value.copy(fileBrowser = null, filePreview = null, inventory = null, plugins = PluginCatalog(), browserOpen = false)
     }
     private fun saveNavigation() {
-        try { persist() } catch (e: Exception) { mutableState.value = mutableState.value.copy(error = "无法保存会话选择：${e.message}") }
+        try { persist() } catch (e: Exception) { mutableState.value = mutableState.value.copy(error = tr("无法保存会话选择：${e.message}", "Failed to save session selection: ${e.message}")) }
     }
     override fun discardUncertainSubmission() {
         val s = current() ?: return
@@ -1081,7 +1287,7 @@ class SessionController(private val context: Context) : CockpitActions {
         val target = current()?.takeIf { it.view.cliServiceUpdateRequired || it.view.cliServiceUpdateAvailable } ?: return
         if (cliMaintenanceJob?.isActive == true) return
         try { persist() } catch (failure: Exception) {
-            target.view = target.view.copy(error = "无法保存会话，CLI 服务未停止：${failure.message}"); publish(); return
+            target.view = target.view.copy(error = tr("无法保存会话，CLI 服务未停止：${failure.message}", "Failed to save session; CLI service was not stopped: ${failure.message}")); publish(); return
         }
         val task = NativeCliRuntimePolicy.task(target.record.cli)
         val affected = sessions.values.filter { it.record.environment == target.record.environment && it.record.cli in CliCatalog.bridged && NativeCliRuntimePolicy.task(it.record.cli) == task }
@@ -1097,7 +1303,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 s.dispatchingLocal = false; s.dismissing = false; s.firstSendScheduled = false
                 s.nativeCli?.close()
                 s.view = s.view.copy(connected = false, loading = true, canOpenTui = false, requests = emptyList(),
-                    connection = "正在更新 CLI 服务…", error = null)
+                    connection = tr("正在更新 CLI 服务…", "Updating CLI service…"), error = null)
                 jobs
             }
             publish()
@@ -1111,14 +1317,14 @@ class SessionController(private val context: Context) : CockpitActions {
                 affected.forEach { s ->
                     s.releasing = false
                     if (sessions[s.record.id] === s) {
-                        s.view = s.view.copy(loading = false, cliServiceUpdateRequired = false, cliServiceUpdateAvailable = false, connection = "CLI 服务已更新 · 待同步")
+                        s.view = s.view.copy(loading = false, cliServiceUpdateRequired = false, cliServiceUpdateAvailable = false, connection = tr("CLI 服务已更新 · 待同步", "CLI service updated · Syncing"))
                         if (s.record.id in restore) startObservation(s, recoverExternal = true)
                     }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 affected.forEach { s -> if (sessions[s.record.id] === s) s.view = s.view.copy(loading = false,
-                    error = "CLI 服务更新失败：${failure.message}；记录与草稿保留，请回到更新入口再次确认") }
+                    error = tr("CLI 服务更新失败：${failure.message}；记录与草稿保留，请回到更新入口再次确认", "CLI service update failed: ${failure.message}; history and drafts preserved")) }
             } finally {
                 affected.forEach { it.releasing = false }
                 if (cliMaintenanceJob === currentCoroutineContext()[Job]) cliMaintenanceJob = null
@@ -1129,12 +1335,12 @@ class SessionController(private val context: Context) : CockpitActions {
     }
 
     private suspend fun connect(s: Live, recoverExternal: Boolean = false) {
-        if (!s.observing || sessions[s.record.id] !== s) throw CancellationException("界面观察已停止")
+        if (!s.observing || sessions[s.record.id] !== s) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
         currentCoroutineContext().ensureActive()
         s.connectJob = currentCoroutineContext()[Job]
         val epoch = ++s.generation
         s.idleConfirmed = false
-        s.view = s.view.copy(loading = true, connected = false, connection = "连接运行环境…", error = null, canOpenTui = false)
+        s.view = s.view.copy(loading = true, connected = false, connection = tr("连接运行环境…", "Connecting to runtime…"), error = null, canOpenTui = false)
         publish()
         if (s.record.cli in CliCatalog.bridged) {
             val cachedModels = s.models.takeIf { s.nativeCli?.catalogIdentity == NativeCliCatalogIdentity.of(s.record) }.orEmpty()
@@ -1146,11 +1352,11 @@ class SessionController(private val context: Context) : CockpitActions {
                 persistCheckpoint = ::persistDurable).also { s.nativeCli = it }
             adapter.connect()
             currentCoroutineContext().ensureActive()
-            if (!s.observing || s.generation != epoch) throw CancellationException("界面观察已停止")
+            if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
             s.endpoint = adapter.endpoint
             return
         }
-        check(s.record.cli in CliCatalog.ids) { "此 CLI 适配尚未启用" }
+        check(s.record.cli in CliCatalog.ids) { tr("此 CLI 适配尚未启用", "Adapter for this CLI is not enabled yet") }
         if (s.record.cli == "OpenCode") {
             openCodeIdleJob?.cancel(); openCodeIdleJob = null
             sessions.values.filter { it.record.environment == environment }.forEach { browser.bind(it.record.id, it.record.threadId) }
@@ -1162,10 +1368,14 @@ class SessionController(private val context: Context) : CockpitActions {
                 persistCheckpoint = ::persistDurable).also { s.openCode = it }
             adapter.connect()
             currentCoroutineContext().ensureActive()
-            if (!s.observing || s.generation != epoch) throw CancellationException("界面观察已停止")
+            if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
             s.endpoint = adapter.endpoint
             adapter.endpoint?.let { lastOpenCodeEndpoint = it }
             return
+        }
+        if (s.record.externalSocket == null) {
+            codexIdleJob?.cancel()
+            codexIdleJob = null
         }
         val endpoint = s.record.externalSocket?.let {
             if (recoverExternal) runtime.recoverExternalCodex(s.record.environment, it)
@@ -1173,7 +1383,7 @@ class SessionController(private val context: Context) : CockpitActions {
         }
             ?: runtime.connect(s.record.environment)
         currentCoroutineContext().ensureActive()
-        if (!s.observing || s.generation != epoch) throw CancellationException("界面观察已停止")
+        if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
         s.endpoint = endpoint
         s.rpc?.close(); s.deltaPublishJob?.cancel(); s.deltaPublishJob = null; s.requests.clear(); s.buffered.clear(); s.hydrationBoundary.clear(); s.subAgentMetadataReads.clear()
         val rpc = CodexRpc(endpoint.url, endpoint.authToken, transport = runtime.codexTransport(endpoint),
@@ -1181,12 +1391,12 @@ class SessionController(private val context: Context) : CockpitActions {
                 if (s.hydrating) { s.buffered.add(message); return@launch }
                 var failed = false
                 try { event(s, message) }
-                catch (failure: Exception) { failed = true; s.view = s.view.copy(error = "无法应用服务事件，请重新连接同步：${failure.message}") }
+                catch (failure: Exception) { failed = true; s.view = s.view.copy(error = tr("无法应用服务事件，请重新连接同步：${failure.message}", "Failed to apply service event; reconnect to resync: ${failure.message}")) }
                 publishCodexEvent(s, message, forceImmediate = failed)
             } } },
             onDisconnect = { failure -> scope.launch { if (s.observing && s.generation == epoch) {
                 s.deltaPublishJob?.cancel(); s.deltaPublishJob = null
-                s.view = s.view.copy(connected = false, connection = "连接中断 · 任务状态待同步", loading = false, sending = false, error = failure.message)
+                s.view = s.view.copy(connected = false, connection = tr("连接中断 · 任务状态待同步", "Disconnected · Task state syncing"), loading = false, sending = false, error = failure.message)
                 s.requests.clear(); publish()
             } } })
         s.rpc = rpc; s.hydrating = true
@@ -1201,7 +1411,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 if (s.record.creationUnknown) {
                     val known = sessions.values.filter { it.record.environment == s.record.environment }.mapNotNull { it.record.threadId }.toSet()
                     val candidates = loadedThreads(rpc) - known
-                    error("上次创建结果尚未确认，不会自动再建。当前服务未关联的 ID：${candidates.joinToString().ifBlank { "无；可能服务已重启" }}。请保留这些 ID，由支持人员核对托管服务与本地索引；确需另建时再点新建。")
+                    error(tr("上次创建结果尚未确认，不会自动再建。当前服务未关联的 ID：${candidates.joinToString().ifBlank { "无；可能服务已重启" }}。请保留这些 ID，由支持人员核对托管服务与本地索引；确需另建时再点新建。", "Previous session creation is unconfirmed; will not auto-recreate. Unlinked IDs on service: ${candidates.joinToString().ifBlank { "none (service may have restarted)" }}. Tap New session again if you want a fresh one."))
                 }
                 s.record.creationUnknown = true
                 try { persist() } catch (e: Exception) { s.record.creationUnknown = false; throw e }
@@ -1221,7 +1431,7 @@ class SessionController(private val context: Context) : CockpitActions {
             browser.bind(s.record.id, id)
             if (s.record.externalSocket == null) CodexThreadInitialization.finish(s.record, startedThread, rpc::request, ::persist)
             val resumed = rpc.request("thread/resume", CodexConnectionSetup.resumeParams(s.record, browserOverrides))
-            check(resumed.getJSONObject("thread").getString("id") == id) { "服务返回了不同会话，已停止接入" }
+            check(resumed.getJSONObject("thread").getString("id") == id) { tr("服务返回了不同会话，已停止接入", "Service returned a different session; attach aborted") }
             s.record.requireLoaded = false
             s.idleConfirmed = resumed.getJSONObject("thread").optJSONObject("status")?.optString("type") == "idle"
             s.rolloutPath = resumed.getJSONObject("thread").stringOrNull("path")
@@ -1247,11 +1457,11 @@ class SessionController(private val context: Context) : CockpitActions {
                     options += CodexCapabilities.permissions(page); next = page.stringOrNull("nextCursor")
                 } while (next != null)
                 s.view = s.view.copy(permissions = options, capabilityNotice = null)
-            } catch (e: RpcRejected) { s.view = s.view.copy(permissions = emptyList(), capabilityNotice = "当前 CLI 未提供可选择的权限配置") }
+            } catch (e: RpcRejected) { s.view = s.view.copy(permissions = emptyList(), capabilityNotice = tr("当前 CLI 未提供可选择的权限配置", "No selectable permission configurations provided by CLI")) }
             refreshQueue(s)
             currentCoroutineContext().ensureActive()
-            if (!s.observing || s.generation != epoch) throw CancellationException("界面观察已停止")
-            s.view = s.view.copy(connected = true, loading = false, connection = "已连接", canOpenTui = true, error = null)
+            if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
+            s.view = s.view.copy(connected = true, loading = false, connection = tr("已连接", "Connected"), canOpenTui = true, error = null)
         } finally {
             if (s.observing && s.generation == epoch) {
                 s.hydrating = false
@@ -1381,7 +1591,7 @@ class SessionController(private val context: Context) : CockpitActions {
             cid != null && (s.items[cid]?.role == "user" || cid in idleDirectIds)
         }
         s.queueRaw = waiting
-        s.view = s.view.copy(queue = waiting.map { QueueEntry(it.getString("id"), CodexAsyncQuestions.displayReply(CodexProjection.inputText(it.optJSONArray("input") ?: JSONArray())), "尚未执行", it.optJSONArray("input")?.objects().orEmpty().filter { input -> input.optString("type") == "text" }.joinToString("\n") { input -> input.optString("text") },
+        s.view = s.view.copy(queue = waiting.map { QueueEntry(it.getString("id"), CodexAsyncQuestions.displayReply(CodexProjection.inputText(it.optJSONArray("input") ?: JSONArray())), tr("尚未执行", "Pending"), it.optJSONArray("input")?.objects().orEmpty().filter { input -> input.optString("type") == "text" }.joinToString("\n") { input -> input.optString("text") },
             clientUserMessageId = it.stringOrNull("clientUserMessageId")) })
         linked.mapNotNull { it.stringOrNull("clientUserMessageId") }.forEach { id ->
             SubmissionLedger.find(s.record, id)?.let {
@@ -1501,7 +1711,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 val reasoning = method.contains("reasoning")
                 val old = s.items[id]
                     ?: ConversationItem(id, if (assistant) "assistant" else "tool",
-                        text = if (reasoning) "推理摘要" else "",
+                        text = if (reasoning) tr("推理摘要", "Reasoning summary") else "",
                         kind = when { reasoning -> "reasoning"; method.contains("commandExecution") -> "commandExecution"; method.contains("plan") -> "plan"; else -> "agentMessage" },
                         turnId = p.optString("turnId"), outcome = "running")
                 val delta = p.optString("delta")
@@ -1559,7 +1769,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 catch (_: RpcRejected) {  }
                 catch (e: Exception) {
                     if (s.generation == epoch && rpc.connected) {
-                        s.view = s.view.copy(error = "子代理名称读取失败，请重连同步：${e.message}"); publish()
+                        s.view = s.view.copy(error = tr("子代理名称读取失败，请重连同步：${e.message}", "Failed to read sub-agent name; reconnect to sync: ${e.message}")); publish()
                     }
                 }
             }
@@ -1592,12 +1802,12 @@ class SessionController(private val context: Context) : CockpitActions {
         val s = current()
         if (s == null) {
             val id = UUID.randomUUID().toString(); val key = blank.key
-            blankImports += Attachment(id, uri, "导入图片…", true); publish()
+            blankImports += Attachment(id, uri, tr("导入图片…", "Importing image…"), true); publish()
             launch(null) {
                 try {
                     val path = runtime.importImage(environment, Uri.parse(uri))
-                    val preview = runtime.imagePreviewUri(environment, path) ?: error("导入图片不可读取")
-                    check(blank.key == key) { "导入期间已切换空白会话，图片未添加，请重新选择" }
+                    val preview = runtime.imagePreviewUri(environment, path) ?: error(tr("导入图片不可读取", "Imported image is unreadable"))
+                    check(blank.key == key) { tr("导入期间已切换空白会话，图片未添加，请重新选择", "Switched blank session during import; image was not added, please reselect") }
                     blank.images += StoredImage(id, preview, path, path.substringAfterLast('/')); persist()
                 } finally { blankImports.removeAll { it.id == id } }
             }
@@ -1605,11 +1815,11 @@ class SessionController(private val context: Context) : CockpitActions {
         }
         if (s.firstSendPending) return
         val id = UUID.randomUUID().toString()
-        s.view = s.view.copy(attachments = s.view.attachments + Attachment(id, uri, "导入图片…", true)); publish()
+        s.view = s.view.copy(attachments = s.view.attachments + Attachment(id, uri, tr("导入图片…", "Importing image…"), true)); publish()
         launch(s) {
             try {
                 val path = runtime.importImage(s.record.environment, Uri.parse(uri))
-                val preview = runtime.imagePreviewUri(s.record.environment, path) ?: error("导入图片的私有副本不可读取")
+                val preview = runtime.imagePreviewUri(s.record.environment, path) ?: error(tr("导入图片的私有副本不可读取", "Private copy of imported image is unreadable"))
                 s.record.draftRevision++; s.record.images += StoredImage(id, preview, path, path.substringAfterLast('/')); persist()
             } finally { s.view = s.view.copy(attachments = s.view.attachments.filterNot { it.id == id }) }
         }
@@ -1625,11 +1835,11 @@ class SessionController(private val context: Context) : CockpitActions {
         val s = current() ?: run { if (!steer) sendFromBlank(); return }
         if (s.firstSendPending) return
         if (s.nativeCli?.retryable == false && !s.view.connected) {
-            s.view = s.view.copy(error = s.view.error ?: "CLI 尚未就绪，请在原生 CLI 处理后重新连接；输入已保留")
+            s.view = s.view.copy(error = s.view.error ?: tr("CLI 尚未就绪，请在原生 CLI 处理后重新连接；输入已保留", "CLI is not ready; resolve in native CLI and reconnect (input preserved)"))
             publish(); return
         }
         if (s.record.cli == "Grok Build" && s.record.threadId == null && !s.view.connected && !s.view.loading && s.view.error != null) {
-            if (!s.view.error.orEmpty().contains("重新连接")) s.view = s.view.copy(error = "${s.view.error}\n请处理后重新连接；未发送的输入仍保留。")
+            if (!s.view.error.orEmpty().let { it.contains("重新连接") || it.contains("reconnect", ignoreCase = true) }) s.view = s.view.copy(error = "${s.view.error}\n" + tr("请处理后重新连接；未发送的输入仍保留。", "Resolve the issue and reconnect; unsent input is preserved."))
             publish(); return
         }
         if (!s.view.connected || s.view.loading) {
@@ -1665,18 +1875,18 @@ class SessionController(private val context: Context) : CockpitActions {
             sessions.remove(record.id); selected = null
             store.navigation.selectedId = null
             blank.text = record.draft; blank.images.addAll(record.images); blank.skills.addAll(record.skills)
-            mutableState.value = mutableState.value.copy(error = "无法创建会话，输入已保留：${e.message}"); publish(); return
+            mutableState.value = mutableState.value.copy(error = tr("无法创建会话，输入已保留：${e.message}", "Failed to create session (input preserved): ${e.message}")); publish(); return
         }
         preferences.edit().putString("session", record.id).apply()
         startObservation(s); publish()
     }
     private suspend fun submitCodex(s: Live, steer: Boolean, external: ManagedSubmission? = null) {
-        check(s.view.connected && !s.view.configuring) { "会话尚未连接或正在更新设置" }
+        check(s.view.connected && !s.view.configuring) { tr("会话尚未连接或正在更新设置", "Session is disconnected or updating settings") }
         val text = external?.text ?: s.record.draft
         val images = external?.images?.map { it.path } ?: s.record.images.map { it.path }
         val skills = external?.skills ?: s.record.skills.toList()
-        check(text.isNotBlank() || images.isNotEmpty() || skills.isNotEmpty()) { "请输入消息或添加图片" }
-        if (images.isNotEmpty()) check(s.models.firstOrNull { it.id == s.record.model }?.supportsImages == true) { "当前模型未声明图片能力，请选择支持图片的模型" }
+        check(text.isNotBlank() || images.isNotEmpty() || skills.isNotEmpty()) { tr("请输入消息或添加图片", "Enter a message or attach an image") }
+        if (images.isNotEmpty()) check(s.models.firstOrNull { it.id == s.record.model }?.supportsImages == true) { tr("当前模型未声明图片能力，请选择支持图片的模型", "Current model does not support images; select an image-capable model") }
         val turn = s.view.activeTurnId
         val doSteer = turn != null && !s.queueNeedsExplicitStart
         val resumeStoppedQueue = !doSteer && turn == null && s.queueNeedsExplicitStart
@@ -1711,7 +1921,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     val idleDirect = turn == null && !resumeStoppedQueue && !s.queueNeedsExplicitStart &&
                         SubmissionLedger.find(s.record, id)?.queuePresentation == false
                     response.optJSONObject("queuedSubmission")?.let { queued ->
-                        check(queued.stringOrNull("clientUserMessageId").let { it == null || it == id }) { "原生队列返回了不同提交身份" }
+                        check(queued.stringOrNull("clientUserMessageId").let { it == null || it == id }) { tr("原生队列返回了不同提交身份", "Native queue returned a mismatched submission ID") }
                         if (!idleDirect) {
                             SubmissionLedger.bindQueue(s.record, id, queued.getString("id")); persist()
                             if (s.items.values.none { it.role == "user" && it.id == id }) {
@@ -1723,12 +1933,12 @@ class SessionController(private val context: Context) : CockpitActions {
                     if (resumeStoppedQueue && s.queueNeedsExplicitStart && s.view.activeTurnId == null &&
                         SubmissionLedger.find(s.record, id)?.dismissed != true) {
                         val queuedId = response.optJSONObject("queuedSubmission")?.stringOrNull("id")
-                            ?: error("CLI 已受理消息，但未返回可启动的队列 ID；不会重新发送")
+                            ?: error(tr("CLI 已受理消息，但未返回可启动的队列 ID；不会重新发送", "CLI accepted message without returning a startable queue ID; will not resend"))
                         try {
                             s.rpc!!.request("thread/queue/start", obj("threadId" to s.record.threadId, "queuedSubmissionId" to queuedId))
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) {
-                            throw java.io.IOException("CLI 已受理消息，但启动排队消息${if (e is RpcRejected) "失败" else "的结果尚未确认"}：${e.message}", e)
+                            throw java.io.IOException(tr("CLI 已受理消息，但启动排队消息${if (e is RpcRejected) "失败" else "的结果尚未确认"}：${e.message}", "CLI accepted message, but starting queued turn ${if (e is RpcRejected) "failed" else "is unconfirmed"}: ${e.message}"), e)
                         }
                     }
                 },
@@ -1741,10 +1951,10 @@ class SessionController(private val context: Context) : CockpitActions {
             if (reconcile && currentCoroutineContext().isActive && s.observing && s.generation == epoch && s.rpc === carrier && carrier.connected) {
                 try { refreshQueue(s) }
                 catch (e: CancellationException) { throw e }
-                catch (_: Exception) { s.view = s.view.copy(error = "发送结果待同步，请重新连接核对") }
+                catch (_: Exception) { s.view = s.view.copy(error = tr("发送结果待同步，请重新连接核对", "Send result awaiting sync; reconnect to verify")) }
                 try { reconcileCodexSubmission(s, id, carrier, epoch) }
                 catch (e: CancellationException) { throw e }
-                catch (_: Exception) { s.view = s.view.copy(error = "发送结果待同步，请重新连接核对") }
+                catch (_: Exception) { s.view = s.view.copy(error = tr("发送结果待同步，请重新连接核对", "Send result awaiting sync; reconnect to verify")) }
             }
         }
     }
@@ -1814,7 +2024,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
                         if (e is RpcRejected || e is NativeCliRejected || (e is OpenCodeRejected && e.status in setOf(400, 401, 403, 404, 422))) intent.state = "rejected"
-                        s.view = s.view.copy(error = if (intent.state == "rejected") "待发已移除，原生撤回未确认" else "待发已移除，撤回结果待核对")
+                        s.view = s.view.copy(error = if (intent.state == "rejected") tr("待发已移除，原生撤回未确认", "Removed locally; native cancellation unconfirmed") else tr("待发已移除，撤回结果待核对", "Removed locally; cancellation awaiting verification"))
                         persist()
                     } finally {
                         if (currentCoroutineContext().isActive && s.observing && s.generation == epoch) try {
@@ -1824,11 +2034,11 @@ class SessionController(private val context: Context) : CockpitActions {
                                 else -> refreshQueue(s)
                             }
                         } catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { s.view = s.view.copy(error = "待发已移除，原生状态待同步") }
+                        catch (_: Exception) { s.view = s.view.copy(error = tr("待发已移除，原生状态待同步", "Removed locally; native state awaiting sync")) }
                     }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = "无法保存删除状态，原生操作已暂停") }
+            catch (e: Exception) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = tr("无法保存删除状态，原生操作已暂停", "Failed to save removal state; native operation paused")) }
             finally {
                 if (s.dismissalJob === currentCoroutineContext()[Job]) { s.dismissalJob = null; s.dismissing = false }
                 publish()
@@ -1846,17 +2056,17 @@ class SessionController(private val context: Context) : CockpitActions {
         val s = current() ?: return
         val entry = s.view.queue.firstOrNull { it.id == id } ?: return
         try { SubmissionLedger.dismiss(s.record, entry, ::persistDurable) }
-        catch (e: SubmissionPersistenceFailure) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = "无法保存删除状态，待发仍保留") }
+        catch (e: SubmissionPersistenceFailure) { s.dispatchStorageBlocked = true; s.view = s.view.copy(error = tr("无法保存删除状态，待发仍保留", "Failed to save removal state; queued message kept")) }
         publish()
     }
     override fun editQueued(id: String, text: String) {
         val s = current() ?: return
         if (changeLocalQueue(s, id, text)) return
-        if (s.record.cli != "Codex") { s.view = s.view.copy(error = "此 CLI 原生队列不支持编辑正文"); publish(); return }
+        if (s.record.cli != "Codex") { s.view = s.view.copy(error = tr("此 CLI 原生队列不支持编辑正文", "Editing native queue items is not supported by this CLI")); publish(); return }
         queueMutation(s) {
-            val raw = s.queueRaw.find { it.optString("id") == id } ?: error("消息已离开队列")
+            val raw = s.queueRaw.find { it.optString("id") == id } ?: error(tr("消息已离开队列", "Message is no longer in queue"))
             val input = QueueEdits.replaceText(raw.getJSONArray("input"), text, s.record.cwd)
-            check(input.length() > 0) { "消息不能为空" }
+            check(input.length() > 0) { tr("消息不能为空", "Message cannot be empty") }
             s.rpc!!.request("thread/queue/update", obj("threadId" to s.record.threadId, "queuedSubmissionId" to id, "input" to input))
             refreshQueue(s)
         }
@@ -1865,17 +2075,17 @@ class SessionController(private val context: Context) : CockpitActions {
         val s = current() ?: return
         try {
             check(!s.firstSendPending && !s.view.attachments.any { it.busy }) {
-                "输入框正在准备内容，请先处理当前输入，再编辑待发消息；两边内容均保留"
+                tr("输入框正在准备内容，请先处理当前输入，再编辑待发消息；两边内容均保留", "Composer is busy preparing attachments; finish current draft before editing queued message (both are kept)")
             }
             val host = s.view.queue.firstOrNull { it.id == id && it.hostOwned && it.canEdit && !it.localRecovery }
             if (host != null) {
-                check(!s.takingBack) { "正在取回待发消息，请稍候" }
-                check(!s.view.loading) { "请先等待 CLI 观察同步后取回待发消息" }
-                val clientId = host.clientUserMessageId ?: error("后台待发未提供精确身份，不能取回")
-                check(host.id == clientId) { "后台待发身份不一致，不能取回" }
+                check(!s.takingBack) { tr("正在取回待发消息，请稍候", "Taking back queued message; please wait") }
+                check(!s.view.loading) { tr("请先等待 CLI 观察同步后取回待发消息", "Wait for CLI sync before taking back queued message") }
+                val clientId = host.clientUserMessageId ?: error(tr("后台待发未提供精确身份，不能取回", "Backend queue item lacks exact identity and cannot be taken back"))
+                check(host.id == clientId) { tr("后台待发身份不一致，不能取回", "Backend queue identity mismatch; cannot take back") }
                 val operation = HostQueueTakeback.begin(s.record, clientId, UUID.randomUUID().toString(), ::persistDurable)
                 val expected = HostQueueTakeback.payload(checkNotNull(SubmissionLedger.find(s.record, clientId)))
-                val adapter = s.nativeCli ?: error("CLI 观察尚未就绪")
+                val adapter = s.nativeCli ?: error(tr("CLI 观察尚未就绪", "CLI observer is not ready yet"))
                 val epoch = s.generation
                 s.takingBack = true; s.view = s.view.copy(queueBusy = true, error = null); publish()
                 launch(s) {
@@ -1890,27 +2100,27 @@ class SessionController(private val context: Context) : CockpitActions {
                         catch (_: Exception) {  }
                         val current = SubmissionLedger.find(s.record, clientId)
                         if (s.generation == epoch && current != null && !current.dismissed && current.state in setOf("pending", "unknown", "accepted")) {
-                            check(!s.view.attachments.any { it.busy }) { "输入框正在准备内容，请先处理当前输入，再编辑待发消息；两边内容均保留" }
+                            check(!s.view.attachments.any { it.busy }) { tr("输入框正在准备内容，请先处理当前输入，再编辑待发消息；两边内容均保留", "Composer is busy preparing attachments; finish current draft before editing queued message (both are kept)") }
                             SubmissionLedger.recoverStoredToComposer(s.record, clientId, host, ::persistDurable)
                             s.view = s.view.copy(error = null)
                         } else if (s.generation == epoch) s.view = s.view.copy(error = rejected.message)
                     } catch (_: Exception) {
-                        if (s.generation == epoch) s.view = s.view.copy(error = "取回结果待核对；不会返回输入框或重发，请重新同步")
+                        if (s.generation == epoch) s.view = s.view.copy(error = tr("取回结果待核对；不会返回输入框或重发，请重新同步", "Takeback unconfirmed; will not restore or resend, resync first"))
                     } finally { s.takingBack = false; if (s.generation == epoch) s.view = s.view.copy(queueBusy = false) }
                 }
                 return
             }
-            val entry = s.view.queue.firstOrNull { it.id == id } ?: error("消息已离开待发队列，未返回输入框")
+            val entry = s.view.queue.firstOrNull { it.id == id } ?: error(tr("消息已离开待发队列，未返回输入框", "Message already left queue; not restored to composer"))
             val message = entry.clientUserMessageId?.let { SubmissionLedger.find(s.record, it) }
                 ?: s.record.submissions.firstOrNull { "submission-${it.id}" == id }
-                ?: error("原待发正文和附件不在本地索引中，无法无损恢复")
+                ?: error(tr("原待发正文和附件不在本地索引中，无法无损恢复", "Queued text and attachments missing from local index; cannot restore losslessly"))
             if (SubmissionLedger.isLocal(message) || HostQueueTakeback.ready(message))
                 SubmissionLedger.restoreLocalToComposer(s.record, message.id, ::persistDurable)
             else SubmissionLedger.recoverStoredToComposer(s.record, message.id, entry, ::persistDurable)
             s.view = s.view.copy(error = null)
         } catch (e: SubmissionPersistenceFailure) {
             s.dispatchStorageBlocked = true
-            s.view = s.view.copy(error = "无法保存编辑状态，待发消息与当前输入均保留")
+            s.view = s.view.copy(error = tr("无法保存编辑状态，待发消息与当前输入均保留", "Failed to save edit state; both queued message and draft preserved"))
         } catch (e: Exception) { s.view = s.view.copy(error = e.message) }
         publish()
     }
@@ -1919,15 +2129,15 @@ class SessionController(private val context: Context) : CockpitActions {
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.queueChange(id, true); return }
         if (s.record.cli == "OpenCode") { s.openCode?.queueChange(id, true); return }
         queueMutation(s) {
-            val turn = s.view.activeTurnId ?: error("当前任务已结束，消息保留在队列中")
-            val raw = s.queueRaw.find { it.optString("id") == id } ?: error("消息已离开队列")
+            val turn = s.view.activeTurnId ?: error(tr("当前任务已结束，消息保留在队列中", "Active turn already ended; message stays in queue"))
+            val raw = s.queueRaw.find { it.optString("id") == id } ?: error(tr("消息已离开队列", "Message is no longer in queue"))
             val transfer = obj("id" to id, "input" to raw.getJSONArray("input"), "turn" to turn,
                 "clientId" to UUID.randomUUID().toString(), "phase" to "deleting")
             s.record.queueTransfer = transfer.toString(); persist(); publish()
             try { s.rpc!!.request("thread/queue/delete", obj("threadId" to s.record.threadId, "queuedSubmissionId" to id)) }
             catch (e: RpcRejected) { s.record.queueTransfer = null; persist(); throw e }
             transfer.put("phase", "removed"); s.record.queueTransfer = transfer.toString(); persist()
-            check(s.view.activeTurnId == turn) { "当前任务已结束，原消息已保存，可恢复到草稿" }
+            check(s.view.activeTurnId == turn) { tr("当前任务已结束，原消息已保存，可恢复到草稿", "Active turn already ended; original message saved and can be restored to draft") }
             transfer.put("phase", "steering"); s.record.queueTransfer = transfer.toString(); persist()
             try {
                 s.rpc!!.request("turn/steer", obj("threadId" to s.record.threadId, "expectedTurnId" to turn,
@@ -1945,12 +2155,12 @@ class SessionController(private val context: Context) : CockpitActions {
         launch(s) {
             val transfer = s.record.queueTransfer?.let(::JSONObject) ?: return@launch
             if (restore) {
-                check(transfer.getString("phase") == "removed") { "请先核对后端执行结果，不能自动重发" }
+                check(transfer.getString("phase") == "removed") { tr("请先核对后端执行结果，不能自动重发", "Verify backend execution result first; will not auto-resend") }
                 val input = transfer.getJSONArray("input").objects()
                 val text = input.filter { it.optString("type") == "text" }.joinToString("\n") { it.optString("text") }
                 val paths = input.filter { it.optString("type") == "localImage" }.map { it.getString("path") }
-                val images = paths.map { path -> StoredImage(UUID.randomUUID().toString(), runtime.imagePreviewUri(s.record.environment, path) ?: error("原图片不可读取，恢复未执行"), path, path.substringAfterLast('/')) }
-                check(input.all { it.optString("type") in listOf("text", "mention", "localImage", "skill") }) { "消息包含无法还原为草稿的内容，请保留记录并人工核对" }
+                val images = paths.map { path -> StoredImage(UUID.randomUUID().toString(), runtime.imagePreviewUri(s.record.environment, path) ?: error(tr("原图片不可读取，恢复未执行", "Original image unreadable; restore aborted")), path, path.substringAfterLast('/')) }
+                check(input.all { it.optString("type") in listOf("text", "mention", "localImage", "skill") }) { tr("消息包含无法还原为草稿的内容，请保留记录并人工核对", "Message contains items that cannot be restored to draft; verify manually") }
                 val mentions = input.filter { it.optString("type") == "mention" }.joinToString(" ") { "@\"${it.getString("path")}\"" }
                 s.record.draft = listOf(s.record.draft, text, mentions).filter { it.isNotBlank() }.joinToString("\n")
                 s.record.images += images
@@ -1967,14 +2177,14 @@ class SessionController(private val context: Context) : CockpitActions {
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.configure(obj("model" to model, "effort" to effort)); return }
         if (s.record.cli == "OpenCode") { s.openCode?.configure(model, effort); return }
         configureNative(obj("model" to model).apply { if (effort.isNotEmpty()) put("effort", effort) }) { live ->
-            val option = live.models.firstOrNull { it.id == model } ?: error("该模型不在服务提供的列表中")
-            check(effort.isEmpty() || effort in option.efforts) { "该模型不支持此推理强度" }
+            val option = live.models.firstOrNull { it.id == model } ?: error(tr("该模型不在服务提供的列表中", "Model is not in service catalog"))
+            check(effort.isEmpty() || effort in option.efforts) { tr("该模型不支持此推理强度", "Reasoning effort not supported by this model") }
         }
     }
     override fun refreshDashboard() {
         val s = current() ?: return
         if (s.dispatchStorageBlocked) try { persist() }
-        catch (e: Exception) { s.view = s.view.copy(error = "无法保存发送状态，待发仍保留"); publish(); return }
+        catch (e: Exception) { s.view = s.view.copy(error = tr("无法保存发送状态，待发仍保留", "Failed to save send state; queued item preserved")); publish(); return }
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.refreshDashboard(); return }
         if (s.record.cli == "OpenCode") { s.openCode?.refreshDashboard(); return }
         if (!s.view.connected) return
@@ -1997,18 +2207,18 @@ class SessionController(private val context: Context) : CockpitActions {
             if (params.has("serviceTier")) body.put("speed", params.optString("serviceTier", "default"))
             s.nativeCli?.configure(body); return
         }
-        if (s.record.cli == "OpenCode") { s.view = s.view.copy(error = "OpenCode 未提供此设置选项"); publish(); return }
+        if (s.record.cli == "OpenCode") { s.view = s.view.copy(error = tr("OpenCode 未提供此设置选项", "Setting not supported by OpenCode")); publish(); return }
         if (s.view.configuring) return
         s.view = s.view.copy(configuring = true); publish()
         launch(s) {
             try {
-                check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { "请在任务与队列结束后修改设置" }
+                check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { tr("请在任务与队列结束后修改设置", "Wait for active turn and queue to finish before changing settings") }
                 validate(s)
                 val waiter = CompletableDeferred<JSONObject>()
                 s.settingsWaiter = waiter; s.settingsExpected = params
                 s.rpc!!.request("thread/settings/update", params.put("threadId", s.record.threadId))
                 val settings = withTimeoutOrNull(10000) { waiter.await() }
-                check(settings != null) { "设置结果尚未同步，请重新连接核对；不会自动重试" }
+                check(settings != null) { tr("设置结果尚未同步，请重新连接核对；不会自动重试", "Settings result awaiting sync; reconnect to verify") }
             } finally {
                 s.settingsWaiter = null; s.settingsExpected = null
                 s.view = s.view.copy(configuring = false)
@@ -2016,15 +2226,15 @@ class SessionController(private val context: Context) : CockpitActions {
         }
     }
     override fun configurePermission(id: String) = configureNative(obj("permissions" to id)) { s ->
-        check(s.view.permissions.any { it.id == id }) { "CLI 未允许此权限配置" }
+        check(s.view.permissions.any { it.id == id }) { tr("CLI 未允许此权限配置", "Permission mode not allowed by CLI") }
     }
     override fun configureSpeed(id: String) = configureNative(obj("serviceTier" to if (id == "default") JSONObject.NULL else id)) { s ->
-        check(s.models.find { it.id == s.record.model }?.speeds?.any { it.id == id } == true) { "该模型未声明此速度选项" }
+        check(s.models.find { it.id == s.record.model }?.speeds?.any { it.id == id } == true) { tr("该模型未声明此速度选项", "Speed option not declared for this model") }
     }
     override fun command(id: String) {
         val s = current() ?: return
         when (id) {
-            "compact" -> if (s.record.cli in CliCatalog.bridged) s.nativeCli?.compact() else if (s.record.cli == "OpenCode") s.openCode?.compact() else launch(s) { check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { "请等待当前任务与队列结束" }; s.rpc!!.request("thread/compact/start", obj("threadId" to s.record.threadId)) }
+            "compact" -> if (s.record.cli in CliCatalog.bridged) s.nativeCli?.compact() else if (s.record.cli == "OpenCode") s.openCode?.compact() else launch(s) { check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { tr("请等待当前任务与队列结束", "Wait for current turn and queue to finish") }; s.rpc!!.request("thread/compact/start", obj("threadId" to s.record.threadId)) }
             "diff" -> previewDiff()
             "steer" -> steer()
             "stop" -> stop()
@@ -2048,13 +2258,13 @@ class SessionController(private val context: Context) : CockpitActions {
         mutableState.value = mutableState.value.copy(inventory = Inventory(title, loading = true))
         scope.launch {
             val result = try {
-                check(s.view.connected) { "请先连接会话" }
+                check(s.view.connected) { tr("请先连接会话", "Connect the session first") }
                 val entries = if (s.record.cli in CliCatalog.bridged) s.nativeCli!!.inventory(kind) else if (s.record.cli == "OpenCode") s.openCode!!.inventory(kind) else if (kind == "skill") {
                     val page = s.rpc!!.request("skills/list", obj("cwds" to JSONArray(listOf(s.record.cwd)), "forceReload" to false))
                     page.optJSONArray("data")?.objects().orEmpty().flatMap { group ->
                         group.optJSONArray("skills")?.objects().orEmpty().map { skill ->
-                            ReadOnlyEntry(skill.getString("name"), skill.optString("description") + "\n" + if (skill.optBoolean("enabled")) "已启用" else "未启用", skill.getString("path"))
-                        } + group.optJSONArray("errors")?.objects().orEmpty().map { ReadOnlyEntry("读取错误", CodexCapabilities.redact(it.toString(2))) }
+                            ReadOnlyEntry(skill.getString("name"), skill.optString("description") + "\n" + if (skill.optBoolean("enabled")) tr("已启用", "Enabled") else tr("未启用", "Disabled"), skill.getString("path"))
+                        } + group.optJSONArray("errors")?.objects().orEmpty().map { ReadOnlyEntry(tr("读取错误", "Load error"), CodexCapabilities.redact(it.toString(2))) }
                     }
                 } else {
                     val entries = mutableListOf<ReadOnlyEntry>(); var next: String? = null
@@ -2067,7 +2277,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 }
                 Inventory(title, entries)
             } catch (e: CancellationException) { throw e }
-              catch (e: Exception) { Inventory(title, error = e.message ?: "读取失败") }
+              catch (e: Exception) { Inventory(title, error = e.message ?: tr("读取失败", "Failed to load")) }
             if (selected == s.record.id && inventoryGeneration == generation) mutableState.value = mutableState.value.copy(inventory = result)
         }
     }
@@ -2077,7 +2287,7 @@ class SessionController(private val context: Context) : CockpitActions {
         mutableState.value = mutableState.value.copy(plugins = PluginCatalog(loading = true))
         scope.launch {
             val result = try {
-                check(s.view.connected) { "请先连接会话" }
+                check(s.view.connected) { tr("请先连接会话", "Connect the session first") }
                 if (s.record.cli in CliCatalog.bridged) s.nativeCli!!.plugins()
                 else if (s.record.cli == "OpenCode") s.openCode!!.plugins()
                 else {
@@ -2094,7 +2304,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     } while (cursor != null)
                     PluginCatalog(skills, mcp, error = groups.flatMap { it.optJSONArray("errors")?.objects().orEmpty() }.takeIf { it.isNotEmpty() }?.joinToString("\n") { CodexCapabilities.redact(it.toString()) })
                 }
-            } catch (e: CancellationException) { throw e } catch (e: Exception) { PluginCatalog(error = e.message ?: "读取插件失败") }
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { PluginCatalog(error = e.message ?: tr("读取插件失败", "Failed to load plugins")) }
             if (selected == s.record.id && inventoryGeneration == generation) mutableState.value = mutableState.value.copy(plugins = result)
         }
     }
@@ -2112,8 +2322,8 @@ class SessionController(private val context: Context) : CockpitActions {
         launch(s) {
             if (s.record.skills.any { it.id == skill.id }) s.record.skills.removeAll { it.id == skill.id }
             else {
-                check(mutableState.value.plugins.skills.any { it == skill }) { "该 Skill 不在当前 CLI 提供的列表中" }
-                check(s.record.skills.size < s.view.capabilities.maxSkills) { "此 CLI 每条消息最多选择 ${s.view.capabilities.maxSkills} 个 Skill" }
+                check(mutableState.value.plugins.skills.any { it == skill }) { tr("该 Skill 不在当前 CLI 提供的列表中", "Skill is not in current CLI catalog") }
+                check(s.record.skills.size < s.view.capabilities.maxSkills) { tr("此 CLI 每条消息最多选择 ${s.view.capabilities.maxSkills} 个 Skill", "Up to ${s.view.capabilities.maxSkills} skills per message for this CLI") }
                 s.record.skills += skill
             }
             s.record.draftRevision++; persist()
@@ -2142,7 +2352,7 @@ class SessionController(private val context: Context) : CockpitActions {
             launch(s) {
                 val current = asyncQuestions(s).find { it.id == requestId } ?: return@launch
                 if (current.answering) return@launch
-                check(choice != "skip") { "此原生异步提问不支持跳过" }
+                check(choice != "skip") { tr("此原生异步提问不支持跳过", "Skipping is not supported for this native async prompt") }
                 val text = CodexAsyncQuestions.reply(current, answers)
                 val id = CodexAsyncQuestions.submissionId(text, s.record.submissions.map { CodexAsyncQuestions.Submission(it.text, it.state) })
                 submitCodex(s, false, ManagedSubmission(id, text))
@@ -2162,7 +2372,7 @@ class SessionController(private val context: Context) : CockpitActions {
         try { renameLocal(s, title) } catch (e: Exception) { s.view = s.view.copy(error = e.message); publish() }
     }
     private fun renameLocal(s: Live, title: String) {
-        val trimmed = title.trim(); require(trimmed.isNotEmpty()) { "会话标题不能为空" }
+        val trimmed = title.trim(); require(trimmed.isNotEmpty()) { tr("会话标题不能为空", "Session title cannot be empty") }
         val previous = s.record.manualTitle
         SessionTitlePolicy.rename(s.record, trimmed)
         try { persist() } catch (e: Exception) {
@@ -2186,7 +2396,7 @@ class SessionController(private val context: Context) : CockpitActions {
             if (wasSelected) selected = id
             store.navigation.selectedId = selected
             blank.key = previousKey; blank.cli = previousCli; blank.cwd = previousCwd
-            mutableState.value = previousState.copy(error = "无法归档会话，原会话已保留：${e.message}")
+            mutableState.value = previousState.copy(error = tr("无法归档会话，原会话已保留：${e.message}", "Failed to archive session (preserved): ${e.message}"))
             publish(); return
         }
         disposeSession(s, destroyBackend = true)
@@ -2197,10 +2407,10 @@ class SessionController(private val context: Context) : CockpitActions {
     override fun openTui() {
         val s = current() ?: return
         launch(s) {
-            check(s.view.canOpenTui) { "会话尚未准备好，请重新连接" }
+            check(s.view.canOpenTui) { tr("会话尚未准备好，请重新连接", "Session is not ready yet; please reconnect") }
             val nativeTerminal = s.nativeCli?.terminal()
             persist()
-            runtime.openTerminal(context, s.record.environment, s.endpoint, s.record.threadId, s.record.cwd, false, s.record.cli, nativeTerminal)
+            runtime.openTerminal(context, s.record.environment, s.endpoint, s.record.threadId, s.record.cwd, false, s.record.cli, nativeTerminal, sessionId = s.record.id)
         }
     }
     override fun openShell(environment: String, cwd: String) { launch(null) { require(environment == this@SessionController.environment); runtime.openTerminal(context, environment, null, null, cwd, true) } }
@@ -2215,7 +2425,7 @@ class SessionController(private val context: Context) : CockpitActions {
             val browser = try {
                 FileBrowser(path, runtime.listFiles(s.record.environment, path).map { FileEntry(it.name, it.path, it.directory, it.size, it.modified) }, picking = picking)
             } catch (e: CancellationException) { throw e }
-              catch (e: Exception) { FileBrowser(path, error = e.message ?: "读取目录失败", picking = picking) }
+              catch (e: Exception) { FileBrowser(path, error = e.message ?: tr("读取目录失败", "Failed to read directory"), picking = picking) }
             if (selected == s.record.id && generation == fileGeneration) mutableState.value = mutableState.value.copy(fileBrowser = browser)
         }
     }
@@ -2237,7 +2447,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 original = snapshot?.invoke(raw) ?: sourceResource
                 shown
             } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { "无法读取：${e.message ?: "未知错误"}" }
+                catch (e: Exception) { tr("无法读取：${e.message ?: "未知错误"}", "Unable to read: ${e.message ?: "unknown error"}") }
             if (selected == s.record.id && generation == previewGeneration) mutableState.value = mutableState.value.copy(filePreview = FilePreview(title, text, sessionId = s.record.id, cwd = cwd, sourceResource = original))
         }
     }
@@ -2310,7 +2520,7 @@ class SessionController(private val context: Context) : CockpitActions {
             }
             val resolved = runtime.resolveMedia(owner.record.environment, dereferenceMedia(owner, captured))
             withContext(Dispatchers.IO) {
-                check(resolved.sizeBytes <= 512 * 1024) { "文本超过 512 KiB，请使用外部应用打开" }
+                check(resolved.sizeBytes <= 512 * 1024) { tr("文本超过 512 KiB，请使用外部应用打开", "Text exceeds 512 KiB; open in an external app") }
                 val bytes = java.io.File(Uri.parse(resolved.uri).path!!).readBytes()
                 Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
                     .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
@@ -2320,26 +2530,26 @@ class SessionController(private val context: Context) : CockpitActions {
     override fun previewDiff() {
         val s = current() ?: return
         var warning = ""
-        preview(s, "工作区 Diff", snapshot = { raw ->
+        preview(s, tr("工作区 Diff", "Workspace Diff"), snapshot = { raw ->
             MediaResource("data:text/x-diff;base64," + java.util.Base64.getEncoder().encodeToString(raw.toByteArray(Charsets.UTF_8)),
                 "changes.patch", "text/x-diff", s.record.id, s.record.cwd)
-        }, display = { raw -> (raw + warning).ifBlank { "没有已跟踪文件的变更；未跟踪文件请从文件列表查看。" } + "\n\n预览最多 512 KiB；仅包含已跟踪文件。" }) {
-            check(s.view.connected) { "请先连接会话" }
-            check(s.record.cli !in CliCatalog.bridged) { "此 CLI 协议不提供 Diff；请在终端使用 git diff" }
+        }, display = { raw -> (raw + warning).ifBlank { tr("没有已跟踪文件的变更；未跟踪文件请从文件列表查看。", "No tracked file changes; check Files for untracked files.") } + tr("\n\n预览最多 512 KiB；仅包含已跟踪文件。", "\n\nPreview up to 512 KiB; tracked files only.") }) {
+            check(s.view.connected) { tr("请先连接会话", "Connect the session first") }
+            check(s.record.cli !in CliCatalog.bridged) { tr("此 CLI 协议不提供 Diff；请在终端使用 git diff", "Diff is not provided by this CLI protocol; run git diff in terminal") }
             if (s.record.cli == "OpenCode") return@preview s.openCode!!.diff()
             val result = s.rpc!!.request("command/exec", obj("command" to JSONArray(listOf("git", "--no-pager", "diff", "--no-ext-diff", "HEAD")), "cwd" to s.record.cwd, "outputBytesCap" to 524288))
             warning = result.optString("stderr")
-            if (result.optInt("exitCode") != 0) throw java.io.IOException("git diff 退出码 ${result.optInt("exitCode")}\n${result.optString("stdout")}$warning")
+            if (result.optInt("exitCode") != 0) throw java.io.IOException(tr("git diff 退出码 ${result.optInt("exitCode")}\n${result.optString("stdout")}$warning", "git diff exited with ${result.optInt("exitCode")}\n${result.optString("stdout")}$warning"))
             result.optString("stdout")
         }
     }
     override fun closePreview() { previewGeneration++; mutableState.value = mutableState.value.copy(filePreview = null) }
     override fun dismissError() { current()?.openCode?.dismissError(); current()?.nativeCli?.dismissError(); current()?.let { it.view = it.view.copy(error = null) }; mutableState.value = mutableState.value.copy(error = null); publish() }
-    fun saveDrafts() { saveJob?.cancel(); try { persist(); store.flush() } catch (e: Exception) { mutableState.value = mutableState.value.copy(error = "无法保存草稿：${e.message}"); publish() } }
+    fun saveDrafts() { saveJob?.cancel(); try { persist(); store.flush() } catch (e: Exception) { mutableState.value = mutableState.value.copy(error = tr("无法保存草稿：${e.message}", "Failed to save draft: ${e.message}")); publish() } }
     fun disconnectAll() {
         wakeEpoch++
         clearSubAgentObservation()
-        if (GuiProduct.usesRootExecution(context)) {
+        if (RootBackgroundNotifications.isEnabled(context)) {
             rootWatcherArmed = false
             lastArmedRootSessions = emptyList()
             RootBackgroundNotifications.disarmLocal(context)
@@ -2362,7 +2572,7 @@ class SessionController(private val context: Context) : CockpitActions {
             s.hydrating = false; s.buffered.clear()
             s.rpc?.close(); s.openCode?.close(); s.nativeCli?.close()
             s.view = s.view.copy(connected = false, loading = false, sending = false, configuring = false, queueBusy = false,
-                connection = "界面已断开 · 后端任务不受影响", canOpenTui = false, requests = emptyList())
+                connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"), canOpenTui = false, requests = emptyList())
             s.requests.clear(); s.admitting.clear()
             if (idle) {
                 dropIdleCache(s)
@@ -2375,6 +2585,7 @@ class SessionController(private val context: Context) : CockpitActions {
             }
         }
         syncOpenCodeDaemonIdleTimer()
+        syncCodexDaemonIdleTimer()
         notificationSink.cancelAll()
         publish()
         store.flush()

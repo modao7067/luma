@@ -26,5 +26,6 @@ android {
         }
     }
     androidResources { noCompress += ['zip', 'xz']; ignoreAssetsPattern = '!.svn:!.git:!.DS_Store:!*~:!__pycache__:!*.pyc:!*.pyo' }
+    testOptions { unitTests.all { systemProperty 'user.language', 'zh'; systemProperty 'user.country', 'CN' } }
     packaging { jniLibs { useLegacyPackaging = true } }
 }

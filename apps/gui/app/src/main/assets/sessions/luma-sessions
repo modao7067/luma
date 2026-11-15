@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""App-bound session management. Capability stays in this client, never in output."""
 import json
 import os
 import socket
 import sys
+
+def _tr(zh, en):
+    return zh if os.environ.get("LUMA_LANG", "zh").strip().lower().startswith("zh") else en
 
 HELP = """luma-sessions '<JSON>' (or JSON stdin). Requires running Luma App.
 list; create(cli,cwd,requestId[,model,title]); attach(cli,cwd,nativeId[,title,externalSocket,id]);
@@ -22,21 +24,21 @@ def main():
         print(HELP)
         return 0
     if len(sys.argv) > 2:
-        raise ValueError("使用一个 JSON 参数或 JSON stdin")
+        raise ValueError(_tr("使用一个 JSON 参数或 JSON stdin", "Pass a single JSON argument or JSON via stdin"))
     request = json.loads(sys.argv[1]) if len(sys.argv) == 2 else json.load(sys.stdin)
     if not isinstance(request, dict):
-        raise ValueError("请求必须是 JSON 对象")
+        raise ValueError(_tr("请求必须是 JSON 对象", "Request must be a JSON object"))
     if "token" in request:
-        raise ValueError("认证由客户端处理，不要传 token")
+        raise ValueError(_tr("认证由客户端处理，不要传 token", "Authentication is handled by the client; do not pass token"))
     config = os.environ.get("LUMA_SESSIONS_CONFIG", "/opt/luma/agent/sessions/binding.json")
     with open(config, encoding="utf-8") as stream:
         binding = json.load(stream)
     if binding.get("host") != "127.0.0.1" or type(binding.get("port")) is not int or not 1 <= binding["port"] <= 65535:
-        raise ValueError("非法会话管理接口地址")
+        raise ValueError(_tr("非法会话管理接口地址", "Invalid session management endpoint"))
     request["token"] = binding["token"]
     payload = (json.dumps(request, ensure_ascii=False) + "\n").encode()
     if len(payload) > 131073:
-        raise ValueError("请求超过 128 KiB")
+        raise ValueError(_tr("请求超过 128 KiB", "Request exceeds 128 KiB"))
     dispatched = False
     try:
         with socket.create_connection(("127.0.0.1", binding["port"]), timeout=10) as connection:
@@ -45,11 +47,14 @@ def main():
             connection.sendall(payload)
             response = connection.makefile("rb").readline(16 * 1024 * 1024)
             if not response or not response.endswith(b"\n"):
-                raise ValueError("会话管理响应不完整")
+                raise ValueError(_tr("会话管理响应不完整", "Incomplete session management response"))
             value = json.loads(response)
     except (OSError, ValueError):
         value = {"ok": False, "state": "unknown" if dispatched else "not_dispatched",
-                 "error": "会话管理连接中断；用原 requestId 查询状态，不要换 ID 重发" if dispatched else "无法连接 Luma，请确认 App 正在运行"}
+                 "error": (_tr("会话管理连接中断；用原 requestId 查询状态，不要换 ID 重发",
+                               "Session management connection interrupted; query status with the original requestId instead of resending with a new ID")
+                           if dispatched else
+                           _tr("无法连接 Luma，请确认 App 正在运行", "Unable to connect to Luma; make sure the app is running"))}
         if "requestId" in request:
             value["requestId"] = request["requestId"]
     print(json.dumps(value, ensure_ascii=False))
@@ -59,5 +64,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:
-        print(json.dumps({"ok": False, "error": "无法读取 App 私有绑定或请求无效；请确认 App 正在运行并检查 JSON"}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "error": _tr("无法读取 App 私有绑定或请求无效；请确认 App 正在运行并检查 JSON",
+                                                     "Unable to read private app binding or invalid request; make sure Luma is running and check JSON")}, ensure_ascii=False))
         sys.exit(1)

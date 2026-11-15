@@ -1,5 +1,9 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+import java.time.format.DateTimeFormatter
+
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.ZoneId
@@ -143,17 +147,17 @@ internal fun formatSessionActivityTime(
     val daysDiff = ChronoUnit.DAYS.between(targetDate, today)
     return when {
         daysDiff == 0L -> String.format(Locale.ROOT, "%02d:%02d", targetZdt.hour, targetZdt.minute)
-        daysDiff == 1L -> "昨天"
+        daysDiff == 1L -> tr("昨天", "Yesterday")
         daysDiff in 2L..6L -> when (targetDate.dayOfWeek) {
-            DayOfWeek.MONDAY -> "星期一"
-            DayOfWeek.TUESDAY -> "星期二"
-            DayOfWeek.WEDNESDAY -> "星期三"
-            DayOfWeek.THURSDAY -> "星期四"
-            DayOfWeek.FRIDAY -> "星期五"
-            DayOfWeek.SATURDAY -> "星期六"
-            DayOfWeek.SUNDAY -> "星期日"
+            DayOfWeek.MONDAY -> tr("星期一", "Mon")
+            DayOfWeek.TUESDAY -> tr("星期二", "Tue")
+            DayOfWeek.WEDNESDAY -> tr("星期三", "Wed")
+            DayOfWeek.THURSDAY -> tr("星期四", "Thu")
+            DayOfWeek.FRIDAY -> tr("星期五", "Fri")
+            DayOfWeek.SATURDAY -> tr("星期六", "Sat")
+            DayOfWeek.SUNDAY -> tr("星期日", "Sun")
         }
-        targetDate.year == today.year -> "${targetDate.monthValue}月${targetDate.dayOfMonth}日"
-        else -> "${targetDate.year}年${targetDate.monthValue}月${targetDate.dayOfMonth}日"
+        targetDate.year == today.year -> if (LumaI18n.isZh()) "${targetDate.monthValue}月${targetDate.dayOfMonth}日" else targetDate.format(DateTimeFormatter.ofPattern("MMM d", Locale.US))
+        else -> if (LumaI18n.isZh()) "${targetDate.year}年${targetDate.monthValue}月${targetDate.dayOfMonth}日" else targetDate.format(DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US))
     }
 }

@@ -1,9 +1,12 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.agent.CodexAsyncQuestions
 
 internal object SessionTitlePolicy {
-    const val unnamed = "未命名会话"
+    val unnamed: String get() = tr("未命名会话", "Untitled session")
+    fun isUnnamed(title: String): Boolean = title == "未命名会话" || title == "Untitled session"
     private const val messageLimit = 40
     private val openCodeDefault = Regex("^(New session|Child session) - \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$")
 
@@ -25,7 +28,7 @@ internal object SessionTitlePolicy {
 
     fun rename(record: SessionRecord, title: String) {
         val manual = title.trim()
-        require(manual.isNotEmpty()) { "会话标题不能为空" }
+        require(manual.isNotEmpty()) { tr("会话标题不能为空", "Session title cannot be empty") }
         record.manualTitle = manual
         refresh(record)
     }
@@ -46,9 +49,9 @@ internal object SessionTitlePolicy {
         if (!ready || record.messageTitle != null) return false
         fun content(message: ConversationItem) = if (message.id == record.submissionId)
             UserMessageContent(record.submissionText.orEmpty(),
-                record.submissionImageData.map { attachment("图片", it.path, it.name) } +
+                record.submissionImageData.map { attachment(tr("图片", "Image"), it.path, it.name) } +
                     record.submissionSkillData.map { attachment("Skill", it.path, it.name) })
-            else message.userContent ?: UserMessageContent(message.text, message.images.map { attachment("图片", it) })
+            else message.userContent ?: UserMessageContent(message.text, message.images.map { attachment(tr("图片", "Image"), it) })
         val first = messages.firstOrNull {
             it.role == "user" && it.delivery.isEmpty() && content(it).let { input ->
                 input.text.isNotBlank() || input.attachments.any(String::isNotBlank)

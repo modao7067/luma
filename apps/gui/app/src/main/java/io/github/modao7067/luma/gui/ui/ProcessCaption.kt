@@ -1,8 +1,11 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.ConversationItem
 
-internal fun reasoningCaption(outcome: String): String = if (outcome == "running") "思考中" else "思考"
+internal fun reasoningCaption(outcome: String): String = if (outcome == "running") tr("思考中", "Thinking") else tr("思考", "Thought")
 
 internal fun processEntryRetained(item: ConversationItem): Boolean =
     item.outcome != "succeeded" && item.outcome != "cancelled" && item.outcome != "failed" && !(item.kind == "subAgent" && item.outcome == "closed")
@@ -42,13 +45,14 @@ internal fun processGroupSummary(entries: List<ConversationItem>, cli: String = 
     val completed = reasoning.count { it.outcome == "succeeded" }
     val running = reasoning.any { it.outcome == "running" }
     return buildList {
-        if (tools.isNotEmpty()) add(ProcessSummaryPart("${tools.size} 次 ", tools.map(::processToolName).distinct().joinToString("、")))
-        if (completed > 0) add(ProcessSummaryPart("$completed 次 ", "思考"))
-        if (running) add(ProcessSummaryPart(label = "思考中"))
-        if (reasoning.isNotEmpty() && completed == 0 && !running) add(ProcessSummaryPart(label = "思考"))
-        if (failedTools > 0) add(ProcessSummaryPart("$failedTools 次 ", "失败"))
-        if (subAgentEntries > 0) add(ProcessSummaryPart("$subAgentEntries 次 ", "子代理"))
-        if (isEmpty() && entries.isNotEmpty()) add(ProcessSummaryPart(label = "执行过程"))
+        val zh = LumaI18n.isZh()
+        if (tools.isNotEmpty()) add(ProcessSummaryPart(if (zh) "${tools.size} 次 " else "${tools.size}× ", tools.map(::processToolName).distinct().joinToString(if (zh) "、" else ", ")))
+        if (completed > 0) add(ProcessSummaryPart(if (zh) "$completed 次 " else "$completed× ", if (zh) "思考" else "thought"))
+        if (running) add(ProcessSummaryPart(label = if (zh) "思考中" else "Thinking"))
+        if (reasoning.isNotEmpty() && completed == 0 && !running) add(ProcessSummaryPart(label = if (zh) "思考" else "Thought"))
+        if (failedTools > 0) add(ProcessSummaryPart(if (zh) "$failedTools 次 " else "$failedTools ", if (zh) "失败" else "failed"))
+        if (subAgentEntries > 0) add(ProcessSummaryPart(if (zh) "$subAgentEntries 次 " else "$subAgentEntries× ", if (zh) "子代理" else "sub-agent"))
+        if (isEmpty() && entries.isNotEmpty()) add(ProcessSummaryPart(label = if (zh) "执行过程" else "Steps"))
     }
 }
 

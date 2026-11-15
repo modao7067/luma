@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.browser
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
@@ -102,7 +105,7 @@ class AgentBrowser(private val context: Context) {
     )
 
     class Tab(val id: String, val owner: String, val web: WebView, val mobileUserAgent: String) {
-        val title = mutableStateOf("新标签页")
+        val title = mutableStateOf(tr("新标签页", "New tab"))
         val url = mutableStateOf("")
         val loading = mutableStateOf(false)
         val progress = mutableIntStateOf(0)
@@ -241,7 +244,7 @@ class AgentBrowser(private val context: Context) {
         if (owner != null) {
             activeTabFor(owner)?.let { foregroundTabByOwner[owner] = it.id }
             if (!allowLiveAgent.value) {
-                activeAgentJobs.remove(owner)?.cancel(CancellationException("用户已进入浏览器接管操作"))
+                activeAgentJobs.remove(owner)?.cancel(CancellationException(tr("用户已进入浏览器接管操作", "User took over browser control")))
                 agentOperatingSessions[owner] = false
             }
         }
@@ -279,13 +282,13 @@ class AgentBrowser(private val context: Context) {
                 val bytes = java.io.ByteArrayOutputStream()
                 while (true) {
                     val value = input.read()
-                    require(value >= 0) { "请求未完成" }
+                    require(value >= 0) { tr("请求未完成", "Incomplete request") }
                     if (value == 10) break
-                    require(bytes.size() < 262144) { "请求过大" }
+                    require(bytes.size() < 262144) { tr("请求过大", "Request payload too large") }
                     bytes.write(value)
                 }
                 val request = JSONObject(bytes.toString("UTF-8"))
-                val owner = tokens[request.optString("token")] ?: error("浏览器接口未授权")
+                val owner = tokens[request.optString("token")] ?: error(tr("浏览器接口未授权", "Unauthorized browser API token"))
                 withTimeout(25000) {
                     withContext(Dispatchers.Main) {
                         val action = request.optString("action")
@@ -302,7 +305,7 @@ class AgentBrowser(private val context: Context) {
                             return@withContext obj(
                                 "ok" to false,
                                 "code" to "USER_CONTROL_ACTIVE",
-                                "error" to "用户正在前台查看或操作该标签页；请等待用户返回会话，或使用 open --background / --tab 操作后台标签页",
+                                "error" to tr("用户正在前台查看或操作该标签页；请等待用户返回会话，或使用 open --background / --tab 操作后台标签页", "User is actively viewing this tab in the foreground; wait until they return to the session, or use open --background / --tab"),
                                 "dispatched" to false,
                             )
                         }
@@ -320,11 +323,11 @@ class AgentBrowser(private val context: Context) {
                 obj(
                     "ok" to false,
                     "code" to "USER_CONTROL_ACTIVE",
-                    "error" to (cancelled.message ?: "操作已被前台用户接管中断"),
+                    "error" to (cancelled.message ?: tr("操作已被前台用户接管中断", "Action interrupted by foreground user takeover")),
                     "dispatched" to false,
                 )
             } catch (e: Exception) {
-                obj("ok" to false, "error" to (e.message ?: "浏览器操作失败"))
+                obj("ok" to false, "error" to (e.message ?: tr("浏览器操作失败", "Browser action failed")))
             }
             socket.getOutputStream().write((response.toString() + "\n").toByteArray())
         }
@@ -430,7 +433,7 @@ class AgentBrowser(private val context: Context) {
 
     @SuppressLint("SetJavaScriptEnabled")
     fun newTab(owner: String, url: String = "", id: String = UUID.randomUUID().toString(), selectActive: Boolean = true): Tab {
-        require(url.isEmpty() || BrowserPolicy.allowedUrl(url)) { "仅支持 HTTPS 或本机 HTTP 页面" }
+        require(url.isEmpty() || BrowserPolicy.allowedUrl(url)) { tr("仅支持 HTTPS 或本机 HTTP 页面", "Only HTTPS or localhost HTTP pages are supported") }
         val web = WebView(MutableContextWrapper(context.applicationContext))
         web.setLayerType(View.LAYER_TYPE_NONE, null)
         val defaultUa = web.settings.userAgentString.orEmpty()
@@ -454,7 +457,7 @@ class AgentBrowser(private val context: Context) {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val targetUrl = request.url.toString()
                 val blocked = !BrowserPolicy.allowedUrl(targetUrl)
-                if (blocked) tab.error.value = "已阻止非 HTTPS／本机 HTTP 导航"
+                if (blocked) tab.error.value = tr("已阻止非 HTTPS／本机 HTTP 导航", "Blocked non-HTTPS / non-localhost navigation")
                 return blocked
             }
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
@@ -509,12 +512,12 @@ class AgentBrowser(private val context: Context) {
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
                 handler.cancel()
                 tab.loading.value = false
-                tab.error.value = "证书验证失败，已阻止连接"
+                tab.error.value = tr("证书验证失败，已阻止连接", "Certificate verification failed; connection blocked")
                 recordError(
                     tab,
                     ErrorEntry(
                         kind = "ssl",
-                        message = "证书验证失败",
+                        message = tr("证书验证失败", "Certificate verification failed"),
                         url = BrowserPolicy.sanitizeTelemetryUrl(error.url.orEmpty()),
                         mainFrame = true,
                         navSeq = tab.navSeq,
@@ -542,7 +545,7 @@ class AgentBrowser(private val context: Context) {
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 tab.generation++
                 tab.crashed.value = true
-                tab.error.value = "网页进程已退出，请关闭并重新打开标签页"
+                tab.error.value = tr("网页进程已退出，请关闭并重新打开标签页", "WebView renderer exited; close and reopen the tab")
                 tab.loading.value = false
                 (view.parent as? android.view.ViewGroup)?.removeView(view)
                 view.destroy()
@@ -552,7 +555,7 @@ class AgentBrowser(private val context: Context) {
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onReceivedTitle(view: WebView, title: String?) {
-                tab.title.value = title.orEmpty().ifBlank { "新标签页" }
+                tab.title.value = title.orEmpty().ifBlank { tr("新标签页", "New tab") }
             }
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 tab.progress.intValue = newProgress.coerceIn(0, 100)
@@ -652,13 +655,13 @@ class AgentBrowser(private val context: Context) {
         }
         web.setDownloadListener { downloadUrl, userAgent, contentDisposition, mimeType, _ ->
             if (!BrowserPolicy.allowedUrl(downloadUrl)) {
-                tab.error.value = "已阻止非安全协议文件下载"
+                tab.error.value = tr("已阻止非安全协议文件下载", "Blocked download over insecure protocol")
                 return@setDownloadListener
             }
             val fileName = URLUtil.guessFileName(downloadUrl, contentDisposition, mimeType)
             val agentDriven = tab.inFlightCount > 0 || isAgentCommandInFlight(tab.owner) || foregroundSession.value != tab.owner
             if (agentDriven && BrowserPolicy.isBlockedAgentDownload(fileName, mimeType)) {
-                val msg = "已拦截高危类型文件下载：$fileName"
+                val msg = tr("已拦截高危类型文件下载：$fileName", "Blocked high-risk file download: $fileName")
                 tab.error.value = msg
                 recordError(tab, ErrorEntry("blocked_download", msg, BrowserPolicy.sanitizeTelemetryUrl(downloadUrl), 0, true, tab.navSeq))
                 return@setDownloadListener
@@ -675,9 +678,9 @@ class AgentBrowser(private val context: Context) {
                     req.addRequestHeader("Cookie", cookie)
                 }
                 dm.enqueue(req)
-                tab.notice.value = "已开始下载：$fileName"
+                tab.notice.value = tr("已开始下载：$fileName", "Download started: $fileName")
             }.onFailure { err ->
-                tab.error.value = "启动下载失败：${err.message ?: "系统下载服务不可用"}"
+                tab.error.value = tr("启动下载失败：${err.message ?: "系统下载服务不可用"}", "Failed to start download: ${err.message ?: "System download manager unavailable"}")
             }
         }
 
@@ -696,7 +699,7 @@ class AgentBrowser(private val context: Context) {
     }
 
     fun attach(tab: Tab, host: android.widget.FrameLayout) {
-        check(!tab.closed && !tab.crashed.value) { "标签页已关闭或网页进程已退出" }
+        check(!tab.closed && !tab.crashed.value) { tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited") }
         tab.web.setLayerType(View.LAYER_TYPE_NONE, null)
         if (tab.web.parent === host) {
             (tab.web.context as MutableContextWrapper).baseContext = host.context
@@ -750,8 +753,8 @@ class AgentBrowser(private val context: Context) {
     }
 
     fun navigate(tab: Tab, url: String, selectActive: Boolean = true) {
-        check(!tab.closed && !tab.crashed.value) { "标签页已关闭或网页进程已退出" }
-        require(BrowserPolicy.allowedUrl(url)) { "请输入 HTTPS 或 localhost HTTP 网址" }
+        check(!tab.closed && !tab.crashed.value) { tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited") }
+        require(BrowserPolicy.allowedUrl(url)) { tr("请输入 HTTPS 或 localhost HTTP 网址", "Enter an HTTPS or localhost HTTP URL") }
         if (selectActive) {
             activeTabByOwner[tab.owner] = tab.id
         }
@@ -768,7 +771,7 @@ class AgentBrowser(private val context: Context) {
         if (!res.optBoolean("ok") || text.isEmpty()) return null
         val url = tab.url.value.ifBlank { res.optString("url") }
         val quoted = text.lines().joinToString("\n") { "> $it" }
-        return if (url.isNotBlank()) "$quoted\n来源：$url" else quoted
+        return if (url.isNotBlank()) tr("$quoted\n来源：$url", "$quoted\nSource: $url") else quoted
     }
 
     private fun persist() {
@@ -1005,7 +1008,7 @@ class AgentBrowser(private val context: Context) {
         delay(24)
         while (true) {
             if (tab.closed || tab.crashed.value) {
-                return obj("ok" to false, "code" to "TAB_UNAVAILABLE", "error" to "标签页已关闭或网页进程已退出", "dispatched" to true)
+                return obj("ok" to false, "code" to "TAB_UNAVAILABLE", "error" to tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited"), "dispatched" to true)
             }
             tab.jsDialog.value?.let { pending ->
                 return obj(
@@ -1037,9 +1040,9 @@ class AgentBrowser(private val context: Context) {
     private fun resolveTargetTab(owner: String, request: JSONObject): Tab {
         val raw = request.optString("tab")
         if (raw.isEmpty() || raw == "\$active") {
-            return activeTabFor(owner) ?: error("当前会话尚无已打开的标签页；请先执行 open 打开网页")
+            return activeTabFor(owner) ?: error(tr("当前会话尚无已打开的标签页；请先执行 open 打开网页", "No open tab in this session; run open first"))
         }
-        val tab = tabs.firstOrNull { it.id == raw } ?: error("标签页不存在；请检查 tabs")
+        val tab = tabs.firstOrNull { it.id == raw } ?: error(tr("标签页不存在；请检查 tabs", "Tab not found; check tabs"))
         BrowserPolicy.requireOwner(tab.owner, owner)
         activeTabByOwner[owner] = tab.id
         return tab
@@ -1261,7 +1264,7 @@ class AgentBrowser(private val context: Context) {
     private suspend fun executeStep(tab: Tab, request: JSONObject): JSONObject {
         coroutineContext.ensureActive()
         if (tab.closed || tab.crashed.value) {
-            return obj("ok" to false, "code" to "TAB_UNAVAILABLE", "error" to "标签页已关闭或网页进程已退出", "dispatched" to false)
+            return obj("ok" to false, "code" to "TAB_UNAVAILABLE", "error" to tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited"), "dispatched" to false)
         }
         return when (val action = request.getString("action")) {
             "navigate" -> {
@@ -1271,7 +1274,7 @@ class AgentBrowser(private val context: Context) {
             }
             "back" -> {
                 if (!tab.web.canGoBack()) {
-                    obj("ok" to false, "code" to "NO_HISTORY_BACK", "error" to "当前标签页没有可后退的历史记录", "dispatched" to false)
+                    obj("ok" to false, "code" to "NO_HISTORY_BACK", "error" to tr("当前标签页没有可后退的历史记录", "No back history in current tab"), "dispatched" to false)
                 } else {
                     tab.generation++
                     tab.error.value = null
@@ -1282,7 +1285,7 @@ class AgentBrowser(private val context: Context) {
             }
             "forward" -> {
                 if (!tab.web.canGoForward()) {
-                    obj("ok" to false, "code" to "NO_HISTORY_FORWARD", "error" to "当前标签页没有可前进的历史记录", "dispatched" to false)
+                    obj("ok" to false, "code" to "NO_HISTORY_FORWARD", "error" to tr("当前标签页没有可前进的历史记录", "No forward history in current tab"), "dispatched" to false)
                 } else {
                     tab.generation++
                     tab.error.value = null
@@ -1304,7 +1307,7 @@ class AgentBrowser(private val context: Context) {
             }
             "swipe" -> {
                 if (tab.loading.value || tab.error.value != null) {
-                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to "页面尚未就绪；先 wait 或检查 tabs", "dispatched" to false)
+                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to tr("页面尚未就绪；先 wait 或检查 tabs", "Page is not ready yet; wait or check tabs"), "dispatched" to false)
                 } else {
                     dispatchSwipeGesture(
                         tab = tab,
@@ -1363,7 +1366,7 @@ class AgentBrowser(private val context: Context) {
                     )
                     "accept" -> {
                         if (pending == null) {
-                            obj("ok" to false, "code" to "NO_DIALOG", "error" to "当前没有待处理的网页弹窗", "dispatched" to false)
+                            obj("ok" to false, "code" to "NO_DIALOG", "error" to tr("当前没有待处理的网页弹窗", "No pending page dialog"), "dispatched" to false)
                         } else {
                             val kind = pending.kind.name.lowercase()
                             val text = if (request.has("promptText")) request.getString("promptText") else pending.defaultPrompt
@@ -1373,19 +1376,19 @@ class AgentBrowser(private val context: Context) {
                     }
                     "dismiss" -> {
                         if (pending == null) {
-                            obj("ok" to false, "code" to "NO_DIALOG", "error" to "当前没有待处理的网页弹窗", "dispatched" to false)
+                            obj("ok" to false, "code" to "NO_DIALOG", "error" to tr("当前没有待处理的网页弹窗", "No pending page dialog"), "dispatched" to false)
                         } else {
                             val kind = pending.kind.name.lowercase()
                             pending.cancel()
                             obj("ok" to true, "dispatched" to true, "handled" to "dismissed", "kind" to kind, "tab" to info(tab))
                         }
                     }
-                    else -> error("未知弹窗动作")
+                    else -> error(tr("未知弹窗动作", "Unknown dialog action"))
                 }
             }
             "diff" -> {
                 if (tab.loading.value || tab.error.value != null) {
-                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to "页面尚未就绪；先 wait 或检查 tabs", "dispatched" to false)
+                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to tr("页面尚未就绪；先 wait 或检查 tabs", "Page is not ready yet; wait or check tabs"), "dispatched" to false)
                 } else {
                     val readReq = obj(
                         "action" to "read",
@@ -1430,13 +1433,13 @@ class AgentBrowser(private val context: Context) {
                 }
             }
             "screenshot" -> {
-                check(!tab.loading.value && tab.error.value == null) { "页面尚未就绪" }
+                check(!tab.loading.value && tab.error.value == null) { tr("页面尚未就绪", "Page is not ready yet") }
                 val annotate = request.optBoolean("annotate", false)
                 val meta = if (annotate) evaluatePage(tab, obj("action" to "read", "interactiveOnly" to true)) else null
                 if (meta != null && !meta.optBoolean("ok")) return meta
                 val fullW = tab.web.width.takeIf { it > 0 } ?: contentViewportWidthPx
                 val rawBitmap = captureViewportBitmap(tab, targetWidthPx = fullW.coerceIn(360, 720))
-                    ?: error("页面尚未完成绘制")
+                    ?: error(tr("页面尚未完成绘制", "Page has not finished rendering yet"))
                 tab.previewBitmap.value = rawBitmap
                 val (outBitmap, annotations) = if (annotate && meta != null) {
                     drawAnnotatedScreenshot(rawBitmap, meta)
@@ -1472,7 +1475,7 @@ class AgentBrowser(private val context: Context) {
             }
             in BrowserProtocol.pageActions -> {
                 if (tab.loading.value || tab.error.value != null) {
-                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to "页面尚未就绪；先 wait 或检查 tabs", "dispatched" to false)
+                    obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to tr("页面尚未就绪；先 wait 或检查 tabs", "Page is not ready yet; wait or check tabs"), "dispatched" to false)
                 } else {
                     if (!tab.web.isAttachedToWindow && tab.web.parent == null) {
                         layoutOffscreen(tab.web)
@@ -1493,7 +1496,7 @@ class AgentBrowser(private val context: Context) {
                     }
                 }
             }
-            else -> error("未知操作")
+            else -> error(tr("未知操作", "Unknown action"))
         }
     }
 
@@ -1502,7 +1505,7 @@ class AgentBrowser(private val context: Context) {
             return obj(
                 "ok" to false,
                 "code" to "DIALOG_OPEN",
-                "error" to "页面存在未处理的 JS 弹窗，请先执行 luma-browser dialog accept 或 dismiss",
+                "error" to tr("页面存在未处理的 JS 弹窗，请先执行 luma-browser dialog accept 或 dismiss", "Unhandled JS dialog is open; run luma-browser dialog accept or dismiss first"),
                 "dispatched" to false,
                 "pendingDialog" to dialogJson(pending),
             )
@@ -1518,6 +1521,7 @@ class AgentBrowser(private val context: Context) {
             if (request.has(key)) data.put(key, request.get(key))
         }
         if (nativeTap) data.put("nativeTap", true)
+        data.put("__lang", LumaI18n.langCode())
         val action = request.getString("action")
         val mutating = action in setOf("click", "fill", "type", "select", "check", "uncheck", "hover", "press")
         val generation = tab.generation
@@ -1554,7 +1558,7 @@ class AgentBrowser(private val context: Context) {
         if (result == null) return obj(
             "ok" to false,
             "code" to "PAGE_CALLBACK_TIMEOUT",
-            "error" to "网页回调超时；操作可能已执行，请查看页面，勿自动重试",
+            "error" to tr("网页回调超时；操作可能已执行，请查看页面，勿自动重试", "Page callback timed out; action may have executed, inspect page instead of retrying"),
             "dispatched" to mutating,
         )
         if (tab.closed || generation != tab.generation) {
@@ -1564,12 +1568,12 @@ class AgentBrowser(private val context: Context) {
             return obj(
                 "ok" to false,
                 "code" to "NAVIGATION_CHANGED",
-                "error" to "页面已导航或关闭；操作可能已执行，请重新读取，勿自动重试",
+                "error" to tr("页面已导航或关闭；操作可能已执行，请重新读取，勿自动重试", "Page navigated or closed; action may have executed, re-read instead of retrying"),
                 "dispatched" to mutating,
             )
         }
         return (org.json.JSONTokener(result).nextValue() as? JSONObject)
-            ?: obj("ok" to false, "code" to "INVALID_PAGE_RESULT", "error" to "页面未返回有效结果", "dispatched" to mutating)
+            ?: obj("ok" to false, "code" to "INVALID_PAGE_RESULT", "error" to tr("页面未返回有效结果", "Page did not return a valid result"), "dispatched" to mutating)
     }
 
     companion object {

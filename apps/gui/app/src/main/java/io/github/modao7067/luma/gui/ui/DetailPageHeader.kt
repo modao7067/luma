@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -16,7 +18,7 @@ internal fun DetailPageHeader(
     title: String,
     onBack: () -> Unit,
     subtitle: String = "",
-    backLabel: String = "返回",
+    backLabel: String = tr("返回", "Back"),
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),

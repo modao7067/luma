@@ -246,21 +246,21 @@ final class TaskRegistry implements AutoCloseable {
     }
 
     JSONObject startTask(JSONObject req) throws Exception {
-        if (closed) throw new IOException("Luma 已停止");
+        if (closed) throw new IOException(com.termux.terminal.LumaLang.tr("Luma 已停止", "Luma has stopped"));
         String requestedId = req.optString("id", "").trim();
         String id = requestedId.isEmpty() ? "svc-" + seq.getAndIncrement() + "-" + randomHex(3) : sanitizeId(requestedId);
         ManagedTask existing = tasks.get(id);
         if (existing != null && !"exited".equals(existing.phase)) {
-            throw new IOException("服务 ID 已在运行：" + id);
+            throw new IOException(com.termux.terminal.LumaLang.tr("服务 ID 已在运行：", "Service ID is already running: ") + id);
         }
         String name = req.optString("name", id);
         String backend = req.optString("backend", "linux");
         if (!"linux".equals(backend) && !"android".equals(backend)) {
-            throw new IOException("不支持的后端：" + backend);
+            throw new IOException(com.termux.terminal.LumaLang.tr("不支持的后端：", "Unsupported backend: ") + backend);
         }
         JSONArray argsJson = req.optJSONArray("args");
         if (argsJson == null || argsJson.length() == 0) {
-            throw new IOException("缺少服务启动命令 args");
+            throw new IOException(com.termux.terminal.LumaLang.tr("缺少服务启动命令 args", "Missing service start command args"));
         }
         ArrayList<String> rawCommand = new ArrayList<>(argsJson.length());
         for (int i = 0; i < argsJson.length(); i++) rawCommand.add(argsJson.getString(i));
@@ -279,7 +279,7 @@ final class TaskRegistry implements AutoCloseable {
             assignedPort = allocateFreePort(bindHost);
         } else if (requestedPort > 0) {
             if (!isPortAvailable(bindHost, requestedPort)) {
-                throw new IOException("port_in_use: 端口已被占用 " + bindHost + ":" + requestedPort);
+                throw new IOException("port_in_use: " + com.termux.terminal.LumaLang.tr("端口已被占用 ", "Port already in use ") + bindHost + ":" + requestedPort);
             }
         }
 
@@ -326,14 +326,14 @@ final class TaskRegistry implements AutoCloseable {
             gracePeriodMs, logFile, recordFile
         );
         synchronized (registryLock) {
-            if (closed) throw new IOException("Luma 已停止");
+            if (closed) throw new IOException(com.termux.terminal.LumaLang.tr("Luma 已停止", "Luma has stopped"));
             ManagedTask current = tasks.get(id);
-            if (current != null && !"exited".equals(current.phase)) throw new IOException("服务 ID 已在运行：" + id);
+            if (current != null && !"exited".equals(current.phase)) throw new IOException(com.termux.terminal.LumaLang.tr("服务 ID 已在运行：", "Service ID is already running: ") + id);
             tasks.put(id, task);
         }
         try {
-            if (logFile.exists() && !logFile.delete()) throw new IOException("无法重置服务日志");
-            if (!logFile.createNewFile()) throw new IOException("无法创建服务日志");
+            if (logFile.exists() && !logFile.delete()) throw new IOException(com.termux.terminal.LumaLang.tr("无法重置服务日志", "Failed to reset service log"));
+            if (!logFile.createNewFile()) throw new IOException(com.termux.terminal.LumaLang.tr("无法创建服务日志", "Failed to create service log"));
             Os.chmod(logFile.getAbsolutePath(), 0600);
             spawnTaskInstance(task);
             return toJson(task);
@@ -349,7 +349,7 @@ final class TaskRegistry implements AutoCloseable {
         SpawnAttempt attempt = new SpawnAttempt();
         attempt.future = new FutureTask<>(() -> { launchTask(task, attempt); return null; });
         synchronized (task.stateLock) {
-            if (closed || task.stopRequested) { markStartFailureLocked(task, "spawn_cancelled"); throw new IOException("服务已取消"); }
+            if (closed || task.stopRequested) { markStartFailureLocked(task, "spawn_cancelled"); throw new IOException(com.termux.terminal.LumaLang.tr("服务已取消", "Service cancelled")); }
             task.launch = attempt;
         }
         try {
@@ -357,16 +357,16 @@ final class TaskRegistry implements AutoCloseable {
             attempt.future.get(5, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             cancelLaunch(task, attempt, "spawn_timeout");
-            throw new IOException("服务派生超时", e);
+            throw new IOException(com.termux.terminal.LumaLang.tr("服务派生超时", "Service spawn timed out"), e);
         } catch (InterruptedException e) {
             cancelLaunch(task, attempt, "spawn_cancelled");
             Thread.currentThread().interrupt();
             throw e;
         } catch (CancellationException e) {
-            throw new IOException("服务启动已取消", e);
+            throw new IOException(com.termux.terminal.LumaLang.tr("服务启动已取消", "Service startup cancelled"), e);
         } catch (RejectedExecutionException e) {
             synchronized (task.stateLock) { markStartFailureLocked(task, "spawn_error"); }
-            throw new IOException("服务派生器已关闭", e);
+            throw new IOException(com.termux.terminal.LumaLang.tr("服务派生器已关闭", "Service spawner is shut down"), e);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) throw (Exception) cause;
@@ -470,7 +470,7 @@ final class TaskRegistry implements AutoCloseable {
                 task.probeWindowSize = 0;
                 task.startupLogMatched = false;
             }
-            if (closed || task.stopRequested || attempt.cancelled) throw new IOException("服务已取消");
+            if (closed || task.stopRequested || attempt.cancelled) throw new IOException(com.termux.terminal.LumaLang.tr("服务已取消", "Service cancelled"));
             proc = processOps.start(builder);
             synchronized (task.stateLock) {
                 task.process = proc;
@@ -747,21 +747,21 @@ final class TaskRegistry implements AutoCloseable {
     JSONObject stopOwnedCliBridge(String id) throws Exception {
         if (!"luma-native-cli-gui".equals(id) && !"luma-native-cli-gui-v3".equals(id) &&
             !"luma-antigravity-gui".equals(id) && !"luma-acp-cli-gui".equals(id) &&
-            !"luma-codebuddy-gui-v1".equals(id)) throw new IOException("无效 CLI 桥服务标识");
+            !"luma-codebuddy-gui-v1".equals(id)) throw new IOException(com.termux.terminal.LumaLang.tr("无效 CLI 桥服务标识", "Invalid CLI bridge service ID"));
         synchronized (registryLock) {
             ManagedTask task = tasks.get(id);
-            if (task == null) throw new IOException("无法确认 CLI 桥服务身份；未停止任何服务");
+            if (task == null) throw new IOException(com.termux.terminal.LumaLang.tr("无法确认 CLI 桥服务身份；未停止任何服务", "Cannot verify CLI bridge service identity; nothing stopped"));
             synchronized (task.stateLock) {
                 String launch = task.command.size() == 4 ? task.command.get(3) : "";
                 String expected = "exec /usr/bin/python3 -I -B '/opt/luma/agent/cli-bridge-v[0-9]+/main\\.py' [0-9]+ '/opt/luma/agent/cli-bridge-token' '/opt/luma/agent/cli-sessions'";
                 if (!"linux".equals(task.backend) || task.command.size() != 4 ||
                     !"/bin/bash".equals(task.command.get(0)) || !"--login".equals(task.command.get(1)) ||
                     !"-c".equals(task.command.get(2)) || !launch.matches(expected)) {
-                    throw new IOException("CLI 桥服务命令身份不匹配；未停止任何服务");
+                    throw new IOException(com.termux.terminal.LumaLang.tr("CLI 桥服务命令身份不匹配；未停止任何服务", "CLI bridge service command mismatch; nothing stopped"));
                 }
                 if ("exited".equals(task.phase)) return toJson(task);
                 if (task.process == null || task.ownerToken == null || task.ownerToken.isEmpty())
-                    throw new IOException("无法确认 CLI 桥服务进程归属；未停止任何服务");
+                    throw new IOException(com.termux.terminal.LumaLang.tr("无法确认 CLI 桥服务进程归属；未停止任何服务", "Cannot verify CLI bridge process ownership; nothing stopped"));
             }
             return stopTask(id, 3000L, false);
         }
@@ -769,7 +769,7 @@ final class TaskRegistry implements AutoCloseable {
 
     JSONObject stopTask(String id, long graceOverrideMs, boolean taskRemoved) throws IOException {
         ManagedTask task = tasks.get(id);
-        if (task == null) throw new IOException("未找到服务：" + id);
+        if (task == null) throw new IOException(com.termux.terminal.LumaLang.tr("未找到服务：", "Service not found: ") + id);
         Process proc;
         int pid;
         String token;
@@ -850,7 +850,7 @@ final class TaskRegistry implements AutoCloseable {
 
     JSONObject waitTask(String id, String waitFor, long timeoutMs, Cancellation cancellation) throws Exception {
         ManagedTask task = tasks.get(id);
-        if (task == null) throw new IOException("未找到服务：" + id);
+        if (task == null) throw new IOException(com.termux.terminal.LumaLang.tr("未找到服务：", "Service not found: ") + id);
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(100L, Math.min(600_000L, timeoutMs)));
         cancellation.attach(task.stateLock);
         try {
@@ -862,7 +862,7 @@ final class TaskRegistry implements AutoCloseable {
                     if (remaining <= 0L) break;
                     TimeUnit.NANOSECONDS.timedWait(task.stateLock, remaining);
                 }
-                if (cancellation.isCancelled()) throw new IOException("客户端已断开");
+                if (cancellation.isCancelled()) throw new IOException(com.termux.terminal.LumaLang.tr("客户端已断开", "Client disconnected"));
                 JSONObject out = toJson(task);
                 boolean satisfied = "exited".equals(waitFor)
                     ? "exited".equals(task.phase)
@@ -886,7 +886,7 @@ final class TaskRegistry implements AutoCloseable {
 
     JSONObject getStatus(String id) throws Exception {
         ManagedTask task = tasks.get(id);
-        if (task == null) throw new IOException("未找到服务：" + id);
+        if (task == null) throw new IOException(com.termux.terminal.LumaLang.tr("未找到服务：", "Service not found: ") + id);
         return toJson(task);
     }
 
@@ -913,7 +913,7 @@ final class TaskRegistry implements AutoCloseable {
     void streamLogs(String id, long offset, long tailBytes, boolean follow, OutputStream output,
                     Cancellation cancellation) throws Exception {
         ManagedTask task = tasks.get(id);
-        if (task == null) throw new IOException("未找到服务：" + id);
+        if (task == null) throw new IOException(com.termux.terminal.LumaLang.tr("未找到服务：", "Service not found: ") + id);
         long pos = Math.max(0L, offset);
         long generation;
         synchronized (task.logLock) {
@@ -1086,7 +1086,7 @@ final class TaskRegistry implements AutoCloseable {
 
     private static String sanitizeId(String raw) throws IOException {
         if (!raw.matches("^[A-Za-z0-9._-]{1,64}$")) {
-            throw new IOException("非法服务 ID（仅限字母、数字、.、_、-）：" + raw);
+            throw new IOException(com.termux.terminal.LumaLang.tr("非法服务 ID（仅限字母、数字、.、_、-）：", "Invalid service ID (letters, digits, ., _, - only): ") + raw);
         }
         return raw;
     }

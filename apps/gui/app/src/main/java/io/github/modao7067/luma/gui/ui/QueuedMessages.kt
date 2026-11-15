@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
@@ -62,7 +64,7 @@ internal fun QueuedMessages(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (displayed.queue.isNotEmpty()) Text("待发消息 · ${displayed.queue.size}",
+            if (displayed.queue.isNotEmpty()) Text(tr("待发消息 · ${displayed.queue.size}", "Queued · ${displayed.queue.size}"),
                 Modifier.padding(start = 14.dp, top = 2.dp), style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             displayed.queue.forEach { entry ->
@@ -131,7 +133,7 @@ internal fun QueuedMessages(
                             val enabled = active && (entry.localSubmission || entry.localRecovery || (entry.hostOwned && !view.loading && !view.queueBusy) || (view.connected && !view.queueBusy && view.queueRecovery == null))
                             if (entry.canSteer) {
                                 ActionMenuItem(
-                                    "插话",
+                                    tr("插话", "Steer"),
                                     MenuSymbol.SEND,
                                     iconContainer = true,
                                     enabled = enabled && view.activeTurnId != null,
@@ -140,7 +142,7 @@ internal fun QueuedMessages(
                             }
                             if (entry.canEdit) {
                                 ActionMenuItem(
-                                    "编辑",
+                                    tr("编辑", "Edit"),
                                     MenuSymbol.EDIT,
                                     iconContainer = true,
                                     enabled = enabled,
@@ -152,7 +154,7 @@ internal fun QueuedMessages(
                             }
                             if (entry.canRemove || entry.canDismiss) {
                                 ActionMenuItem(
-                                    "删除",
+                                    tr("删除", "Remove"),
                                     MenuSymbol.DELETE,
                                     iconContainer = true,
                                     destructive = true,
@@ -168,7 +170,7 @@ internal fun QueuedMessages(
                 LiquidGlass(Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            if (recovery.phase == "removed") "未能追加，原消息已保留" else "转发结果待确认，请核对会话和队列",
+                            if (recovery.phase == "removed") tr("未能追加，原消息已保留", "Could not append; original message kept") else tr("转发结果待确认，请核对会话和队列", "Forwarding unconfirmed; verify session and queue"),
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(recovery.text, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -179,21 +181,21 @@ internal fun QueuedMessages(
                                     onClick = { actions.resolveQueueRecovery(true) },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                     modifier = Modifier.height(32.dp),
-                                ) { Text("恢复到草稿", style = MaterialTheme.typography.labelMedium) }
+                                ) { Text(tr("恢复到草稿", "Restore to draft"), style = MaterialTheme.typography.labelMedium) }
                             } else {
                                 FilledTonalButton(
                                     enabled = hasItems && !view.queueBusy,
                                     onClick = actions::reconnect,
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                     modifier = Modifier.height(32.dp),
-                                ) { Text("重新同步", style = MaterialTheme.typography.labelMedium) }
+                                ) { Text(tr("重新同步", "Resync"), style = MaterialTheme.typography.labelMedium) }
                             }
                             TextButton(
                                 enabled = hasItems && !view.queueBusy,
                                 onClick = { discard = true },
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                 modifier = Modifier.height(32.dp),
-                            ) { Text("已核对", style = MaterialTheme.typography.labelMedium) }
+                            ) { Text(tr("已核对", "Dismiss"), style = MaterialTheme.typography.labelMedium) }
                         }
                     }
                 }
@@ -206,13 +208,13 @@ internal fun QueuedMessages(
         LaunchedEffect(current?.id) { if (current == null) editing = null }
         var text by rememberSaveable(entry.id) { mutableStateOf(entry.editableText) }
         LiquidModalDialog(
-            title = "编辑待发消息",
+            title = tr("编辑待发消息", "Edit queued message"),
             onDismiss = { editing = null },
             confirmButton = {
-                Button(onClick = { actions.editQueued(entry.id, text); editing = null }, enabled = editable) { Text("保存") }
+                Button(onClick = { actions.editQueued(entry.id, text); editing = null }, enabled = editable) { Text(tr("保存", "Save")) }
             },
             dismissButton = {
-                TextButton(onClick = { editing = null }) { Text("取消") }
+                TextButton(onClick = { editing = null }) { Text(tr("取消", "Cancel")) }
             },
         ) {
             OutlinedTextField(
@@ -227,17 +229,17 @@ internal fun QueuedMessages(
     }
     if (discard) {
         LiquidModalDialog(
-            title = "清除转发记录？",
+            title = tr("清除转发记录？", "Clear forwarding record?"),
             onDismiss = { discard = false },
             confirmButton = {
-                Button(onClick = { discard = false; actions.resolveQueueRecovery(false) }) { Text("确认清除") }
+                Button(onClick = { discard = false; actions.resolveQueueRecovery(false) }) { Text(tr("确认清除", "Clear")) }
             },
             dismissButton = {
-                TextButton(onClick = { discard = false }) { Text("保留") }
+                TextButton(onClick = { discard = false }) { Text(tr("保留", "Keep")) }
             },
         ) {
             Text(
-                "请先确认消息是否已执行。清除不会撤销后端操作，也不会重发原消息。",
+                tr("请先确认消息是否已执行。清除不会撤销后端操作，也不会重发原消息。", "Check whether the message already ran first. Clearing will neither undo backend execution nor resend it."),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

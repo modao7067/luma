@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import json, os, re, socket, sys
 
+def _tr(zh, en):
+    return zh if os.environ.get('LUMA_LANG', 'zh').strip().lower().startswith('zh') else en
+
 HELP = """Luma session browser — CLI subcommands, JSON argument, or JSON on stdin.
 
 Quick commands (auto-uses active session tab; add --tab <id> or --json if needed):
@@ -46,11 +49,11 @@ def load_credentials():
         if re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', thread):
             config = '/opt/luma/agent/browser/threads/' + thread + '.json'
     if not config:
-        raise RuntimeError('当前会话未绑定 Luma 浏览器，请从 Luma 会话启动 CLI')
+        raise RuntimeError(_tr('当前会话未绑定 Luma 浏览器，请从 Luma 会话启动 CLI', 'Current session is not bound to Luma Browser; launch the CLI from a Luma session'))
     with open(config, encoding='utf-8') as f:
         credentials = json.load(f)
     if credentials.get('host') != '127.0.0.1':
-        raise RuntimeError('非法浏览器接口地址')
+        raise RuntimeError(_tr('非法浏览器接口地址', 'Invalid browser endpoint address'))
     return credentials
 
 def send_request(request):
@@ -59,12 +62,12 @@ def send_request(request):
     payload_obj['token'] = credentials['token']
     payload = (json.dumps(payload_obj, ensure_ascii=False) + '\n').encode('utf-8')
     if len(payload) > 262145:
-        raise RuntimeError('浏览器请求过大（最多 256 KiB）')
+        raise RuntimeError(_tr('浏览器请求过大（最多 256 KiB）', 'Browser request is too large (max 256 KiB)'))
     with socket.create_connection(('127.0.0.1', credentials['port']), timeout=28) as connection:
         connection.sendall(payload)
         response = connection.makefile('rb').readline(8 * 1024 * 1024)
         if not response or not response.endswith(b'\n'):
-            raise RuntimeError('浏览器接口响应不完整')
+            raise RuntimeError(_tr('浏览器接口响应不完整', 'Incomplete browser endpoint response'))
         value = json.loads(response)
         if isinstance(value, dict):
             value.pop('token', None)
@@ -78,7 +81,7 @@ def parse_target(raw):
     if m:
         return {'x': float(m.group(1)), 'y': float(m.group(2))}
     if not text:
-        raise RuntimeError('目标不能为空，请提供 @N、CSS/语义选择器或 x,y 坐标')
+        raise RuntimeError(_tr('目标不能为空，请提供 @N、CSS/语义选择器或 x,y 坐标', 'Target cannot be empty; provide @N, a CSS/semantic selector, or x,y coordinates'))
     return {'selector': text}
 
 def format_element_line(el):
@@ -167,7 +170,7 @@ def build_cli_request(argv):
             cleaned.append(arg)
             i += 1
     if not cleaned:
-        raise RuntimeError('缺少子命令；运行 luma-browser --help 查看用法')
+        raise RuntimeError(_tr('缺少子命令；运行 luma-browser --help 查看用法', 'Missing subcommand; run `luma-browser --help` for usage'))
     cmd = cleaned[0]
     rest = cleaned[1:]
 
@@ -193,9 +196,9 @@ def build_cli_request(argv):
             elif url is None and not tok.startswith('-'):
                 url = tok
             else:
-                raise RuntimeError('用法: luma-browser open <url> [--background] [-i] [-u]')
+                raise RuntimeError(_tr('用法: luma-browser open <url> [--background] [-i] [-u]', 'Usage: luma-browser open <url> [--background] [-i] [-u]'))
         if not url:
-            raise RuntimeError('用法: luma-browser open <url> [--background] [-i] [-u]')
+            raise RuntimeError(_tr('用法: luma-browser open <url> [--background] [-i] [-u]', 'Usage: luma-browser open <url> [--background] [-i] [-u]'))
         req = {'action': 'open', 'url': url, 'waitAfter': True, 'returnRead': True}
         if bg:
             req['background'] = True
@@ -206,7 +209,7 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'navigate':
         if len(rest) != 1:
-            raise RuntimeError('用法: luma-browser navigate <url>')
+            raise RuntimeError(_tr('用法: luma-browser navigate <url>', 'Usage: luma-browser navigate <url>'))
         return attach_tab({'action': 'navigate', 'url': rest[0], 'waitAfter': True, 'returnRead': True}), json_out
     if cmd in ('back', 'forward', 'reload'):
         return attach_tab({'action': cmd, 'waitAfter': True, 'returnRead': True}), json_out
@@ -273,7 +276,7 @@ def build_cli_request(argv):
     if cmd == 'dialog':
         decision = rest[0] if rest else 'status'
         if decision not in ('status', 'accept', 'dismiss'):
-            raise RuntimeError('用法: luma-browser dialog [status | accept [promptText] | dismiss]')
+            raise RuntimeError(_tr('用法: luma-browser dialog [status | accept [promptText] | dismiss]', 'Usage: luma-browser dialog [status | accept [promptText] | dismiss]'))
         req = attach_tab({'action': 'dialog', 'decision': decision})
         if decision == 'accept' and len(rest) >= 2:
             req['promptText'] = rest[1]
@@ -283,7 +286,7 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'click':
         if not rest:
-            raise RuntimeError('用法: luma-browser click <@ref|selector|x,y> [--submit]')
+            raise RuntimeError(_tr('用法: luma-browser click <@ref|selector|x,y> [--submit]', 'Usage: luma-browser click <@ref|selector|x,y> [--submit]'))
         submit = '--submit' in rest[1:]
         req = attach_tab({'action': 'click', **parse_target(rest[0]), 'waitAfter': True, 'returnRead': True})
         if submit:
@@ -291,11 +294,11 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'hover':
         if len(rest) != 1:
-            raise RuntimeError('用法: luma-browser hover <@ref|selector|x,y>')
+            raise RuntimeError(_tr('用法: luma-browser hover <@ref|selector|x,y>', 'Usage: luma-browser hover <@ref|selector|x,y>'))
         return attach_tab({'action': 'hover', **parse_target(rest[0]), 'waitAfter': True, 'returnRead': True}), json_out
     if cmd == 'press':
         if not rest:
-            raise RuntimeError('用法: luma-browser press <Key> [<@ref|selector>] [--submit]')
+            raise RuntimeError(_tr('用法: luma-browser press <Key> [<@ref|selector>] [--submit]', 'Usage: luma-browser press <Key> [<@ref|selector>] [--submit]'))
         key = rest[0]
         submit = '--submit' in rest[1:]
         others = [x for x in rest[1:] if x != '--submit']
@@ -307,10 +310,11 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'find':
         if len(rest) < 2:
-            raise RuntimeError('用法: luma-browser find <role|text|label|placeholder|testid> <value> [click|fill|type|hover|check|uncheck] [arg]')
+            raise RuntimeError(_tr('用法: luma-browser find <role|text|label|placeholder|testid> <value> [click|fill|type|hover|check|uncheck] [arg]',
+                                   'Usage: luma-browser find <role|text|label|placeholder|testid> <value> [click|fill|type|hover|check|uncheck] [arg]'))
         kind = rest[0].lower()
         if kind not in ('role', 'text', 'label', 'placeholder', 'testid'):
-            raise RuntimeError('find 仅支持 role/text/label/placeholder/testid')
+            raise RuntimeError(_tr('find 仅支持 role/text/label/placeholder/testid', 'find only supports role/text/label/placeholder/testid'))
         val = rest[1]
         act = rest[2].lower() if len(rest) >= 3 and not rest[2].startswith('--') else 'click'
         name_override = None
@@ -326,12 +330,12 @@ def build_cli_request(argv):
             return attach_tab({'action': act, 'selector': selector, 'waitAfter': True, 'returnRead': act in ('click', 'hover')}), json_out
         if act in ('fill', 'type', 'select'):
             if not extra_args:
-                raise RuntimeError(f'find ... {act} 需要提供输入文本')
+                raise RuntimeError(_tr(f'find ... {act} 需要提供输入文本', f'find ... {act} requires input text'))
             return attach_tab({'action': act, 'selector': selector, 'text': extra_args[0], 'waitAfter': True, 'returnRead': True}), json_out
-        raise RuntimeError(f'不支持的 find 动作: {act}')
+        raise RuntimeError(_tr(f'不支持的 find 动作: {act}', f'Unsupported find action: {act}'))
     if cmd == 'type':
         if len(rest) < 2:
-            raise RuntimeError('用法: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]')
+            raise RuntimeError(_tr('用法: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]', 'Usage: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]'))
         flags = set(rest[2:])
         req = attach_tab({
             'action': 'type',
@@ -345,11 +349,11 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'select':
         if len(rest) < 2:
-            raise RuntimeError('用法: luma-browser select <@ref|selector> <option>')
+            raise RuntimeError(_tr('用法: luma-browser select <@ref|selector> <option>', 'Usage: luma-browser select <@ref|selector> <option>'))
         return attach_tab({'action': 'select', **parse_target(rest[0]), 'text': rest[1], 'waitAfter': True, 'returnRead': True}), json_out
     if cmd in ('check', 'uncheck'):
         if len(rest) != 1:
-            raise RuntimeError(f'用法: luma-browser {cmd} <@ref|selector|x,y>')
+            raise RuntimeError(_tr(f'用法: luma-browser {cmd} <@ref|selector|x,y>', f'Usage: luma-browser {cmd} <@ref|selector|x,y>'))
         return attach_tab({'action': cmd, **parse_target(rest[0])}), json_out
     if cmd == 'fill':
         steps = []
@@ -373,9 +377,9 @@ def build_cli_request(argv):
                 steps.append({'action': 'fill', **parse_target(tok), 'text': rest[j + 1], 'reuseSnapshot': True})
                 j += 2
             else:
-                raise RuntimeError(f'无法解析 fill 参数: {tok}')
+                raise RuntimeError(_tr(f'无法解析 fill 参数: {tok}', f'Unable to parse fill argument: {tok}'))
         if not steps:
-            raise RuntimeError('用法: luma-browser fill <@ref|selector> <text> [...] [--submit]')
+            raise RuntimeError(_tr('用法: luma-browser fill <@ref|selector> <text> [...] [--submit]', 'Usage: luma-browser fill <@ref|selector> <text> [...] [--submit]'))
         if submit:
             steps[-1]['submit'] = True
         if len(steps) == 1:
@@ -414,7 +418,7 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'swipe':
         if len(rest) < 4:
-            raise RuntimeError('用法: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]')
+            raise RuntimeError(_tr('用法: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]', 'Usage: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]'))
         req = attach_tab({
             'action': 'swipe',
             'fromX': float(rest[0]),
@@ -444,7 +448,7 @@ def build_cli_request(argv):
             else:
                 j += 1
         return req, json_out
-    raise RuntimeError(f'未知子命令: {cmd}；运行 luma-browser --help 查看用法')
+    raise RuntimeError(_tr(f'未知子命令: {cmd}；运行 luma-browser --help 查看用法', f'Unknown subcommand: {cmd}; run `luma-browser --help` for usage'))
 
 def main():
     args = sys.argv[1:]
@@ -455,7 +459,7 @@ def main():
     if len(args) == 0 or (len(args) == 1 and args[0].lstrip().startswith('{')):
         request = json.loads(args[0]) if len(args) == 1 else json.load(sys.stdin)
         if not isinstance(request, dict):
-            raise RuntimeError('浏览器请求必须是 JSON 对象')
+            raise RuntimeError(_tr('浏览器请求必须是 JSON 对象', 'Browser request must be a JSON object'))
         value = send_request(request)
         print(json.dumps(value, ensure_ascii=False))
         return 0 if value.get('ok') else 1

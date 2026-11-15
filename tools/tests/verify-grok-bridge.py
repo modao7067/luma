@@ -2,10 +2,10 @@ import copy,json,pathlib,sys,threading,time,unittest
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT.parents[1]/'apps/gui/app/src/main/assets/cli_bridge'))
-from luma_cli.grok import GrokSession
+from luma_cli.grok import GrokSession, safe_reason
+from luma_cli.i18n import tr
 from luma_cli.transport import Peer, Rejected, RpcRejected
 from luma_cli.server import ADAPTERS, carrier_revision
-from luma_cli.grok import safe_reason
 
 MODEL={'currentModelId':'grok-test','availableModels':[{'modelId':'grok-test','name':'Grok test','_meta':{'totalContextTokens':500000}}]}
 OPTIONS=[{'id':'model','name':'Model','category':'model','type':'select','currentValue':'grok-test','options':[{'value':'grok-test','name':'Grok test'}]},
@@ -43,8 +43,8 @@ def notification(kind,ident='event1',session='native',prompt=None,replay=False,*
  return {'method':'session/update' if kind in ('agent_message_chunk','agent_thought_chunk','user_message_chunk','tool_call','tool_call_update','usage_update') else '_x.ai/session_notification',
          'params':{'sessionId':session,'update':{'sessionUpdate':kind,**values},'_meta':meta}}
 def wait(test):
- end=time.time()+2
- while time.time()<end:
+ end=time.monotonic()+2
+ while time.monotonic()<end:
   if test():return
   time.sleep(.01)
  raise AssertionError('did not settle')
@@ -100,7 +100,7 @@ class Contract(unittest.TestCase):
   self.s.configure({'permission':'default'})
   def fail():raise OSError('storage unavailable')
   self.s.save=fail
-  with self.assertRaisesRegex(RuntimeError,'保存失败'):self.s.configure({'permission':'always-approve'})
+  with self.assertRaisesRegex(RuntimeError,tr('保存失败','saving session selection failed')):self.s.configure({'permission':'always-approve'})
   self.assertEqual('always-approve',self.s.data['permission']);self.assertEqual('default',self.config['selectedPermission'])
  def test_restore_refusal_is_not_silently_downgraded(self):
   class Refusing(Harness):
@@ -127,7 +127,7 @@ class Contract(unittest.TestCase):
   self.begin();self.s.submit({'submissionId':'steer','text':'same','steer':True});wait(lambda:any(f.get('method')=='_x.ai/interject' for f in self.s.peer.frames));self.assertEqual('unknown',self.config['receipts']['steer']);self.assertNotIn('steer',self.s.rows)
   self.s.event(notification('agent_thought_chunk','th1',prompt='a',content={'type':'text','text':'思考'}));self.s.event({'method':'_x.ai/session/interjection','params':{'sessionId':'native','interjectionId':'steer','text':'same'}})
   self.assertEqual('accepted',self.config['receipts']['steer']);self.assertEqual('a',self.s.current_submission);self.assertNotIn('steer',self.s.rows);self.assertNotIn('steer',self.s.snapshot()['admittedDisplaySubmissions'])
-  self.assertEqual([{'id':'steer','text':'same','status':'插话 · 等待当前步骤结束','clientUserMessageId':'steer','canRemove':False,'canSteer':False,'canEdit':False,'hostOwned':True}],self.s.snapshot()['hostQueue'])
+  self.assertEqual([{'id':'steer','text':'same','status':tr('插话 · 等待当前步骤结束','Steer · Waiting for current step'),'clientUserMessageId':'steer','canRemove':False,'canSteer':False,'canEdit':False,'hostOwned':True}],self.s.snapshot()['hostQueue'])
   self.s.event(notification('agent_message_chunk','m1',prompt='a',content={'type':'text','text':'上一轮回答'}));self.assertNotIn('steer',self.s.rows)
   self.s.event(notification('response_completed','rc1'));self.assertNotIn('steer',self.s.rows)
   self.s.event(notification('agent_message_chunk','m2',prompt='a',content={'type':'text','text':'针对插话的回答'}))
@@ -259,10 +259,10 @@ class Contract(unittest.TestCase):
   raw={'variant':'Task','prompt':prompt,'description':'子代理丙就绪','run_in_background':True,'task_id':None}
   self.s.event({'id':7,'method':'session/request_permission','params':{'sessionId':'native','toolCall':{'title':'子代理丙就绪','rawInput':raw,'_meta':{'x.ai/tool':{'name':'spawn_subagent','kind':'task'}}},'options':[{'optionId':'allow-once','name':'Yes, send once','kind':'allow_once'},{'optionId':'reject-once','name':'No, and tell Grok what to do differently','kind':'reject_once'}]}})
   req=self.s.data['requests'][-1]
-  self.assertEqual('启动子代理',req['title']);self.assertEqual('子代理丙就绪\n\n'+prompt,req['body'])
-  self.assertNotIn('variant',req['body']);self.assertEqual(['Yes, send once','No, and tell Grok what to do differently','取消'],[c['label'] for c in req['choices']])
+  self.assertEqual(tr('启动子代理','Spawn subagent'),req['title']);self.assertEqual('子代理丙就绪\n\n'+prompt,req['body'])
+  self.assertNotIn('variant',req['body']);self.assertEqual(['Yes, send once','No, and tell Grok what to do differently',tr('取消','Cancel')],[c['label'] for c in req['choices']])
   self.s.event({'id':8,'method':'session/request_permission','params':{'sessionId':'native','toolCall':{'title':'子代理丁就绪','rawInput':{'variant':'Task','prompt':'丁的任务','description':'子代理丁就绪'}},'options':[{'optionId':'allow-once','name':'Yes, send once','kind':'allow_once'}]}})
-  self.assertEqual('启动子代理',self.s.data['requests'][-1]['title']);self.assertEqual('子代理丁就绪\n\n丁的任务',self.s.data['requests'][-1]['body'])
+  self.assertEqual(tr('启动子代理','Spawn subagent'),self.s.data['requests'][-1]['title']);self.assertEqual('子代理丁就绪\n\n丁的任务',self.s.data['requests'][-1]['body'])
   self.s.event({'id':9,'method':'session/request_permission','params':{'sessionId':'native','toolCall':{'title':'bash','rawInput':{'command':'ls'}},'options':[{'optionId':'once','name':'Once','kind':'allow_once'}]}})
   other=self.s.data['requests'][-1];self.assertEqual('bash',other['title']);self.assertIn('"command": "ls"',other['body'])
  def test_question_freeform_native_notes(self):
@@ -414,4 +414,70 @@ class Contract(unittest.TestCase):
   self.s.event(notification('tool_call','tc-next',prompt='a',toolCallId='tnext',title='read_d'))
   self.assertEqual(['a','grok:m0','ij-tool','tool-tnext'],list(self.s.rows))
   self.finish()
+ def test_background_task_and_autonomous_wakeup_protect_from_idle_release(self):
+  from luma_cli.i18n import tr
+  self.begin()
+  self.s.update(historyReady=True)
+  self.s.row({**self.s.rows['a'],'origin':''})
+  self.s.event(notification('tool_call','tc-bg',prompt='a',toolCallId='tbg',title='bash'))
+  self.s.event({'method':'x.ai/task_backgrounded','params':{'sessionId':'native','task_id':'bg1','tool_call_id':'tbg','command':'sleep 60'}})
+  self.finish()
+  self.assertFalse(self.s.data['running'])
+  self.assertEqual(tr('后台任务尚未确认结束','Background task has not been confirmed finished'),self.s.release_blocker())
+  self.s.event({'method':'x.ai/task_completed','params':{'sessionId':'native','task_snapshot':{'id':'bg1','exit_code':0,'output':'done'}}})
+  self.assertEqual('completed',self.s.rows['tool-tbg']['status'])
+  self.assertEqual(tr('后台唤醒回合尚未结算','Background wake-up turn has not settled'),self.s.release_blocker())
+  self.s.event(notification('agent_message_chunk','m-bg',prompt='task-completed-bg1',content={'type':'text','text':'bg finished'}))
+  self.assertTrue(self.s.data['running'])
+  self.assertEqual(tr('原生回合尚未结算','Native turn has not settled'),self.s.release_blocker())
+  self.s.event(notification('turn_completed','done-bg',prompt_id='task-completed-bg1',stop_reason='end_turn'))
+  self.assertFalse(self.s.data['running'])
+  self.assertEqual('completed',self.s.rows['grok:m-bg']['status'])
+  self.assertIsNone(self.s.release_blocker())
+ def test_admitted_interjection_allows_release_mode_after_turn_settles(self):
+  self.begin();self.s.row({**self.s.rows['a'],'origin':''});self.s.update(historyReady=True)
+  self.s.submit({'submissionId':'steer-rel','text':'admit me','steer':True})
+  wait(lambda:any(f.get('method')=='_x.ai/interject' for f in self.s.peer.frames))
+  self.s.event({'method':'_x.ai/session/interjection','params':{'sessionId':'native','interjectionId':'steer-rel','text':'admit me'}})
+  self.assertIsNone(self.s.release_mode())
+  self.s.event(notification('response_completed','rc-rel'))
+  self.s.event(notification('agent_message_chunk','m-rel',prompt='a',content={'type':'text','text':'ok'}))
+  self.assertTrue(self.config['admittedDisplaySubmissions']['steer-rel'])
+  self.finish()
+  self.assertEqual('process',self.s.release_mode())
+  self.assertIsNone(self.s.release_blocker())
+ def test_leader_reconnect_mid_turn_preserves_pending_interjection_until_turn_completes(self):
+  cfg={'cli':'Grok Build','cwd':'/tmp','id':'local','nativeId':'native',
+       'receipts':{'active-turn':'accepted','ij-pending':'accepted'},
+       'consumedSubmissions':{'active-turn':True},
+       'pendingInterjections':[{'id':'ij-pending','text':'wait for me','armed':False}]}
+  frames=[notification('user_message_chunk','u-act',replay=True,prompt='active-turn',content={'type':'text','text':'work'}),
+          notification('agent_message_chunk','a-act',replay=True,prompt='active-turn',content={'type':'text','text':'still going'})]
+  class LeaderHarness(Harness):
+   def start(inner,*args,**kwargs):
+    super().start(*args,**kwargs)
+    inner.owner=type('Owner',(),{'handle':{'instanceId':'inst-1','pid':99999},'alive':lambda _:True})()
+  with patch('luma_cli.grok.non_mcp_background_child_alive',return_value=False):
+   s=LeaderHarness(cfg,lambda:None);s.replay=frames;s.connect()
+   self.assertTrue(s.data['running'])
+   self.assertEqual(['ij-pending'],[e['id'] for e in cfg.get('pendingInterjections',[])])
+   self.assertIsNone(s.release_mode())
+   s.event(notification('turn_completed','done-act',prompt_id='active-turn',stop_reason='end_turn'))
+   self.assertFalse(s.data['running'])
+   self.assertEqual([],cfg.get('pendingInterjections',[]))
+   self.assertTrue(cfg['admittedDisplaySubmissions']['ij-pending'])
+   self.assertEqual('observer',s.release_mode())
+ def test_multi_chunk_user_replay_tags_all_chunks_and_zero_monotonic_startup_not_blocked(self):
+  with patch('luma_cli.grok.time.monotonic',return_value=1.0):
+   self.begin();self.s.row({**self.s.rows['a'],'origin':''});self.s.update(historyReady=True)
+   self.finish()
+   self.assertIsNone(self.s.release_blocker())
+  cfg={'cli':'Grok Build','cwd':'/tmp','id':'local','nativeId':'native','receipts':{'multi':'unknown'}}
+  frames=[notification('user_message_chunk','u-txt',replay=True,content={'type':'text','text':'part1'}),
+          notification('user_message_chunk','u-img',replay=True,content={'type':'image','mimeType':'image/png','data':'abcd'}),
+          notification('turn_completed','d-multi',replay=True,prompt_id='multi',stop_reason='end_turn')]
+  s=Harness(cfg,lambda:None);s.replay=frames;s.connect()
+  users=[r for r in s.rows.values() if r.get('role')=='user']
+  self.assertEqual(['multi'],[r['id'] for r in users])
+  self.assertTrue(users[0].get('media'))
 if __name__=='__main__':unittest.main()

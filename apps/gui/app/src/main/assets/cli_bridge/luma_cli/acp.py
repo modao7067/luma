@@ -2,6 +2,7 @@ import json
 import threading
 import uuid
 from .base import Session, item, text, image_blocks
+from .i18n import tr
 from .transport import Rejected
 from .metrics import acp_usage
 from .media import display_content, display_object
@@ -30,6 +31,7 @@ class AcpSession(Session):
         self.chunk_id = None
         self.current_submission = None
         self.echoed_user_submission = False
+        self.pending_echo_submissions = []
         self.preexisting_tool_ids = set()
         self.start(self.argv)
         client_caps = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
@@ -37,7 +39,7 @@ class AcpSession(Session):
         info = self.call("initialize", {"protocolVersion": 1, "clientInfo": {"name": "luma", "version": "1"},
                                         "clientCapabilities": client_caps})
         self.initialize_info = info
-        if info.get("protocolVersion") != 1: raise Rejected("不兼容的 ACP 版本")
+        if info.get("protocolVersion") != 1: raise Rejected(tr("不兼容的 ACP 版本", "Incompatible ACP version"))
         caps = info.get("agentCapabilities", {})
         meta = info.get("_meta", {})
         self.native_caps = caps
@@ -49,10 +51,10 @@ class AcpSession(Session):
             args["sessionId"] = native
             method = "session/load" if caps.get("loadSession") else "session/resume"
             if method == "session/resume" and "resume" not in caps.get("sessionCapabilities", {}):
-                raise Rejected("此 CLI 未提供原生会话恢复")
+                raise Rejected(tr("此 CLI 未提供原生会话恢复", "This CLI does not support native session resume"))
         else:
             if self.config.get("creationUnknown"):
-                raise Rejected("上次原生创建结果未知；请从 CLI 会话列表取得原 ID 后接入，不能自动再建")
+                raise Rejected(tr("上次原生创建结果未知；请从 CLI 会话列表取得原 ID 后接入，不能自动再建", "Previous native session creation result is unknown; attach using the original ID from CLI session list instead of recreating"))
             self.config["creationUnknown"] = True; self.save()
             method = "session/new"
         try:
@@ -63,7 +65,7 @@ class AcpSession(Session):
         self.finish_chunk()
         self.chunk_id = self.chunk_kind = None
         ident = result.get("sessionId", native)
-        if not ident or (native and ident != native): raise Rejected("ACP 返回了不同会话身份")
+        if not ident or (native and ident != native): raise Rejected(tr("ACP 返回了不同会话身份", "ACP returned a mismatched session identity"))
         self.config["creationUnknown"] = False
         self.update(nativeId=ident)
         self.apply_options(result.get("configOptions", []))
@@ -72,8 +74,8 @@ class AcpSession(Session):
         self.update(connected=not getattr(self, "defer_connected", False), capabilities={"queue": False, "steer": False, "stop": True,
                     "images": caps.get("promptCapabilities", {}).get("image", False), "skills": False,
                     "compact": any(c.get("name") == "compact" for c in self.commands)},
-                    notice=("使用原生 ACP 审批。无可管理待发队列、逐消息 Skill 附件或实时 TUI 接管。" +
-                            ("原生恢复不重放历史，重启托管服务后只显示本次连接输出。" if not caps.get("loadSession") else "")))
+                    notice=(tr("使用原生 ACP 审批。无可管理待发队列、逐消息 Skill 附件或实时 TUI 接管。", "Uses native ACP approvals. No managed queue, per-message skills, or live TUI takeover.") +
+                            (tr("原生恢复不重放历史，重启托管服务后只显示本次连接输出。", " Native resume does not replay history; only output from the current connection is shown after host restart.") if not caps.get("loadSession") else "")))
         self.apply_commands(self.commands)
         self.update(historyReady=True)
 
@@ -171,7 +173,7 @@ class AcpSession(Session):
                     "required": required,
                 })
             self.request(str(e["id"]), e, "Answer", p.get("message", ""),
-                         [{"id": "accept", "label": "提交"}, {"id": "decline", "label": "不回答"}, {"id": "cancel", "label": "终止提问"}],
+                         [{"id": "accept", "label": tr("提交", "Submit")}, {"id": "decline", "label": tr("不回答", "Decline")}, {"id": "cancel", "label": tr("终止提问", "Cancel")}],
                          questions, submit_choice="accept", skip_choice="decline")
             return
         if method == "session/update":
@@ -181,18 +183,39 @@ class AcpSession(Session):
                 if self.chunk_kind != kind:
                     self.finish_chunk()
                     bind_current = False
-                    if kind == "user_message_chunk" and self.current_submission and not getattr(self, "echoed_user_submission", False):
-                        existing = self.rows.get(self.current_submission, {})
-                        local_text = existing.get("text", "") if existing.get("role") == "user" else ""
-                        chunk_text = text(u.get("content"))
-                        if not local_text or not chunk_text or local_text.startswith(chunk_text) or chunk_text.startswith(local_text):
-                            bind_current = True
-                    self.chunk_id = self.current_submission if bind_current else str(uuid.uuid4())
-                    self.chunk_kind = kind
-                    if bind_current:
-                        self.echoed_user_submission = True
-                        self.row(item(self.chunk_id, "user", "", origin="native"))
-                        self.consumed(self.current_submission)
+                    matched_echo = None
+                    chunk_text = text(u.get("content")) if kind == "user_message_chunk" else ""
+                    with self.lock:
+                        if kind == "user_message_chunk" and self.current_submission and not getattr(self, "echoed_user_submission", False):
+                            existing = self.rows.get(self.current_submission, {})
+                            local_text = existing.get("text", "") if existing.get("role") == "user" else ""
+                            if not local_text or not chunk_text or local_text.startswith(chunk_text) or chunk_text.startswith(local_text):
+                                bind_current = True
+                        if not bind_current and kind == "user_message_chunk":
+                            pending_echoes = getattr(self, "pending_echo_submissions", None)
+                            if pending_echoes:
+                                for cand_id in list(pending_echoes):
+                                    existing = self.rows.get(cand_id, {})
+                                    local_text = existing.get("text", "") if existing.get("role") == "user" else ""
+                                    if not local_text or not chunk_text or local_text.startswith(chunk_text) or chunk_text.startswith(local_text):
+                                        matched_echo = cand_id
+                                        pending_echoes.remove(cand_id)
+                                        break
+                        if bind_current:
+                            self.chunk_id = self.current_submission
+                        elif matched_echo:
+                            self.chunk_id = matched_echo
+                        else:
+                            self.chunk_id = str(uuid.uuid4())
+                        self.chunk_kind = kind
+                        if bind_current:
+                            self.echoed_user_submission = True
+                            self.row(item(self.chunk_id, "user", "", origin="native"))
+                            self.consumed(self.current_submission)
+                        elif matched_echo:
+                            self.row(item(self.chunk_id, "user", "", origin="native"))
+                            self.receipt(matched_echo, "accepted")
+                            self.consumed(matched_echo)
                 old = self.rows.get(self.chunk_id, item(self.chunk_id, role, kind="reasoning" if role == "reasoning" else ""))
                 self.row({**old, "text": old["text"] + text(u.get("content")), "media": old.get("media", []) + self.media(u.get("content")), "status": "running"})
             elif kind in ("tool_call", "tool_call_update"):
@@ -200,7 +223,7 @@ class AcpSession(Session):
                 self.chunk_kind = None
                 if kind == "tool_call" and getattr(self, "preexisting_tool_ids", None) is not None:
                     self.preexisting_tool_ids.discard(u["toolCallId"])
-                ident = "tool-" + u["toolCallId"]; old = self.rows.get(ident, item(ident, "tool", "工具", kind="tool"))
+                ident = "tool-" + u["toolCallId"]; old = self.rows.get(ident, item(ident, "tool", tr("工具", "Tool"), kind="tool"))
                 changes = {}
                 if "title" in u: changes["text"] = u["title"]
                 if isinstance(u.get("name"), str) and u["name"]: changes["toolName"] = u["name"]
@@ -235,20 +258,42 @@ class AcpSession(Session):
                     self.receipt(self.current_submission, "accepted")
                     self.consumed(self.current_submission)
         elif method == "session/request_permission" and "id" in e:
-            tool = p.get("toolCall", {})
-            body = json.dumps(tool["rawInput"], ensure_ascii=False) if "rawInput" in tool else ""
-            display = "\n".join(text(c.get("content")) if c.get("type") == "content" else json.dumps(c, ensure_ascii=False) for c in tool.get("content", []))
+            tool = p.get("toolCall") if isinstance(p.get("toolCall"), dict) else {}
+            call_id = tool.get("toolCallId")
+            prior = self.rows.get("tool-" + call_id, {}) if isinstance(call_id, str) and call_id else {}
+            if "rawInput" in tool:
+                body = json.dumps(tool["rawInput"], ensure_ascii=False)
+            elif isinstance(prior.get("input"), str):
+                body = prior["input"]
+            else:
+                body = ""
+            if tool.get("content"):
+                display = "\n".join(text(c.get("content")) if c.get("type") == "content" else json.dumps(c, ensure_ascii=False) for c in tool.get("content", []))
+            elif isinstance(prior.get("outcome"), str):
+                display = prior["outcome"]
+            else:
+                display = ""
+            raw_title = tool.get("title") if isinstance(tool.get("title"), str) else ""
+            prior_text = prior.get("text") if isinstance(prior.get("text"), str) else ""
+            prior_name = prior.get("toolName") if isinstance(prior.get("toolName"), str) else ""
+            resolved_title = (
+                raw_title.strip()
+                or (prior_text.strip() if prior_text.strip() not in ("", "工具", "Tool") else "")
+                or prior_name.strip()
+                or tr("工具授权", "Tool permission")
+            )
             option_ids = {o["optionId"] for o in p.get("options", [])}
             cancel = "cancel"
             while cancel in option_ids: cancel = "luma:" + cancel
-            self.request(str(e["id"]), {**e, "_cancelChoice": cancel}, p.get("toolCall", {}).get("title", "工具授权"),
+            self.request(str(e["id"]), {**e, "_cancelChoice": cancel}, resolved_title,
                          "\n".join(v for v in (body, display) if v),
-                         [{"id": o["optionId"], "label": o["name"]} for o in p.get("options", [])] + [{"id": cancel, "label": "取消"}])
+                         [{"id": o["optionId"], "label": o["name"]} for o in p.get("options", [])] + [{"id": cancel, "label": tr("取消", "Cancel")}])
         elif "id" in e and method:
             self.peer.send({"jsonrpc": "2.0", "id": e["id"], "error": {"code": -32601, "message": "Client capability not advertised"}})
 
     def invalidate_context(self):
-        self.acp_metrics = [r for r in getattr(self, "acp_metrics", []) if r["label"] != "上下文" and "缓存命中" not in r["label"]]
+        self.acp_metrics = [r for r in getattr(self, "acp_metrics", [])
+                            if r["label"] not in ("上下文", "Context") and "缓存命中" not in r["label"] and "cache hit" not in r["label"].lower()]
         self.update(metrics=self.acp_metrics + getattr(self, "request_metrics", []))
 
     def apply_usage(self, update):
@@ -268,15 +313,16 @@ class AcpSession(Session):
         if command and command[0] in ("/compact", "/compress") and any(c.get("name") == command[0][1:] for c in self.commands):
             self.invalidate_context()
         blocks = ([{"type": "text", "text": p["text"]}] if p["text"] else []) + image_blocks(p.get("images", []))
-        if self.current_submission is None and self.data.get("error") and getattr(self, "delivery_storage_error", None) is None:
-            self.update(error=None)
-        self.preexisting_tool_ids = {k[5:] for k in self.rows if k.startswith("tool-")}
-        self.echoed_user_submission = False
-        self.current_submission = p["submissionId"]
-        self.prompt_wait_error = None
-        self.chunk_kind = None
-        self.update(running=True)
-        self.row(item(p["submissionId"], "user", p["text"], origin="local"))
+        with self.lock:
+            if self.current_submission is None and self.data.get("error") and getattr(self, "delivery_storage_error", None) is None:
+                self.update(error=None)
+            self.preexisting_tool_ids = {k[5:] for k in self.rows if k.startswith("tool-")}
+            self.echoed_user_submission = False
+            self.current_submission = p["submissionId"]
+            self.prompt_wait_error = None
+            self.chunk_kind = None
+            self.update(running=True)
+            self.row(item(p["submissionId"], "user", p["text"], origin="local"))
         def execute():
             try:
                 params = {"sessionId": self.data["nativeId"], "prompt": blocks}
@@ -319,25 +365,25 @@ class AcpSession(Session):
     def prompt_uncertain(self, ident, error):
         with self.lock:
             if self.current_submission != ident: return
-            self.prompt_wait_error = f"ACP 回合结果待确认（{type(error).__name__}）"
+            self.prompt_wait_error = tr(f"ACP 回合结果待确认（{type(error).__name__}）", f"ACP turn result pending confirmation ({type(error).__name__})")
             self.diagnostic("acp-prompt-result-unknown", error)
             self.update(error=self.prompt_wait_error)
 
     def configure(self, p):
-        if self.data["running"]: raise Rejected("请等待回合结束再更改设置")
+        if self.data["running"]: raise Rejected(tr("请等待回合结束再更改设置", "Wait for the current turn to finish before changing settings"))
         if p.get("speed"): return super().configure(p)
         for key, cats in (("model", ("model",)), ("effort", ("thought_level", "reasoning_effort")), ("permission", self.permission_categories)):
             value = p.get(key)
             if not value: continue
             option = next((o for o in self.options if o.get("category", o["id"]) in cats), None)
             if option:
-                if value not in {v["value"] for v in self.flatten(option.get("options", []))}: raise Rejected("选项不在原生目录中")
+                if value not in {v["value"] for v in self.flatten(option.get("options", []))}: raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
                 result = self.call("session/set_config_option", {"sessionId": self.data["nativeId"], "configId": option["id"], "value": value})
                 self.apply_options(result["configOptions"])
                 actual = next((o for o in self.options if o.get("id") == option["id"]), None)
                 if not actual or actual.get("currentValue") != value:
-                    raise Rejected("CLI 尚未确认所选设置，请按原生实际状态核对")
-            else: raise Rejected("CLI 未提供此设置接口")
+                    raise Rejected(tr("CLI 尚未确认所选设置，请按原生实际状态核对", "CLI has not confirmed the selected setting; verify native state"))
+            else: raise Rejected(tr("CLI 未提供此设置接口", "CLI does not support this setting"))
         return {}
 
     def stop(self):
@@ -356,7 +402,7 @@ class AcpSession(Session):
         if not raw: return super().answer(p)
         if raw.get("method") == "elicitation/create":
             choice = p["choice"]
-            if choice not in ("accept", "decline", "cancel"): raise Rejected("无效表单动作")
+            if choice not in ("accept", "decline", "cancel"): raise Rejected(tr("无效表单动作", "Invalid form action"))
             result = {"action": choice}
             if choice == "accept":
                 schema = raw["params"]["requestedSchema"]
@@ -389,9 +435,9 @@ class AcpSession(Session):
                             elif has_other and entry.strip():
                                 free_text.append(entry.strip())
                             else:
-                                raise Rejected("回答不在原生选项中")
+                                raise Rejected(tr("回答不在原生选项中", "Answer is not among native options"))
                         if not matched and not free_text:
-                            if key in required_keys: raise Rejected("请回答：" + spec.get("title", key))
+                            if key in required_keys: raise Rejected(tr("请回答：", "Please answer: ") + spec.get("title", key))
                             continue
                         if matched:
                             try:
@@ -400,15 +446,15 @@ class AcpSession(Session):
                                     if matched[0] not in ("true", "false", True, False): raise ValueError()
                                     values[key] = matched[0] in ("true", True)
                                 elif kind == "integer": values[key] = int(matched[0])
-                                elif kind == "number": values[key] = float(matched[0])
+                                elif kind == "number": value = float(matched[0]); values[key] = value
                                 else: values[key] = matched[0]
                             except ValueError:
-                                raise Rejected("回答格式无效：" + spec.get("title", key)) from None
+                                raise Rejected(tr("回答格式无效：", "Invalid answer format: ") + spec.get("title", key)) from None
                         if free_text:
                             values[other_key] = ", ".join(free_text)
                     else:
                         if not entries:
-                            if key in required_keys: raise Rejected("请回答：" + spec.get("title", key))
+                            if key in required_keys: raise Rejected(tr("请回答：", "Please answer: ") + spec.get("title", key))
                             continue
                         try:
                             if kind == "array": value = entries
@@ -419,7 +465,7 @@ class AcpSession(Session):
                             elif kind == "number": value = float(entries[0])
                             else: value = entries[0]
                         except ValueError:
-                            raise Rejected("回答格式无效：" + spec.get("title", key)) from None
+                            raise Rejected(tr("回答格式无效：", "Invalid answer format: ") + spec.get("title", key)) from None
                         values[key] = value
                 result["content"] = values
             self.peer.send({"jsonrpc": "2.0", "id": raw["id"], "result": result})
@@ -428,6 +474,6 @@ class AcpSession(Session):
         choice = p["choice"]
         if choice == raw.get("_cancelChoice", "cancel"): outcome = {"outcome": "cancelled"}
         elif choice in {o["optionId"] for o in raw["params"].get("options", [])}: outcome = {"outcome": "selected", "optionId": choice}
-        else: raise Rejected("无效审批选项")
+        else: raise Rejected(tr("无效审批选项", "Invalid approval choice"))
         self.peer.send({"jsonrpc": "2.0", "id": raw["id"], "result": {"outcome": outcome}})
         self.answered(p["id"]); return {}

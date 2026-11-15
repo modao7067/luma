@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -38,7 +40,7 @@ internal class CodexWebSocketTransport(
             override fun onMessage(webSocket: WebSocket, text: String) = message(text)
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = failed(RpcDisconnected())
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val reason = if (response?.code == 401 || response?.code == 403) "Codex 服务认证失败，请重新连接运行环境" else "无法连接 Codex 服务，请检查终端中的服务与登录状态"
+                val reason = if (response?.code == 401 || response?.code == 403) tr("Codex 服务认证失败，请重新连接运行环境", "Codex authentication failed; reconnect the runtime") else tr("无法连接 Codex 服务，请检查终端中的服务与登录状态", "Unable to connect to Codex service; check service and sign-in status in terminal")
                 failed(RpcDisconnected(reason).also { it.initCause(t) })
             }
         })

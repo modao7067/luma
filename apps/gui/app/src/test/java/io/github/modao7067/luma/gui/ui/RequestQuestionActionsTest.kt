@@ -1,9 +1,12 @@
 package io.github.modao7067.luma.gui.ui
 
 import io.github.modao7067.luma.gui.agent.OpenCodeProjection
+import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.session.RequestQuestion
+import io.github.modao7067.luma.gui.session.UserRequest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RequestQuestionActionsTest {
@@ -49,5 +52,34 @@ class RequestQuestionActionsTest {
         assertEquals(listOf(1), defaultQuestionIndices(q))
         val defaults = formatEnteredQuestionAnswers(listOf(q), emptyMap(), emptyMap(), emptyMap())
         assertEquals(listOf("选项B"), defaults["q1"])
+    }
+
+    @Test
+    fun dshEscalationPayloadPromotesJustificationAndSandboxWithoutExposingBareToolName() {
+        val rawBody = JSONObject()
+            .put("command", "echo test > /workspace/.approval-test.txt")
+            .put("description", "Write test file with escalation")
+            .put("justification", "Verify sandbox escalation prompt rendering.")
+            .put("sandbox_permissions", "workspace-write")
+            .toString()
+        val req = UserRequest(id = "perm-1", title = "bash", body = rawBody)
+        try {
+            LumaI18n.overrideLanguage = "zh"
+            val (zhTitle, zhBody) = parseStructuredApprovalBody(req.title, req.body)
+            assertEquals("Write test file with escalation", zhTitle)
+            assertEquals("echo test > /workspace/.approval-test.txt", zhBody.codeBlock)
+            assertTrue(zhBody.leadText.contains("Verify sandbox escalation prompt rendering."))
+            assertTrue(zhBody.leadText.contains("请求沙箱权限：workspace-write"))
+            assertEquals("", zhBody.extraCode)
+            assertEquals("Write test file with escalation", requestBannerTitle(req))
+
+            LumaI18n.overrideLanguage = "en"
+            val (enTitle, enBody) = parseStructuredApprovalBody(req.title, req.body)
+            assertEquals("Write test file with escalation", enTitle)
+            assertTrue(enBody.leadText.contains("Requested sandbox: workspace-write"))
+            assertEquals("", enBody.extraCode)
+        } finally {
+            LumaI18n.resetForTest()
+        }
     }
 }

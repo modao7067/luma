@@ -8,6 +8,7 @@ gradle.afterProject { project, state ->
         project.dependencies.add('debugImplementation', 'androidx.compose.ui:ui-test-manifest:1.12.1')
         project.tasks.withType(Test).configureEach {
             inputs.property('codexQuestionEndpoint', System.getenv('LUMA_TEST_QUESTION_ENDPOINT') ?: '')
+            systemProperty 'luma.lang', System.getProperty('luma.lang', 'zh')
             maxHeapSize = '1024m'
             testLogging { events 'passed', 'failed', 'skipped'; showStandardStreams = true }
         }

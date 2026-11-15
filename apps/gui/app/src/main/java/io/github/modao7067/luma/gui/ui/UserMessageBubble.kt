@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -61,8 +63,8 @@ internal fun UserMessageBubble(item: ConversationItem, actions: CockpitActions) 
 private fun UserDeliveryCaption(item: ConversationItem, actions: CockpitActions) {
     val recoverable = item.delivery == "rejected" || item.canRecover
     val caption = when (item.delivery) {
-        "pending", "unknown" -> "发送中"
-        "rejected" -> "未发送"
+        "pending", "unknown" -> tr("发送中", "Sending")
+        "rejected" -> tr("未发送", "Not sent")
         else -> null
     }
     var retainedDelivery by remember(item.id) { mutableStateOf(item.delivery) }
@@ -78,8 +80,8 @@ private fun UserDeliveryCaption(item: ConversationItem, actions: CockpitActions)
         enter = expandVertically(spatialSizeSpring()) + fadeIn(),
         exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
     ) {
-        val effectiveText = caption ?: if (retainedDelivery == "rejected") "未发送" else "发送中"
-        val isSending = effectiveText == "发送中"
+        val effectiveText = caption ?: if (retainedDelivery == "rejected") tr("未发送", "Not sent") else tr("发送中", "Sending")
+        val isSending = effectiveText == "发送中" || effectiveText == "Sending"
         Row(
             Modifier.widthIn(max = 316.dp).padding(top = 4.dp, start = 8.dp, end = 8.dp)
                 .testTag("user-delivery:${item.id}"),
@@ -102,7 +104,7 @@ private fun UserDeliveryCaption(item: ConversationItem, actions: CockpitActions)
                 IconButton(
                     onClick = { actions.recoverSubmission(item.id) },
                     enabled = recoverable,
-                    modifier = Modifier.size(32.dp).semantics { contentDescription = "编辑未发送消息" },
+                    modifier = Modifier.size(32.dp).semantics { contentDescription = tr("编辑未发送消息", "Edit unsent message") },
                 ) {
                     MenuIcon(MenuSymbol.EDIT, size = 14.dp)
                 }

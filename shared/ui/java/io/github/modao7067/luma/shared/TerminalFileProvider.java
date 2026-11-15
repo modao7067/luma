@@ -28,7 +28,7 @@ public class TerminalFileProvider extends ContentProvider {
         String token=uri.getPathSegments().get(0);
         if(!token.matches("open-[A-Za-z0-9.-]+"))throw new FileNotFoundException();
         File f=new File(new File(getContext().getCacheDir(),"terminal-open"),token);
-        if(!f.isFile())throw new FileNotFoundException("文件预览已过期，请重新点击链接");
+        if(!f.isFile())throw new FileNotFoundException(com.termux.terminal.LumaLang.tr("文件预览已过期，请重新点击链接","File preview expired; tap the link again"));
         return f;
     }
     @Override public String getType(Uri uri){return mime(uri.getLastPathSegment()==null ? "" : uri.getLastPathSegment());}

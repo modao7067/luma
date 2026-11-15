@@ -7,7 +7,6 @@ import io.github.modao7067.luma.ghostty.GhosttyTerminalEmulator;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Isolated native preview, wholly owned by one Looper. No session or PTY is created. */
 public final class TerminalPreviewScreen implements AutoCloseable {
     final TerminalRenderer renderer;
     final RectF frame=new RectF(),body=new RectF();
@@ -26,7 +25,6 @@ public final class TerminalPreviewScreen implements AutoCloseable {
     private Runnable invalidator=()->{};
     int topRow;
 
-    /** Prepared on an IO worker. No native handle, Looper or UI object crosses threads. */
     public static final class PreparedText {
         final byte[] ansi;final int[] widths,counts;final int longest;
         private PreparedText(byte[] ansi,int[] widths,int[] counts,int longest){this.ansi=ansi;this.widths=widths;this.counts=counts;this.longest=longest;}
@@ -88,7 +86,7 @@ public final class TerminalPreviewScreen implements AutoCloseable {
             public void write(byte[]b,int o,int n){}public void titleChanged(String a,String b){}public void onCopyTextToClipboard(String s){}public void onPasteTextFromClipboard(){}public void onBell(){}public void onColorsChanged(){}public void onScreenChanged(){invalidator.run();}
         };
         try {emulator=GhosttyTerminalEmulator.forOutput(output,cols,rows,Math.max(1,Math.round(renderer.mFontWidth)),renderer.mFontLineSpacing,4096,CLIENT,palette);}
-        catch(RuntimeException | LinkageError failure){initializationError="libghostty 预览初始化失败，请重新打开";invalidator.run();return;}
+        catch(RuntimeException | LinkageError failure){initializationError=com.termux.terminal.LumaLang.tr("libghostty 预览初始化失败，请重新打开","libghostty preview initialization failed; please reopen");invalidator.run();return;}
         byte[] hide="\033[?25l".getBytes(StandardCharsets.UTF_8);emulator.append(hide,hide.length);feedOffset=0;
         loading=text!=null&&text.ansi.length>0;if(loading)handler.post(feedMore);
     }
@@ -111,7 +109,7 @@ public final class TerminalPreviewScreen implements AutoCloseable {
         else if(emulator!=null){canvas.translate(body.left,body.top-renderer.mFontLineSpacingAndAscent);renderer.render(emulator,canvas,topRow,-1,-1,-1,-1);}
         canvas.restore();canvas.drawRect(frame.left+stroke/2,frame.top+stroke/2,frame.right-stroke/2,frame.bottom-stroke/2,border);
     }
-    @Override public void close(){checkOwner();if(closed)return;releaseCore();closed=true;image=null;text=null;invalidator=()->{};/* GPU display lists may still reference prior bitmaps. */}
+    @Override public void close(){checkOwner();if(closed)return;releaseCore();closed=true;image=null;text=null;invalidator=()->{};}
     private static final TerminalSessionClient CLIENT=new TerminalSessionClient(){
         public void onTextChanged(TerminalSession s){}public void onTitleChanged(TerminalSession s){}public void onSessionFinished(TerminalSession s){}public void onCopyTextToClipboard(TerminalSession s,String t){}public void onPasteTextFromClipboard(TerminalSession s){}public void onBell(TerminalSession s){}public void onColorsChanged(TerminalSession s){}public void onTerminalCursorStateChange(boolean s){}public void setTerminalShellPid(TerminalSession s,int p){}public Integer getTerminalCursorStyle(){return 1;}
         public void logError(String t,String m){}public void logWarn(String t,String m){}public void logInfo(String t,String m){}public void logDebug(String t,String m){}public void logVerbose(String t,String m){}public void logStackTraceWithMessage(String t,String m,Exception e){}public void logStackTrace(String t,Exception e){}

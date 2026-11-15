@@ -274,7 +274,7 @@ public final class TerminalSession extends TerminalOutput {
             mEmulator=java.util.Objects.requireNonNull(mEmulatorFactory.create(this,columns,rows,cellWidthPixels,cellHeightPixels,mTranscriptRows,mClient));
             mInitializationError=null;
         } catch(RuntimeException | LinkageError failure){
-            mInitializationError="libghostty 初始化失败，切换窗口可重试："+failure.getMessage();
+            mInitializationError=LumaLang.tr("libghostty 初始化失败，切换窗口可重试：","libghostty initialization failed; switch windows to retry: ")+failure.getMessage();
             mClient.onEmulatorError(this,mInitializationError);return;
         }
 

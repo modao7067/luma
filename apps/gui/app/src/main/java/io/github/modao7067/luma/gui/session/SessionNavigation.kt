@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.agent.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,7 +19,7 @@ internal data class SessionNavigation(
 internal fun decodeNavigation(root: JSONObject?): SessionNavigation {
     if (root == null) return SessionNavigation()
     val blank = root.getJSONObject("blank")
-    val cli = blank.getString("cli"); require(cli in CliCatalog.ids) { "空白会话 CLI 无效，原索引已保留" }
+    val cli = blank.getString("cli"); require(cli in CliCatalog.ids) { tr("空白会话 CLI 无效，原索引已保留", "Invalid blank session CLI; original index preserved") }
     return SessionNavigation(true, root.stringOrNull("selectedId"), BlankSessionDraft(
         blank.getString("key"), cli, blank.getString("cwd"), blank.optString("text"),
         blank.optJSONArray("images")?.objects()?.map { StoredImage(it.getString("id"), it.getString("uri"), it.getString("path"), it.getString("name")) }?.toMutableList() ?: mutableListOf(),

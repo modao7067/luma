@@ -5,6 +5,8 @@ const net = require('node:net');
 const fs = require('node:fs');
 const path = require('node:path');
 const dns = require('node:dns');
+const ZH = String(process.env.LUMA_LANG || 'zh').toLowerCase().startsWith('zh');
+const tr = (zh, en) => (ZH ? zh : en);
 
 function getSocketName() {
   if (process.env.LUMA_NATIVE_SOCKET) return process.env.LUMA_NATIVE_SOCKET;
@@ -148,7 +150,7 @@ async function cmdStart(args) {
     }
   }
   if (cmdArgs.length === 0) {
-    throw new Error('用法: lumactl start [--id ID] [--port PORT] [--base-path /v1] [--probe http|tcp|log|none] -- <command> [args...]');
+    throw new Error(tr('用法: lumactl start [--id ID] [--port PORT] [--base-path /v1] [--probe http|tcp|log|none] -- <command> [args...]', 'Usage: lumactl start [--id ID] [--port PORT] [--base-path /v1] [--probe http|tcp|log|none] -- <command> [args...]'));
   }
   req.args = cmdArgs;
   req.wait = explicitWait !== null ? explicitWait : (req.listen.port !== undefined || req.probe.type !== undefined);
@@ -168,7 +170,7 @@ async function cmdList(args) {
     return;
   }
   if (list.length === 0) {
-    console.log('无托管服务');
+    console.log(tr('无托管服务', 'No managed services'));
     return;
   }
   for (const svc of list) printServiceSummary(svc, false);
@@ -177,7 +179,7 @@ async function cmdList(args) {
 async function cmdStatus(args) {
   const id = args.find((a) => !a.startsWith('-'));
   const asJson = args.includes('--json');
-  if (!id) throw new Error('用法: lumactl status <id> [--json]');
+  if (!id) throw new Error(tr('用法: lumactl status <id> [--json]', 'Usage: lumactl status <id> [--json]'));
   const { result } = await callBridge({ op: 'svc.status', id });
   printServiceSummary(result, asJson);
 }
@@ -188,7 +190,7 @@ async function cmdStop(args) {
   let grace = -1;
   const gIdx = args.indexOf('--grace');
   if (gIdx >= 0 && args[gIdx + 1]) grace = parseInt(args[gIdx + 1], 10);
-  if (!id) throw new Error('用法: lumactl stop <id> [--grace ms] [--json]');
+  if (!id) throw new Error(tr('用法: lumactl stop <id> [--grace ms] [--json]', 'Usage: lumactl stop <id> [--grace ms] [--json]'));
   const { result } = await callBridge({ op: 'svc.stop', id, gracePeriodMs: grace });
   printServiceSummary(result, asJson);
 }
@@ -202,7 +204,7 @@ async function cmdWait(args) {
     if (args[i] === '--for') waitFor = args[++i];
     else if (args[i] === '--timeout') timeoutMs = parseInt(args[++i], 10);
   }
-  if (!id) throw new Error('用法: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]');
+  if (!id) throw new Error(tr('用法: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]', 'Usage: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]'));
   const { result } = await callBridge({ op: 'svc.wait', id, waitFor, timeoutMs });
   printServiceSummary(result, asJson);
   if (!result.waitSatisfied) process.exitCode = 1;
@@ -218,7 +220,7 @@ async function cmdLogs(args) {
     else if (args[i] === '--tail') tail = parseInt(args[++i], 10);
     else if (args[i] === '--offset') offset = parseInt(args[++i], 10);
   }
-  if (!id) throw new Error('用法: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]');
+  if (!id) throw new Error(tr('用法: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]', 'Usage: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]'));
   await callBridge({ op: 'svc.logs', id, follow, tail, offset }, (buf) => {
     process.stdout.write(buf);
   });
@@ -226,7 +228,7 @@ async function cmdLogs(args) {
 
 async function cmdOpen(args) {
   const target = args.find((a) => !a.startsWith('-'));
-  if (!target) throw new Error('用法: lumactl open <id|url>');
+  if (!target) throw new Error(tr('用法: lumactl open <id|url>', 'Usage: lumactl open <id|url>'));
   const { result } = await callBridge({ op: 'svc.open', target });
   console.log('Opened:', result.opened);
 }
@@ -317,7 +319,7 @@ async function main() {
     case 'doctor': return await cmdDoctor(rest);
     default:
       console.log([
-        '用法: lumactl <command> [options]',
+        tr('用法: lumactl <command> [options]', 'Usage: lumactl <command> [options]'),
         '  start [--id ID] [--port PORT] [--lan] [--base-path /v1] [--probe http|tcp|log|none] -- <cmd> [args...]',
         '  list [--json]',
         '  status <id> [--json]',

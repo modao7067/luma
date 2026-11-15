@@ -1,11 +1,36 @@
 package io.github.modao7067.luma.gui.ui
 
+import com.termux.terminal.LumaLang
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 
 class GlobalUsageTest {
+    private lateinit var previousLocale: Locale
+    private var previousLangProp: String? = null
+
+    @Before fun setUp() {
+        previousLocale = Locale.getDefault()
+        previousLangProp = System.getProperty("luma.lang")
+        Locale.setDefault(Locale.SIMPLIFIED_CHINESE)
+        System.clearProperty("luma.lang")
+        LumaI18n.resetForTest()
+        LumaLang.setOverride(null)
+    }
+
+    @After fun tearDown() {
+        LumaI18n.resetForTest()
+        LumaLang.setOverride(null)
+        Locale.setDefault(previousLocale)
+        if (previousLangProp == null) System.clearProperty("luma.lang")
+        else System.setProperty("luma.lang", previousLangProp)
+    }
+
     @Test fun parsesSummaryAndDistinguishesCostSources() {
         val raw = JSONObject()
             .put("generatedAt", "2026-11-06T19:00:00Z")
@@ -278,7 +303,26 @@ class GlobalUsageTest {
     }
 
     @Test fun distinguishesMissingVsZeroRolling30dCostAndGuardsStalePeriodSummary() {
-        assertEquals("cached_summary_v2_", SUMMARY_CACHE_PREF_PREFIX)
+        assertEquals("cached_summary_v5_", SUMMARY_CACHE_PREF_PREFIX)
+        assertEquals(
+            "剩余 ¥2.73",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "账户余额", used = 0.0, limit = null, remaining = 2.73, unit = "CNY")),
+        )
+        assertEquals(
+            "剩余 $12.50 / $50.00",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "可用额度", used = 37.5, limit = 50.0, remaining = 12.5, unit = "USD")),
+        )
+        assertEquals(
+            "已用 $4.20",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "额外用量", used = 4.2, limit = null, remaining = null, unit = "USD")),
+        )
+        val fallbackColor = providerUsageColor("Unknown CLI")
+        val catalogColors = io.github.modao7067.luma.gui.session.CliCatalog.ids.map { cli ->
+            val color = providerUsageColor(cli)
+            assertNotEquals("Expected dedicated usage color for $cli", fallbackColor, color)
+            color
+        }
+        assertEquals(io.github.modao7067.luma.gui.session.CliCatalog.ids.size, catalogColors.toSet().size)
 
         val legacyRaw = JSONObject()
             .put("period", "month")
@@ -288,6 +332,10 @@ class GlobalUsageTest {
         val legacySummary = parseGlobalUsageSummary(legacyRaw)
         assertFalse(legacySummary.hasRolling30dCost)
         assertTrue(legacySummary.rolling30dCostByCli.isEmpty())
+        assertEquals("builtin", legacySummary.pricingSource.mode)
+        assertEquals(2, legacySummary.pricingSource.sources.size)
+        assertEquals("anomalyco/models.dev", legacySummary.pricingSource.sources[0].repo)
+        assertEquals("BerriAI/litellm", legacySummary.pricingSource.sources[1].repo)
         assertEquals("—", formatRolling30dCost(null, "Codex"))
 
         val zeroCostRaw = JSONObject()
@@ -295,8 +343,40 @@ class GlobalUsageTest {
             .put("days", 30)
             .put("granularity", "day")
             .put("rolling30dCostByCli", JSONObject().put("Codex", 0.0).put("Bad", -1.5))
+            .put(
+                "pricingSource",
+                JSONObject()
+                    .put("mode", "online")
+                    .put("updatedAt", "2026-11-14T07:10:00Z")
+                    .put("modelCount", 2852)
+                    .put(
+                        "sources",
+                        JSONArray()
+                            .put(
+                                JSONObject()
+                                    .put("id", "models.dev")
+                                    .put("name", "models.dev")
+                                    .put("repo", "anomalyco/models.dev")
+                                    .put("url", "https://github.com/anomalyco/models.dev")
+                                    .put("active", true),
+                            )
+                            .put(
+                                JSONObject()
+                                    .put("id", "litellm")
+                                    .put("name", "LiteLLM")
+                                    .put("repo", "BerriAI/litellm")
+                                    .put("url", "https://github.com/BerriAI/litellm")
+                                    .put("active", true),
+                            ),
+                    ),
+            )
         val zeroCostSummary = parseGlobalUsageSummary(zeroCostRaw)
         assertTrue(zeroCostSummary.hasRolling30dCost)
+        assertEquals("online", zeroCostSummary.pricingSource.mode)
+        assertEquals(2852, zeroCostSummary.pricingSource.modelCount)
+        assertTrue(zeroCostSummary.pricingSource.sources.all { it.active })
+        assertEquals("2026-11-14 07:10", formatPricingSyncTime("2026-11-14T07:10:00Z", java.time.ZoneOffset.UTC))
+        assertNull(formatPricingSyncTime(""))
         assertEquals(0.0, zeroCostSummary.rolling30dCostByCli.getValue("Codex"), 1e-6)
         assertFalse(zeroCostSummary.rolling30dCostByCli.containsKey("Bad"))
         assertEquals("$0.00", formatRolling30dCost(zeroCostSummary.rolling30dCostByCli, "Codex"))
@@ -306,5 +386,161 @@ class GlobalUsageTest {
         assertSame(zeroCostSummary, resolveStatsSummary(zeroCostSummary, suppliedSummary = null, selectedPeriodId = "month"))
         assertNull(resolveStatsSummary(zeroCostSummary, suppliedSummary = null, selectedPeriodId = "week"))
         assertSame(zeroCostSummary, resolveStatsSummary(zeroCostSummary, suppliedSummary = zeroCostSummary, selectedPeriodId = "week"))
+    }
+
+    @Test fun englishLocaleFormatsUsageLabelsCountdownsAndCredits() {
+        Locale.setDefault(Locale.US)
+        LumaI18n.overrideLanguage = "en"
+
+        assertEquals(listOf("Stats", "Quotas"), UsageMetricView.entries.map { it.label })
+        assertEquals(listOf("Today", "Week", "Month", "All time"), UsagePeriodOption.entries.map { it.label })
+
+        val nowMs = 1_700_000_000_000L
+        val in95Mins = java.time.Instant.ofEpochMilli(nowMs + 95L * 60_000L).toString()
+        assertEquals("Resets in 1h 35m", formatResetCountdown(in95Mins, nowMs))
+        assertEquals("Resetting soon", formatResetCountdown(java.time.Instant.ofEpochMilli(nowMs - 1000L).toString(), nowMs))
+
+        assertEquals(
+            "¥2.73 left",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "Balance", used = 0.0, limit = null, remaining = 2.73, unit = "CNY")),
+        )
+        assertEquals(
+            "$12.50 left / $50.00",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "Quota", used = 37.5, limit = 50.0, remaining = 12.5, unit = "USD")),
+        )
+        assertEquals(
+            "$4.20 used",
+            formatUsageCreditsValue(UsageCreditsSnapshot(label = "Extra", used = 4.2, limit = null, remaining = null, unit = "USD")),
+        )
+
+        val omittedCredLabelJson = JSONObject().put(
+            "providers",
+            JSONArray().put(
+                JSONObject()
+                    .put("cli", "Codex")
+                    .put("status", "ok")
+                    .put("source", "live")
+                    .put("windows", JSONArray())
+                    .put("credits", JSONObject().put("used", 1.0).put("unit", "USD")),
+            ),
+        )
+        assertEquals("Quota", parseGlobalUsageLimits(omittedCredLabelJson).providers.single().credits?.label)
+    }
+
+    @Test fun guardsNonFiniteNumbersAndJsonNullsInLimitsAndFormatters() {
+        assertNull(computeUsagePace(Double.NaN, 0.5))
+        assertNull(computeUsagePace(Double.POSITIVE_INFINITY, 0.5))
+        assertNull(computeUsagePace(Double.NEGATIVE_INFINITY, 0.5))
+        assertNull(computeUsagePace(20.0, Double.NaN))
+        assertNull(computeUsagePace(20.0, Double.POSITIVE_INFINITY))
+        assertNull(computePaceRemainingPercent(Double.NaN))
+        assertNull(computePaceRemainingPercent(Double.NEGATIVE_INFINITY))
+
+        assertEquals("$0.00", formatUsdCost(Double.NaN))
+        assertEquals("$0.00", formatUsdCost(Double.POSITIVE_INFINITY))
+        assertEquals("$0.00", formatUsdCost(Double.NEGATIVE_INFINITY))
+
+        val nonFiniteCredits = UsageCreditsSnapshot(
+            label = "额度",
+            used = Double.NaN,
+            limit = Double.POSITIVE_INFINITY,
+            remaining = Double.NEGATIVE_INFINITY,
+            unit = "USD",
+        )
+        assertEquals("已用 $0.00", formatUsageCreditsValue(nonFiniteCredits))
+
+        val rawWithNullsAndNonFinite = JSONObject()
+            .put("generatedAt", JSONObject.NULL)
+            .put(
+                "providers",
+                JSONArray().put(
+                    JSONObject()
+                        .put("cli", "Codex")
+                        .put("planType", JSONObject.NULL)
+                        .put("updatedAt", JSONObject.NULL)
+                        .put("status", "ok")
+                        .put("source", "live")
+                        .put("message", JSONObject.NULL)
+                        .put(
+                            "windows",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("id", "primary")
+                                    .put("label", JSONObject.NULL)
+                                    .put("usedPercent", "NaN")
+                                    .put("remainingPercent", "Infinity")
+                                    .put("resetsAt", JSONObject.NULL)
+                                    .put("windowDurationMs", JSONObject.NULL)
+                                    .put("groupLabel", JSONObject.NULL),
+                            ),
+                        )
+                        .put(
+                            "credits",
+                            JSONObject()
+                                .put("label", JSONObject.NULL)
+                                .put("used", "NaN")
+                                .put("limit", "Infinity")
+                                .put("remaining", "-Infinity")
+                                .put("unit", JSONObject.NULL),
+                        ),
+                ),
+            )
+
+        val limits = parseGlobalUsageLimits(rawWithNullsAndNonFinite)
+        assertEquals("", limits.generatedAt)
+        val provider = limits.providers.single()
+        assertNull(provider.planType)
+        assertEquals("", provider.updatedAt)
+        assertNull(provider.message)
+        val window = provider.windows.single()
+        assertEquals("", window.label)
+        assertTrue(window.usedPercent.isFinite())
+        assertTrue(window.remainingPercent.isFinite())
+        assertEquals(0.0, window.usedPercent, 1e-6)
+        assertEquals(100.0, window.remainingPercent, 1e-6)
+        assertNull(window.resetsAt)
+        assertNull(window.windowDurationMs)
+        assertNull(window.groupLabel)
+        val credits = provider.credits!!
+        assertEquals("额度", credits.label)
+        assertEquals(0.0, credits.used, 1e-6)
+        assertNull(credits.limit)
+        assertNull(credits.remaining)
+        assertEquals("USD", credits.unit)
+
+        val nonFiniteWindowJson = object : JSONObject() {
+            override fun opt(key: String?): Any? = when (key) {
+                "id" -> "primary"
+                "usedPercent" -> Double.NaN
+                "remainingPercent" -> Double.NEGATIVE_INFINITY
+                else -> null
+            }
+        }
+        val nonFiniteCreditsJson = object : JSONObject() {
+            override fun opt(key: String?): Any? = when (key) {
+                "used" -> Double.NaN
+                "limit" -> Double.POSITIVE_INFINITY
+                "remaining" -> Double.NEGATIVE_INFINITY
+                "unit" -> "USD"
+                else -> null
+            }
+        }
+        val directNonFiniteRaw = JSONObject().put(
+            "providers",
+            JSONArray().put(
+                JSONObject()
+                    .put("cli", "Codex")
+                    .put("status", "ok")
+                    .put("source", "live")
+                    .put("windows", JSONArray().put(nonFiniteWindowJson))
+                    .put("credits", nonFiniteCreditsJson),
+            ),
+        )
+        val directParsed = parseGlobalUsageLimits(directNonFiniteRaw).providers.single()
+        assertEquals(0.0, directParsed.windows.single().usedPercent, 1e-6)
+        assertEquals(100.0, directParsed.windows.single().remainingPercent, 1e-6)
+        assertEquals(0.0, directParsed.credits!!.used, 1e-6)
+        assertNull(directParsed.credits!!.limit)
+        assertNull(directParsed.credits!!.remaining)
     }
 }

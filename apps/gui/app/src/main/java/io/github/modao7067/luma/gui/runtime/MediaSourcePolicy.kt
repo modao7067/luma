@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import java.io.File
 import java.io.IOException
 import java.net.URI
@@ -13,20 +15,20 @@ internal object MediaSourcePolicy {
         forbiddenPseudoRoots.any { root -> normalizedPath == root || normalizedPath.startsWith("$root/") }
 
     fun guestPath(source: String, cwd: String): String {
-        require(source.isNotBlank() && '\u0000' !in source && '\u0000' !in cwd) { "无效文件引用" }
+        require(source.isNotBlank() && '\u0000' !in source && '\u0000' !in cwd) { tr("无效文件引用", "Invalid file reference") }
         val path = when {
-            source.startsWith("sandbox:") -> URI(source.replace(" ", "%20")).path ?: throw IOException("无效 sandbox 文件地址")
+            source.startsWith("sandbox:") -> URI(source.replace(" ", "%20")).path ?: throw IOException(tr("无效 sandbox 文件地址", "Invalid sandbox file URI"))
             source.startsWith("file:") -> {
                 val uri = URI(source.replace(" ", "%20"))
-                require(uri.authority.isNullOrEmpty() || uri.authority == "localhost") { "不支持远程 file 地址" }
-                uri.path ?: throw IOException("无效文件地址")
+                require(uri.authority.isNullOrEmpty() || uri.authority == "localhost") { tr("不支持远程 file 地址", "Remote file URIs are not supported") }
+                uri.path ?: throw IOException(tr("无效文件地址", "Invalid file URI"))
             }
             else -> source
         }
-        require(!path.contains(Regex("^[A-Za-z][A-Za-z0-9+.-]*:"))) { "此资源协议无法读取" }
-        require(cwd.startsWith('/')) { "资源缺少所属工作目录" }
+        require(!path.contains(Regex("^[A-Za-z][A-Za-z0-9+.-]*:"))) { tr("此资源协议无法读取", "Unsupported resource URI scheme") }
+        require(cwd.startsWith('/')) { tr("资源缺少所属工作目录", "Resource is missing working directory") }
         val normalized = File(if (path.startsWith('/')) path else cwd.trimEnd('/') + "/" + path).toPath().normalize().toString()
-        if (isForbiddenGuestPath(normalized)) throw IOException("不允许读取系统伪文件系统路径")
+        if (isForbiddenGuestPath(normalized)) throw IOException(tr("不允许读取系统伪文件系统路径", "Reading system pseudo-filesystem paths is not allowed"))
         return normalized
     }
     fun documentDirectory(source: String, cwd: String): String {
@@ -39,10 +41,10 @@ internal object MediaSourcePolicy {
     }
     fun relativeHttp(source: String, cwd: String?): String = if (cwd != null && (cwd.startsWith("http:") || cwd.startsWith("https:")) &&
         !Regex("^[A-Za-z][A-Za-z0-9+.-]*:").containsMatchIn(source)) URI(cwd).resolve(source.replace(" ", "%20")).toASCIIString() else source
-    fun name(source: String): String = if (source.startsWith("data:")) "附件" else runCatching {
+    fun name(source: String): String = if (source.startsWith("data:")) tr("附件", "attachment") else runCatching {
         val path = if (source.contains("://") || source.startsWith("file:") || source.startsWith("sandbox:")) URI(source.replace(" ", "%20")).path else source
-        path.substringAfterLast('/').ifBlank { "附件" }
-    }.getOrDefault("附件")
+        path.substringAfterLast('/').ifBlank { tr("附件", "attachment") }
+    }.getOrDefault(tr("附件", "attachment"))
     fun mime(name: String): String = when (name.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
         "png" -> "image/png"; "jpg", "jpeg" -> "image/jpeg"; "webp" -> "image/webp"; "gif" -> "image/gif"
         "bmp" -> "image/bmp"; "avif" -> "image/avif"; "heic", "heif" -> "image/heif"; "svg" -> "image/svg+xml"

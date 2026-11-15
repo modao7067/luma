@@ -1,11 +1,13 @@
-# Ported and adapted from t3code UsageService and UsageLimitSources.
+# Adapted from t3code UsageService/UsageLimitSources, junhoyeo/tokscale, and MoonshotAI/kimi-cli.
 from __future__ import annotations
 
 import calendar
-import concurrent.futures
+import contextlib
 import datetime as dt
 import glob
+import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -13,8 +15,11 @@ import re
 import shutil
 import signal
 import sqlite3
+import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -22,17 +27,101 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-CACHE_VERSION = 4
+
+def _is_zh() -> bool:
+    return os.environ.get("LUMA_LANG", "zh").strip().lower().startswith("zh")
+
+
+def _lang_code() -> str:
+    return "zh" if _is_zh() else "en"
+
+
+def _tr(zh: str, en: str) -> str:
+    return zh if _is_zh() else en
+
+
+CACHE_VERSION = 6
 ARCHIVE_VERSION = 2
+SCANNER_REV = 4
+PRICING_CACHE_VERSION = 1
 GUARD_BYTES = 64
 MAX_RECORDS_PER_SOURCE = 25000
 LIMITS_CACHE_TTL_SECONDS = 60
+PRICING_CACHE_TTL_SECONDS = 86400
+PRICING_OFFLINE_BACKOFF_SECONDS = 300
+MAX_HTTP_RESPONSE_BYTES = 1_048_576
+MAX_PRICING_RESPONSE_BYTES = 33_554_432
+MAX_SQLITE_SNAPSHOT_BYTES = 67_108_864
 
-MODEL_RATES_PER_M: dict[str, tuple[float, float, float, float, tuple[int, float, float, float, float] | None]] = {
+RateTuple = tuple[float, float, float, float, tuple[int, float, float, float, float] | None]
+
+MODELS_DEV_API_URL = "https://models.dev/api.json"
+LITELLM_PRICES_URLS = (
+    "https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+)
+TRUSTED_MODELS_DEV_PROVIDERS = (
+    "anthropic",
+    "openai",
+    "google",
+    "deepseek",
+    "moonshotai",
+    "zhipuai",
+    "xai",
+    "minimax",
+    "mistral",
+    "cohere",
+    "alibaba",
+    "moonshotai-cn",
+    "minimax-cn",
+    "alibaba-cn",
+    "google-vertex",
+)
+PRICING_SOURCE_CATALOG = (
+    {
+        "id": "models.dev",
+        "name": "models.dev",
+        "repo": "anomalyco/models.dev",
+        "url": "https://github.com/anomalyco/models.dev",
+        "siteUrl": "https://models.dev",
+    },
+    {
+        "id": "litellm",
+        "name": "LiteLLM",
+        "repo": "BerriAI/litellm",
+        "url": "https://github.com/BerriAI/litellm",
+        "siteUrl": "https://models.litellm.ai",
+    },
+)
+MODEL_PRICING_ALIASES: dict[str, str] = {
+    "gemini-pro-orchestrator": "gemini-4-carbon",
+    "gemini-pro-orchestrator-argon": "gemini-4-argon",
+    "gemini-4": "gemini-4-carbon",
+    "deepseek-v4": "deepseek-v4-pro",
+    "kimi-for-coding": "kimi-k2.7-code",
+    "kimi-for-coding-highspeed": "kimi-k2.7-code-highspeed",
+    "k2p5": "kimi-k2-thinking",
+    "k2-p5": "kimi-k2-thinking",
+    "k2p6": "kimi-k2.6",
+    "k2-p6": "kimi-k2.6",
+    "kimi-k2p6": "kimi-k2.6",
+    "kimi-k2.5-thinking": "kimi-k2-thinking",
+    "k2d6-agent": "kimi-k2.6",
+    "k3": "kimi-k3",
+    "k3-256k": "kimi-k3",
+    "k3-agent": "kimi-k3",
+    "k3-agent-swarm": "kimi-k3",
+    "k3.1-pro": "kimi-k3.1-pro",
+    "k3.1-pro-highspeed": "kimi-k3.1-pro-highspeed",
+    "kimi-k2.5-nvfp4": "kimi-k2.5",
+    "kimi-k2-instruct-0905": "kimi-k2.5",
+}
+
+MODEL_RATES_PER_M: dict[str, RateTuple] = {
     "gpt-6.1": (2.50, 15.00, 0.25, 2.50, None),
     "gpt-6": (2.50, 15.00, 0.25, 2.50, None),
     "codex-auto-review": (0.40, 1.60, 0.04, 0.40, None),
-    "gpt-5.4": (2.50, 15.00, 0.25, 2.50, None),
+    "gpt-5.4": (2.50, 15.00, 0.25, 2.50, (272_000, 5.00, 22.50, 0.50, 5.00)),
     "gpt-5.4-mini": (0.40, 1.60, 0.04, 0.40, None),
     "gpt-5.3-codex": (1.75, 14.00, 0.175, 1.75, None),
     "gpt-5.3-codex-spark": (0.40, 1.60, 0.04, 0.40, None),
@@ -52,8 +141,8 @@ MODEL_RATES_PER_M: dict[str, tuple[float, float, float, float, tuple[int, float,
     "o3": (2.00, 8.00, 0.50, 2.00, None),
     "o4-mini": (1.10, 4.40, 0.275, 1.10, None),
     "codex-mini-latest": (1.50, 6.00, 0.375, 1.50, None),
-    "claude-opus-5-5": (5.00, 25.00, 0.50, 6.25, None),
-    "claude-sonnet-5-5": (3.00, 15.00, 0.30, 3.75, (200_000, 6.00, 22.50, 0.60, 7.50)),
+    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00, None),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.10, 2.50, None),
     "claude-opus-4-7": (5.00, 25.00, 0.50, 6.25, None),
     "claude-opus-4-6": (5.00, 25.00, 0.50, 6.25, None),
     "claude-opus-4-5": (5.00, 25.00, 0.50, 6.25, None),
@@ -66,30 +155,48 @@ MODEL_RATES_PER_M: dict[str, tuple[float, float, float, float, tuple[int, float,
     "claude-3-5-sonnet": (3.00, 15.00, 0.30, 3.75, None),
     "claude-haiku-4-5": (1.00, 5.00, 0.10, 1.25, None),
     "claude-3-5-haiku": (0.80, 4.00, 0.08, 1.00, None),
-    "gemini-4-carbon": (2.50, 15.00, 0.50, 2.50, None),
-    "gemini-4-argon": (2.00, 12.00, 0.50, 2.00, None),
-    "gemini-4": (2.00, 12.00, 0.50, 2.00, None),
-    "gemini-3.8-flash": (0.15, 0.60, 0.0375, 0.15, None),
-    "gemini-3.6-flash": (0.15, 0.60, 0.0375, 0.15, None),
+    "gemini-4-hydrogen": (1.50, 7.50, 0.075, 1.50, None),
+    "gemini-4-carbon": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-4-argon": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-4": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-pro-orchestrator-argon": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-pro-orchestrator": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-3.8-flash": (0.75, 3.75, 0.075, 0.75, None),
+    "gemini-3.7-flash": (0.75, 3.75, 0.075, 0.75, None),
+    "gemini-3.6-flash": (0.75, 3.75, 0.075, 0.75, None),
     "gemini-3.5-flash-lite": (0.10, 0.40, 0.025, 0.10, None),
     "gemini-3.5-flash": (0.15, 0.60, 0.0375, 0.15, None),
-    "gemini-3.1-pro": (1.25, 10.00, 0.3125, 1.25, (200_000, 2.50, 15.00, 0.625, 2.50)),
+    "gemini-3.1-flash-lite": (0.25, 1.50, 0.025, 0.25, None),
+    "gemini-3.1-pro": (2.00, 12.00, 0.20, 2.00, (200_000, 4.00, 18.00, 0.40, 4.00)),
     "gemini-3-pro": (1.25, 10.00, 0.3125, 1.25, (200_000, 2.50, 15.00, 0.625, 2.50)),
     "gemini-3-flash": (0.15, 0.60, 0.0375, 0.15, None),
     "gemini-2.5-pro": (1.25, 10.00, 0.3125, 1.25, (200_000, 2.50, 15.00, 0.625, 2.50)),
     "gemini-2.5-flash": (0.15, 0.60, 0.0375, 0.15, None),
+    "gpt-oss-120b": (0.09, 0.36, 0.045, 0.09, None),
+    "grok-4.7-build-fast": (4.00, 12.00, 1.00, 4.00, None),
+    "grok-4.7-build": (2.00, 6.00, 0.50, 2.00, None),
+    "grok-4.6-build": (2.00, 6.00, 0.50, 2.00, None),
     "grok-4.20": (3.00, 15.00, 0.75, 3.00, None),
     "grok-4": (3.00, 15.00, 0.75, 3.00, None),
     "grok-code-fast-1": (0.20, 1.50, 0.02, 0.20, None),
     "grok-3": (3.00, 15.00, 0.75, 3.00, None),
     "grok-3-mini": (0.30, 0.50, 0.075, 0.30, None),
+    "deepseek-v4-pro": (0.66, 1.98, 0.022, 0.66, None),
+    "deepseek-v4-flash": (0.15, 0.60, 0.003, 0.15, None),
     "deepseek-v4.1-flash": (0.10, 0.40, 0.025, 0.10, None),
-    "deepseek-flash": (0.10, 0.40, 0.025, 0.10, None),
+    "deepseek-flash": (0.15, 0.60, 0.003, 0.15, None),
     "deepseek-v4": (0.27, 1.10, 0.07, 0.27, None),
-    "deepseek-chat": (0.27, 1.10, 0.07, 0.27, None),
-    "deepseek-reasoner": (0.55, 2.19, 0.14, 0.55, None),
+    "deepseek-chat": (0.28, 0.42, 0.028, 0.28, None),
+    "deepseek-reasoner": (0.28, 0.42, 0.028, 0.28, None),
     "deepseek-v3": (0.27, 1.10, 0.07, 0.27, None),
     "deepseek-r1": (0.55, 2.19, 0.14, 0.55, None),
+    "kimi-k3.1-pro-highspeed": (4.00, 20.00, 0.20, 4.00, None),
+    "kimi-k3.1-pro": (2.00, 10.00, 0.20, 2.00, None),
+    "kimi-k3": (3.00, 15.00, 0.30, 3.00, None),
+    "kimi-k2.7-code-highspeed": (1.90, 8.00, 0.38, 1.90, None),
+    "kimi-k2.7-code": (0.95, 4.00, 0.19, 0.95, None),
+    "kimi-k2.6": (0.95, 4.00, 0.16, 0.95, None),
+    "kimi-k2-thinking": (0.574, 2.294, 0.574, 0.574, None),
     "kimi-k2.5": (0.60, 2.50, 0.15, 0.60, None),
     "kimi-k2": (0.60, 2.50, 0.15, 0.60, None),
     "qwen3-coder-plus": (0.35, 1.40, 0.08, 0.35, None),
@@ -113,6 +220,7 @@ AGY_MODEL_ENUM: dict[int, str] = {
     334: "claude-sonnet-4-5",
     340: "claude-haiku-4-5",
     341: "claude-haiku-4-5",
+    342: "gpt-oss-120b",
     1016: "gemini-3.1-pro",
     1018: "gemini-3-flash-preview",
     1020: "claude-haiku-4-5",
@@ -124,17 +232,36 @@ AGY_MODEL_ENUM: dict[int, str] = {
     1036: "gemini-3.1-pro",
     1037: "gemini-3.1-pro",
     1047: "gemini-3-flash-preview",
+    1050: "gemini-3.1-flash-lite",
+    1071: "gemini-3.6-flash",
+    1072: "gemini-3.6-flash",
+    1073: "gemini-3.6-flash",
     1084: "gemini-3-flash-preview",
+    1298: "gemini-3.7-flash",
+    1299: "gemini-3.7-flash",
+    1300: "gemini-3.7-flash",
     1318: "gemini-3.8-flash",
     1319: "gemini-3.8-flash",
+    1320: "gemini-3.8-flash",
     1322: "gemini-3.8-flash-tiered",
+    1400: "claude-opus-5-5",
     1401: "claude-opus-5-5",
     1402: "claude-opus-5-5",
+    1403: "claude-sonnet-5-5",
     1404: "claude-sonnet-5-5",
     1405: "claude-sonnet-5-5",
     1417: "gemini-4-argon",
     1418: "gemini-4-argon",
     1419: "gemini-4-argon",
+    1427: "gemini-4-carbon",
+    1437: "gemini-4-carbon",
+    1438: "gemini-4-carbon",
+    1461: "gemini-4-hydrogen",
+    1462: "gemini-4-hydrogen",
+    1463: "gemini-4-hydrogen",
+    1464: "gemini-4-hydrogen",
+    1528: "gemini-4-hydrogen",
+    1667: "gemini-pro-orchestrator",
     2006: "gemini-2.5-pro",
     2007: "gemini-2.5-flash",
     2018: "gemini-3-pro",
@@ -187,11 +314,11 @@ def _safe_float(val: Any) -> float | None:
 
 def _parse_ts_ms(val: Any) -> int | None:
     if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
-        n = int(val)
-        if n <= 0:
+        if val <= 0:
             return None
-        if n < 10_000_000_000:
-            return n * 1000
+        if val < 10_000_000_000:
+            return int(val * 1000)
+        n = int(val)
         if n > 10_000_000_000_000:
             return n // 1000
         return n
@@ -201,9 +328,15 @@ def _parse_ts_ms(val: Any) -> int | None:
             return None
         if s.isdigit():
             return _parse_ts_ms(int(s))
+        if re.fullmatch(r"\d+\.\d+", s):
+            try:
+                return _parse_ts_ms(float(s))
+            except Exception:
+                return None
         try:
             if s.endswith("Z"):
                 s = s[:-1] + "+00:00"
+            s = re.sub(r"\.(\d{6})\d+", r".\1", s)
             parsed = dt.datetime.fromisoformat(s)
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=dt.timezone.utc)
@@ -244,52 +377,738 @@ def _is_variant_endpoint(model_id: str) -> bool:
         return True
     return False
 
-def _lookup_model_rate(model_id: str) -> tuple[float, float, float, float, tuple[int, float, float, float, float] | None] | None:
-    m = model_id.lower().strip()
-    if not m or m in ("unknown", "<synthetic>", "synthetic", "gemini-default", "antigravity-unknown"):
+_PRICING_LOCK = threading.Lock()
+_PRICING_RUNTIME_STATE: dict[str, Any] = {
+    "cache_path": "",
+    "mtime_ns": -2,
+    "checked_mono": 0.0,
+    "catalog": None,
+}
+
+
+def _pricing_cache_path() -> Path:
+    return _cache_dir() / f"pricing-catalog-v{PRICING_CACHE_VERSION}.json"
+
+
+def _coerce_rate_tuple(val: Any) -> RateTuple | None:
+    if not isinstance(val, (list, tuple)) or len(val) < 4:
         return None
-    if m.endswith(":fast"):
-        m = m[:-5]
-    if m in MODEL_RATES_PER_M:
-        return MODEL_RATES_PER_M[m]
-    cleaned = m
-    for suffix in (
-        "-thinking",
-        "-extra-low",
-        "-medium",
-        "-high",
-        "-low",
-        "-preview",
-        "-latest",
-        "-trial",
-        "-exp",
-        "-canary",
-        "-tiered",
-    ):
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
-    if cleaned in MODEL_RATES_PER_M:
-        return MODEL_RATES_PER_M[cleaned]
-    alt_hyphen = cleaned.replace(".", "-")
-    if alt_hyphen in MODEL_RATES_PER_M:
-        return MODEL_RATES_PER_M[alt_hyphen]
-    for key in sorted(MODEL_RATES_PER_M.keys(), key=len, reverse=True):
-        if cleaned == key or cleaned.startswith(key + "-") or cleaned.startswith(key + "."):
-            return MODEL_RATES_PER_M[key]
-        if alt_hyphen == key or alt_hyphen.startswith(key + "-"):
-            return MODEL_RATES_PER_M[key]
+    in_m = _safe_float(val[0])
+    out_m = _safe_float(val[1])
+    read_m = _safe_float(val[2])
+    write_m = _safe_float(val[3])
+    if in_m is None or out_m is None or read_m is None or write_m is None:
+        return None
+    tiered: tuple[int, float, float, float, float] | None = None
+    raw_tier = val[4] if len(val) >= 5 else None
+    if isinstance(raw_tier, (list, tuple)) and len(raw_tier) >= 5:
+        thresh = _safe_int(raw_tier[0])
+        t_in = _safe_float(raw_tier[1])
+        t_out = _safe_float(raw_tier[2])
+        t_read = _safe_float(raw_tier[3])
+        t_write = _safe_float(raw_tier[4])
+        if thresh > 0 and t_in is not None and t_out is not None and t_read is not None and t_write is not None:
+            tiered = (thresh, t_in, t_out, t_read, t_write)
+    return (in_m, out_m, read_m, write_m, tiered)
+
+
+def _serialize_rate_tuple(rate: RateTuple) -> list[Any]:
+    in_m, out_m, read_m, write_m, tiered = rate
+    return [
+        round(in_m, 6),
+        round(out_m, 6),
+        round(read_m, 6),
+        round(write_m, 6),
+        [tiered[0], round(tiered[1], 6), round(tiered[2], 6), round(tiered[3], 6), round(tiered[4], 6)]
+        if tiered is not None
+        else None,
+    ]
+
+
+def _pricing_backoff_path() -> Path:
+    return _cache_dir() / "pricing-catalog-backoff-v1.json"
+
+
+def _validate_http_url(url: Any) -> str | None:
+    if not isinstance(url, str):
+        return None
+    cleaned = url.strip()
+    if not cleaned or any(ch in cleaned for ch in "\r\n\x00"):
+        return None
+    try:
+        parsed = urllib.parse.urlparse(cleaned)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        return None
+    return cleaned
+
+
+def _read_response_bytes(resp: Any, max_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> bytes:
+    try:
+        raw = resp.read(max_bytes + 1)
+    except TypeError:
+        raw = resp.read()
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("invalid response body")
+    data = bytes(raw)
+    if len(data) > max_bytes:
+        raise ValueError("response too large")
+    return data
+
+
+def _atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(fh.fileno(), mode)
+            fh.write(text)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        if mode is not None:
+            try:
+                os.chmod(tmp_path, mode)
+            except Exception:
+                pass
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _run_daemon_tasks(tasks: dict[str, Any], timeout: float) -> dict[str, tuple[bool, Any]]:
+    results: dict[str, tuple[bool, Any]] = {}
+    lock = threading.Lock()
+    done_events: list[threading.Event] = []
+
+    def _runner(key: str, fn: Any, ev: threading.Event) -> None:
+        try:
+            val = fn()
+            with lock:
+                results[key] = (True, val)
+        except Exception as exc:
+            with lock:
+                results[key] = (False, type(exc).__name__)
+        finally:
+            ev.set()
+
+    for key, fn in tasks.items():
+        ev = threading.Event()
+        done_events.append(ev)
+        t = threading.Thread(
+            target=_runner,
+            args=(key, fn, ev),
+            daemon=True,
+        )
+        t.start()
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    for ev in done_events:
+        rem = deadline - time.monotonic()
+        if rem <= 0.0:
+            break
+        ev.wait(timeout=rem)
+
+    with lock:
+        return dict(results)
+
+
+def _safe_stat_sig(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _db_fingerprint_sig(
+    db_path: Path,
+    extra_paths: tuple[Path, ...] = (),
+) -> str | None:
+    db_sig = _safe_stat_sig(db_path)
+    if db_sig is None:
+        return None
+    parts = [f"{db_sig[0]}:{db_sig[1]}"]
+    for p in (Path(str(db_path) + "-wal"), Path(str(db_path) + "-journal"), *extra_paths):
+        s = _safe_stat_sig(p)
+        parts.append(f"{s[0]}:{s[1]}" if s is not None else "0:0")
+    return "|".join(parts)
+
+
+@contextlib.contextmanager
+def _open_readonly_sqlite(db_path: Path, timeout: float = 2.0):
+    abs_path = Path(os.path.abspath(db_path))
+    if not abs_path.is_file():
+        raise FileNotFoundError(str(abs_path))
+    wal_path = Path(str(abs_path) + "-wal")
+    wal_sig = _safe_stat_sig(wal_path)
+    is_wal_hdr = False
+    try:
+        with open(abs_path, "rb") as fh:
+            hdr = fh.read(20)
+            is_wal_hdr = len(hdr) >= 20 and hdr[18:20] == b"\x02\x02"
+    except OSError:
+        pass
+    if wal_sig is not None and wal_sig[0] > 0:
+        db_sig = _safe_stat_sig(abs_path)
+        db_bytes = db_sig[0] if db_sig is not None else 0
+        if db_bytes + wal_sig[0] <= MAX_SQLITE_SNAPSHOT_BYTES:
+            with tempfile.TemporaryDirectory(prefix="luma-sqlite-") as tmpdir:
+                t_db = Path(tmpdir) / "db.sqlite"
+                shutil.copy2(abs_path, t_db)
+                try:
+                    shutil.copy2(wal_path, Path(str(t_db) + "-wal"))
+                except FileNotFoundError:
+                    shutil.copy2(abs_path, t_db)
+                shm_path = Path(str(abs_path) + "-shm")
+                try:
+                    shutil.copy2(shm_path, Path(str(t_db) + "-shm"))
+                except OSError:
+                    pass
+                con = sqlite3.connect(f"{t_db.as_uri()}?mode=ro", uri=True, timeout=timeout)
+                try:
+                    yield con
+                finally:
+                    con.close()
+            return
+        uri = f"{abs_path.as_uri()}?mode=ro"
+    elif is_wal_hdr or wal_sig is not None:
+        uri = f"{abs_path.as_uri()}?mode=ro&immutable=1"
+    else:
+        uri = f"{abs_path.as_uri()}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=timeout)
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def _fetch_remote_json(url: str, timeout: float = 6.5) -> Any | None:
+    safe_url = _validate_http_url(url)
+    if safe_url is None:
+        return None
+    try:
+        req = urllib.request.Request(
+            safe_url,
+            headers={
+                "User-Agent": "Luma/1.0",
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = _read_response_bytes(resp, MAX_PRICING_RESPONSE_BYTES)
+            enc = (resp.headers.get("Content-Encoding") or "").lower()
+        if "gzip" in enc or raw[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read(MAX_PRICING_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_PRICING_RESPONSE_BYTES:
+                return None
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _extract_models_dev_rate(cost: Any) -> RateTuple | None:
+    if not isinstance(cost, dict):
+        return None
+    in_m = _safe_float(cost.get("input"))
+    out_m = _safe_float(cost.get("output"))
+    if in_m is None or out_m is None or (in_m <= 0.0 and out_m <= 0.0):
+        return None
+    if in_m > 1000.0 or out_m > 2000.0:
+        return None
+    cr_raw = _safe_float(cost.get("cache_read"))
+    read_m = cr_raw if cr_raw is not None else in_m
+    cw_raw = _safe_float(cost.get("cache_write"))
+    write_m = cw_raw if (cw_raw is not None and cw_raw > 0.0) else in_m
+
+    tiered: tuple[int, float, float, float, float] | None = None
+    tiers_raw = cost.get("tiers")
+    best_thresh = 0
+    best_tier_obj: dict[str, Any] | None = None
+    if isinstance(tiers_raw, list):
+        for item in tiers_raw:
+            if not isinstance(item, dict):
+                continue
+            tier_meta = item.get("tier")
+            if isinstance(tier_meta, dict) and tier_meta.get("type") == "context":
+                sz = _safe_int(tier_meta.get("size"))
+                if sz > 0 and (best_thresh == 0 or sz < best_thresh):
+                    best_thresh = sz
+                    best_tier_obj = item
+    if best_tier_obj is None and isinstance(cost.get("context_over_200k"), dict):
+        best_thresh = 200_000
+        best_tier_obj = cost["context_over_200k"]
+    if best_tier_obj is not None and best_thresh > 0:
+        t_in = _safe_float(best_tier_obj.get("input"))
+        t_out = _safe_float(best_tier_obj.get("output"))
+        if t_in is not None and t_out is not None and (t_in > 0.0 or t_out > 0.0):
+            t_cr = _safe_float(best_tier_obj.get("cache_read"))
+            t_read = t_cr if t_cr is not None else t_in
+            t_cw = _safe_float(best_tier_obj.get("cache_write"))
+            t_write = t_cw if (t_cw is not None and t_cw > 0.0) else t_in
+            tiered = (best_thresh, t_in, t_out, t_read, t_write)
+    return (in_m, out_m, read_m, write_m, tiered)
+
+
+def _parse_models_dev_rates(payload: Any) -> tuple[dict[str, RateTuple], dict[str, RateTuple]]:
+    primary: dict[str, RateTuple] = {}
+    secondary: dict[str, RateTuple] = {}
+    if not isinstance(payload, dict):
+        return primary, secondary
+
+    def _collect_provider(models_obj: Any, dest: dict[str, RateTuple], check_modality: bool) -> None:
+        if not isinstance(models_obj, dict):
+            return
+        local_map: dict[str, RateTuple] = {}
+        for raw_mid, m_info in models_obj.items():
+            if not isinstance(raw_mid, str) or not isinstance(m_info, dict):
+                continue
+            if check_modality:
+                mods = m_info.get("modalities")
+                if isinstance(mods, dict):
+                    out_mods = mods.get("output")
+                    if isinstance(out_mods, list) and out_mods and "text" not in out_mods:
+                        continue
+            rate = _extract_models_dev_rate(m_info.get("cost"))
+            if rate is None:
+                continue
+            norm = _normalize_model_id(raw_mid)
+            if not norm or norm == "unknown":
+                continue
+            if norm not in local_map or raw_mid.strip().lower() == norm:
+                local_map[norm] = rate
+        for norm, rate in local_map.items():
+            dest.setdefault(norm, rate)
+
+    trusted_set = set(TRUSTED_MODELS_DEV_PROVIDERS)
+    for prov in TRUSTED_MODELS_DEV_PROVIDERS:
+        p_info = payload.get(prov)
+        if isinstance(p_info, dict):
+            _collect_provider(p_info.get("models"), primary, check_modality=False)
+
+    for prov, p_info in payload.items():
+        if not isinstance(prov, str) or prov in trusted_set or not isinstance(p_info, dict):
+            continue
+        low_prov = prov.lower()
+        if "plan" in low_prov or "free" in low_prov:
+            continue
+        _collect_provider(p_info.get("models"), secondary, check_modality=True)
+
+    return primary, secondary
+
+
+_LITELLM_BEDROCK_PREFIX_RE = re.compile(
+    r"^(?:(?:us|eu|ap|au|ca|global)\.)?(?:anthropic|amazon|meta|mistral|cohere|deepseek)\.",
+    re.IGNORECASE,
+)
+_LITELLM_CANONICAL_PREFIXES = (
+    "anthropic/",
+    "openai/",
+    "gemini/",
+    "deepseek/",
+    "moonshot/",
+    "xai/",
+    "zai/",
+    "dashscope/",
+    "qwen/",
+    "minimax/",
+)
+_LITELLM_SKIP_MODES = {
+    "embedding",
+    "image_generation",
+    "audio_transcription",
+    "audio_speech",
+    "moderation",
+    "rerank",
+    "video_generation",
+}
+
+
+def _parse_litellm_rates(payload: Any) -> dict[str, RateTuple]:
+    ranked: dict[str, tuple[int, RateTuple]] = {}
+    if not isinstance(payload, dict):
+        return {}
+    for raw_key, info in payload.items():
+        if not isinstance(raw_key, str) or raw_key == "sample_spec" or not isinstance(info, dict):
+            continue
+        mode = str(info.get("mode") or "").strip().lower()
+        if mode in _LITELLM_SKIP_MODES:
+            continue
+        in_tok = _safe_float(info.get("input_cost_per_token"))
+        out_tok = _safe_float(info.get("output_cost_per_token"))
+        if in_tok is None or out_tok is None:
+            continue
+        in_m = round(in_tok * 1_000_000.0, 6)
+        out_m = round(out_tok * 1_000_000.0, 6)
+        if (in_m <= 0.0 and out_m <= 0.0) or in_m > 1000.0 or out_m > 2000.0:
+            continue
+        cr_tok = _safe_float(info.get("cache_read_input_token_cost"))
+        read_m = round(cr_tok * 1_000_000.0, 6) if cr_tok is not None else in_m
+        cw_tok = _safe_float(info.get("cache_creation_input_token_cost"))
+        write_m = round(cw_tok * 1_000_000.0, 6) if (cw_tok is not None and cw_tok > 0.0) else in_m
+
+        tiered: tuple[int, float, float, float, float] | None = None
+        t_in_tok = _safe_float(info.get("input_cost_per_token_above_200k_tokens"))
+        t_out_tok = _safe_float(info.get("output_cost_per_token_above_200k_tokens"))
+        if t_in_tok is not None and t_out_tok is not None and (t_in_tok > 0.0 or t_out_tok > 0.0):
+            t_in = round(t_in_tok * 1_000_000.0, 6)
+            t_out = round(t_out_tok * 1_000_000.0, 6)
+            t_cr_tok = _safe_float(info.get("cache_read_input_token_cost_above_200k_tokens"))
+            t_read = round(t_cr_tok * 1_000_000.0, 6) if t_cr_tok is not None else t_in
+            t_cw_tok = _safe_float(info.get("cache_creation_input_token_cost_above_200k_tokens"))
+            t_write = round(t_cw_tok * 1_000_000.0, 6) if (t_cw_tok is not None and t_cw_tok > 0.0) else t_in
+            tiered = (200_000, t_in, t_out, t_read, t_write)
+
+        stripped_key = _LITELLM_BEDROCK_PREFIX_RE.sub("", raw_key.strip())
+        norm = _normalize_model_id(stripped_key)
+        if not norm or norm == "unknown":
+            continue
+        low_raw = raw_key.strip().lower()
+        if low_raw == norm:
+            prio = 0
+        elif low_raw.startswith(_LITELLM_CANONICAL_PREFIXES):
+            prio = 1
+        elif "/" not in low_raw and stripped_key.lower() == norm:
+            prio = 2
+        else:
+            prio = 3
+        rate: RateTuple = (in_m, out_m, read_m, write_m, tiered)
+        prev = ranked.get(norm)
+        if prev is None or prio < prev[0]:
+            ranked[norm] = (prio, rate)
+    return {k: v[1] for k, v in ranked.items()}
+
+
+def _merge_rate_maps(
+    base_map: dict[str, RateTuple],
+    override_map: dict[str, RateTuple],
+) -> dict[str, RateTuple]:
+    merged = dict(base_map)
+    for key, rate in override_map.items():
+        prev = merged.get(key)
+        if (
+            rate[4] is None
+            and prev is not None
+            and prev[4] is not None
+            and abs(rate[0] - prev[0]) < 1e-6
+            and abs(rate[1] - prev[1]) < 1e-6
+        ):
+            merged[key] = (rate[0], rate[1], rate[2], rate[3], prev[4])
+        else:
+            merged[key] = rate
+    return merged
+
+
+def _build_runtime_catalog(
+    online_rates: dict[str, RateTuple],
+    mode: str,
+    updated_at: str,
+    active_sources: list[str],
+) -> dict[str, Any]:
+    merged = _merge_rate_maps(MODEL_RATES_PER_M, online_rates)
+    sorted_keys = sorted(merged.keys(), key=len, reverse=True)
+    digest_payload = json.dumps(
+        [[k, _serialize_rate_tuple(merged[k])] for k in sorted(merged.keys())],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "mode": mode,
+        "updatedAt": updated_at,
+        "activeSources": list(active_sources),
+        "modelCount": len(merged),
+        "rates": merged,
+        "sortedKeys": sorted_keys,
+        "digest": _fnv1a64(digest_payload),
+        "memo": {},
+    }
+
+
+def _load_cached_pricing_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.is_file():
+            return None
+        obj = json.loads(path.read_text("utf-8"))
+        if not isinstance(obj, dict) or obj.get("version") != PRICING_CACHE_VERSION:
+            return None
+        raw_rates = obj.get("rates")
+        if not isinstance(raw_rates, dict) or not raw_rates:
+            return None
+        parsed_rates: dict[str, RateTuple] = {}
+        for k, v in raw_rates.items():
+            if isinstance(k, str) and k:
+                rt = _coerce_rate_tuple(v)
+                if rt is not None:
+                    parsed_rates[k] = rt
+        if not parsed_rates:
+            return None
+        return {
+            "fetchedAtEpoch": _safe_int(obj.get("fetchedAtEpoch")),
+            "updatedAt": str(obj.get("updatedAt") or ""),
+            "activeSources": [str(s) for s in (obj.get("activeSources") or []) if isinstance(s, str)],
+            "rates": parsed_rates,
+        }
+    except Exception:
+        return None
+
+
+def _get_pricing_catalog(force_reload_disk: bool = False) -> dict[str, Any]:
+    path = _pricing_cache_path()
+    path_str = str(path)
+    now_mono = time.monotonic()
+    with _PRICING_LOCK:
+        cached_cat = _PRICING_RUNTIME_STATE.get("catalog")
+        if (
+            not force_reload_disk
+            and cached_cat is not None
+            and _PRICING_RUNTIME_STATE.get("cache_path") == path_str
+            and (now_mono - float(_PRICING_RUNTIME_STATE.get("checked_mono") or 0.0)) < 2.0
+        ):
+            return cached_cat
+        try:
+            st_mtime = path.stat().st_mtime_ns
+        except Exception:
+            st_mtime = -1
+        if (
+            not force_reload_disk
+            and cached_cat is not None
+            and _PRICING_RUNTIME_STATE.get("cache_path") == path_str
+            and _PRICING_RUNTIME_STATE.get("mtime_ns") == st_mtime
+        ):
+            _PRICING_RUNTIME_STATE["checked_mono"] = now_mono
+            return cached_cat
+
+    disk = _load_cached_pricing_payload(path) if st_mtime >= 0 else None
+    if disk is not None:
+        cat = _build_runtime_catalog(
+            online_rates=disk["rates"],
+            mode="cached",
+            updated_at=disk["updatedAt"],
+            active_sources=disk["activeSources"],
+        )
+    else:
+        cat = _build_runtime_catalog(
+            online_rates={},
+            mode="builtin",
+            updated_at="",
+            active_sources=[],
+        )
+    with _PRICING_LOCK:
+        _PRICING_RUNTIME_STATE["cache_path"] = path_str
+        _PRICING_RUNTIME_STATE["mtime_ns"] = st_mtime
+        _PRICING_RUNTIME_STATE["checked_mono"] = now_mono
+        _PRICING_RUNTIME_STATE["catalog"] = cat
+    return cat
+
+
+def _fetch_litellm_json() -> Any | None:
+    for url in LITELLM_PRICES_URLS:
+        data = _fetch_remote_json(url)
+        if isinstance(data, dict) and data:
+            return data
     return None
 
-def _tiered_cost(tokens: int, base_per_m: float, threshold: int | None, above_per_m: float | None) -> float:
-    if tokens <= 0:
-        return 0.0
-    if threshold is None or above_per_m is None or tokens <= threshold:
-        return (tokens * base_per_m) / 1_000_000.0
-    below = threshold
-    above = tokens - threshold
-    return ((below * base_per_m) + (above * above_per_m)) / 1_000_000.0
 
-def _price_record(rec: dict[str, Any]) -> dict[str, Any]:
+def _sync_pricing_catalog(force: bool = False) -> dict[str, Any]:
+    path = _pricing_cache_path()
+    backoff_path = _pricing_backoff_path()
+    now_sec = int(time.time())
+    disk = _load_cached_pricing_payload(path)
+    if (
+        not force
+        and disk is not None
+        and disk["fetchedAtEpoch"] > 0
+        and (now_sec - disk["fetchedAtEpoch"]) < PRICING_CACHE_TTL_SECONDS
+    ):
+        return _get_pricing_catalog()
+    if not force and backoff_path.is_file():
+        try:
+            backoff_raw = json.loads(backoff_path.read_text("utf-8"))
+            failed_at = _safe_int(backoff_raw.get("failedAtEpoch")) if isinstance(backoff_raw, dict) else 0
+            if failed_at > 0 and 0 <= (now_sec - failed_at) < PRICING_OFFLINE_BACKOFF_SECONDS:
+                return _get_pricing_catalog()
+        except Exception:
+            pass
+
+    task_res = _run_daemon_tasks(
+        {
+            "md": lambda: _fetch_remote_json(MODELS_DEV_API_URL),
+            "ll": _fetch_litellm_json,
+        },
+        timeout=8.0,
+    )
+    md_raw = task_res["md"][1] if "md" in task_res and task_res["md"][0] else None
+    ll_raw = task_res["ll"][1] if "ll" in task_res and task_res["ll"][0] else None
+
+    md_primary, md_secondary = _parse_models_dev_rates(md_raw) if md_raw is not None else ({}, {})
+    ll_rates = _parse_litellm_rates(ll_raw) if ll_raw is not None else {}
+
+    active_sources: list[str] = []
+    if md_primary or md_secondary:
+        active_sources.append("models.dev")
+    if ll_rates:
+        active_sources.append("litellm")
+
+    merged_online = _merge_rate_maps(md_secondary, ll_rates)
+    merged_online = _merge_rate_maps(merged_online, md_primary)
+
+    if merged_online:
+        updated_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        payload = {
+            "version": PRICING_CACHE_VERSION,
+            "fetchedAtEpoch": now_sec,
+            "updatedAt": updated_iso,
+            "activeSources": active_sources,
+            "rates": {k: _serialize_rate_tuple(v) for k, v in sorted(merged_online.items())},
+        }
+        try:
+            _atomic_write_text(path, json.dumps(payload, separators=(",", ":")))
+        except Exception:
+            pass
+        try:
+            backoff_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        cat = _build_runtime_catalog(
+            online_rates=merged_online,
+            mode="online",
+            updated_at=updated_iso,
+            active_sources=active_sources,
+        )
+        try:
+            st_mtime = path.stat().st_mtime_ns
+        except Exception:
+            st_mtime = -1
+        with _PRICING_LOCK:
+            _PRICING_RUNTIME_STATE["cache_path"] = str(path)
+            _PRICING_RUNTIME_STATE["mtime_ns"] = st_mtime
+            _PRICING_RUNTIME_STATE["checked_mono"] = time.monotonic()
+            _PRICING_RUNTIME_STATE["catalog"] = cat
+        return cat
+
+    try:
+        _atomic_write_text(backoff_path, json.dumps({"failedAtEpoch": now_sec}, separators=(",", ":")))
+    except Exception:
+        pass
+    return _get_pricing_catalog(force_reload_disk=True)
+
+
+def _pricing_source_metadata(catalog: dict[str, Any]) -> dict[str, Any]:
+    active_set = set(catalog.get("activeSources") or [])
+    sources_out = []
+    for item in PRICING_SOURCE_CATALOG:
+        sources_out.append({
+            "id": item["id"],
+            "name": item["name"],
+            "repo": item["repo"],
+            "url": item["url"],
+            "siteUrl": item["siteUrl"],
+            "active": item["id"] in active_set,
+        })
+    return {
+        "mode": str(catalog.get("mode") or "builtin"),
+        "updatedAt": str(catalog.get("updatedAt") or ""),
+        "modelCount": _safe_int(catalog.get("modelCount")),
+        "sources": sources_out,
+    }
+
+
+def _lookup_model_rate_in_catalog(model_id: str, catalog: dict[str, Any]) -> RateTuple | None:
+    m = _normalize_model_id(model_id)
+    if m.endswith(":fast"):
+        m = m[:-5]
+    if not m or m in ("unknown", "<synthetic>", "synthetic", "gemini-default", "antigravity-unknown"):
+        return None
+    memo: dict[str, RateTuple | None] = catalog["memo"]
+    if m in memo:
+        return memo[m]
+    rates: dict[str, RateTuple] = catalog["rates"]
+
+    def _resolve() -> RateTuple | None:
+        alias_direct = MODEL_PRICING_ALIASES.get(m)
+        if alias_direct and alias_direct in rates:
+            return rates[alias_direct]
+        if m in rates:
+            return rates[m]
+        cleaned = m
+        for suffix in (
+            "-thinking",
+            "-extra-low",
+            "-xhigh",
+            "-medium",
+            "-high",
+            "-low",
+            "-max",
+            "-preview",
+            "-latest",
+            "-trial",
+            "-exp",
+            "-canary",
+            "-tiered",
+        ):
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)]
+                alias_clean = MODEL_PRICING_ALIASES.get(cleaned)
+                if alias_clean and alias_clean in rates:
+                    return rates[alias_clean]
+                if cleaned in rates:
+                    return rates[cleaned]
+                if f"{cleaned}-preview" in rates:
+                    return rates[f"{cleaned}-preview"]
+        alias_clean = MODEL_PRICING_ALIASES.get(cleaned)
+        if alias_clean and alias_clean in rates:
+            return rates[alias_clean]
+        if cleaned in rates:
+            return rates[cleaned]
+        if f"{cleaned}-preview" in rates:
+            return rates[f"{cleaned}-preview"]
+        alt_hyphen = cleaned.replace(".", "-")
+        if alt_hyphen in rates:
+            return rates[alt_hyphen]
+        if f"{alt_hyphen}-preview" in rates:
+            return rates[f"{alt_hyphen}-preview"]
+        for key in catalog["sortedKeys"]:
+            if cleaned == key or cleaned.startswith(key + "-") or cleaned.startswith(key + "."):
+                return rates[key]
+            if alt_hyphen == key or alt_hyphen.startswith(key + "-"):
+                return rates[key]
+        return None
+
+    ans = _resolve()
+    if len(memo) < 4096:
+        memo[m] = ans
+    return ans
+
+
+def _lookup_model_rate(model_id: str) -> RateTuple | None:
+    if not isinstance(model_id, str):
+        return None
+    return _lookup_model_rate_in_catalog(model_id, _get_pricing_catalog())
+
+
+def _price_record(
+    rec: dict[str, Any],
+    catalog: dict[str, Any] | None = None,
+    event_count: int = 1,
+) -> dict[str, Any]:
     uncached = _safe_int(rec.get("uncachedInputTokens"))
     cached = _safe_int(rec.get("cachedInputTokens"))
     cache_write = _safe_int(rec.get("cacheCreationTokens"))
@@ -302,7 +1121,8 @@ def _price_record(rec: dict[str, Any]) -> dict[str, Any]:
     multiplier = 2.0 if is_fast else 1.0
 
     reported = _safe_float(rec.get("reportedCostUsd"))
-    rate = _lookup_model_rate(model)
+    active_cat = catalog if catalog is not None else _get_pricing_catalog()
+    rate = _lookup_model_rate_in_catalog(model, active_cat)
     is_explicit_free = model.lower().endswith("-free") or model.lower().endswith(":free")
 
     cat_in = 0.0
@@ -314,7 +1134,7 @@ def _price_record(rec: dict[str, Any]) -> dict[str, Any]:
     if rate is not None:
         in_m, out_m, read_m, write_m, tiered = rate
         prompt_tokens = uncached + cached + cache_write
-        if tiered is not None and prompt_tokens > tiered[0]:
+        if tiered is not None and (prompt_tokens / max(1, event_count)) > tiered[0]:
             _, in_m, out_m, read_m, write_m = tiered
 
         cat_in = (uncached * in_m / 1_000_000.0) * multiplier
@@ -393,15 +1213,10 @@ def _load_scan_cache() -> dict[str, Any]:
 
 def _save_scan_cache(cache: dict[str, Any]) -> None:
     path = _cache_dir() / "usage-scan-cache-v1.json"
-    tmp = path.with_suffix(f".tmp.{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(cache, ensure_ascii=False, separators=(",", ":")), "utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, json.dumps(cache, ensure_ascii=False, separators=(",", ":")))
     except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        pass
 
 def _read_jsonl_incremental(
     file_path: str,
@@ -456,19 +1271,15 @@ def _read_jsonl_incremental(
     try:
         with open(file_path, "rb") as f:
             f.seek(resume_offset)
-            raw = f.read()
-            last_nl = raw.rfind(b"\n")
-            if last_nl >= 0:
-                complete_chunk = raw[: last_nl + 1]
-                new_resume = resume_offset + last_nl + 1
-            else:
-                complete_chunk = b""
-                new_resume = resume_offset
-
-            cur_offset = resume_offset
-            for raw_line_with_end in complete_chunk.splitlines(keepends=True):
-                line_offset = cur_offset
-                cur_offset += len(raw_line_with_end)
+            new_resume = resume_offset
+            while True:
+                line_offset = f.tell()
+                raw_line_with_end = f.readline()
+                if not raw_line_with_end:
+                    break
+                if not raw_line_with_end.endswith(b"\n"):
+                    break
+                new_resume = f.tell()
                 raw_line = raw_line_with_end.rstrip(b"\r\n")
                 if not raw_line:
                     continue
@@ -694,7 +1505,13 @@ def _scan_codex(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
                 "out": _safe_int(tot.get("output_tokens")),
                 "reason": _safe_int(tot.get("reasoning_output_tokens")),
             }
-            if prev is not None and (cur_tot["in"] == prev["in"] and cur_tot["out"] == prev["out"]):
+            if prev is not None and (
+                cur_tot["in"] == prev.get("in")
+                and cur_tot["cached"] == prev.get("cached")
+                and cur_tot["write"] == prev.get("write")
+                and cur_tot["out"] == prev.get("out")
+                and cur_tot["reason"] == prev.get("reason")
+            ):
                 return None
 
         if isinstance(last, dict):
@@ -704,13 +1521,17 @@ def _scan_codex(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
             d_out = _safe_int(last.get("output_tokens"))
             d_reason = _safe_int(last.get("reasoning_output_tokens"))
             if cur_tot is not None and prev is not None:
-                diff_in = max(0, cur_tot["in"] - prev["in"])
-                if diff_in > 0 and d_in > diff_in:
-                    d_in = diff_in
-                    d_cached = max(0, cur_tot["cached"] - prev["cached"])
-                    d_write = max(0, cur_tot["write"] - prev["write"])
-                    d_out = max(0, cur_tot["out"] - prev["out"])
-                    d_reason = max(0, cur_tot["reason"] - prev["reason"])
+                p_in = _safe_int(prev.get("in"))
+                p_out = _safe_int(prev.get("out"))
+                if cur_tot["in"] >= p_in and cur_tot["out"] >= p_out:
+                    diff_in = cur_tot["in"] - p_in
+                    diff_out = cur_tot["out"] - p_out
+                    if d_in > diff_in or d_out > diff_out:
+                        d_in = diff_in
+                        d_cached = max(0, cur_tot["cached"] - _safe_int(prev.get("cached")))
+                        d_write = max(0, cur_tot["write"] - _safe_int(prev.get("write")))
+                        d_out = diff_out
+                        d_reason = max(0, cur_tot["reason"] - _safe_int(prev.get("reason")))
         elif cur_tot is not None:
             if prev is not None:
                 d_in = max(0, cur_tot["in"] - prev["in"])
@@ -815,12 +1636,8 @@ def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
 
     for db_path in sorted(data_dir.glob("opencode*.db")):
         db_str = str(db_path)
-        try:
-            st = db_path.stat()
-            wal_path = Path(db_str + "-wal")
-            wal_st = wal_path.stat() if wal_path.exists() else None
-            fp_sig = f"{st.st_size}:{st.st_mtime_ns}:{wal_st.st_size if wal_st else 0}:{wal_st.st_mtime_ns if wal_st else 0}"
-        except OSError:
+        fp_sig = _db_fingerprint_sig(db_path)
+        if fp_sig is None:
             continue
 
         cached_entry = cache_files.get(db_str)
@@ -828,9 +1645,9 @@ def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
             db_records = cached_entry["records"]
         else:
             db_records = []
+            scan_ok = False
             try:
-                con = sqlite3.connect(f"file:{db_str}?mode=ro", uri=True, timeout=2.0)
-                try:
+                with _open_readonly_sqlite(db_path, timeout=2.0) as con:
                     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     if "session_message" in tables:
                         cur = con.execute(
@@ -860,13 +1677,14 @@ def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
                                 rec = parse_msg_data(str(m_id), t_created, d)
                                 if rec:
                                     db_records.append(rec)
-                finally:
-                    con.close()
+                scan_ok = True
             except Exception:
-                pass
-            if len(db_records) > MAX_RECORDS_PER_SOURCE:
-                db_records = db_records[-MAX_RECORDS_PER_SOURCE:]
-            cache_files[db_str] = {"fp_sig": fp_sig, "records": db_records}
+                db_records = []
+                scan_ok = False
+            if scan_ok:
+                if len(db_records) > MAX_RECORDS_PER_SOURCE:
+                    db_records = db_records[-MAX_RECORDS_PER_SOURCE:]
+                cache_files[db_str] = {"fp_sig": fp_sig, "records": db_records}
 
         for rec in db_records:
             if rec["timestampMs"] >= cutoff_ms:
@@ -931,93 +1749,450 @@ def _scan_pi(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[di
                 deduped[rec["dedupKey"]] = rec
     return list(deduped.values())
 
-def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
-    sessions_dir = home / ".grok" / "sessions"
-    if not sessions_dir.is_dir():
-        return []
-    files: set[str] = set()
-    for path in sessions_dir.rglob("updates.jsonl"):
+def _grok_has_incomplete_usage(u: dict[str, Any]) -> bool:
+    return any(
+        u.get(k) is True
+        for k in ("usageIsIncomplete", "usage_is_incomplete")
+    )
+
+
+def _grok_has_untrustworthy_cost(u: dict[str, Any]) -> bool:
+    return _grok_has_incomplete_usage(u) or any(
+        u.get(k) is True
+        for k in ("costIsPartial", "cost_is_partial")
+    )
+
+
+def _grok_extract_ticks(u: dict[str, Any]) -> float | None:
+    if _grok_has_untrustworthy_cost(u):
+        return None
+    for k in ("costUsdTicks", "cost_usd_ticks", "costInUsdTicks", "cost_in_usd_ticks"):
+        v = _safe_float(u.get(k))
+        if v is not None and v > 0:
+            return v
+    return None
+
+
+def _grok_usage_record(
+    u: dict[str, Any],
+    raw_model: Any,
+    ts: int,
+    dedup_key: str,
+    parent_upd: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    total_in = _safe_int(u.get("inputTokens") or u.get("input_tokens") or u.get("promptTokens"))
+    out_tok = _safe_int(u.get("outputTokens") or u.get("output_tokens") or u.get("completionTokens"))
+    c_read = _safe_int(u.get("cachedReadTokens") or u.get("cacheReadTokens") or u.get("cache_read_input_tokens"))
+    c_write = _safe_int(
+        u.get("cacheCreationTokens")
+        or u.get("cachedWriteTokens")
+        or u.get("cacheWriteTokens")
+        or u.get("cache_creation_input_tokens")
+    )
+    reason = _safe_int(u.get("reasoningTokens") or u.get("thoughtTokens") or u.get("thinkingTokens"))
+    if total_in + out_tok + c_read + c_write + reason <= 0:
+        return None
+    rep_tot_raw = u.get("totalTokens") if "totalTokens" in u else u.get("total_tokens")
+    rep_tot = _safe_int(rep_tot_raw) if rep_tot_raw is not None else None
+    is_inclusive = rep_tot is None or rep_tot == (total_in + out_tok)
+    uncached = max(0, total_in - c_read - c_write) if is_inclusive else total_in
+    out_excl = max(0, out_tok - reason) if is_inclusive else out_tok
+    if uncached + c_read + c_write + out_excl + reason <= 0:
+        return None
+    m = _normalize_model_id(raw_model or "grok-4")
+    if parent_upd is not None and _grok_has_untrustworthy_cost(parent_upd):
+        ticks = None
+    else:
+        ticks = _grok_extract_ticks(u)
+        if ticks is None and parent_upd is not None:
+            ticks = _grok_extract_ticks(parent_upd)
+    cost_usd = (ticks / 10_000_000_000.0) if (ticks is not None and ticks > 0) else None
+    return {
+        "cli": "Grok Build",
+        "model": m,
+        "timestampMs": ts,
+        "uncachedInputTokens": uncached,
+        "cachedInputTokens": c_read,
+        "cacheCreationTokens": c_write,
+        "outputTokens": out_excl,
+        "reasoningTokens": reason,
+        "reportedCostUsd": cost_usd,
+        "dedupKey": dedup_key,
+    }
+
+
+def _grok_session_model_from_dir(session_dir: Path) -> str:
+    sig_path = session_dir / "signals.json"
+    if sig_path.is_file():
         try:
-            if path.stat().st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
-                files.add(str(path))
-        except OSError:
+            sig = json.loads(sig_path.read_text("utf-8"))
+            if isinstance(sig, dict):
+                m = str(sig.get("modelId") or sig.get("model") or sig.get("primaryModelId") or "").strip()
+                if m:
+                    return _normalize_model_id(m)
+        except Exception:
             pass
+    sum_path = session_dir / "summary.json"
+    if sum_path.is_file():
+        try:
+            sm = json.loads(sum_path.read_text("utf-8"))
+            if isinstance(sm, dict):
+                m = str(sm.get("modelId") or sm.get("model") or sm.get("primaryModelId") or "").strip()
+                if m:
+                    return _normalize_model_id(m)
+        except Exception:
+            pass
+    return "grok-4.7-build"
 
-    def parse_line(obj: dict[str, Any], _state: dict[str, Any]) -> list[dict[str, Any]] | None:
-        upd = obj.get("update")
-        if not isinstance(upd, dict) or upd.get("sessionUpdate") != "turn_completed":
-            return None
-        meta = upd.get("_meta")
-        if not isinstance(meta, dict) or meta.get("usageIsIncomplete") is True:
-            return None
-        ts = _parse_ts_ms(obj.get("timestamp"))
-        if ts is None:
-            return None
-        session_id = str(obj.get("sessionId") or "")
-        prompt_id = str(upd.get("promptId") or "")
 
-        by_model = meta.get("byModel")
-        out_recs: list[dict[str, Any]] = []
-        if isinstance(by_model, list) and by_model:
-            for item in by_model:
-                if not isinstance(item, dict):
-                    continue
-                m = _normalize_model_id(item.get("model"))
-                u = item.get("usage") if isinstance(item.get("usage"), dict) else item
-                total_in = _safe_int(u.get("inputTokens"))
-                c_read = _safe_int(u.get("cachedReadTokens"))
-                c_write = _safe_int(u.get("cacheCreationTokens"))
-                uncached = max(0, total_in - c_read - c_write)
-                out_tok = _safe_int(u.get("outputTokens"))
-                reason = _safe_int(u.get("reasoningTokens"))
-                if uncached + c_read + c_write + out_tok <= 0:
-                    continue
-                ticks = _safe_float(u.get("costUsdTicks"))
-                cost_usd = (ticks / 10_000_000_000.0) if (ticks is not None and u.get("costIsPartial") is not True) else None
-                out_recs.append({
-                    "cli": "Grok Build",
-                    "model": m,
-                    "timestampMs": ts,
-                    "uncachedInputTokens": uncached,
-                    "cachedInputTokens": c_read,
-                    "cacheCreationTokens": c_write,
-                    "outputTokens": max(0, out_tok - reason),
-                    "reasoningTokens": reason,
-                    "reportedCostUsd": cost_usd,
-                    "dedupKey": f"grok:{session_id}:{prompt_id}:{m}:{ts}",
-                })
-            return out_recs
-
-        total_in = _safe_int(meta.get("inputTokens"))
-        c_read = _safe_int(meta.get("cachedReadTokens"))
-        c_write = _safe_int(meta.get("cacheCreationTokens"))
-        uncached = max(0, total_in - c_read - c_write)
-        out_tok = _safe_int(meta.get("outputTokens"))
-        reason = _safe_int(meta.get("reasoningTokens"))
-        if uncached + c_read + c_write + out_tok <= 0:
-            return None
-        m = _normalize_model_id(meta.get("model") or "grok-4")
-        ticks = _safe_float(meta.get("costUsdTicks"))
-        cost_usd = (ticks / 10_000_000_000.0) if (ticks is not None and meta.get("costIsPartial") is not True) else None
-        return [{
-            "cli": "Grok Build",
-            "model": m,
-            "timestampMs": ts,
-            "uncachedInputTokens": uncached,
-            "cachedInputTokens": c_read,
-            "cacheCreationTokens": c_write,
-            "outputTokens": max(0, out_tok - reason),
-            "reasoningTokens": reason,
-            "reportedCostUsd": cost_usd,
-            "dedupKey": f"grok:{session_id}:{prompt_id}:{m}:{ts}",
-        }]
-
+def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
+    grok_home = Path(os.environ.get("GROK_HOME") or (home / ".grok"))
+    sessions_dir = grok_home / "sessions"
+    unified_log = grok_home / "logs" / "unified.jsonl"
+    if not sessions_dir.is_dir() and not unified_log.is_file():
+        return []
     deduped: dict[str, dict[str, Any]] = {}
-    for fp in sorted(files):
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
-            if rec["timestampMs"] >= cutoff_ms:
-                deduped[rec["dedupKey"]] = rec
+    usage_json_dirs: set[Path] = set()
+    covered_sids: set[str] = set()
+    session_dirs_by_sid: dict[str, Path] = {}
+
+    if sessions_dir.is_dir():
+        for ws_dir in sorted(sessions_dir.iterdir()):
+            if not ws_dir.is_dir():
+                continue
+            for s_dir in sorted(ws_dir.iterdir()):
+                if s_dir.is_dir():
+                    session_dirs_by_sid[s_dir.name] = s_dir
+
+        for uj_path in sorted(sessions_dir.rglob("usage.json")):
+            try:
+                st = uj_path.stat()
+            except OSError:
+                continue
+            usage_json_dirs.add(uj_path.parent)
+            covered_sids.add(uj_path.parent.name)
+            if st.st_mtime_ns // 1_000_000 < cutoff_ms - 86_400_000:
+                continue
+            cache_key = f"grok_usage::{uj_path}"
+            fp_sig = f"{st.st_mtime_ns}:{st.st_size}"
+            cached = cache_files.get(cache_key)
+            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+                file_records = cached["records"]
+            else:
+                file_records = []
+                try:
+                    data = json.loads(uj_path.read_text("utf-8"))
+                except Exception:
+                    data = None
+                if isinstance(data, dict):
+                    session_id = str(data.get("sessionId") or uj_path.parent.name)
+                    covered_sids.add(session_id)
+                    sess_obj = data.get("session") if isinstance(data.get("session"), dict) else {}
+                    default_model = sess_obj.get("primaryModelId") or "grok-4"
+                    turns = data.get("turns")
+                    if isinstance(turns, list) and turns:
+                        for idx, turn in enumerate(turns):
+                            if not isinstance(turn, dict):
+                                continue
+                            ts = _parse_ts_ms(turn.get("endedAt") or data.get("updatedAt"))
+                            if ts is None:
+                                continue
+                            turn_id = str(turn.get("turnNumber") if turn.get("turnNumber") is not None else idx)
+                            model_usage = turn.get("modelUsage")
+                            if isinstance(model_usage, dict) and model_usage:
+                                for raw_m, mu in model_usage.items():
+                                    if isinstance(mu, dict):
+                                        rec = _grok_usage_record(
+                                            mu,
+                                            raw_m,
+                                            ts,
+                                            f"grok:{session_id}:turn:{turn_id}:{_normalize_model_id(raw_m)}",
+                                            turn,
+                                        )
+                                        if rec:
+                                            file_records.append(rec)
+                            else:
+                                raw_m = turn.get("primaryModelId") or default_model
+                                rec = _grok_usage_record(
+                                    turn,
+                                    raw_m,
+                                    ts,
+                                    f"grok:{session_id}:turn:{turn_id}:{_normalize_model_id(raw_m)}",
+                                )
+                                if rec:
+                                    file_records.append(rec)
+                    elif sess_obj:
+                        ts = _parse_ts_ms(data.get("updatedAt"))
+                        if ts is not None:
+                            model_usage = sess_obj.get("modelUsage")
+                            if isinstance(model_usage, dict) and model_usage:
+                                for raw_m, mu in model_usage.items():
+                                    if isinstance(mu, dict):
+                                        rec = _grok_usage_record(
+                                            mu,
+                                            raw_m,
+                                            ts,
+                                            f"grok:{session_id}:session:{_normalize_model_id(raw_m)}",
+                                            sess_obj,
+                                        )
+                                        if rec:
+                                            file_records.append(rec)
+                            else:
+                                rec = _grok_usage_record(
+                                    sess_obj,
+                                    default_model,
+                                    ts,
+                                    f"grok:{session_id}:session:{_normalize_model_id(default_model)}",
+                                )
+                                if rec:
+                                    file_records.append(rec)
+                    if len(file_records) > MAX_RECORDS_PER_SOURCE:
+                        file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
+                    cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+
+            for rec in file_records:
+                if rec["timestampMs"] >= cutoff_ms:
+                    deduped[rec["dedupKey"]] = rec
+                    sid_part = rec["dedupKey"].split(":", 2)[1] if ":" in rec["dedupKey"] else ""
+                    if sid_part:
+                        covered_sids.add(sid_part)
+
+        update_files: list[str] = []
+        for path in sessions_dir.rglob("updates.jsonl"):
+            if path.parent in usage_json_dirs:
+                continue
+            try:
+                if path.stat().st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
+                    update_files.append(str(path))
+            except OSError:
+                pass
+
+        def parse_line(obj: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]] | None:
+            params = obj.get("params") if isinstance(obj.get("params"), dict) else obj
+            upd = params.get("update")
+            if not isinstance(upd, dict) or upd.get("sessionUpdate") != "turn_completed":
+                return None
+            params_meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+            ts = _parse_ts_ms(params_meta.get("agentTimestampMs") or obj.get("timestamp"))
+            if ts is None:
+                return None
+            session_id = str(params.get("sessionId") or obj.get("sessionId") or "")
+            prompt_id = str(upd.get("prompt_id") or upd.get("promptId") or "").strip()
+            seq_idx = int(state.get("u_idx") or 0)
+            state["u_idx"] = seq_idx + 1
+            turn_ident = f"prompt:{prompt_id}" if prompt_id else f"idx:{seq_idx}:{params_meta.get('eventId') or ts}"
+
+            usage_obj = upd.get("usage")
+            if isinstance(usage_obj, dict):
+                model_usage = usage_obj.get("modelUsage")
+                out_recs: list[dict[str, Any]] = []
+                if isinstance(model_usage, dict) and model_usage:
+                    for raw_m, mu in model_usage.items():
+                        if isinstance(mu, dict):
+                            rec = _grok_usage_record(
+                                mu,
+                                raw_m,
+                                ts,
+                                f"grok:{session_id}:{turn_ident}:{_normalize_model_id(raw_m)}",
+                                upd,
+                            )
+                            if rec:
+                                out_recs.append(rec)
+                    return out_recs or None
+                raw_m = usage_obj.get("primaryModelId") or usage_obj.get("model") or "grok-4"
+                rec = _grok_usage_record(
+                    usage_obj,
+                    raw_m,
+                    ts,
+                    f"grok:{session_id}:{turn_ident}:{_normalize_model_id(raw_m)}",
+                    upd,
+                )
+                return [rec] if rec else None
+
+            meta = upd.get("_meta")
+            if not isinstance(meta, dict) or _grok_has_incomplete_usage(meta):
+                return None
+            by_model = meta.get("byModel")
+            if isinstance(by_model, list) and by_model:
+                out_recs = []
+                for item in by_model:
+                    if not isinstance(item, dict):
+                        continue
+                    u = item.get("usage") if isinstance(item.get("usage"), dict) else item
+                    raw_m = item.get("model")
+                    rec = _grok_usage_record(
+                        u,
+                        raw_m,
+                        ts,
+                        f"grok:{session_id}:{turn_ident}:{_normalize_model_id(raw_m)}",
+                        meta,
+                    )
+                    if rec:
+                        out_recs.append(rec)
+                return out_recs or None
+            raw_m = meta.get("model") or "grok-4"
+            rec = _grok_usage_record(
+                meta,
+                raw_m,
+                ts,
+                f"grok:{session_id}:{turn_ident}:{_normalize_model_id(raw_m)}",
+                meta,
+            )
+            return [rec] if rec else None
+
+        for fp in sorted(update_files):
+            fp_sid = Path(fp).parent.name
+            recs = _read_jsonl_incremental(fp, cache_files, parse_line)
+            if recs:
+                covered_sids.add(fp_sid)
+            for rec in recs:
+                sid_part = rec["dedupKey"].split(":", 2)[1] if ":" in rec["dedupKey"] else ""
+                if sid_part:
+                    covered_sids.add(sid_part)
+                if rec["timestampMs"] >= cutoff_ms:
+                    prev_rec = deduped.get(rec["dedupKey"])
+                    if prev_rec is None or _total_tokens(rec) >= _total_tokens(prev_rec):
+                        deduped[rec["dedupKey"]] = rec
+
+    if unified_log.is_file():
+        try:
+            u_st = unified_log.stat()
+        except OSError:
+            u_st = None
+        if u_st is not None and u_st.st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
+            u_cache_key = f"grok_unified::{unified_log}"
+            u_fp_sig = f"{u_st.st_mtime_ns}:{u_st.st_size}"
+            u_cached = cache_files.get(u_cache_key)
+            if isinstance(u_cached, dict) and u_cached.get("fp_sig") == u_fp_sig and isinstance(u_cached.get("records"), list):
+                uni_records = u_cached["records"]
+            else:
+                uni_records = []
+                pid_models: dict[int, str] = {}
+                sid_models: dict[str, str] = {}
+                try:
+                    with unified_log.open("r", encoding="utf-8", errors="replace") as uf:
+                        for idx, raw_ln in enumerate(uf):
+                            if "inference_done" not in raw_ln and "model" not in raw_ln and "subagent" not in raw_ln:
+                                continue
+                            try:
+                                obj = json.loads(raw_ln)
+                            except Exception:
+                                continue
+                            if not isinstance(obj, dict):
+                                continue
+                            msg = obj.get("msg")
+                            pid = obj.get("pid") if isinstance(obj.get("pid"), int) else None
+                            ctx = obj.get("ctx") if isinstance(obj.get("ctx"), dict) else {}
+                            if msg in ("subagent spawn credentials", "subagent completed"):
+                                sub_id = str(ctx.get("subagent_id") or "").strip()
+                                eff_m = str(ctx.get("effective_model") or ctx.get("effective_model_raw") or "").strip()
+                                if sub_id and eff_m:
+                                    sid_models[sub_id] = _normalize_model_id(eff_m)
+                                continue
+                            if msg == "subagent read parent config (live)":
+                                pm = str(ctx.get("session_model_id") or ctx.get("parent_model") or ctx.get("global_model_id") or "").strip()
+                                if pid is not None and pm:
+                                    pid_models[pid] = _normalize_model_id(pm)
+                                continue
+                            if msg != "shell.turn.inference_done":
+                                continue
+                            sid = str(obj.get("sid") or "").strip()
+                            if not sid:
+                                continue
+                            ts = _parse_ts_ms(obj.get("ts"))
+                            if ts is None:
+                                continue
+                            p_tok = _safe_int(ctx.get("prompt_tokens"))
+                            c_read = _safe_int(ctx.get("cached_prompt_tokens"))
+                            c_tok = _safe_int(ctx.get("completion_tokens"))
+                            r_tok = _safe_int(ctx.get("reasoning_tokens"))
+                            if p_tok + c_tok <= 0:
+                                continue
+                            m_str = (
+                                str(ctx.get("model") or "").strip()
+                                or sid_models.get(sid)
+                                or (pid_models.get(pid) if pid is not None else None)
+                                or ""
+                            )
+                            uni_records.append({
+                                "sid": sid,
+                                "model": _normalize_model_id(m_str) if m_str else "",
+                                "timestampMs": ts,
+                                "uncachedInputTokens": max(0, p_tok - c_read),
+                                "cachedInputTokens": c_read,
+                                "cacheCreationTokens": 0,
+                                "outputTokens": max(0, c_tok - r_tok),
+                                "reasoningTokens": r_tok,
+                                "dedupKey": f"grok-unified:{sid}:{idx}:{ts}",
+                            })
+                    if len(uni_records) > MAX_RECORDS_PER_SOURCE:
+                        uni_records = uni_records[-MAX_RECORDS_PER_SOURCE:]
+                    cache_files[u_cache_key] = {"fp_sig": u_fp_sig, "records": uni_records}
+                except OSError:
+                    uni_records = []
+
+            uni_covered: set[str] = set()
+            for item in uni_records:
+                sid = str(item.get("sid") or "")
+                if not sid or sid in covered_sids:
+                    continue
+                uni_covered.add(sid)
+                if int(item["timestampMs"]) < cutoff_ms:
+                    continue
+                m_resolved = str(item.get("model") or "")
+                if not m_resolved or m_resolved == "unknown":
+                    s_dir = session_dirs_by_sid.get(sid)
+                    m_resolved = _grok_session_model_from_dir(s_dir) if s_dir is not None else "grok-4.7-build"
+                deduped[item["dedupKey"]] = {
+                    "cli": "Grok Build",
+                    "model": m_resolved,
+                    "timestampMs": int(item["timestampMs"]),
+                    "uncachedInputTokens": int(item["uncachedInputTokens"]),
+                    "cachedInputTokens": int(item["cachedInputTokens"]),
+                    "cacheCreationTokens": 0,
+                    "outputTokens": int(item["outputTokens"]),
+                    "reasoningTokens": int(item["reasoningTokens"]),
+                    "reportedCostUsd": None,
+                    "dedupKey": item["dedupKey"],
+                }
+            covered_sids.update(uni_covered)
+
+    for sid, s_dir in session_dirs_by_sid.items():
+        if sid in covered_sids:
+            continue
+        sig_path = s_dir / "signals.json"
+        if not sig_path.is_file():
+            continue
+        try:
+            sig_st = sig_path.stat()
+            if sig_st.st_mtime_ns // 1_000_000 < cutoff_ms:
+                continue
+            sig_obj = json.loads(sig_path.read_text("utf-8"))
+        except Exception:
+            continue
+        if not isinstance(sig_obj, dict):
+            continue
+        eff_total = _safe_int(sig_obj.get("totalTokensBeforeCompaction")) + _safe_int(sig_obj.get("contextTokensUsed"))
+        if eff_total <= 0:
+            continue
+        ts = sig_st.st_mtime_ns // 1_000_000
+        m_resolved = _grok_session_model_from_dir(s_dir)
+        d_key = f"grok:{sid}:signals"
+        deduped[d_key] = {
+            "cli": "Grok Build",
+            "model": m_resolved,
+            "timestampMs": ts,
+            "uncachedInputTokens": eff_total,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 0,
+            "reasoningTokens": 0,
+            "reportedCostUsd": None,
+            "dedupKey": d_key,
+        }
+
     return list(deduped.values())
+
 
 def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
     projects_dir = home / ".codebuddy" / "projects"
@@ -1030,6 +2205,8 @@ def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> 
                 files.add(str(path))
         except OSError:
             pass
+
+    cur_fp_id = ""
 
     def parse_line(obj: dict[str, Any], _state: dict[str, Any]) -> dict[str, Any] | None:
         if obj.get("type") != "message" or obj.get("role") != "assistant":
@@ -1044,23 +2221,80 @@ def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> 
         ts = _parse_ts_ms(obj.get("timestamp"))
         if ts is None:
             return None
-        total_in = _safe_int(raw_u.get("prompt_tokens") or u.get("inputTokens"))
         c_read = _safe_int(
             raw_u.get("cache_read_input_tokens")
+            or raw_u.get("cacheReadInputTokens")
+            or raw_u.get("cacheTokens")
             or raw_u.get("prompt_cache_hit_tokens")
             or raw_u.get("cached_tokens")
+            or u.get("cacheReadInputTokens")
+            or u.get("cacheTokens")
         )
         c_write = _safe_int(
             raw_u.get("cache_creation_input_tokens")
+            or raw_u.get("cacheCreationInputTokens")
+            or raw_u.get("cachedWriteTokens")
             or raw_u.get("prompt_cache_write_tokens")
+            or u.get("cacheCreationInputTokens")
+            or u.get("cachedWriteTokens")
         )
-        uncached = max(0, total_in - c_read - c_write)
-        out_tok = _safe_int(raw_u.get("completion_tokens") or u.get("outputTokens"))
-        reason = _safe_int(raw_u.get("completion_thinking_tokens"))
-        if uncached + c_read + c_write + out_tok <= 0:
+        out_raw = _safe_int(
+            raw_u.get("output_tokens")
+            or raw_u.get("outputTokens")
+            or raw_u.get("completion_tokens")
+            or u.get("outputTokens")
+            or u.get("output_tokens")
+        )
+        reason = _safe_int(
+            raw_u.get("completion_thinking_tokens")
+            or raw_u.get("completionThinkingTokens")
+            or raw_u.get("reasoningTokens")
+            or u.get("reasoningTokens")
+        )
+        miss_val = (
+            raw_u.get("cachedMissTokens")
+            if "cachedMissTokens" in raw_u
+            else (
+                raw_u.get("cache_miss_tokens")
+                if "cache_miss_tokens" in raw_u
+                else (u.get("cachedMissTokens") if "cachedMissTokens" in u else u.get("cache_miss_tokens"))
+            )
+        )
+        if miss_val is not None:
+            uncached = _safe_int(miss_val)
+        elif ("input_tokens" in raw_u or "inputTokens" in raw_u or "inputTokens" in u or "input_tokens" in u):
+            inp_raw = _safe_int(
+                raw_u.get("input_tokens")
+                or raw_u.get("inputTokens")
+                or u.get("inputTokens")
+                or u.get("input_tokens")
+            )
+            tot_raw = (
+                raw_u.get("total_tokens")
+                if "total_tokens" in raw_u
+                else (raw_u.get("totalTokens") if "totalTokens" in raw_u else (u.get("totalTokens") if "totalTokens" in u else u.get("total_tokens")))
+            )
+            if tot_raw is not None:
+                tot = _safe_int(tot_raw)
+                incl_tot = inp_raw + out_raw
+                excl_tot = incl_tot + c_read + c_write + max(0, reason)
+                uncached = max(0, inp_raw - c_read) if (c_read > 0 and tot == incl_tot and incl_tot != excl_tot) else inp_raw
+            else:
+                uncached = inp_raw
+        else:
+            prompt_in = _safe_int(raw_u.get("prompt_tokens") or u.get("prompt_tokens"))
+            uncached = max(0, prompt_in - c_read - c_write)
+        out_tok = max(0, out_raw - reason) if ("completion_tokens" in raw_u and "output_tokens" not in raw_u and "outputTokens" not in raw_u) else out_raw
+        if uncached + c_read + c_write + out_tok + reason <= 0:
             return None
         model = _normalize_model_id(pd.get("model") or pd.get("requestModelId") or "unknown")
-        msg_id = str(pd.get("messageId") or pd.get("conversationRequestId") or obj.get("id") or "")
+        raw_mid = pd.get("messageId") or pd.get("conversationRequestId") or obj.get("id")
+        if isinstance(raw_mid, str) and raw_mid.strip():
+            msg_id = raw_mid.strip()
+        elif isinstance(raw_mid, (int, float)) and not isinstance(raw_mid, bool):
+            msg_id = str(raw_mid)
+        else:
+            msg_id = f"{cur_fp_id}:{_safe_int(_state.get('_line_offset'))}"
         return {
             "cli": "CodeBuddy Code",
             "model": model,
@@ -1068,7 +2302,7 @@ def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> 
             "uncachedInputTokens": uncached,
             "cachedInputTokens": c_read,
             "cacheCreationTokens": c_write,
-            "outputTokens": max(0, out_tok - reason),
+            "outputTokens": out_tok,
             "reasoningTokens": reason,
             "reportedCostUsd": None,
             "dedupKey": f"codebuddy:{msg_id}",
@@ -1076,10 +2310,775 @@ def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> 
 
     deduped: dict[str, dict[str, Any]] = {}
     for fp in sorted(files):
+        cur_fp_id = _fnv1a64(fp.encode("utf-8"))[:12]
         for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
             if rec["timestampMs"] >= cutoff_ms:
                 deduped[rec["dedupKey"]] = rec
     return list(deduped.values())
+
+
+def _iter_dsh_json_objects(path: Path, on_obj: Any) -> bool:
+    try:
+        with path.open("rb") as fh:
+            magic = fh.read(4)
+    except OSError:
+        return False
+
+    def _consume_lines(line_iter: Any) -> None:
+        for idx, raw_line in enumerate(line_iter):
+            if idx == 0 and raw_line.startswith("\ufeff"):
+                raw_line = raw_line[1:]
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+                on_obj(obj)
+
+    if magic == b"\x28\xb5\x2f\xfd":
+        try:
+            from compression import zstd
+            with zstd.ZstdFile(path, "rb") as zf:
+                with io.TextIOWrapper(zf, encoding="utf-8", errors="replace") as wrapper:
+                    _consume_lines(wrapper)
+            return True
+        except ImportError:
+            proc: subprocess.Popen[bytes] | None = None
+            wrapper = None
+            try:
+                proc = subprocess.Popen(
+                    ["zstd", "-dc", "--", str(path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                if proc.stdout is None:
+                    return False
+                wrapper = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace")
+                deadline = time.monotonic() + 15.0
+                _consume_lines(wrapper)
+                rem = max(0.1, deadline - time.monotonic())
+                rc = proc.wait(timeout=rem)
+                return rc == 0
+            except Exception:
+                return False
+            finally:
+                if wrapper is not None:
+                    try:
+                        wrapper.close()
+                    except Exception:
+                        pass
+                if proc is not None:
+                    if proc.stdout is not None:
+                        try:
+                            proc.stdout.close()
+                        except Exception:
+                            pass
+                    if proc.poll() is None:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    try:
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        pass
+        except Exception:
+            return False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            _consume_lines(fh)
+        return True
+    except OSError:
+        return False
+
+
+def _extract_dsh_event_usage(data: dict[str, Any], event_type: str) -> dict[str, Any] | None:
+    if event_type in ("assistant/message", "compaction/summary") and isinstance(data.get("usage"), dict):
+        return data["usage"]
+    if event_type not in ("assistant/message", "assistant/attempt"):
+        return None
+    stream = data.get("stream")
+    if not isinstance(stream, list):
+        return None
+    for item in reversed(stream):
+        if not isinstance(item, dict):
+            continue
+        chunk = item.get("chunk") if isinstance(item.get("chunk"), dict) else item
+        if chunk.get("type") == "usage" and isinstance(chunk.get("usage"), dict):
+            return chunk["usage"]
+    return None
+
+
+def _dsh_fork_boundary_stream(path: Path) -> tuple[bool, int, bool]:
+    st_info: dict[str, Any] = {
+        "session_seen": False,
+        "seeded_v3": False,
+        "seed_cut": 0,
+        "seed_fixed": False,
+        "last_tagged_cut": None,
+    }
+
+    def _on_meta(obj: dict[str, Any]) -> None:
+        ev_type = obj.get("type")
+        if ev_type == "session/end-seed":
+            d = obj.get("data")
+            if isinstance(d, dict) and d.get("inherited") is True and isinstance(obj.get("seq"), int):
+                st_info["last_tagged_cut"] = obj["seq"]
+        elif ev_type == "session" and not st_info["session_seen"]:
+            st_info["session_seen"] = True
+            if "seedLength" in obj and obj.get("seedLength") is not None:
+                st_info["seed_cut"] = max(0, _safe_int(obj.get("seedLength")))
+                st_info["seed_fixed"] = True
+            elif obj.get("isSeeded") is True:
+                st_info["seeded_v3"] = True
+
+    if not _iter_dsh_json_objects(path, _on_meta):
+        return False, 0, False
+    if st_info["seed_fixed"]:
+        return True, st_info["seed_cut"], False
+    if st_info["seeded_v3"]:
+        if st_info["last_tagged_cut"] is None:
+            return True, 0, True
+        return True, max(0, st_info["last_tagged_cut"]), False
+    return True, 0, False
+
+
+def _scan_deepseek(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
+    dsh_home = Path(os.environ.get("DSH_HOME") or (home / ".dsh"))
+    sessions_dir = dsh_home / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+    deduped: dict[str, dict[str, Any]] = {}
+    candidates: list[Path] = []
+    for path in sessions_dir.rglob("session*.jsonl*"):
+        name = path.name
+        if name.endswith((".lock", ".tmp")) or not name.endswith((".jsonl", ".jsonl.zst", ".jsonl.zstd")):
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
+            candidates.append(path)
+
+    for path in sorted(candidates):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        cache_key = f"dsh::{path}"
+        fp_sig = f"{st.st_mtime_ns}:{st.st_size}"
+        cached = cache_files.get(cache_key)
+        if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+            file_records = cached["records"]
+        else:
+            ok_boundary, seed_cut, missing_tagged_cut = _dsh_fork_boundary_stream(path)
+            if not ok_boundary or missing_tagged_cut:
+                continue
+
+            dsh_state: dict[str, Any] = {
+                "session_id": path.parent.name or "unknown",
+                "session_header_seen": False,
+                "fallback_provider": "",
+                "fallback_model": "",
+                "last_settlement": None,
+            }
+            step_started: dict[tuple[int, int], int] = {}
+            seen_local: set[str] = set()
+            file_records = []
+
+            def _on_dsh_obj(obj: dict[str, Any]) -> None:
+                ev_type = obj["type"]
+                data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+
+                if ev_type == "session":
+                    dsh_state["session_header_seen"] = True
+                    sid = str(obj.get("id") or "").strip()
+                    if sid:
+                        dsh_state["session_id"] = sid
+                elif ev_type == "request/header":
+                    hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
+                    cfg = hdr.get("config") if isinstance(hdr.get("config"), dict) else {}
+                    if isinstance(cfg.get("provider"), str) and cfg["provider"].strip():
+                        dsh_state["fallback_provider"] = cfg["provider"].strip()
+                    if isinstance(cfg.get("model"), str) and cfg["model"].strip():
+                        dsh_state["fallback_model"] = cfg["model"].strip()
+                elif ev_type == "request/context":
+                    if isinstance(data.get("provider"), str) and data["provider"].strip():
+                        dsh_state["fallback_provider"] = data["provider"].strip()
+                    if isinstance(data.get("model"), str) and data["model"].strip():
+                        dsh_state["fallback_model"] = data["model"].strip()
+                elif ev_type == "step/start":
+                    turn_v = data.get("turn")
+                    step_v = data.get("step")
+                    if isinstance(turn_v, int) and isinstance(step_v, int):
+                        ts_start = _parse_ts_ms(obj.get("time"))
+                        if ts_start is not None:
+                            step_started[(turn_v, step_v)] = ts_start
+                        else:
+                            step_started.pop((turn_v, step_v), None)
+                elif ev_type == "llm/retry-started":
+                    turn_v = data.get("turn")
+                    step_v = data.get("step")
+                    if isinstance(turn_v, int) and isinstance(step_v, int):
+                        ts_retry = _parse_ts_ms(obj.get("time"))
+                        if ts_retry is not None:
+                            step_started[(turn_v, step_v)] = ts_retry
+                        else:
+                            step_started.pop((turn_v, step_v), None)
+                        ls = dsh_state["last_settlement"]
+                        if ls is not None and ls[0] == turn_v and ls[1] == step_v:
+                            dsh_state["last_settlement"] = None
+                elif ev_type in ("assistant/message", "assistant/attempt", "compaction/summary"):
+                    seq_val = obj.get("seq")
+                    if dsh_state["session_header_seen"] and seed_cut > 0 and isinstance(seq_val, int) and seq_val < seed_cut:
+                        return
+                    usage = _extract_dsh_event_usage(data, ev_type)
+                    if not isinstance(usage, dict):
+                        return
+                    uncached = _safe_int(usage.get("inputTokens"))
+                    c_read = _safe_int(usage.get("cacheReadTokens"))
+                    c_write = _safe_int(usage.get("cacheWriteTokens"))
+                    out_raw = _safe_int(usage.get("outputTokens"))
+                    reason = _safe_int(usage.get("reasoningTokens"))
+                    out_tok = max(0, out_raw - reason)
+                    if uncached + c_read + c_write + out_tok + reason <= 0:
+                        return
+                    raw_ts = _parse_ts_ms(obj.get("time"))
+                    if raw_ts is None:
+                        return
+
+                    is_summary = ev_type == "compaction/summary"
+                    is_attempt = ev_type == "assistant/attempt"
+                    msg_obj = data.get("message") if isinstance(data.get("message"), dict) else {}
+                    source = msg_obj.get("source") if isinstance(msg_obj.get("source"), dict) else {}
+                    prov_id = str(source.get("provider") or dsh_state["fallback_provider"] or "deepseek").strip()
+                    if prov_id.lower().startswith("migrated:"):
+                        return
+
+                    replay = source.get("replayState") if isinstance(source.get("replayState"), dict) else {}
+                    resp_meta = replay.get("response") if isinstance(replay.get("response"), dict) else {}
+                    resp_model_raw = str(resp_meta.get("responseModel") or "").strip()
+                    if resp_model_raw.lower() == "keepalive":
+                        resp_model_raw = ""
+                    raw_model = (
+                        resp_model_raw
+                        or (source.get("model") if isinstance(source.get("model"), str) and source["model"].strip() else None)
+                        or dsh_state["fallback_model"]
+                        or "deepseek-chat"
+                    )
+                    model = _normalize_model_id(raw_model)
+
+                    turn_v = data.get("turn")
+                    step_v = data.get("step")
+                    slot = (turn_v, step_v) if isinstance(turn_v, int) and isinstance(step_v, int) else None
+                    anchor_ts = step_started.get(slot) if (not is_summary and slot is not None) else None
+                    rec_ts = anchor_ts if (anchor_ts is not None and 0 < anchor_ts <= raw_ts) else raw_ts
+
+                    cur_sid = dsh_state["session_id"]
+                    if is_attempt:
+                        att_id = str(data.get("attemptId") or data.get("retryId") or "").strip()
+                        if att_id:
+                            ident = f"attempt-id:{att_id}"
+                        elif isinstance(seq_val, int):
+                            ident = f"attempt-session:{cur_sid}:seq:{seq_val}"
+                        elif slot is not None:
+                            ident = f"attempt-session:{cur_sid}:turn:{slot[0]}:step:{slot[1]}:{raw_ts}"
+                        else:
+                            ident = f"attempt-session:{cur_sid}:{raw_ts}"
+                    else:
+                        msg_id = str(msg_obj.get("id") or "").strip()
+                        cmp_id = str(data.get("compactionId") or "").strip() if is_summary else ""
+                        if msg_id:
+                            ident = f"msg:{msg_id}"
+                        elif cmp_id:
+                            ident = f"cmp:{cmp_id}"
+                        elif isinstance(seq_val, int):
+                            ident = f"seq:{seq_val}"
+                        else:
+                            ident = f"sid:{cur_sid}"
+
+                    kind = "summary:" if is_summary else ("attempt:" if is_attempt else "")
+                    dedup_key = f"dsh:{kind}{ident}:{raw_ts}:{prov_id}:{model}:{uncached}:{out_tok}:{c_read}:{c_write}:{reason}"
+                    if dedup_key in seen_local:
+                        return
+                    seen_local.add(dedup_key)
+
+                    rec = {
+                        "cli": "DeepSeek Harness",
+                        "model": model,
+                        "timestampMs": rec_ts,
+                        "uncachedInputTokens": uncached,
+                        "cachedInputTokens": c_read,
+                        "cacheCreationTokens": c_write,
+                        "outputTokens": out_tok,
+                        "reasoningTokens": reason,
+                        "reportedCostUsd": None,
+                        "dedupKey": dedup_key,
+                    }
+                    if is_summary:
+                        file_records.append(rec)
+                        return
+                    if slot is not None:
+                        ls = dsh_state["last_settlement"]
+                        if ls is not None and ls[0] == slot[0] and ls[1] == slot[1]:
+                            file_records[ls[2]] = rec
+                            return
+                        idx = len(file_records)
+                        file_records.append(rec)
+                        dsh_state["last_settlement"] = (slot[0], slot[1], idx)
+                    else:
+                        file_records.append(rec)
+                        dsh_state["last_settlement"] = None
+
+            if not _iter_dsh_json_objects(path, _on_dsh_obj):
+                continue
+
+            if len(file_records) > MAX_RECORDS_PER_SOURCE:
+                file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
+            cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+
+        for rec in file_records:
+            if rec["timestampMs"] >= cutoff_ms:
+                deduped[rec["dedupKey"]] = rec
+
+    return list(deduped.values())
+
+
+def _read_kimi_cli_default_model(kimi_root: Path) -> str:
+    toml_path = kimi_root / "config.toml"
+    if toml_path.is_file():
+        try:
+            import tomllib
+            cfg = tomllib.loads(toml_path.read_text("utf-8"))
+            if isinstance(cfg, dict):
+                def_key = str(cfg.get("default_model") or "").strip()
+                models_map = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
+                if def_key and isinstance(models_map.get(def_key), dict):
+                    m_name = str(models_map[def_key].get("model") or "").strip()
+                    if m_name:
+                        return _normalize_model_id(m_name)
+                if def_key:
+                    return _normalize_model_id(def_key)
+        except Exception:
+            pass
+    json_path = kimi_root / "config.json"
+    if json_path.is_file():
+        try:
+            cfg = json.loads(json_path.read_text("utf-8"))
+            if isinstance(cfg, dict):
+                m_name = str(cfg.get("model") or cfg.get("default_model") or "").strip()
+                if m_name:
+                    return _normalize_model_id(m_name)
+        except Exception:
+            pass
+    return "kimi-for-coding"
+
+
+def _concrete_kimi_code_model(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if s.lower().startswith("kimi-code/"):
+        s = s[len("kimi-code/"):].strip()
+    if len(s) >= 4 and s.startswith("__") and s.endswith("__"):
+        return None
+    if not s or s.lower() in ("default", "auto", "config", "unknown"):
+        return None
+    return _normalize_model_id(s)
+
+
+def _scan_kimi(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
+    roots: list[Path] = []
+    for raw_root in (
+        os.environ.get("KIMI_SHARE_DIR"),
+        str(home / ".kimi"),
+        os.environ.get("KIMI_CODE_HOME"),
+        str(home / ".kimi-code"),
+    ):
+        if not raw_root:
+            continue
+        p = Path(raw_root).expanduser()
+        if p not in roots and (p / "sessions").is_dir():
+            roots.append(p)
+    if not roots:
+        return []
+
+    deduped: dict[str, dict[str, Any]] = {}
+    default_models: dict[Path, str] = {}
+
+    for root in roots:
+        sessions_dir = root / "sessions"
+        for wire_path in sorted(sessions_dir.rglob("wire.jsonl")):
+            try:
+                st = wire_path.stat()
+            except OSError:
+                continue
+            fallback_ts = st.st_mtime_ns // 1_000_000
+            if fallback_ts < cutoff_ms - 86_400_000:
+                continue
+            is_kimi_code = wire_path.parent.parent.name == "agents"
+            if not is_kimi_code:
+                root_default_model = default_models.get(root)
+                if root_default_model is None:
+                    root_default_model = _read_kimi_cli_default_model(root)
+                    default_models[root] = root_default_model
+                fp_sig = f"{st.st_mtime_ns}:{st.st_size}:{root_default_model}"
+            else:
+                root_default_model = "kimi-for-coding"
+                fp_sig = f"{st.st_mtime_ns}:{st.st_size}"
+
+            cache_key = f"kimi::{wire_path}"
+            cached = cache_files.get(cache_key)
+            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+                file_records = cached["records"]
+            else:
+                file_records = []
+                try:
+                    with wire_path.open("r", encoding="utf-8", errors="replace") as fh:
+                        if is_kimi_code:
+                            session_id = wire_path.parent.parent.parent.name or "unknown"
+                            agent_id = wire_path.parent.name or "main"
+                            latest_req_model: str | None = None
+                            pending_req_ms: int | None = None
+                            for idx, raw_ln in enumerate(fh):
+                                if idx == 0 and raw_ln.startswith("\ufeff"):
+                                    raw_ln = raw_ln[1:]
+                                ln = raw_ln.strip()
+                                if not ln:
+                                    continue
+                                try:
+                                    obj = json.loads(ln)
+                                except Exception:
+                                    continue
+                                if not isinstance(obj, dict):
+                                    continue
+                                ltype = obj.get("type")
+                                if ltype == "llm.request":
+                                    cm = _concrete_kimi_code_model(obj.get("model"))
+                                    if cm:
+                                        latest_req_model = cm
+                                    pending_req_ms = _parse_ts_ms(obj.get("time"))
+                                    continue
+                                if ltype != "usage.record" or obj.get("usageScope") != "turn":
+                                    continue
+                                req_ms = pending_req_ms
+                                pending_req_ms = None
+                                u = obj.get("usage")
+                                if not isinstance(u, dict):
+                                    continue
+                                inp = _safe_int(u.get("inputOther") if "inputOther" in u else u.get("input_other"))
+                                out_tok = _safe_int(u.get("output"))
+                                c_read = _safe_int(u.get("inputCacheRead") if "inputCacheRead" in u else u.get("input_cache_read"))
+                                c_write = _safe_int(u.get("inputCacheCreation") if "inputCacheCreation" in u else u.get("input_cache_creation"))
+                                if inp + out_tok + c_read + c_write <= 0:
+                                    continue
+                                model = _concrete_kimi_code_model(obj.get("model")) or latest_req_model or "kimi-for-coding"
+                                wire_ms = _parse_ts_ms(obj.get("time"))
+                                ts = req_ms if (req_ms is not None and wire_ms is not None and wire_ms > req_ms) else (wire_ms or fallback_ts)
+                                file_records.append({
+                                    "cli": "Kimi Code",
+                                    "model": model,
+                                    "timestampMs": ts,
+                                    "uncachedInputTokens": inp,
+                                    "cachedInputTokens": c_read,
+                                    "cacheCreationTokens": c_write,
+                                    "outputTokens": out_tok,
+                                    "reasoningTokens": 0,
+                                    "reportedCostUsd": None,
+                                    "dedupKey": f"kimi-code:{session_id}:{agent_id}:{idx}:{ts}",
+                                })
+                        else:
+                            session_id = wire_path.parent.name or "unknown"
+                            by_msg_id: dict[str, tuple[int, bool]] = {}
+                            for idx, raw_ln in enumerate(fh):
+                                if idx == 0 and raw_ln.startswith("\ufeff"):
+                                    raw_ln = raw_ln[1:]
+                                ln = raw_ln.strip()
+                                if not ln:
+                                    continue
+                                try:
+                                    obj = json.loads(ln)
+                                except Exception:
+                                    continue
+                                if not isinstance(obj, dict) or obj.get("type") == "metadata":
+                                    continue
+                                msg = obj.get("message")
+                                if not isinstance(msg, dict) or msg.get("type") != "StatusUpdate":
+                                    continue
+                                payload = msg.get("payload")
+                                if not isinstance(payload, dict):
+                                    continue
+                                tu = payload.get("token_usage")
+                                if not isinstance(tu, dict):
+                                    continue
+                                inp = _safe_int(tu.get("input_other") if "input_other" in tu else tu.get("inputOther"))
+                                out_tok = _safe_int(tu.get("output"))
+                                c_read = _safe_int(tu.get("input_cache_read") if "input_cache_read" in tu else tu.get("inputCacheRead"))
+                                c_write = _safe_int(tu.get("input_cache_creation") if "input_cache_creation" in tu else tu.get("inputCacheCreation"))
+                                tot_cand = inp + out_tok + c_read + c_write
+                                if tot_cand <= 0:
+                                    continue
+                                ts_parsed = _parse_ts_ms(obj.get("timestamp"))
+                                has_wire_ts = ts_parsed is not None
+                                ts = ts_parsed if ts_parsed is not None else fallback_ts
+                                raw_mid = str(payload.get("message_id") or "").strip()
+                                dedup_key = f"kimi:{session_id}:{raw_mid or f'line-{idx}'}"
+                                rec = {
+                                    "cli": "Kimi Code",
+                                    "model": root_default_model,
+                                    "timestampMs": ts,
+                                    "uncachedInputTokens": inp,
+                                    "cachedInputTokens": c_read,
+                                    "cacheCreationTokens": c_write,
+                                    "outputTokens": out_tok,
+                                    "reasoningTokens": 0,
+                                    "reportedCostUsd": None,
+                                    "dedupKey": dedup_key,
+                                }
+                                if raw_mid and raw_mid in by_msg_id:
+                                    prev_idx, prev_wire = by_msg_id[raw_mid]
+                                    prev_rec = file_records[prev_idx]
+                                    prev_tot = _total_tokens(prev_rec)
+                                    replace = (
+                                        tot_cand > prev_tot
+                                        or (
+                                            tot_cand == prev_tot
+                                            and (
+                                                (has_wire_ts and not prev_wire)
+                                                or (has_wire_ts == prev_wire and ts >= int(prev_rec["timestampMs"]))
+                                            )
+                                        )
+                                    )
+                                    if replace:
+                                        file_records[prev_idx] = rec
+                                        by_msg_id[raw_mid] = (prev_idx, has_wire_ts)
+                                else:
+                                    if raw_mid:
+                                        by_msg_id[raw_mid] = (len(file_records), has_wire_ts)
+                                    file_records.append(rec)
+                except OSError:
+                    continue
+
+                if len(file_records) > MAX_RECORDS_PER_SOURCE:
+                    file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
+                cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+
+            for rec in file_records:
+                if rec["timestampMs"] >= cutoff_ms:
+                    deduped[rec["dedupKey"]] = rec
+
+    return list(deduped.values())
+
+
+def _extract_qoder_usage_buckets(usage: dict[str, Any]) -> tuple[int, int, int, int, int] | None:
+    if "promptTokenCount" in usage or "candidatesTokenCount" in usage:
+        prompt_tok = _safe_int(usage.get("promptTokenCount"))
+        c_read = _safe_int(usage.get("cachedContentTokenCount"))
+        c_write = 0
+        uncached = max(0, prompt_tok - c_read)
+        cand_tok = _safe_int(usage.get("candidatesTokenCount"))
+        reason = _safe_int(usage.get("thoughtsTokenCount"))
+        tot = _safe_int(usage.get("totalTokenCount"))
+        out_tok = max(0, cand_tok - reason) if (tot > 0 and tot == prompt_tok + cand_tok) else cand_tok
+    else:
+        inp_raw = _safe_int(
+            usage.get("input_tokens")
+            or usage.get("inputTokens")
+            or usage.get("prompt_tokens")
+            or usage.get("promptTokens")
+        )
+        c_read = _safe_int(
+            usage.get("cache_read_input_tokens")
+            or usage.get("cacheReadInputTokens")
+            or usage.get("cache_read_tokens")
+            or usage.get("cacheReadTokens")
+        )
+        c_write_base = _safe_int(
+            usage.get("cache_creation_input_tokens")
+            or usage.get("cacheCreationInputTokens")
+            or usage.get("cache_write_tokens")
+            or usage.get("cacheWriteTokens")
+        )
+        cc_sub = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+        c_write_1h = _safe_int(cc_sub.get("ephemeral_1h_input_tokens") or usage.get("ephemeral_1h_input_tokens"))
+        c_write = max(c_write_base, c_write_1h)
+        has_split = any(
+            k in usage
+            for k in (
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+            )
+        )
+        uncached = inp_raw if has_split else max(0, inp_raw - c_read - c_write)
+        out_raw = _safe_int(
+            usage.get("output_tokens")
+            or usage.get("outputTokens")
+            or usage.get("completion_tokens")
+            or usage.get("completionTokens")
+        )
+        reason = _safe_int(
+            usage.get("thinking_tokens")
+            or usage.get("thinkingTokens")
+            or usage.get("reasoning_tokens")
+            or usage.get("reasoningTokens")
+        )
+        out_tok = max(0, out_raw - reason)
+    if uncached + c_read + c_write + out_tok + reason <= 0:
+        return None
+    return uncached, c_read, c_write, out_tok, reason
+
+
+def _scan_qoder(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
+    base_roots: list[Path] = []
+    for raw_root in (
+        os.environ.get("QODER_CONFIG_DIR"),
+        os.environ.get("QODER_HOME"),
+        str(home / ".qoder"),
+        os.environ.get("QODERCN_CONFIG_DIR"),
+        str(home / ".qoder-cn"),
+    ):
+        if not raw_root:
+            continue
+        base_p = Path(raw_root).expanduser()
+        if base_p not in base_roots and base_p.is_dir():
+            base_roots.append(base_p)
+    if not base_roots:
+        return []
+
+    project_sids: set[str] = set()
+    files: list[str] = []
+    for base_p in base_roots:
+        projects_dir = base_p / "projects"
+        if projects_dir.is_dir():
+            for path in projects_dir.rglob("*.jsonl"):
+                name = path.name
+                if name.endswith(".checkpoints.jsonl"):
+                    continue
+                if name == "journal.jsonl" and any(p.name == "subagents" for p in path.parents):
+                    continue
+                project_sids.add(path.stem)
+                try:
+                    if path.stat().st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
+                        files.append(str(path))
+                except OSError:
+                    pass
+        logs_sess_dir = base_p / "logs" / "sessions"
+        if logs_sess_dir.is_dir():
+            for sid_dir in logs_sess_dir.iterdir():
+                if not sid_dir.is_dir() or sid_dir.name in project_sids:
+                    continue
+                seg_dir = sid_dir / "segments"
+                target_dir = seg_dir if seg_dir.is_dir() else sid_dir
+                for path in target_dir.rglob("*.jsonl"):
+                    try:
+                        if path.stat().st_mtime_ns // 1_000_000 >= cutoff_ms - 86_400_000:
+                            files.append(str(path))
+                    except OSError:
+                        pass
+
+    cur_fp_id = ""
+
+    def parse_line(obj: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        etype = str(obj.get("type") or obj.get("role") or "")
+        if etype == "runtime-config":
+            rm = str(obj.get("model") or "").strip()
+            if rm and rm.lower() not in ("<synthetic>", "auto"):
+                state["active_model"] = rm
+            return None
+        if etype == "user":
+            msg_u = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            bmk = str(obj.get("businessModelKey") or msg_u.get("businessModelKey") or "").strip()
+            if bmk and bmk.lower() not in ("<synthetic>", "auto"):
+                state["active_model"] = bmk
+            return None
+        if etype == "model.response.completed":
+            data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+            u_src = data.get("usage") if isinstance(data.get("usage"), dict) else (data or (obj.get("usage") if isinstance(obj.get("usage"), dict) else obj))
+            if not isinstance(u_src, dict):
+                return None
+            buckets = _extract_qoder_usage_buckets(u_src)
+            if buckets is None:
+                return None
+            cand_m = str(data.get("model") or obj.get("model") or "").strip()
+            raw_model = cand_m if (cand_m and cand_m.lower() != "auto") else str(state.get("active_model") or cand_m or "auto")
+            if not raw_model or raw_model.lower() == "<synthetic>":
+                return None
+            ts = _parse_ts_ms(obj.get("ts") or obj.get("timestamp") or data.get("timestamp"))
+            if ts is None:
+                return None
+            uncached, c_read, c_write, out_tok, reason = buckets
+            model = _normalize_model_id(raw_model)
+            raw_rid = obj.get("request_id") or data.get("request_id")
+            if isinstance(raw_rid, str) and raw_rid.strip():
+                req_id = raw_rid.strip()
+            elif isinstance(raw_rid, (int, float)) and not isinstance(raw_rid, bool):
+                req_id = str(raw_rid)
+            else:
+                req_id = f"{cur_fp_id}:{_safe_int(state.get('_line_offset'))}:{ts}:{model}"
+            return {
+                "cli": "Qoder CLI",
+                "model": model,
+                "timestampMs": ts,
+                "uncachedInputTokens": uncached,
+                "cachedInputTokens": c_read,
+                "cacheCreationTokens": c_write,
+                "outputTokens": out_tok,
+                "reasoningTokens": reason,
+                "reportedCostUsd": None,
+                "dedupKey": f"qoder:{req_id}",
+            }
+        if etype != "assistant":
+            return None
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        cand_m = str(msg.get("model") or obj.get("model") or "").strip()
+        raw_model = cand_m if (cand_m and cand_m.lower() != "auto") else str(state.get("active_model") or cand_m or "")
+        if not raw_model or raw_model.lower() == "<synthetic>":
+            return None
+        usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else (obj.get("usage") if isinstance(obj.get("usage"), dict) else None)
+        if not isinstance(usage, dict):
+            return None
+        ts = _parse_ts_ms(obj.get("timestamp") or msg.get("timestamp"))
+        if ts is None:
+            return None
+        buckets = _extract_qoder_usage_buckets(usage)
+        if buckets is None:
+            return None
+        uncached, c_read, c_write, out_tok, reason = buckets
+        model = _normalize_model_id(raw_model)
+        raw_mid = msg.get("id") or obj.get("requestId") or obj.get("uuid")
+        if isinstance(raw_mid, str) and raw_mid.strip():
+            msg_id = raw_mid.strip()
+        elif isinstance(raw_mid, (int, float)) and not isinstance(raw_mid, bool):
+            msg_id = str(raw_mid)
+        else:
+            msg_id = f"{cur_fp_id}:{_safe_int(state.get('_line_offset'))}:{ts}:{model}"
+        return {
+            "cli": "Qoder CLI",
+            "model": model,
+            "timestampMs": ts,
+            "uncachedInputTokens": uncached,
+            "cachedInputTokens": c_read,
+            "cacheCreationTokens": c_write,
+            "outputTokens": out_tok,
+            "reasoningTokens": reason,
+            "reportedCostUsd": _safe_float(obj.get("costUSD")),
+            "dedupKey": f"qoder:{msg_id}",
+        }
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for fp in sorted(files):
+        cur_fp_id = _fnv1a64(fp.encode("utf-8"))[:12]
+        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
+            if rec["timestampMs"] >= cutoff_ms:
+                deduped[rec["dedupKey"]] = rec
+    return list(deduped.values())
+
 
 def _read_varint(buf: bytes, pos: int, end: int) -> tuple[int, int] | None:
     result = 0
@@ -1115,6 +3114,7 @@ def _iter_proto_fields(buf: bytes, start: int = 0, end: int | None = None):
         elif wire_type == 1:
             if pos + 8 > end:
                 return
+            yield field_no, 1, buf[pos : pos + 8]
             pos += 8
         elif wire_type == 2:
             l_res = _read_varint(buf, pos, end)
@@ -1128,6 +3128,7 @@ def _iter_proto_fields(buf: bytes, start: int = 0, end: int | None = None):
         elif wire_type == 5:
             if pos + 4 > end:
                 return
+            yield field_no, 5, buf[pos : pos + 4]
             pos += 4
         else:
             return
@@ -1173,6 +3174,11 @@ def _proto_timestamp(fields: dict[int, list[int | bytes]]) -> int | None:
 def _agy_model_name(name: str, enum_id: int, is_ui_label: bool = False) -> str:
     if name:
         raw = name.strip()
+        low_compact = " ".join(raw.lower().split())
+        if low_compact == "orchestrator (carbon)":
+            return "gemini-pro-orchestrator"
+        if low_compact == "orchestrator (argon)":
+            return "gemini-pro-orchestrator-argon"
         if not is_ui_label and " " not in raw and "(" not in raw:
             return _normalize_model_id(raw)
         norm = re.sub(r"\s*\([^)]*\)\s*$", "", raw.lower()).replace(" ", "-")
@@ -1195,15 +3201,17 @@ def _extract_agy_usages(data: dict[int, list[int | bytes]], usage_field: int, re
     return usages
 
 
-def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[dict[str, Any]], int, int, str]:
-    db_str = str(db_path)
+def _extract_agy_db_session_checked(
+    db_path: Path,
+    fallback_ts: int = 0,
+) -> tuple[list[dict[str, Any]], int, int, str, bool]:
     raw_candidates: list[dict[str, Any]] = []
     est_used = 0
     max_ctx = 0
     latest_model = ""
+    scan_ok = False
     try:
-        con = sqlite3.connect(f"file:{db_str}?mode=ro", uri=True, timeout=2.0)
-        try:
+        with _open_readonly_sqlite(db_path, timeout=2.0) as con:
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             traj_ts: int | None = None
             if "trajectory_metadata_blob" in tables:
@@ -1328,20 +3336,31 @@ def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[d
                         latest_model = resolved_model
 
                     for u_idx, usage in enumerate(usages):
-                        uncached = _proto_num(usage, 1) + _proto_num(usage, 2)
+                        uncached = _proto_num(usage, 2)
                         c_read = _proto_num(usage, 5)
                         c_write = _proto_num(usage, 4)
                         u9 = _proto_num(usage, 9)
                         u10 = _proto_num(usage, 10)
                         u3 = _proto_num(usage, 3)
                         if u9 > 0 or u10 > 0:
-                            text_out = u9
-                            reason_out = u10
+                            reason_out = u9
+                            text_out = u10
                         else:
-                            text_out = u3
                             reason_out = 0
+                            text_out = u3
                         if uncached + c_read + c_write + text_out + reason_out <= 0:
                             continue
+                        u_enum_id = _proto_num(usage, 1)
+                        u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
+                        usage_model = resolved_model or "antigravity-unknown"
+                        usage_prio = m_prio
+                        if (
+                            not resolved_model
+                            or resolved_model in ("antigravity-unknown", "orchestrator")
+                            or resolved_model.startswith("gemini-pro-orchestrator")
+                        ) and u_sub_model and not u_sub_model.startswith("gemini-pro-orchestrator"):
+                            usage_model = u_sub_model
+                            usage_prio = max(m_prio, 2)
                         keys = []
                         for k in (11, 12, 7):
                             kid = _proto_text(usage, k)
@@ -1356,9 +3375,9 @@ def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[d
                         )
                         raw_candidates.append({
                             "cli": "Antigravity",
-                            "model": resolved_model or "antigravity-unknown",
+                            "model": usage_model,
                             "uiLabel": ui_lbl or None,
-                            "modelPriority": m_prio,
+                            "modelPriority": usage_prio,
                             "timestampMs": u_ts or traj_ts or fallback_ts,
                             "tsQuality": 2 if u_ts is not None else (1 if traj_ts is not None else 0),
                             "uncachedInputTokens": uncached,
@@ -1372,18 +3391,25 @@ def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[d
             else:
                 for e_idx, (idx, entry_model, entry_ts, usages) in enumerate(legacy_steps):
                     for u_idx, usage in enumerate(usages):
-                        uncached = _proto_num(usage, 1) + _proto_num(usage, 2)
+                        uncached = _proto_num(usage, 2)
                         c_read = _proto_num(usage, 5)
                         c_write = _proto_num(usage, 4)
                         u9 = _proto_num(usage, 9)
                         u10 = _proto_num(usage, 10)
                         u3 = _proto_num(usage, 3)
-                        text_out = u9 if (u9 > 0 or u10 > 0) else u3
-                        reason_out = u10 if (u9 > 0 or u10 > 0) else 0
+                        text_out = u10 if (u9 > 0 or u10 > 0) else u3
+                        reason_out = u9 if (u9 > 0 or u10 > 0) else 0
                         if uncached + c_read + c_write + text_out + reason_out <= 0:
                             continue
                         keys = [f"agy:{k}:{_proto_text(usage, k)}" for k in (11, 12, 7) if _proto_text(usage, k)]
                         model_id = _normalize_model_id(entry_model or "antigravity-unknown")
+                        u_enum_id = _proto_num(usage, 1)
+                        u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
+                        if (
+                            model_id in ("unknown", "antigravity-unknown", "orchestrator")
+                            or model_id.startswith("gemini-pro-orchestrator")
+                        ) and u_sub_model and not u_sub_model.startswith("gemini-pro-orchestrator"):
+                            model_id = u_sub_model
                         if model_id != "antigravity-unknown":
                             latest_model = model_id
                         raw_candidates.append({
@@ -1401,10 +3427,9 @@ def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[d
                             "reportedCostUsd": None,
                             "keys": keys or [f"agy:{db_path.stem}:step:{e_idx}:{u_idx}"],
                         })
-        finally:
-            con.close()
+        scan_ok = True
     except Exception:
-        pass
+        scan_ok = False
 
     key_to_group: dict[str, int] = {}
     groups: dict[int, dict[str, Any]] = {}
@@ -1452,6 +3477,11 @@ def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[d
         rec.pop("tsQuality", None)
         rec.pop("modelPriority", None)
         db_records.append(rec)
+    return db_records, est_used, max_ctx, latest_model, scan_ok
+
+
+def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[dict[str, Any]], int, int, str]:
+    db_records, est_used, max_ctx, latest_model, _ = _extract_agy_db_session_checked(db_path, fallback_ts)
     return db_records, est_used, max_ctx, latest_model
 
 
@@ -1478,21 +3508,20 @@ def _scan_antigravity(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -
     all_records: list[dict[str, Any]] = []
     for db_path in sorted(dbs):
         db_str = str(db_path)
-        try:
-            st = db_path.stat()
-            wal_path = Path(db_str + "-wal")
-            wal_st = wal_path.stat() if wal_path.exists() else None
-            fallback_ts = st.st_mtime_ns // 1_000_000
-            fp_sig = f"v4:{st.st_size}:{st.st_mtime_ns}:{wal_st.st_size if wal_st else 0}:{wal_st.st_mtime_ns if wal_st else 0}"
-        except OSError:
+        db_stat = _safe_stat_sig(db_path)
+        sig_body = _db_fingerprint_sig(db_path)
+        if db_stat is None or sig_body is None:
             continue
+        fallback_ts = db_stat[1] // 1_000_000
+        fp_sig = f"v4:{sig_body}"
 
         cached_entry = cache_files.get(db_str)
         if isinstance(cached_entry, dict) and cached_entry.get("fp_sig") == fp_sig and isinstance(cached_entry.get("records"), list):
             db_records = cached_entry["records"]
         else:
-            db_records, _, _, _ = _extract_agy_db_session(db_path, fallback_ts)
-            cache_files[db_str] = {"fp_sig": fp_sig, "records": db_records}
+            db_records, _, _, _, scan_ok = _extract_agy_db_session_checked(db_path, fallback_ts)
+            if scan_ok:
+                cache_files[db_str] = {"fp_sig": fp_sig, "records": db_records}
 
         for rec in db_records:
             if rec["timestampMs"] >= cutoff_ms:
@@ -1517,10 +3546,8 @@ def _load_daily_archive() -> dict[str, Any]:
 
 def _save_daily_archive(archive: dict[str, Any]) -> None:
     p = _cache_dir() / "usage-daily-archive-v1.json"
-    tmp = p.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(archive, ensure_ascii=False), "utf-8")
-        tmp.replace(p)
+        _atomic_write_text(p, json.dumps(archive, ensure_ascii=False))
     except Exception:
         pass
 
@@ -1600,43 +3627,161 @@ def _compute_activity_summary(tz_archive: dict[str, dict[str, Any]], today_start
     }
 
 
+def _reprice_archived_entry(entry: dict[str, Any], catalog: dict[str, Any]) -> None:
+    reprice_buckets = entry.get("repriceBuckets")
+    fixed_rep = entry.get("fixedReported")
+    if isinstance(reprice_buckets, dict) or isinstance(fixed_rep, dict):
+        fr = fixed_rep if isinstance(fixed_rep, dict) else {}
+        rep_cost = float(_safe_float(fr.get("costUsd")) or 0.0)
+        tot_cost = rep_cost
+        mod_cost = 0.0
+        unp_ev = 0
+        unp_tok = 0
+        cache_sav = float(_safe_float(fr.get("cacheSavingsUsd")) or 0.0)
+        fixed_cats = fr.get("categoryCostUsd") if isinstance(fr.get("categoryCostUsd"), dict) else {}
+        cat_cost = {
+            ck: float(_safe_float(fixed_cats.get(ck)) or 0.0)
+            for ck in ("input", "cacheRead", "cacheWrite", "output")
+        }
+        if isinstance(reprice_buckets, dict):
+            for rb in reprice_buckets.values():
+                if not isinstance(rb, dict):
+                    continue
+                b_events = max(1, _safe_int(rb.get("events")))
+                b_unc = _safe_int(rb.get("uncachedInputTokens"))
+                b_cr = _safe_int(rb.get("cachedInputTokens"))
+                b_cw = _safe_int(rb.get("cacheCreationTokens"))
+                b_out = _safe_int(rb.get("outputTokens"))
+                b_rea = _safe_int(rb.get("reasoningTokens"))
+                if b_unc + b_cr + b_cw + b_out + b_rea <= 0:
+                    continue
+                priced = _price_record(
+                    {
+                        "model": entry.get("model"),
+                        "speed": rb.get("speed"),
+                        "uncachedInputTokens": b_unc,
+                        "cachedInputTokens": b_cr,
+                        "cacheCreationTokens": b_cw,
+                        "outputTokens": b_out,
+                        "reasoningTokens": b_rea,
+                    },
+                    catalog=catalog,
+                    event_count=b_events,
+                )
+                tot_cost += priced["costUsd"]
+                cache_sav += priced["cacheSavingsUsd"]
+                for ck in ("input", "cacheRead", "cacheWrite", "output"):
+                    cat_cost[ck] += priced["categoryCostUsd"][ck]
+                cost_src = priced["costSource"]
+                if cost_src == "providerReported":
+                    rep_cost += priced["costUsd"]
+                elif cost_src == "modelPriced":
+                    mod_cost += priced["costUsd"]
+                else:
+                    unp_ev += _safe_int(rb.get("events"))
+                    unp_tok += priced["totalTokens"]
+        entry["costUsd"] = tot_cost
+        entry["providerReportedCostUsd"] = rep_cost
+        entry["modelPricedCostUsd"] = mod_cost
+        entry["unpricedEvents"] = unp_ev
+        entry["unpricedTokens"] = unp_tok
+        entry["cacheSavingsUsd"] = cache_sav
+        entry["categoryCostUsd"] = cat_cost
+        return
+
+    rep_cost = float(_safe_float(entry.get("providerReportedCostUsd")) or 0.0)
+    if rep_cost > 0.0:
+        return
+    events = max(1, _safe_int(entry.get("events")))
+    uncached = _safe_int(entry.get("uncachedInputTokens"))
+    cached = _safe_int(entry.get("cachedInputTokens"))
+    cache_write = _safe_int(entry.get("cacheCreationTokens"))
+    out_tok = _safe_int(entry.get("outputTokens"))
+    reason_tok = _safe_int(entry.get("reasoningTokens"))
+    tot_tok = uncached + cached + cache_write + out_tok + reason_tok
+    if tot_tok <= 0:
+        return
+    priced = _price_record(
+        {
+            "model": entry.get("model"),
+            "uncachedInputTokens": uncached,
+            "cachedInputTokens": cached,
+            "cacheCreationTokens": cache_write,
+            "outputTokens": out_tok,
+            "reasoningTokens": reason_tok,
+        },
+        catalog=catalog,
+        event_count=events,
+    )
+    cost_usd = priced["costUsd"]
+    cost_src = priced["costSource"]
+    entry["totalTokens"] = tot_tok
+    entry["costUsd"] = cost_usd
+    entry["cacheSavingsUsd"] = priced["cacheSavingsUsd"]
+    entry["categoryCostUsd"] = dict(priced["categoryCostUsd"])
+    if cost_src == "providerReported":
+        entry["providerReportedCostUsd"] = cost_usd
+        entry["modelPricedCostUsd"] = 0.0
+        entry["unpricedEvents"] = 0
+        entry["unpricedTokens"] = 0
+    elif cost_src == "modelPriced":
+        entry["providerReportedCostUsd"] = 0.0
+        entry["modelPricedCostUsd"] = cost_usd
+        entry["unpricedEvents"] = 0
+        entry["unpricedTokens"] = 0
+    else:
+        entry["providerReportedCostUsd"] = 0.0
+        entry["modelPricedCostUsd"] = 0.0
+        entry["unpricedEvents"] = events
+        entry["unpricedTokens"] = tot_tok
+
+
 def collect_summary(
     days: int = 30,
     tz_name: str = "UTC",
     refresh: bool = False,
     period: str | None = None,
+    sync_pricing: bool = True,
 ) -> dict[str, Any]:
     now_dt = dt.datetime.now(dt.timezone.utc)
     now_ms = int(now_dt.timestamp() * 1000)
 
-    resolved_tz_key = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else "LOCAL"
+    clean_tz_name = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else ""
+    resolved_tz_key = clean_tz_name or "LOCAL"
     try:
         from zoneinfo import ZoneInfo
-        tz = ZoneInfo(tz_name) if tz_name else dt.datetime.now().astimezone().tzinfo
+        tz = ZoneInfo(clean_tz_name) if clean_tz_name else (dt.datetime.now().astimezone().tzinfo or dt.timezone.utc)
     except Exception:
+        resolved_tz_key = "LOCAL"
         tz = dt.datetime.now().astimezone().tzinfo or dt.timezone.utc
 
     local_now = now_dt.astimezone(tz)
-    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = dt.datetime.combine(local_now.date(), dt.time.min, tzinfo=tz)
     today_key = today_start.strftime("%Y-%m-%d")
-    month_start = today_start.replace(day=1)
+    month_start = dt.datetime.combine(local_now.date().replace(day=1), dt.time.min, tzinfo=tz)
     month_prefix = today_start.strftime("%Y-%m-")
 
     norm_period = period.strip().lower() if isinstance(period, str) and period.strip() else None
     if norm_period not in ("today", "week", "month", "all"):
         norm_period = None
 
+    hourly_start_utc: dt.datetime | None = None
+    hourly_count = 0
     if norm_period == "today":
         effective_period = "today"
         effective_days = 1
         hourly = True
         start_dt = today_start
-        period_cutoff_ms = int(start_dt.timestamp() * 1000)
+        next_day_start = dt.datetime.combine(today_start.date() + dt.timedelta(days=1), dt.time.min, tzinfo=tz)
+        hourly_start_utc = start_dt.astimezone(dt.timezone.utc)
+        next_day_utc = next_day_start.astimezone(dt.timezone.utc)
+        hourly_count = max(1, int(round((next_day_utc - hourly_start_utc).total_seconds() / 3600.0)))
+        period_cutoff_ms = int(hourly_start_utc.timestamp() * 1000)
     elif norm_period == "week":
         effective_period = "week"
         effective_days = 7
         hourly = False
-        start_dt = today_start - dt.timedelta(days=today_start.weekday())
+        start_dt = dt.datetime.combine(today_start.date() - dt.timedelta(days=today_start.weekday()), dt.time.min, tzinfo=tz)
         period_cutoff_ms = int(start_dt.timestamp() * 1000)
     elif norm_period == "month":
         effective_period = "month"
@@ -1657,24 +3802,45 @@ def collect_summary(
         hourly = effective_days == 1
         if hourly:
             cur_hour = local_now.replace(minute=0, second=0, microsecond=0)
-            start_dt = cur_hour - dt.timedelta(hours=23)
+            cur_hour_utc = cur_hour.astimezone(dt.timezone.utc)
+            hourly_start_utc = cur_hour_utc - dt.timedelta(hours=23)
+            hourly_count = 24
+            start_dt = hourly_start_utc.astimezone(tz)
+            period_cutoff_ms = int(hourly_start_utc.timestamp() * 1000)
         else:
-            start_dt = today_start - dt.timedelta(days=effective_days - 1)
-        period_cutoff_ms = int(start_dt.timestamp() * 1000)
+            start_dt = dt.datetime.combine(today_start.date() - dt.timedelta(days=effective_days - 1), dt.time.min, tzinfo=tz)
+            period_cutoff_ms = int(start_dt.timestamp() * 1000)
+
+    pricing_catalog = _sync_pricing_catalog(force=refresh) if sync_pricing else _get_pricing_catalog()
+    pricing_digest = str(pricing_catalog.get("digest") or "")
 
     archive = _load_daily_archive()
     seeded_tzs: list[str] = archive.setdefault("seededTimezones", [])
-    tz_archive: dict[str, dict[str, Any]] = archive.setdefault("byTz", {}).setdefault(resolved_tz_key, {})
+    by_tz_all: dict[str, Any] = archive.setdefault("byTz", {})
+    tz_archive: dict[str, dict[str, Any]] = by_tz_all.setdefault(resolved_tz_key, {})
+    pricing_changed = bool(pricing_digest) and archive.get("pricingDigest") != pricing_digest
+    scanner_changed = archive.get("scannerRev") != SCANNER_REV
+
+    if pricing_changed:
+        for tz_days in by_tz_all.values():
+            if not isinstance(tz_days, dict):
+                continue
+            for day_models in tz_days.values():
+                if not isinstance(day_models, dict):
+                    continue
+                for arch_entry in day_models.values():
+                    if isinstance(arch_entry, dict):
+                        _reprice_archived_entry(arch_entry, pricing_catalog)
 
     rolling_30d_start = today_start - dt.timedelta(days=29)
     rolling_30d_start_key = rolling_30d_start.strftime("%Y-%m-%d")
     rolling_30d_cutoff_ms = int(rolling_30d_start.timestamp() * 1000)
-    if resolved_tz_key not in seeded_tzs or norm_period == "all" or refresh:
+    if resolved_tz_key not in seeded_tzs or norm_period == "all" or refresh or pricing_changed or scanner_changed:
         scan_cutoff_ms = 0
     else:
         scan_cutoff_ms = min(period_cutoff_ms, rolling_30d_cutoff_ms)
 
-    scan_cache = {"version": CACHE_VERSION, "files": {}} if refresh else _load_scan_cache()
+    scan_cache = {"version": CACHE_VERSION, "files": {}} if (refresh or scanner_changed) else _load_scan_cache()
     cache_files = scan_cache.setdefault("files", {})
     home = Path.home()
 
@@ -1684,7 +3850,10 @@ def collect_summary(
     records.extend(_scan_antigravity(home, cache_files, scan_cutoff_ms))
     records.extend(_scan_opencode(home, cache_files, scan_cutoff_ms))
     records.extend(_scan_pi(home, cache_files, scan_cutoff_ms))
+    records.extend(_scan_deepseek(home, cache_files, scan_cutoff_ms))
+    records.extend(_scan_kimi(home, cache_files, scan_cutoff_ms))
     records.extend(_scan_grok(home, cache_files, scan_cutoff_ms))
+    records.extend(_scan_qoder(home, cache_files, scan_cutoff_ms))
     records.extend(_scan_codebuddy(home, cache_files, scan_cutoff_ms))
 
     _save_scan_cache(scan_cache)
@@ -1702,7 +3871,7 @@ def collect_summary(
         ts_ms = rec["timestampMs"]
         if ts_ms < scan_cutoff_ms or ts_ms > now_ms + 3_600_000:
             continue
-        priced = _price_record(rec)
+        priced = _price_record(rec, catalog=pricing_catalog)
         tot_tok = priced["totalTokens"]
         if tot_tok <= 0:
             continue
@@ -1736,6 +3905,14 @@ def collect_summary(
                 "cacheSavingsUsd": 0.0,
                 "categoryCostUsd": {"input": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.0},
                 "uiLabels": [],
+                "fixedReported": {
+                    "events": 0,
+                    "tokens": 0,
+                    "costUsd": 0.0,
+                    "cacheSavingsUsd": 0.0,
+                    "categoryCostUsd": {"input": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.0},
+                },
+                "repriceBuckets": {},
             },
         )
         cost_usd = priced["costUsd"]
@@ -1753,11 +3930,49 @@ def collect_summary(
             d_entry["categoryCostUsd"][ck] += priced["categoryCostUsd"][ck]
         if cost_src == "providerReported":
             d_entry["providerReportedCostUsd"] += cost_usd
-        elif cost_src == "modelPriced":
-            d_entry["modelPricedCostUsd"] += cost_usd
+            fr = d_entry["fixedReported"]
+            fr["events"] += 1
+            fr["tokens"] += tot_tok
+            fr["costUsd"] += cost_usd
+            fr["cacheSavingsUsd"] += priced["cacheSavingsUsd"]
+            for ck in ("input", "cacheRead", "cacheWrite", "output"):
+                fr["categoryCostUsd"][ck] += priced["categoryCostUsd"][ck]
         else:
-            d_entry["unpricedEvents"] += 1
-            d_entry["unpricedTokens"] += tot_tok
+            if cost_src == "modelPriced":
+                d_entry["modelPricedCostUsd"] += cost_usd
+            else:
+                d_entry["unpricedEvents"] += 1
+                d_entry["unpricedTokens"] += tot_tok
+            prompt_tok = (
+                rec["uncachedInputTokens"]
+                + rec["cachedInputTokens"]
+                + rec["cacheCreationTokens"]
+            )
+            tier_band = (
+                0 if prompt_tok <= 128_000 else (1 if prompt_tok <= 200_000 else (2 if prompt_tok <= 272_000 else 3))
+            )
+            rate_obj = _lookup_model_rate_in_catalog(model, pricing_catalog)
+            cat_above = 1 if (rate_obj is not None and rate_obj[4] is not None and prompt_tok > rate_obj[4][0]) else 0
+            speed_str = str(rec.get("speed") or "")
+            rb_key = f"{speed_str}|{tier_band}|{cat_above}"
+            rb = d_entry["repriceBuckets"].setdefault(
+                rb_key,
+                {
+                    "speed": speed_str or None,
+                    "events": 0,
+                    "uncachedInputTokens": 0,
+                    "cachedInputTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "outputTokens": 0,
+                    "reasoningTokens": 0,
+                },
+            )
+            rb["events"] += 1
+            rb["uncachedInputTokens"] += rec["uncachedInputTokens"]
+            rb["cachedInputTokens"] += rec["cachedInputTokens"]
+            rb["cacheCreationTokens"] += rec["cacheCreationTokens"]
+            rb["outputTokens"] += rec["outputTokens"]
+            rb["reasoningTokens"] += rec["reasoningTokens"]
         ui_lbl = rec.get("uiLabel")
         if isinstance(ui_lbl, str) and ui_lbl and ui_lbl not in d_entry["uiLabels"] and len(d_entry["uiLabels"]) < 4:
             d_entry["uiLabels"].append(ui_lbl)
@@ -1774,6 +3989,9 @@ def collect_summary(
         tz_archive.pop(dk, None)
     if resolved_tz_key not in seeded_tzs:
         seeded_tzs.append(resolved_tz_key)
+    if pricing_digest:
+        archive["pricingDigest"] = pricing_digest
+    archive["scannerRev"] = SCANNER_REV
     _save_daily_archive(archive)
 
     rolling_30d_cost_by_cli: dict[str, float] = {}
@@ -1793,9 +4011,10 @@ def collect_summary(
     bucket_index: dict[str, dict[str, Any]] = {}
     bucket_granularity = "hour" if hourly else "day"
 
-    if hourly:
-        for i in range(24):
-            b_dt = start_dt + dt.timedelta(hours=i)
+    hourly_start_epoch_sec = int(hourly_start_utc.timestamp()) if hourly_start_utc is not None else 0
+    if hourly and hourly_start_utc is not None:
+        for i in range(hourly_count):
+            b_dt = (hourly_start_utc + dt.timedelta(hours=i)).astimezone(tz)
             key = b_dt.strftime("%Y-%m-%dT%H:00")
             entry = {
                 "date": key,
@@ -1805,7 +4024,6 @@ def collect_summary(
                 "byCli": {},
             }
             buckets.append(entry)
-            bucket_index[key] = entry
     elif effective_period == "all":
         active_arch_keys = sorted(k for k, v in tz_archive.items() if k <= today_key and v)
         earliest_key = active_arch_keys[0] if active_arch_keys else today_key
@@ -1997,8 +4215,8 @@ def collect_summary(
             ts_ms = rec["timestampMs"]
             if ts_ms < period_cutoff_ms or ts_ms > now_ms + 3_600_000:
                 continue
-            b_key = rec_dt.strftime("%Y-%m-%dT%H:00")
-            bucket = bucket_index.get(b_key)
+            slot = (ts_ms // 1000 - hourly_start_epoch_sec) // 3600
+            bucket = buckets[slot] if 0 <= slot < len(buckets) else None
             if bucket is None:
                 continue
             tot_tok = priced["totalTokens"]
@@ -2041,8 +4259,8 @@ def collect_summary(
             ts_ms = rec["timestampMs"]
             if ts_ms < period_cutoff_ms or ts_ms > now_ms + 3_600_000:
                 continue
-            b_key = rec_dt.strftime("%Y-%m-%dT%H:00")
-            bucket = bucket_index.get(b_key)
+            slot = (ts_ms // 1000 - hourly_start_epoch_sec) // 3600
+            bucket = buckets[slot] if 0 <= slot < len(buckets) else None
             if bucket is None:
                 continue
             cost_usd = priced["costUsd"]
@@ -2134,6 +4352,7 @@ def collect_summary(
         "byModel": sorted_models,
         "rolling30dCostByCli": rolling_30d_cost_by_cli,
         "activity": activity,
+        "pricingSource": _pricing_source_metadata(pricing_catalog),
     }
 
 def _iso_from_epoch_sec(sec: Any) -> str | None:
@@ -2251,7 +4470,7 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": "未检测到 Codex OAuth 登录凭证",
+            "message": _tr("未检测到 Codex OAuth 登录凭证", "Codex OAuth credentials not detected"),
             "windows": [],
             "credits": None,
         }
@@ -2274,11 +4493,13 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                     if not isinstance(rl, dict):
                         continue
                     windows = []
-                    for key, default_label, default_mins in (("primary", "5h 窗口", 300), ("secondary", "7d 窗口", 10080)):
+                    lbl_5h = _tr("5h 窗口", "5h window")
+                    lbl_7d = _tr("7d 窗口", "7d window")
+                    for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
                         slot = rl.get(key)
                         if isinstance(slot, dict) and _safe_float(slot.get("used_percent")) is not None:
                             mins = _safe_int(slot.get("window_minutes")) or default_mins
-                            lbl = "5h 窗口" if mins == 300 else ("7d 窗口" if mins == 10080 else default_label)
+                            lbl = lbl_5h if mins == 300 else (lbl_7d if mins == 10080 else default_label)
                             windows.append(
                                 _make_window(
                                     key,
@@ -2333,17 +4554,22 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                 for line in out.splitlines():
                     if not line.strip():
                         continue
-                    msg = json.loads(line)
-                    if msg.get("id") == 2 and isinstance(msg.get("result"), dict):
+                    try:
+                        msg = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(msg, dict) and msg.get("id") == 2 and isinstance(msg.get("result"), dict):
                         res = msg["result"]
                         rl = res.get("rateLimits") if isinstance(res.get("rateLimits"), dict) else res
                         windows = []
-                        for key, default_label, default_mins in (("primary", "5h 窗口", 300), ("secondary", "7d 窗口", 10080)):
+                        lbl_5h = _tr("5h 窗口", "5h window")
+                        lbl_7d = _tr("7d 窗口", "7d window")
+                        for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
                             slot = rl.get(key)
                             if isinstance(slot, dict) and _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) is not None:
                                 used_p = _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) or 0.0
                                 mins = _safe_int(slot.get("windowDurationMins") or slot.get("window_minutes")) or default_mins
-                                lbl = "5h 窗口" if mins == 300 else ("7d 窗口" if mins == 10080 else default_label)
+                                lbl = lbl_5h if mins == 300 else (lbl_7d if mins == 10080 else default_label)
                                 resets = slot.get("resetsAt") or slot.get("resets_at")
                                 resets_iso = resets if isinstance(resets, str) else _iso_from_epoch_sec(resets)
                                 windows.append(_make_window(key, lbl, used_p, resets_iso, mins * 60_000))
@@ -2360,6 +4586,12 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                                 "credits": None,
                             }
             finally:
+                for pipe in (proc.stdin, proc.stdout):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
@@ -2384,7 +4616,7 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
         "updatedAt": now_iso,
         "source": "unavailable",
         "status": "error",
-        "message": "无法读取 Codex OAuth 实时限额，请检查网络或重新登录",
+        "message": _tr("无法读取 Codex OAuth 实时限额，请检查网络或重新登录", "Unable to fetch live Codex OAuth limits; check network or sign in again"),
         "windows": [],
         "credits": None,
     }
@@ -2426,7 +4658,7 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": "未配置 Claude.ai OAuth 凭证（API Key 模式无订阅窗口限额）",
+            "message": _tr("未配置 Claude.ai OAuth 凭证（API Key 模式无订阅窗口限额）", "Claude.ai OAuth credentials not configured (API key mode has no subscription window limits)"),
             "windows": [],
             "credits": None,
         }
@@ -2438,7 +4670,7 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": "Claude OAuth 令牌已失效，请在 Claude Code 中重新登录",
+            "message": _tr("Claude OAuth 令牌已失效，请在 Claude Code 中重新登录", "Claude OAuth token expired; sign in again in Claude Code"),
             "windows": [],
             "credits": None,
         }
@@ -2454,11 +4686,11 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             },
         )
         with urllib.request.urlopen(req, timeout=3.5) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+            body = json.loads(_read_response_bytes(resp).decode("utf-8"))
         windows = []
         mapping = [
-            ("five_hour", "5h 窗口", 5 * 3_600_000),
-            ("seven_day", "7d 总窗口", 7 * 86_400_000),
+            ("five_hour", _tr("5h 窗口", "5h window"), 5 * 3_600_000),
+            ("seven_day", _tr("7d 总窗口", "7d overall"), 7 * 86_400_000),
             ("seven_day_sonnet", "7d Sonnet", 7 * 86_400_000),
             ("seven_day_opus", "7d Opus", 7 * 86_400_000),
         ]
@@ -2481,7 +4713,7 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             limit_c = _safe_float(extra.get("monthly_limit"))
             if used_c is not None:
                 credits = {
-                    "label": "额外用量额度",
+                    "label": _tr("额外用量额度", "Extra usage credits"),
                     "used": round(used_c / 100.0, 2),
                     "limit": round(limit_c / 100.0, 2) if limit_c else None,
                     "remaining": round(max(0.0, (limit_c - used_c) / 100.0), 2) if limit_c else None,
@@ -2504,7 +4736,7 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": f"读取限额失败：{type(exc).__name__}",
+            "message": _tr(f"读取限额失败：{type(exc).__name__}", f"Failed to read limits: {type(exc).__name__}"),
             "windows": [],
             "credits": None,
         }
@@ -2586,12 +4818,12 @@ def _parse_antigravity_summary_windows(
                 else ((5 * 3_600_000) if win_type == "5h" else None)
             )
             win_lbl = (
-                "7d 窗口"
+                _tr("7d 窗口", "7d window")
                 if win_type == "weekly"
                 else (
-                    "5h 窗口"
+                    _tr("5h 窗口", "5h window")
                     if win_type == "5h"
-                    else (str(b.get("displayName") or "").strip() or "配额")
+                    else (str(b.get("displayName") or "").strip() or _tr("配额", "Quota"))
                 )
             )
             used_pct = max(0.0, min(100.0, (1.0 - rem_frac) * 100.0))
@@ -2633,8 +4865,8 @@ def _parse_antigravity_model_windows(payload: dict[str, Any]) -> list[dict[str, 
             _safe_float(m_info["weeklyQuotaInfo"].get("remainingFraction")) is not None
         )
         for suffix, q_key, dur_ms, s_lbl in (
-            ("primary", "quotaInfo", None, f"{grp} · 主窗口" if has_weekly else grp),
-            ("weekly", "weeklyQuotaInfo", 7 * 86_400_000, f"{grp} · 7d 窗口"),
+            ("primary", "quotaInfo", None, f"{grp} · {_tr('主窗口', 'Primary')}" if has_weekly else grp),
+            ("weekly", "weeklyQuotaInfo", 7 * 86_400_000, f"{grp} · {_tr('7d 窗口', '7d window')}"),
         ):
             q_info = m_info.get(q_key)
             if not isinstance(q_info, dict):
@@ -2708,7 +4940,7 @@ def _refresh_antigravity_access_token(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         at = payload.get("access_token")
         return at.strip() if isinstance(at, str) and at.strip() else None
     except Exception:
@@ -2784,7 +5016,7 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": "未检测到 Antigravity OAuth 登录凭证",
+            "message": _tr("未检测到 Antigravity OAuth 登录凭证", "Antigravity OAuth credentials not detected"),
             "windows": [],
             "credits": None,
         }
@@ -2818,7 +5050,7 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": "OAuth 令牌刷新失败，可在 Antigravity 会话中重新登录",
+            "message": _tr("OAuth 令牌刷新失败，可在 Antigravity 会话中重新登录", "OAuth token refresh failed; sign in again in an Antigravity session"),
             "windows": [],
             "credits": None,
         }
@@ -2834,37 +5066,33 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
         if max_wait <= 0.2:
             return []
         req_timeout = max(0.5, min(2.8, max_wait))
-        host_pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(ANTIGRAVITY_QUOTA_URLS))
 
         def _fetch_one(host: str) -> list[dict[str, Any]] | None:
+            safe_url = _validate_http_url(f"{host}{endpoint_suffix}")
+            if safe_url is None:
+                return None
             req_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
             req = urllib.request.Request(
-                f"{host}{endpoint_suffix}",
+                safe_url,
                 data=body_bytes,
                 headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=req_timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                data = json.loads(_read_response_bytes(resp).decode("utf-8"))
             if isinstance(data, dict):
                 return parse_fn(data, req_ms)
             return None
 
-        futs = [host_pool.submit(_fetch_one, h) for h in ANTIGRAVITY_QUOTA_URLS]
+        task_res = _run_daemon_tasks(
+            {h: (lambda host=h: _fetch_one(host)) for h in ANTIGRAVITY_QUOTA_URLS},
+            timeout=max_wait,
+        )
         collected: list[list[dict[str, Any]]] = []
-        try:
-            done, not_done = concurrent.futures.wait(futs, timeout=max_wait)
-            for f in not_done:
-                f.cancel()
-            for f in done:
-                try:
-                    res = f.result()
-                    if res is not None:
-                        collected.append(res)
-                except Exception:
-                    continue
-        finally:
-            host_pool.shutdown(wait=False, cancel_futures=True)
+        for h in ANTIGRAVITY_QUOTA_URLS:
+            item = task_res.get(h)
+            if item is not None and item[0] and item[1] is not None:
+                collected.append(item[1])
         return collected
 
     summary_host_windows = _query_hosts_concurrently(
@@ -2901,13 +5129,114 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
         "updatedAt": now_iso,
         "source": "unavailable",
         "status": "error",
-        "message": "OAuth 令牌已过期或配额端点暂不可达，可在 Antigravity 会话中刷新登录",
+        "message": _tr("OAuth 令牌已过期或配额端点暂不可达，可在 Antigravity 会话中刷新登录", "OAuth token expired or quota endpoint unreachable; refresh sign-in in an Antigravity session"),
         "windows": [],
         "credits": None,
     }
 
-def _extract_grok_oauth(home: Path) -> tuple[str, str | None] | None:
-    auth_file = home / ".grok" / "auth.json"
+class _GrpcStatusError(Exception):
+    def __init__(self, status_code: int, message: str = "") -> None:
+        super().__init__(f"gRPC {status_code}: {message}")
+        self.status_code = status_code
+        self.grpc_message = message
+
+
+def _decode_grok_grpc_web_billing(raw_bytes: bytes) -> dict[str, Any]:
+    pos = 0
+    n = len(raw_bytes)
+    payload_parts: list[bytes] = []
+    trailers: dict[str, str] = {}
+    while pos + 5 <= n:
+        flags = raw_bytes[pos]
+        ln = int.from_bytes(raw_bytes[pos + 1 : pos + 5], "big")
+        pos += 5
+        if pos + ln > n:
+            raise ValueError("Truncated gRPC-Web frame")
+        chunk = raw_bytes[pos : pos + ln]
+        pos += ln
+        if flags & 0x80:
+            for line in chunk.decode("utf-8", errors="replace").splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    trailers[k.strip().lower()] = v.strip()
+        else:
+            payload_parts.append(chunk)
+
+    grpc_status = trailers.get("grpc-status")
+    if grpc_status is not None and grpc_status != "0":
+        code_int = int(grpc_status) if grpc_status.lstrip("-").isdigit() else -1
+        msg = urllib.parse.unquote(trailers.get("grpc-message", ""))
+        raise _GrpcStatusError(code_int, msg)
+
+    raw_payload = b"".join(payload_parts)
+    top = _proto_fields(raw_payload)
+    cfg_bytes = _proto_bytes(top, 1) or raw_payload
+    cfg = _proto_fields(cfg_bytes)
+
+    used_pct: float | None = None
+    for fno, wt, val in _iter_proto_fields(cfg_bytes):
+        if fno != 1 or not isinstance(val, bytes):
+            continue
+        if wt == 5:
+            cand = struct.unpack("<f", val)[0]
+            if math.isfinite(cand) and 0.0 <= cand <= 100.0:
+                used_pct = cand
+                break
+        elif wt == 1:
+            cand = struct.unpack("<d", val)[0]
+            if math.isfinite(cand) and 0.0 <= cand <= 100.0:
+                used_pct = cand
+                break
+
+    start_ms = _proto_timestamp(_proto_nested(cfg, 4))
+    end_ms = _proto_timestamp(_proto_nested(cfg, 5))
+    period_msg = _proto_nested(cfg, 8)
+    period_enum = _proto_num(period_msg, 1)
+    if start_ms is None and period_msg:
+        start_ms = _proto_timestamp(_proto_nested(period_msg, 2))
+    if end_ms is None and period_msg:
+        end_ms = _proto_timestamp(_proto_nested(period_msg, 3))
+
+    if used_pct is None and (start_ms is not None or end_ms is not None or period_enum in (2, 3)):
+        used_pct = 0.0
+
+    windows: list[dict[str, Any]] = []
+    if used_pct is not None:
+        span_days = ((end_ms - start_ms) / 86_400_000.0) if (start_ms and end_ms and end_ms > start_ms) else None
+        if period_enum == 2 or (span_days is not None and 4.0 <= span_days <= 12.0):
+            dur_ms: int | None = 7 * 86_400_000
+            lbl = _tr("7d 订阅额度", "7d subscription")
+        elif period_enum == 3 or (span_days is not None and 20.0 <= span_days <= 45.0):
+            dur_ms = 30 * 86_400_000
+            lbl = _tr("月度订阅额度", "Monthly subscription")
+        else:
+            dur_ms = int(end_ms - start_ms) if (start_ms and end_ms and end_ms > start_ms) else None
+            lbl = _tr("订阅额度", "Subscription")
+        end_iso = _iso_from_epoch_sec(end_ms / 1000.0) if end_ms else None
+        windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
+
+    return {
+        "windows": windows,
+        "credits": None,
+        "plan": "SuperGrok" if windows else "xAI",
+    }
+
+
+def _extract_grok_oauth(home: Path) -> dict[str, Any] | None:
+    env_token = (os.environ.get("GROK_BEARER_TOKEN") or "").strip()
+    if env_token:
+        return {
+            "token": env_token,
+            "email": None,
+            "refreshToken": "",
+            "expiresAt": None,
+            "oidcIssuer": "https://auth.x.ai",
+            "oidcClientId": "",
+            "authFile": None,
+            "scopeKey": None,
+        }
+    grok_home = Path(os.environ.get("GROK_HOME") or str(home / ".grok")).expanduser()
+    auth_file = grok_home / "auth.json"
     if not auth_file.is_file():
         return None
     try:
@@ -2916,46 +5245,149 @@ def _extract_grok_oauth(home: Path) -> tuple[str, str | None] | None:
         return None
     if not isinstance(raw, dict):
         return None
-    cred = (
-        raw.get("https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828")
-        or raw.get("https://accounts.x.ai/sign-in")
-    )
-    if not isinstance(cred, dict):
-        for v in raw.values():
+
+    scope_key: str | None = None
+    cred: dict[str, Any] | None = None
+    for preferred in (
+        "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828",
+        "https://accounts.x.ai/sign-in",
+    ):
+        cand = raw.get(preferred)
+        if isinstance(cand, dict):
+            scope_key = preferred
+            cred = cand
+            break
+    if cred is None:
+        for k, v in raw.items():
             if isinstance(v, dict) and (v.get("key") or v.get("access_token") or v.get("refresh_token")):
+                scope_key = str(k)
                 cred = v
                 break
-    if not isinstance(cred, dict):
+    if cred is None:
         return None
+
     auth_mode = str(cred.get("auth_mode") or "").strip().lower()
     if auth_mode in ("api_key", "apikey"):
         return None
     email = str(cred.get("email") or "").strip() or None
     token = str(cred.get("key") or cred.get("access_token") or "").strip()
-    has_refresh = isinstance(cred.get("refresh_token"), str) and bool(cred.get("refresh_token").strip())
+    ref = str(cred.get("refresh_token") or "").strip()
     if not token:
-        if has_refresh or auth_mode in ("oidc", "oauth"):
-            return ("", email)
+        if not ref and auth_mode not in ("oidc", "oauth"):
+            return None
+    elif token.startswith("xai-") and not ref and auth_mode not in ("oidc", "oauth"):
         return None
-    if token.startswith("xai-") and not has_refresh and auth_mode not in ("oidc", "oauth"):
+
+    exp_ms = _parse_ts_ms(cred.get("expires_at"))
+    exp_sec = (exp_ms / 1000.0) if exp_ms is not None else _safe_float(cred.get("expires_at"))
+    issuer = str(cred.get("oidc_issuer") or "https://auth.x.ai").strip().rstrip("/")
+    client_id = str(cred.get("oidc_client_id") or "").strip()
+    if not client_id and scope_key and "::" in scope_key:
+        client_id = scope_key.split("::", 1)[1].strip()
+
+    return {
+        "token": token,
+        "email": email,
+        "refreshToken": ref,
+        "expiresAt": exp_sec,
+        "oidcIssuer": issuer,
+        "oidcClientId": client_id,
+        "authFile": auth_file,
+        "scopeKey": scope_key,
+    }
+
+
+def _refresh_grok_access_token(auth: dict[str, Any]) -> str | None:
+    ref = str(auth.get("refreshToken") or "").strip()
+    client_id = str(auth.get("oidcClientId") or "").strip()
+    if not ref or not client_id:
         return None
-    return (token, email)
+    safe_issuer = _validate_http_url(auth.get("oidcIssuer") or "https://auth.x.ai")
+    if safe_issuer is None:
+        return None
+    issuer = safe_issuer.rstrip("/")
+    body_bytes = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": ref,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{issuer}/oauth2/token",
+        data=body_bytes,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": "Grok Build",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4.5) as resp:
+            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    new_tok = str(payload.get("access_token") or "").strip()
+    if not new_tok:
+        return None
+    new_ref = str(payload.get("refresh_token") or ref).strip()
+    exp_in = _safe_float(payload.get("expires_in")) or 3600.0
+    new_exp = time.time() + exp_in
+
+    auth_file = auth.get("authFile")
+    scope_key = auth.get("scopeKey")
+    if isinstance(auth_file, Path):
+        if not isinstance(scope_key, str) or not auth_file.is_file():
+            return None
+        try:
+            raw = json.loads(auth_file.read_text("utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
+                return None
+            entry = raw[scope_key]
+            if "access_token" in entry and "key" not in entry:
+                entry["access_token"] = new_tok
+            else:
+                entry["key"] = new_tok
+            entry["refresh_token"] = new_ref
+            old_exp = entry.get("expires_at")
+            if isinstance(old_exp, str) and "-" in old_exp:
+                entry["expires_at"] = dt.datetime.fromtimestamp(new_exp, tz=dt.timezone.utc).isoformat()
+            else:
+                entry["expires_at"] = int(new_exp)
+            _atomic_write_text(auth_file, json.dumps(raw, ensure_ascii=False, indent=2), mode=0o600)
+        except Exception:
+            return None
+    auth["token"] = new_tok
+    auth["refreshToken"] = new_ref
+    auth["expiresAt"] = new_exp
+    return new_tok
+
 
 def _probe_grok_limits(home: Path) -> dict[str, Any]:
+    now_sec = time.time()
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
-    extracted = _extract_grok_oauth(home)
-    if extracted is None:
+    auth = _extract_grok_oauth(home)
+    if auth is None:
         return {
             "cli": "Grok Build",
             "planType": None,
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": "未检测到 Grok OAuth 登录凭证",
+            "message": _tr("未检测到 Grok OAuth 登录凭证", "Grok OAuth credentials not detected"),
             "windows": [],
             "credits": None,
         }
-    token, email = extracted
+    token = str(auth.get("token") or "").strip()
+    email = auth.get("email")
+    exp_at = _safe_float(auth.get("expiresAt"))
+    refreshed_once = False
+    if (not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec + 60)) and auth.get("refreshToken"):
+        refreshed = _refresh_grok_access_token(auth)
+        if refreshed:
+            token = refreshed
+            refreshed_once = True
     if not token:
         return {
             "cli": "Grok Build",
@@ -2963,42 +5395,77 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": "Grok OAuth 令牌已失效，请在 Grok Build 中重新登录",
+            "message": _tr("Grok OAuth 令牌已失效，请在 Grok Build 中重新登录", "Grok OAuth token expired; sign in again in Grok Build"),
             "windows": [],
             "credits": None,
         }
-    try:
+
+    def _fetch_rest(bearer: str) -> dict[str, Any]:
         req = urllib.request.Request(
             "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {bearer}",
                 "Accept": "application/json",
                 "User-Agent": "grok-cli/1.0",
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=3.5) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as he:
-            err_txt = ""
-            try:
-                err_txt = he.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            if he.code == 403 and "WKE=privacy-mode:" in err_txt:
-                return {
-                    "cli": "Grok Build",
-                    "planType": email or "xAI",
-                    "updatedAt": now_iso,
-                    "source": "unavailable",
-                    "status": "error",
-                    "message": "请在 xAI 账户设置中开启 Privacy Mode 以查看 Grok 限额",
-                    "windows": [],
-                    "credits": None,
-                }
-            raise
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            return json.loads(_read_response_bytes(resp).decode("utf-8"))
 
-        windows = []
+    def _fetch_grpc_web(bearer: str) -> dict[str, Any]:
+        req = urllib.request.Request(
+            "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
+            data=b"\x00\x00\x00\x00\x00",
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {bearer}",
+                "X-XAI-Token-Auth": "xai-grok-cli",
+                "Accept": "*/*",
+                "Content-Type": "application/grpc-web+proto",
+                "User-Agent": "Grok Build",
+                "Origin": "https://grok.com",
+                "Referer": "https://grok.com/?_s=usage",
+                "x-grpc-web": "1",
+                "x-user-agent": "connect-es/2.1.1",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4.5) as resp:
+            return _decode_grok_grpc_web_billing(_read_response_bytes(resp))
+
+    privacy_blocked = False
+    rest_exc: Exception | None = None
+    try:
+        try:
+            body = _fetch_rest(token)
+        except urllib.error.HTTPError as he:
+            if he.code == 401 and not refreshed_once and auth.get("refreshToken"):
+                try:
+                    he.close()
+                except Exception:
+                    pass
+                refreshed = _refresh_grok_access_token(auth)
+                if refreshed:
+                    token = refreshed
+                    refreshed_once = True
+                    body = _fetch_rest(token)
+                else:
+                    raise
+            else:
+                err_txt = ""
+                try:
+                    err_txt = _read_response_bytes(he, 16384).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        he.close()
+                    except Exception:
+                        pass
+                if he.code == 403 and "WKE=privacy-mode:" in err_txt:
+                    privacy_blocked = True
+                raise
+
+        windows: list[dict[str, Any]] = []
         credits = None
         cfg = body.get("config") if isinstance(body.get("config"), dict) else {}
         period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else {}
@@ -3008,7 +5475,11 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
             used_pct = 0.0
         if used_pct is not None:
             dur_ms = (7 * 86_400_000) if p_type == "WEEKLY" else ((30 * 86_400_000) if p_type == "MONTHLY" else None)
-            lbl = "7d 订阅额度" if p_type == "WEEKLY" else ("月度订阅额度" if p_type == "MONTHLY" else "订阅额度")
+            lbl = (
+                _tr("7d 订阅额度", "7d subscription")
+                if p_type == "WEEKLY"
+                else (_tr("月度订阅额度", "Monthly subscription") if p_type == "MONTHLY" else _tr("订阅额度", "Subscription"))
+            )
             end_iso = period.get("end") if isinstance(period.get("end"), str) else None
             windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
 
@@ -3019,35 +5490,632 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
             tot_usd = (tot_cents / 100.0) if (tot_cents and tot_cents > 0) else None
             used_usd = max(0.0, tot_usd - rem_usd) if tot_usd is not None else 0.0
             credits = {
-                "label": "可用额度",
+                "label": _tr("可用额度", "Available credits"),
                 "used": round(used_usd, 2),
                 "limit": round(tot_usd, 2) if tot_usd else None,
                 "remaining": round(rem_usd, 2),
                 "unit": "USD",
             }
             if not windows and tot_usd and tot_usd > 0:
-                windows.append(_make_window("credits", "月度额度", (used_usd / tot_usd) * 100.0, None, 30 * 86_400_000))
-        return {
-            "cli": "Grok Build",
-            "planType": email or str(body.get("plan") or "xAI"),
-            "updatedAt": now_iso,
-            "source": "live",
-            "status": "ok",
-            "message": None,
-            "windows": windows,
-            "credits": credits,
-        }
+                windows.append(_make_window("credits", _tr("月度额度", "Monthly credits"), (used_usd / tot_usd) * 100.0, None, 30 * 86_400_000))
+        if windows or credits is not None:
+            return {
+                "cli": "Grok Build",
+                "planType": email or str(body.get("plan") or "xAI"),
+                "updatedAt": now_iso,
+                "source": "live",
+                "status": "ok",
+                "message": None,
+                "windows": windows,
+                "credits": credits,
+            }
     except Exception as exc:
+        rest_exc = exc
+
+    try:
+        try:
+            grpc_res = _fetch_grpc_web(token)
+        except (_GrpcStatusError, urllib.error.HTTPError) as g_err:
+            is_auth_err = (
+                (isinstance(g_err, urllib.error.HTTPError) and g_err.code == 401)
+                or (
+                    isinstance(g_err, _GrpcStatusError)
+                    and (
+                        g_err.status_code == 16
+                        or (
+                            g_err.status_code == 7
+                            and any(k in g_err.grpc_message.lower() for k in ("bad-credentials", "unauthenticated", "expired", "token"))
+                        )
+                    )
+                )
+            )
+            if is_auth_err and not refreshed_once and auth.get("refreshToken"):
+                refreshed = _refresh_grok_access_token(auth)
+                if refreshed:
+                    token = refreshed
+                    refreshed_once = True
+                    grpc_res = _fetch_grpc_web(token)
+                else:
+                    raise
+            else:
+                raise
+        if grpc_res.get("windows") or grpc_res.get("credits") is not None:
+            return {
+                "cli": "Grok Build",
+                "planType": email or str(grpc_res.get("plan") or "SuperGrok"),
+                "updatedAt": now_iso,
+                "source": "live",
+                "status": "ok",
+                "message": None,
+                "windows": grpc_res.get("windows") or [],
+                "credits": grpc_res.get("credits"),
+            }
+    except Exception as grpc_exc:
+        if privacy_blocked:
+            return {
+                "cli": "Grok Build",
+                "planType": email or "xAI",
+                "updatedAt": now_iso,
+                "source": "unavailable",
+                "status": "error",
+                "message": _tr("请在 xAI 账户设置中开启 Privacy Mode 以查看 Grok 限额", "Enable Privacy Mode in xAI account settings to view Grok limits"),
+                "windows": [],
+                "credits": None,
+            }
+        err_obj = rest_exc or grpc_exc
         return {
             "cli": "Grok Build",
             "planType": email,
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": f"读取 Grok 额度失败：{type(exc).__name__}",
+            "message": _tr(f"读取 Grok 额度失败：{type(err_obj).__name__}", f"Failed to read Grok credits: {type(err_obj).__name__}"),
             "windows": [],
             "credits": None,
         }
+
+    return {
+        "cli": "Grok Build",
+        "planType": email or "xAI",
+        "updatedAt": now_iso,
+        "source": "live",
+        "status": "ok",
+        "message": None,
+        "windows": [],
+        "credits": None,
+    }
+
+
+def _extract_deepseek_auth(home: Path) -> dict[str, str] | None:
+    api_key = (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or "").strip()
+    platform_token = ""
+    platform_issuer = "https://platform.deepseek.com"
+    dsh_home = Path(os.environ.get("DSH_HOME") or str(home / ".dsh")).expanduser()
+    cred_path = dsh_home / ".credentials.yaml"
+    if cred_path.is_file():
+        try:
+            text = cred_path.read_text("utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if text:
+            if not api_key:
+                m_key = re.search(r"(?:^|[{,\s])DEEPSEEK_API_KEY:\s*([^\s,}#]+)", text, re.M)
+                if m_key:
+                    api_key = m_key.group(1).strip("'\"")
+            lines = text.splitlines()
+            start = next(
+                (
+                    (idx, len(line) - len(line.lstrip()))
+                    for idx, line in enumerate(lines)
+                    if re.match(r"^\s*deepseek-account-platform/[^:]+:\s*$", line)
+                ),
+                None,
+            )
+            if start is not None:
+                start_idx, base_indent = start
+                for line in lines[start_idx + 1 :]:
+                    stripped = line.strip()
+                    if stripped and (len(line) - len(line.lstrip())) <= base_indent:
+                        break
+                    m_tok = re.match(r"^\s+token:\s*([^\s,}#]+)", line)
+                    if m_tok:
+                        platform_token = m_tok.group(1).strip("'\"")
+                    m_iss = re.match(r"^\s+issuer:\s*([^\s,}#]+)", line)
+                    if m_iss:
+                        platform_issuer = m_iss.group(1).strip("'\"").rstrip("/")
+    if not api_key and not platform_token:
+        return None
+    return {
+        "apiKey": api_key,
+        "platformToken": platform_token,
+        "platformIssuer": platform_issuer or "https://platform.deepseek.com",
+    }
+
+
+def _probe_deepseek_limits(home: Path) -> dict[str, Any]:
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    auth = _extract_deepseek_auth(home)
+    if auth is None:
+        return {
+            "cli": "DeepSeek Harness",
+            "planType": None,
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "unconfigured",
+            "message": _tr("未检测到 DeepSeek 登录凭证", "DeepSeek credentials not detected"),
+            "windows": [],
+            "credits": None,
+        }
+
+    last_exc: Exception | None = None
+    api_key = auth.get("apiKey") or ""
+    if api_key:
+        try:
+            req = urllib.request.Request(
+                "https://api.deepseek.com/user/balance",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "luma-cli/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
+            infos = [x for x in (payload.get("balance_infos") or []) if isinstance(x, dict)]
+            chosen = (
+                next((x for x in infos if (_safe_float(x.get("total_balance")) or 0.0) > 0), None)
+                or next((x for x in infos if str(x.get("currency") or "").upper() == "CNY"), None)
+                or (infos[0] if infos else None)
+            )
+            if chosen is not None:
+                bal = _safe_float(chosen.get("total_balance")) or 0.0
+                unit = str(chosen.get("currency") or "CNY").upper()
+                return {
+                    "cli": "DeepSeek Harness",
+                    "planType": "API Balance",
+                    "updatedAt": now_iso,
+                    "source": "live",
+                    "status": "ok",
+                    "message": None,
+                    "windows": [],
+                    "credits": {
+                        "label": _tr("账户余额", "Account balance"),
+                        "used": 0.0,
+                        "limit": None,
+                        "remaining": round(bal, 2),
+                        "unit": unit,
+                    },
+                }
+        except Exception as exc:
+            last_exc = exc
+
+    platform_token = auth.get("platformToken") or ""
+    safe_issuer = _validate_http_url(auth.get("platformIssuer") or "https://platform.deepseek.com")
+    if platform_token and safe_issuer is not None:
+        platform_issuer = safe_issuer.rstrip("/")
+        try:
+            req = urllib.request.Request(
+                f"{platform_issuer}/api/v0/users/get_user_summary",
+                headers={
+                    "x-dsh-auth-token": platform_token,
+                    "Accept": "application/json",
+                    "User-Agent": "luma-cli/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
+            biz = ((payload.get("data") or {}).get("biz_data")) if isinstance(payload.get("data"), dict) else None
+            wallets = [w for w in ((biz or {}).get("normal_wallets") or []) if isinstance(w, dict)]
+            chosen = (
+                next((w for w in wallets if (_safe_float(w.get("balance")) or 0.0) > 0), None)
+                or next((w for w in wallets if str(w.get("currency") or "").upper() == "CNY"), None)
+                or (wallets[0] if wallets else None)
+            )
+            if chosen is not None:
+                bal = _safe_float(chosen.get("balance")) or 0.0
+                unit = str(chosen.get("currency") or "CNY").upper()
+                return {
+                    "cli": "DeepSeek Harness",
+                    "planType": "DSH Account",
+                    "updatedAt": now_iso,
+                    "source": "live",
+                    "status": "ok",
+                    "message": None,
+                    "windows": [],
+                    "credits": {
+                        "label": _tr("账户余额", "Account balance"),
+                        "used": 0.0,
+                        "limit": None,
+                        "remaining": round(bal, 2),
+                        "unit": unit,
+                    },
+                }
+        except Exception as exc:
+            last_exc = exc
+
+    err_name = type(last_exc).__name__ if last_exc is not None else "Unavailable"
+    return {
+        "cli": "DeepSeek Harness",
+        "planType": "DeepSeek",
+        "updatedAt": now_iso,
+        "source": "unavailable",
+        "status": "error",
+        "message": _tr(f"读取 DeepSeek 余额失败：{err_name}", f"Failed to read DeepSeek balance: {err_name}"),
+        "windows": [],
+        "credits": None,
+    }
+
+def _extract_kimi_oauth(home: Path) -> dict[str, Any] | None:
+    default_base = (os.environ.get("KIMI_CODE_BASE_URL") or "https://api.kimi.com/coding/v1").strip().rstrip("/")
+    oauth_host = (
+        os.environ.get("KIMI_CODE_OAUTH_HOST")
+        or os.environ.get("KIMI_OAUTH_HOST")
+        or "https://auth.kimi.com"
+    ).strip().rstrip("/")
+
+    roots: list[Path] = []
+    for raw_root in (
+        os.environ.get("KIMI_SHARE_DIR"),
+        str(home / ".kimi"),
+        os.environ.get("KIMI_CODE_HOME"),
+        str(home / ".kimi-code"),
+    ):
+        if not raw_root:
+            continue
+        p = Path(raw_root).expanduser()
+        if p not in roots and p.is_dir():
+            roots.append(p)
+
+    for root in roots:
+        base_url = default_base
+        cfg_api_key = ""
+        toml_path = root / "config.toml"
+        if toml_path.is_file():
+            try:
+                import tomllib
+                cfg = tomllib.loads(toml_path.read_text("utf-8"))
+                providers = cfg.get("providers") if isinstance(cfg, dict) and isinstance(cfg.get("providers"), dict) else {}
+                for pk, pv in providers.items():
+                    if not isinstance(pv, dict):
+                        continue
+                    b_url = str(pv.get("base_url") or "").strip().rstrip("/")
+                    if "kimi-code" in str(pk).lower() or "/coding" in b_url:
+                        if b_url:
+                            base_url = b_url
+                        ak = str(pv.get("api_key") or "").strip()
+                        if ak:
+                            cfg_api_key = ak
+                        break
+            except Exception:
+                pass
+
+        cred_file = root / "credentials" / "kimi-code.json"
+        if cred_file.is_file():
+            try:
+                raw_cred = json.loads(cred_file.read_text("utf-8"))
+            except Exception:
+                raw_cred = None
+            if isinstance(raw_cred, dict):
+                acc = str(raw_cred.get("access_token") or "").strip()
+                ref = str(raw_cred.get("refresh_token") or "").strip()
+                exp = _safe_float(raw_cred.get("expires_at"))
+                if acc or ref:
+                    return {
+                        "accessToken": acc,
+                        "refreshToken": ref,
+                        "expiresAt": exp,
+                        "baseUrl": base_url,
+                        "oauthHost": oauth_host,
+                        "credFile": cred_file,
+                    }
+
+        if cfg_api_key:
+            return {
+                "accessToken": cfg_api_key,
+                "refreshToken": "",
+                "expiresAt": None,
+                "baseUrl": base_url,
+                "oauthHost": oauth_host,
+                "credFile": None,
+            }
+    env_key = (os.environ.get("KIMI_CODE_API_KEY") or "").strip()
+    if env_key:
+        return {
+            "accessToken": env_key,
+            "refreshToken": "",
+            "expiresAt": None,
+            "baseUrl": default_base,
+            "oauthHost": oauth_host,
+            "credFile": None,
+        }
+    return None
+
+
+def _refresh_kimi_access_token(auth: dict[str, Any]) -> str | None:
+    ref = str(auth.get("refreshToken") or "").strip()
+    if not ref:
+        return None
+    safe_oauth_host = _validate_http_url(auth.get("oauthHost") or "https://auth.kimi.com")
+    if safe_oauth_host is None:
+        return None
+    oauth_host = safe_oauth_host.rstrip("/")
+    form_body = urllib.parse.urlencode({
+        "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
+        "grant_type": "refresh_token",
+        "refresh_token": ref,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{oauth_host}/api/oauth/token",
+        data=form_body,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "X-Msh-Platform": "kimi_cli",
+            "User-Agent": "kimi-cli/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    new_acc = str(payload.get("access_token") or "").strip()
+    if not new_acc:
+        return None
+    exp_in = _safe_float(payload.get("expires_in")) or 3600.0
+    new_ref = str(payload.get("refresh_token") or ref).strip()
+    new_exp = time.time() + exp_in
+    cred_file = auth.get("credFile")
+    if isinstance(cred_file, Path):
+        try:
+            existing: dict[str, Any] = {}
+            if cred_file.is_file():
+                try:
+                    loaded = json.loads(cred_file.read_text("utf-8"))
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except Exception:
+                    existing = {}
+            existing.update({
+                "access_token": new_acc,
+                "refresh_token": new_ref,
+                "expires_at": new_exp,
+                "scope": str(payload.get("scope") or existing.get("scope") or ""),
+                "token_type": str(payload.get("token_type") or existing.get("token_type") or "Bearer"),
+                "expires_in": exp_in,
+            })
+            _atomic_write_text(cred_file, json.dumps(existing, ensure_ascii=False), mode=0o600)
+        except Exception:
+            return None
+    auth["accessToken"] = new_acc
+    auth["refreshToken"] = new_ref
+    auth["expiresAt"] = new_exp
+    return new_acc
+
+
+def _kimi_reset_iso(data: dict[str, Any], now_sec: float) -> str | None:
+    for key in ("reset_at", "resetAt", "reset_time", "resetTime"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            ts_ms = _parse_ts_ms(val)
+            if ts_ms is not None:
+                return _iso_from_epoch_sec(ts_ms / 1000.0)
+    for key in ("reset_in", "resetIn", "ttl"):
+        sec = _safe_float(data.get(key))
+        if sec is not None and sec > 0:
+            return _iso_from_epoch_sec(now_sec + sec)
+    return None
+
+
+def _probe_kimi_limits(home: Path) -> dict[str, Any]:
+    now_sec = time.time()
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    auth = _extract_kimi_oauth(home)
+    if auth is None:
+        return {
+            "cli": "Kimi Code",
+            "planType": None,
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "unconfigured",
+            "message": _tr("未检测到 Kimi Code 登录凭证", "Kimi Code credentials not detected"),
+            "windows": [],
+            "credits": None,
+        }
+    token = str(auth.get("accessToken") or "").strip()
+    exp_at = _safe_float(auth.get("expiresAt"))
+    if (not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec + 60)) and auth.get("refreshToken"):
+        refreshed = _refresh_kimi_access_token(auth)
+        if refreshed:
+            token = refreshed
+    if not token:
+        return {
+            "cli": "Kimi Code",
+            "planType": "Kimi Code",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _tr("Kimi Code OAuth 令牌已过期，请重新登录", "Kimi Code OAuth token expired; sign in again"),
+            "windows": [],
+            "credits": None,
+        }
+
+    safe_base = _validate_http_url(auth.get("baseUrl") or "https://api.kimi.com/coding/v1")
+    if safe_base is None:
+        return {
+            "cli": "Kimi Code",
+            "planType": "Kimi Code",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _tr("Kimi Code 接口地址无效", "Invalid Kimi Code base URL"),
+            "windows": [],
+            "credits": None,
+        }
+    base_url = safe_base.rstrip("/")
+    try:
+        def _fetch(bearer: str) -> dict[str, Any]:
+            req = urllib.request.Request(
+                f"{base_url}/usages",
+                headers={
+                    "Authorization": f"Bearer {bearer}",
+                    "Accept": "application/json",
+                    "X-Msh-Platform": "kimi_cli",
+                    "User-Agent": "kimi-cli/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                return json.loads(_read_response_bytes(resp).decode("utf-8"))
+
+        try:
+            body = _fetch(token)
+        except urllib.error.HTTPError as he:
+            if he.code == 401 and auth.get("refreshToken"):
+                try:
+                    he.close()
+                except Exception:
+                    pass
+                refreshed = _refresh_kimi_access_token(auth)
+                if refreshed:
+                    body = _fetch(refreshed)
+                else:
+                    raise
+            else:
+                raise
+
+        if isinstance(body, dict) and isinstance(body.get("data"), dict):
+            body = body["data"]
+
+        user_obj = body.get("user") if isinstance(body.get("user"), dict) else {}
+        mem_obj = user_obj.get("membership") if isinstance(user_obj.get("membership"), dict) else {}
+        raw_level = str(mem_obj.get("level") or "").strip()
+        plan_label = raw_level.removeprefix("LEVEL_").replace("_", " ").title() if raw_level else "Kimi Code"
+
+        windows: list[dict[str, Any]] = []
+        usage_map = body.get("usage")
+        if isinstance(usage_map, dict):
+            lim_v = _safe_float(usage_map.get("limit"))
+            used_v = _safe_float(usage_map.get("used"))
+            if used_v is None and lim_v is not None:
+                rem_v = _safe_float(usage_map.get("remaining"))
+                if rem_v is not None:
+                    used_v = max(0.0, lim_v - rem_v)
+            if lim_v is not None and lim_v > 0 and used_v is not None:
+                lbl = str(usage_map.get("name") or usage_map.get("title") or _tr("7d 订阅限额", "Weekly limit"))
+                windows.append(
+                    _make_window(
+                        "weekly",
+                        lbl,
+                        (used_v / lim_v) * 100.0,
+                        _kimi_reset_iso(usage_map, now_sec),
+                        7 * 86_400_000,
+                    )
+                )
+
+        raw_limits = body.get("limits")
+        if isinstance(raw_limits, list):
+            for idx, item in enumerate(raw_limits):
+                if not isinstance(item, dict):
+                    continue
+                detail = item.get("detail") if isinstance(item.get("detail"), dict) else item
+                win_meta = item.get("window") if isinstance(item.get("window"), dict) else {}
+                lim_v = _safe_float(detail.get("limit"))
+                used_v = _safe_float(detail.get("used"))
+                if used_v is None and lim_v is not None:
+                    rem_v = _safe_float(detail.get("remaining"))
+                    if rem_v is not None:
+                        used_v = max(0.0, lim_v - rem_v)
+                if lim_v is None or lim_v <= 0 or used_v is None:
+                    continue
+                dur = _safe_int(win_meta.get("duration") or item.get("duration") or detail.get("duration"))
+                t_unit = str(win_meta.get("timeUnit") or item.get("timeUnit") or detail.get("timeUnit") or "").upper()
+                dur_ms: int | None = None
+                auto_lbl = _tr(f"限额 #{idx + 1}", f"Limit #{idx + 1}")
+                if dur > 0:
+                    if "MIN" in t_unit:
+                        dur_ms = dur * 60_000
+                        auto_lbl = _tr(f"{dur // 60}h 限额", f"{dur // 60}h limit") if (dur >= 60 and dur % 60 == 0) else _tr(f"{dur}m 限额", f"{dur}m limit")
+                    elif "HOUR" in t_unit:
+                        dur_ms = dur * 3_600_000
+                        auto_lbl = _tr(f"{dur}h 限额", f"{dur}h limit")
+                    elif "DAY" in t_unit:
+                        dur_ms = dur * 86_400_000
+                        auto_lbl = _tr(f"{dur}d 限额", f"{dur}d limit")
+                    elif "WEEK" in t_unit:
+                        dur_ms = dur * 7 * 86_400_000
+                        auto_lbl = _tr("7d 订阅限额", "Weekly limit") if dur == 1 else _tr(f"{dur}w 限额", f"{dur}w limit")
+                    elif "MONTH" in t_unit:
+                        dur_ms = dur * 30 * 86_400_000
+                        auto_lbl = _tr("月度限额", "Monthly limit") if dur == 1 else _tr(f"{dur}mo 限额", f"{dur}mo limit")
+                    else:
+                        dur_ms = dur * 1000
+                lbl = str(item.get("name") or item.get("title") or detail.get("name") or detail.get("title") or auto_lbl)
+                windows.append(
+                    _make_window(
+                        f"limit_{idx}",
+                        lbl,
+                        (used_v / lim_v) * 100.0,
+                        _kimi_reset_iso(detail, now_sec) or _kimi_reset_iso(item, now_sec),
+                        dur_ms,
+                    )
+                )
+
+        usages_map = body.get("usages")
+        if isinstance(usages_map, dict):
+            has_short = any((w.get("windowDurationMs") or 0) in range(1, 6 * 3_600_000 + 1) for w in windows)
+            pool_5h = usages_map.get("limit_5h")
+            if not has_short and isinstance(pool_5h, dict):
+                ratio_5h = _safe_float(pool_5h.get("used_ratio") if "used_ratio" in pool_5h else pool_5h.get("usedRatio"))
+                if ratio_5h is not None:
+                    windows.append(
+                        _make_window(
+                            "limit_5h",
+                            _tr("5h 限额", "5h limit"),
+                            max(0.0, min(100.0, ratio_5h * 100.0)),
+                            _kimi_reset_iso(pool_5h, now_sec),
+                            5 * 3_600_000,
+                        )
+                    )
+            has_long = any((w.get("windowDurationMs") or 0) >= 7 * 86_400_000 for w in windows)
+            pool_mo = usages_map.get("limit_month_total") or usages_map.get("limit_month_code")
+            if not has_long and isinstance(pool_mo, dict):
+                ratio_mo = _safe_float(pool_mo.get("used_ratio") if "used_ratio" in pool_mo else pool_mo.get("usedRatio"))
+                if ratio_mo is not None:
+                    windows.append(
+                        _make_window(
+                            "monthly",
+                            _tr("月度限额", "Monthly limit"),
+                            max(0.0, min(100.0, ratio_mo * 100.0)),
+                            _kimi_reset_iso(pool_mo, now_sec),
+                            30 * 86_400_000,
+                        )
+                    )
+
+        return {
+            "cli": "Kimi Code",
+            "planType": plan_label,
+            "updatedAt": now_iso,
+            "source": "live",
+            "status": "ok",
+            "message": None,
+            "windows": windows,
+            "credits": None,
+        }
+    except Exception as exc:
+        return {
+            "cli": "Kimi Code",
+            "planType": "Kimi Code",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _tr(f"读取 Kimi Code 限额失败：{type(exc).__name__}", f"Failed to read Kimi Code limits: {type(exc).__name__}"),
+            "windows": [],
+            "credits": None,
+        }
+
 
 def _has_claude_oauth(home: Path) -> bool:
     return _extract_claude_oauth(home) is not None
@@ -3058,14 +6126,25 @@ def _has_antigravity_oauth(home: Path) -> bool:
 def _has_grok_oauth(home: Path) -> bool:
     return _extract_grok_oauth(home) is not None
 
+def _has_deepseek_auth(home: Path) -> bool:
+    return _extract_deepseek_auth(home) is not None
+
+def _has_kimi_oauth(home: Path) -> bool:
+    return _extract_kimi_oauth(home) is not None
+
 
 def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str, Any]:
-    cache_path = _cache_dir() / "usage-limits-cache-v3.json"
+    cache_path = _cache_dir() / "usage-limits-cache-v4.json"
     now_sec = time.time()
+    lang = _lang_code()
     if not fresh and cache_path.is_file():
         try:
             cached = json.loads(cache_path.read_text("utf-8"))
-            if isinstance(cached, dict) and now_sec - float(cached.get("cachedAtEpoch", 0)) < LIMITS_CACHE_TTL_SECONDS:
+            if (
+                isinstance(cached, dict)
+                and cached.get("lang", "zh") == lang
+                and now_sec - float(cached.get("cachedAtEpoch", 0)) < LIMITS_CACHE_TTL_SECONDS
+            ):
                 providers = cached.get("providers")
                 if isinstance(providers, list):
                     cached["providers"] = [
@@ -3081,49 +6160,47 @@ def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str,
         ("Claude Code", _has_claude_oauth, _probe_claude_limits),
         ("Antigravity", _has_antigravity_oauth, _probe_antigravity_limits),
         ("Grok Build", _has_grok_oauth, _probe_grok_limits),
+        ("DeepSeek Harness", _has_deepseek_auth, _probe_deepseek_limits),
+        ("Kimi Code", _has_kimi_oauth, _probe_kimi_limits),
     ]
     active_probes = [(name, fn) for name, has_oauth, fn in candidate_probes if has_oauth(home)]
 
     results_map: dict[str, dict[str, Any]] = {}
     timed_out = False
     if active_probes:
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(active_probes))
-        fut_map = {pool.submit(fn, home): name for name, fn in active_probes}
-        try:
-            done, not_done = concurrent.futures.wait(fut_map, timeout=probe_timeout)
-            for fut in done:
-                name = fut_map[fut]
-                try:
-                    results_map[name] = fut.result()
-                except Exception as exc:
+        task_res = _run_daemon_tasks(
+            {name: (lambda p=p: p(home)) for name, p in active_probes},
+            timeout=probe_timeout,
+        )
+        for name, _ in active_probes:
+            if name not in task_res:
+                timed_out = True
+                results_map[name] = {
+                    "cli": name,
+                    "planType": None,
+                    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "source": "unavailable",
+                    "status": "error",
+                    "message": _tr("实时限额探测超时，请检查网络后刷新重试", "Live limit probe timed out; check network and refresh"),
+                    "windows": [],
+                    "credits": None,
+                }
+            else:
+                ok, val = task_res[name]
+                if ok:
+                    results_map[name] = val
+                else:
+                    exc_name = str(val or "Exception")
                     results_map[name] = {
                         "cli": name,
                         "planType": None,
                         "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
                         "source": "unavailable",
                         "status": "error",
-                        "message": f"探测异常：{type(exc).__name__}",
+                        "message": _tr(f"探测异常：{exc_name}", f"Probe error: {exc_name}"),
                         "windows": [],
                         "credits": None,
                     }
-            if not_done:
-                timed_out = True
-                now_timeout_iso = dt.datetime.now(dt.timezone.utc).isoformat()
-                for fut in not_done:
-                    fut.cancel()
-                    name = fut_map[fut]
-                    results_map[name] = {
-                        "cli": name,
-                        "planType": None,
-                        "updatedAt": now_timeout_iso,
-                        "source": "unavailable",
-                        "status": "error",
-                        "message": "实时限额探测超时，请检查网络后刷新重试",
-                        "windows": [],
-                        "credits": None,
-                    }
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def _provider_sort_rank(item: dict[str, Any]) -> int:
         has_data = bool(item.get("windows")) or item.get("credits") is not None
@@ -3143,11 +6220,12 @@ def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str,
     payload = {
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "cachedAtEpoch": now_sec,
+        "lang": lang,
         "providers": ordered,
     }
     if not timed_out:
         try:
-            cache_path.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+            _atomic_write_text(cache_path, json.dumps(payload, ensure_ascii=False))
         except Exception:
             pass
     return payload

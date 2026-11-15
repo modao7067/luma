@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -94,14 +97,27 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
     ActionWindowPolicy(activityWindow, enabled = drawerVisible && sidebarRenaming == null)
 
     val savedScreens = rememberSaveableStateHolder()
+    val langCode = LumaI18n.langCode()
+    var previousLangCode by rememberSaveable { mutableStateOf(langCode) }
     var pickerSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var pickerError by rememberSaveable { mutableStateOf<String?>(null) }
+    var pickerSessionMismatch by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(langCode) {
+        if (previousLangCode != langCode) {
+            previousLangCode = langCode
+            pickerError = null
+        }
+    }
     val selected = state.selected
     val capture = rememberPhotoCapture(
         ownerKey = { actions.environment + ":" + (currentSessionId()?.let { "session:$it" } ?: "blank:${currentBlankKey()}") },
         enabled = !state.creating && selected?.preparingFirstSend != true && selected?.capabilities?.images != false &&
             state.models.find { it.id == selected?.summary?.model }?.supportsImages != false,
-        onImage = actions::addImage, onError = { pickerError = it },
+        onImage = actions::addImage,
+        onError = {
+            pickerSessionMismatch = false
+            pickerError = it
+        },
     )
     val lastViews = remember { HashMap<String, SessionView>() }
     val seenSaveableIds = remember { HashSet<String>() }
@@ -127,7 +143,8 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
             if (uris.isNotEmpty()) {
                 val current = currentSessionId()?.let { "session:$it" } ?: "blank:${currentBlankKey()}"
                 if (target == null || target != current) {
-                    pickerError = "选图期间已切换会话，图片未添加。请回到原会话后重新选择。"
+                    pickerError = null
+                    pickerSessionMismatch = true
                 } else {
                     uris.forEach { actions.addImage(it.toString()) }
                 }
@@ -518,12 +535,24 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
     sidebarRenaming?.let { target ->
         SessionRenameDialog(target, actions::renameSession, onDismiss = { sidebarRenaming = null })
     }
-    pickerError?.let { message ->
+    val imageAlertMessage = if (pickerSessionMismatch) {
+        tr(
+            "选图期间已切换会话，图片未添加。请回到原会话后重新选择。",
+            "Switched session while picking image; image was not added. Return to the original session and try again.",
+        )
+    } else {
+        pickerError
+    }
+    imageAlertMessage?.let { message ->
+        val dismissImageAlert = {
+            pickerSessionMismatch = false
+            pickerError = null
+        }
         LiquidModalDialog(
-            title = "图片未添加",
-            onDismiss = { pickerError = null },
+            title = tr("图片未添加", "Image not added"),
+            onDismiss = dismissImageAlert,
             confirmButton = {
-                TextButton(onClick = { pickerError = null }) { Text("知道了") }
+                TextButton(onClick = dismissImageAlert) { Text(tr("知道了", "Got it")) }
             },
         ) {
             Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -534,7 +563,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
             title = inventory.title,
             onDismiss = actions::closeInventory,
             confirmButton = {
-                TextButton(onClick = actions::closeInventory) { Text("关闭") }
+                TextButton(onClick = actions::closeInventory) { Text(tr("关闭", "Close")) }
             },
         ) {
             LazyColumn(
@@ -546,7 +575,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                 if (inventory.loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
                 inventory.error?.let { item { Text(inventoryFetchErrorLabel(inventory.title), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) } }
                 if (!inventory.loading && inventory.error == null && inventory.entries.isEmpty()) {
-                    item { Text("没有配置项", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium) }
+                    item { Text(tr("没有配置项", "No items"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium) }
                 }
                 items(inventory.entries) { entry ->
                     Surface(
@@ -627,7 +656,7 @@ internal fun ErrorNotice(message: String, dismiss: (() -> Unit)? = null) {
                     modifier = Modifier.height(32.dp),
                     colors = ButtonDefaults.textButtonColors(contentColor = colors.onErrorContainer, disabledContentColor = colors.onErrorContainer),
                 ) {
-                    Text("知道了", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold))
+                    Text(tr("知道了", "Got it"), style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold))
                 }
             }
         }

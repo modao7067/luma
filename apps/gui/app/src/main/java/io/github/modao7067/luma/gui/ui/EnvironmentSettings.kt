@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -71,19 +73,21 @@ private fun SettingsActionRow(title: String, symbol: MenuSymbol, detail: String,
     }
 }
 
-private data class EnvironmentRead(val state: EnvironmentSettingsState? = null, val error: String? = null)
+private data class EnvironmentRead(val state: EnvironmentSettingsState? = null, val readFailed: Boolean = false)
 private fun readEnvironmentSettings(access: EnvironmentSettingsAccess): EnvironmentRead = try { EnvironmentRead(access.read()) }
-    catch (_: Exception) { EnvironmentRead(error = "无法读取环境状态") }
+    catch (_: Exception) { EnvironmentRead(readFailed = true) }
+
+private enum class EnvironmentOpenError { SETTINGS, WAKE_LOCK }
 
 internal fun shizukuStatusDetail(state: EnvironmentSettingsState): String = when {
     state.shizukuAuthorized -> when (state.shizukuUid) {
-        0 -> "已连接 · Root (UID 0)"
-        2000 -> "已连接 · ADB Shell (UID 2000)"
-        else -> if (state.shizukuUid > 0) "已连接 · UID ${state.shizukuUid}" else "已连接 · ADB Shell"
+        0 -> tr("已连接 · Root (UID 0)", "Connected · Root (UID 0)")
+        2000 -> tr("已连接 · ADB Shell (UID 2000)", "Connected · ADB Shell (UID 2000)")
+        else -> if (state.shizukuUid > 0) tr("已连接 · UID ${state.shizukuUid}", "Connected · UID ${state.shizukuUid}") else tr("已连接 · ADB Shell", "Connected · ADB Shell")
     }
-    state.shizukuRunning -> "未授权 · 点击授权"
-    state.shizukuInstalled -> "未运行 · 点击打开 Shizuku"
-    else -> "未安装 · 点击查看"
+    state.shizukuRunning -> tr("未授权 · 点击授权", "Unauthorized · Tap to grant")
+    state.shizukuInstalled -> tr("未运行 · 点击打开 Shizuku", "Not running · Tap to open Shizuku")
+    else -> tr("未安装 · 点击查看", "Not installed · Tap to view")
 }
 
 @Composable
@@ -92,7 +96,7 @@ internal fun ColumnScope.EnvironmentSettingsContent(suppliedAccess: EnvironmentS
     val access = suppliedAccess ?: remember(context) { AndroidEnvironmentSettingsAccess(context) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var read by remember(access) { mutableStateOf(readEnvironmentSettings(access)) }
-    var openError by remember { mutableStateOf<String?>(null) }
+    var openError by remember { mutableStateOf<EnvironmentOpenError?>(null) }
     val rootSwitch by access.rootSwitch.collectAsState()
     var confirmRootSwitch by remember { mutableStateOf(false) }
     var wasSwitching by remember { mutableStateOf(rootSwitch.running) }
@@ -126,54 +130,54 @@ internal fun ColumnScope.EnvironmentSettingsContent(suppliedAccess: EnvironmentS
     }
     fun open(setting: EnvironmentSetting) {
         try { access.open(setting); openError = null }
-        catch (_: Exception) { openError = "无法打开系统设置" }
+        catch (_: Exception) { openError = EnvironmentOpenError.SETTINGS }
     }
-    val unavailable = if (read.error == null) "读取中…" else "读取失败"
+    val unavailable = if (!read.readFailed) tr("读取中…", "Loading…") else tr("读取失败", "Failed to load")
     val rootDetail = when {
-        rootSwitch.running -> rootSwitch.progress ?: "正在切换…"
+        rootSwitch.running -> rootSwitch.progress ?: tr("正在切换…", "Switching…")
         state == null -> unavailable
-        rootEnabled && rootActive == false -> "没检测到 Root，激活后就能继续用"
-        rootEnabled -> "运行中"
-        else -> "用 Root 运行内置 Debian，不用再开后台保活和 Shizuku"
+        rootEnabled && rootActive == false -> tr("没检测到 Root，激活后就能继续用", "Root not detected; activate it to continue")
+        rootEnabled -> tr("运行中", "Running")
+        else -> tr("用 Root 运行内置 Debian，不用再开后台保活和 Shizuku", "Run built-in Debian via Root without foreground keep-alive or Shizuku")
     }
     SettingsActionRow(
-        title = "Root 模式",
+        title = tr("Root 模式", "Root mode"),
         symbol = MenuSymbol.SHIELD,
         detail = rootDetail,
-        action = if (state != null && !rootEnabled) "切换" else null,
+        action = if (state != null && !rootEnabled) tr("切换", "Switch") else null,
         enabled = !rootSwitch.running,
     ) { confirmRootSwitch = true }
     if (confirmRootSwitch) {
         AlertDialog(
             onDismissRequest = { confirmRootSwitch = false },
-            title = { Text("切换到 Root 模式？") },
+            title = { Text(tr("切换到 Root 模式？", "Switch to Root mode?")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("切换后无法撤销。想换回普通模式只能清除 Luma 的数据，工作区文件会一起删掉。")
-                    Text("之后每次使用都需要 Root，临时 Root 重启后要重新激活。")
+                    Text(tr("切换后无法撤销。想换回普通模式只能清除 Luma 的数据，工作区文件会一起删掉。", "This cannot be undone. Reverting to standard mode requires clearing Luma app data, which also deletes workspace files."))
+                    Text(tr("之后每次使用都需要 Root，临时 Root 重启后要重新激活。", "Root access will be required every time; temporary Root must be re-activated after reboot."))
                 }
             },
             confirmButton = {
-                TextButton(onClick = { confirmRootSwitch = false; openError = null; access.startRootSwitch() }) { Text("切换") }
+                TextButton(onClick = { confirmRootSwitch = false; openError = null; access.startRootSwitch() }) { Text(tr("切换", "Switch")) }
             },
-            dismissButton = { TextButton(onClick = { confirmRootSwitch = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { confirmRootSwitch = false }) { Text(tr("取消", "Cancel")) } },
         )
     }
-    SettingsNavigationRow("手机文件访问", MenuSymbol.FOLDER,
-        state?.let { (if (it.storageGranted) "已授权" else "未授权") + " · /sdcard" } ?: unavailable) { open(EnvironmentSetting.STORAGE) }
-    SettingsNavigationRow("通知", MenuSymbol.NOTIFICATIONS,
-        state?.let { if (it.notificationsEnabled) "已开启" else "已关闭" } ?: unavailable) { open(EnvironmentSetting.NOTIFICATIONS) }
+    SettingsNavigationRow(tr("手机文件访问", "Device storage access"), MenuSymbol.FOLDER,
+        state?.let { (if (it.storageGranted) tr("已授权", "Granted") else tr("未授权", "Not granted")) + " · /sdcard" } ?: unavailable) { open(EnvironmentSetting.STORAGE) }
+    SettingsNavigationRow(tr("通知", "Notifications"), MenuSymbol.NOTIFICATIONS,
+        state?.let { if (it.notificationsEnabled) tr("已开启", "On") else tr("已关闭", "Off") } ?: unavailable) { open(EnvironmentSetting.NOTIFICATIONS) }
     if (!rootEnabled) {
-        SettingsNavigationRow("Shizuku 提权", MenuSymbol.TERMINAL,
+        SettingsNavigationRow(tr("Shizuku 提权", "Shizuku privilege"), MenuSymbol.TERMINAL,
             state?.let(::shizukuStatusDetail) ?: unavailable) { open(EnvironmentSetting.SHIZUKU) }
-        SettingsNavigationRow("忽略电池优化", MenuSymbol.BATTERY,
-            state?.let { if (it.batteryIgnored) "已允许" else "未允许" } ?: unavailable) { open(EnvironmentSetting.BATTERY) }
-        SettingsNavigationRow("无障碍保活", MenuSymbol.ACCESSIBILITY,
-            state?.let { if (it.accessibilityConnected) "已连接" else if (it.accessibilityEnabled) "已开启，待系统连接" else "未开启" } ?: unavailable) { open(EnvironmentSetting.ACCESSIBILITY) }
+        SettingsNavigationRow(tr("忽略电池优化", "Ignore battery optimizations"), MenuSymbol.BATTERY,
+            state?.let { if (it.batteryIgnored) tr("已允许", "Allowed") else tr("未允许", "Restricted") } ?: unavailable) { open(EnvironmentSetting.BATTERY) }
+        SettingsNavigationRow(tr("无障碍保活", "Accessibility keep-alive"), MenuSymbol.ACCESSIBILITY,
+            state?.let { if (it.accessibilityConnected) tr("已连接", "Connected") else if (it.accessibilityEnabled) tr("已开启，待系统连接", "Enabled, awaiting system bind") else tr("未开启", "Off") } ?: unavailable) { open(EnvironmentSetting.ACCESSIBILITY) }
         SettingsToggleRow(
-            title = "后台唤醒锁",
+            title = tr("后台唤醒锁", "Background wake lock"),
             symbol = MenuSymbol.LOCK,
-            detail = state?.let { if (it.wakeLockEnabled) "已开启" else "已关闭" } ?: unavailable,
+            detail = state?.let { if (it.wakeLockEnabled) tr("已开启", "On") else tr("已关闭", "Off") } ?: unavailable,
             checked = state?.wakeLockEnabled == true,
             enabled = state != null && !rootSwitch.running,
         ) {
@@ -183,18 +187,24 @@ internal fun ColumnScope.EnvironmentSettingsContent(suppliedAccess: EnvironmentS
                 read = readEnvironmentSettings(access)
                 openError = null
             } catch (_: Exception) {
-                openError = "无法切换后台唤醒锁"
+                openError = EnvironmentOpenError.WAKE_LOCK
             }
         }
     }
-    (openError ?: rootSwitch.error?.let { "切换没成功：$it" } ?: read.error)?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
-    Text("环境信息", Modifier.padding(start = 4.dp, top = 12.dp), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val openErrorMessage = when (openError) {
+        EnvironmentOpenError.SETTINGS -> tr("无法打开系统设置", "Unable to open system settings")
+        EnvironmentOpenError.WAKE_LOCK -> tr("无法切换后台唤醒锁", "Unable to toggle background wake lock")
+        null -> null
+    }
+    val readErrorMessage = if (read.readFailed) tr("无法读取环境状态", "Unable to read environment status") else null
+    (openErrorMessage ?: rootSwitch.error?.let { tr("切换没成功：$it", "Switch failed: $it") } ?: readErrorMessage)?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+    Text(tr("环境信息", "Environment info"), Modifier.padding(start = 4.dp, top = 12.dp), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Surface(shape = LumaCardShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (rootEnabled) "Debian 13 · ARM64 · Chroot" else "Debian 13 · ARM64 · PRoot", style = MaterialTheme.typography.titleMedium)
-            Text("工作区  /workspace\n手机存储  /sdcard", style = MaterialTheme.typography.bodyMedium)
-            Text("局域网 IPv4", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(state?.lanAddresses?.joinToString("\n")?.ifEmpty { "未连接局域网" } ?: unavailable, style = MaterialTheme.typography.bodyMedium)
+            Text(tr("工作区  /workspace\n手机存储  /sdcard", "Workspace  /workspace\nStorage  /sdcard"), style = MaterialTheme.typography.bodyMedium)
+            Text(tr("局域网 IPv4", "LAN IPv4"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(state?.lanAddresses?.joinToString("\n")?.ifEmpty { tr("未连接局域网", "Not connected to LAN") } ?: unavailable, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

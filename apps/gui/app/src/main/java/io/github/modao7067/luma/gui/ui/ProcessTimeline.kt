@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.net.Uri
 import kotlin.math.roundToInt
 import androidx.compose.animation.core.Animatable
@@ -167,7 +170,8 @@ internal fun ProcessGroup(
 ) {
     var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
     val entryState = rememberSaveableStateHolder()
-    val summary = remember(entries, cli) { processSummaryText(processGroupSummary(entries, cli)) }
+    val langCode = LumaI18n.langCode()
+    val summary = remember(entries, cli, langCode) { processSummaryText(processGroupSummary(entries, cli)) }
     val hasRunningEntries = entries.any { it.outcome == "running" }
     val colors = MaterialTheme.colorScheme
     val border = colors.outlineVariant.copy(alpha = 0.55f)
@@ -247,7 +251,7 @@ internal fun ProcessGroup(
                         onManualLayoutToggle?.invoke()
                         expanded = !expanded
                     }
-                    .semantics { stateDescription = (if (hasRunningEntries) "进行中 · " else "") + if (expanded) "已展开执行过程" else "已折叠执行过程" }
+                    .semantics { stateDescription = (if (hasRunningEntries) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("已展开执行过程", "Expanded steps") else tr("已折叠执行过程", "Collapsed steps") }
                     .padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -454,7 +458,7 @@ private fun ProcessEntry(
                     onManualLayoutToggle?.invoke()
                     expanded = !expanded
                 }
-                .semantics { stateDescription = (if (running) "进行中 · " else "") + if (expanded) "收起$label" else "展开$label" }
+                .semantics { stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起$label", "Collapse $label") else tr("展开$label", "Expand $label") }
                 .padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -527,7 +531,7 @@ private fun ProcessEntry(
             ) {
                 if (reasoning) {
                     if (item.detail.isBlank()) {
-                        Text("CLI 尚未提供摘要。", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Text(tr("CLI 尚未提供摘要。", "No summary provided by CLI yet."), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     } else {
                         val reasoningMarkdown = rememberMarkdownPresentation(
                             identity = "reasoning:${item.id}",
@@ -550,7 +554,7 @@ private fun ProcessEntry(
                         )
                     } else if (messageMedia(item).isEmpty()) {
                         Text(
-                            if (running) "等待工具输出…" else "工具未返回文本输出。",
+                            if (running) tr("等待工具输出…", "Waiting for tool output…") else tr("工具未返回文本输出。", "Tool returned no text output."),
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                         )
@@ -664,9 +668,10 @@ private fun ProcessReadBatchEntry(
     val running = entries.any { it.outcome == "running" }
     val colors = MaterialTheme.colorScheme
     val color = if (running) colors.primary else colors.onSurfaceVariant
-    val batchToolLabel = remember(entries, cli) {
+    val langCode = LumaI18n.langCode()
+    val batchToolLabel = remember(entries, cli, langCode) {
         val labels = entries.map { processEntryLabel(it, cli) }.distinct()
-        if (labels.size == 1) labels.single() else labels.joinToString("、")
+        if (labels.size == 1) labels.single() else labels.joinToString(tr("、", ", "))
     }
     val fileNamesSummary = remember(entries, cli) {
         formatProcessReadBatchSummary(entries, cli)
@@ -687,7 +692,7 @@ private fun ProcessReadBatchEntry(
                     expanded = !expanded
                 }
                 .semantics {
-                    stateDescription = (if (running) "进行中 · " else "") + if (expanded) "收起批量读取" else "展开批量读取"
+                    stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起批量读取", "Collapse batch read") else tr("展开批量读取", "Expand batch read")
                 }
                 .padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1026,7 +1031,7 @@ private fun ProcessSingleReadPreviewCard(
                                 }
                                 copied = true
                             }
-                            .semantics { contentDescription = "复制" },
+                            .semantics { contentDescription = tr("复制", "Copy") },
                         contentAlignment = Alignment.Center,
                     ) {
                         CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
@@ -1052,7 +1057,7 @@ private fun ProcessReadFileBody(
     if (preview.cleanText.isBlank()) {
         Box(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(
-                if (item.outcome == "running" || resolving) "正在读取文件…" else "文件为空。",
+                if (item.outcome == "running" || resolving) tr("正在读取文件…", "Reading file…") else tr("文件为空。", "File is empty."),
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
             )
@@ -1191,7 +1196,7 @@ private fun ProcessReadFileBody(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
                     Text(
-                        "… 已省略剩余 $omittedLineCount 行",
+                        tr("… 已省略剩余 $omittedLineCount 行", "… $omittedLineCount more lines omitted"),
                         fontFamily = termFont,
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant.copy(alpha = 0.72f),
@@ -1261,7 +1266,8 @@ private fun ProcessEditCardGroup(
     previewDetailClosing: Boolean,
     previewDetailFraction: Float?,
 ) {
-    val mergedEdits = remember(entries, cli) { mergeConsecutiveProcessEdits(entries, cli) }
+    val langCode = LumaI18n.langCode()
+    val mergedEdits = remember(entries, cli, langCode) { mergeConsecutiveProcessEdits(entries, cli) }
     val colors = MaterialTheme.colorScheme
     val dark = codePaletteDark(colors)
     val headerBg = if (dark) Color(0xFF18181B) else colors.surfaceContainerHigh.copy(alpha = 0.45f)
@@ -1460,7 +1466,7 @@ private fun ProcessEditCardGroup(
                                 .clip(LumaCardShape(12.dp))
                                 .clickable { toggleHandlers[index]() }
                                 .semantics {
-                                    stateDescription = (if (running) "进行中 · " else "") + if (expanded) "收起${merged.toolLabel}" else "展开${merged.toolLabel}"
+                                    stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起${merged.toolLabel}", "Collapse ${merged.toolLabel}") else tr("展开${merged.toolLabel}", "Expand ${merged.toolLabel}")
                                 }
                                 .padding(horizontal = 6.dp, vertical = rowVerticalPad),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1508,7 +1514,7 @@ private fun ProcessEditCardGroup(
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             Text(
-                                                "${merged.editCount} 处",
+                                                tr("${merged.editCount} 处", "${merged.editCount} edits"),
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontFamily = terminalFont(),
                                                 color = colors.onSurfaceVariant.copy(alpha = 0.78f),
@@ -1595,7 +1601,7 @@ private fun StreamingDiffViewer(
     if (hunks.isEmpty()) {
         Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(
-                if (running) "正在写入变更…" else "未包含行级差异。",
+                if (running) tr("正在写入变更…", "Writing changes…") else tr("未包含行级差异。", "No line-level diff included."),
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
             )
@@ -1811,7 +1817,7 @@ private fun StreamingDiffViewer(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
                     Text(
-                        "… 已省略剩余 $omittedDiffRows 行",
+                        tr("… 已省略剩余 $omittedDiffRows 行", "… $omittedDiffRows more diff lines omitted"),
                         fontFamily = termFont,
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant.copy(alpha = 0.72f),

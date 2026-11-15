@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -12,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class RpcRejected(val code: Int, message: String) : IOException(message)
-class RpcDisconnected(message: String = "连接已断开；已提交操作的结果需要重新核对") : IOException(message)
+class RpcDisconnected(message: String = tr("连接已断开；已提交操作的结果需要重新核对", "Disconnected; verify results of submitted actions after reconnecting")) : IOException(message)
 
 class CodexRpc(
     url: String,
@@ -43,7 +45,7 @@ class CodexRpc(
                     pending.remove(message.get("id").toString())?.complete(message)
                 } else onEvent(message)
             } catch (failure: Exception) {
-                fail(IOException("收到无法解析的 Codex 协议消息", failure))
+                fail(IOException(tr("收到无法解析的 Codex 协议消息", "Received unparseable Codex protocol message"), failure))
             }
         }, failed = ::fail)
         try {
@@ -53,7 +55,7 @@ class CodexRpc(
         } catch (_: TimeoutCancellationException) {
             close()
             currentCoroutineContext().ensureActive()
-            throw RpcDisconnected("连接 Codex 服务超时")
+            throw RpcDisconnected(tr("连接 Codex 服务超时", "Timed out connecting to Codex service"))
         } catch (failure: Throwable) {
             close()
             throw failure
@@ -69,7 +71,7 @@ class CodexRpc(
             pending.remove(id)
             throw RpcDisconnected()
         }
-        val message = try { withTimeout(45_000) { result.await() } } catch (_: TimeoutCancellationException) { currentCoroutineContext().ensureActive(); throw RpcDisconnected("Codex 响应超时；请重新连接核对操作结果") } finally { pending.remove(id) }
+        val message = try { withTimeout(45_000) { result.await() } } catch (_: TimeoutCancellationException) { currentCoroutineContext().ensureActive(); throw RpcDisconnected(tr("Codex 响应超时；请重新连接核对操作结果", "Codex response timed out; reconnect to verify action status")) } finally { pending.remove(id) }
         val error = message.optJSONObject("error")
         if (error != null) throw RpcRejected(error.optInt("code"), CodexProjection.error(error))
         return message.optJSONObject("result") ?: JSONObject()

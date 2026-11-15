@@ -47,7 +47,7 @@ final class RuntimeAssets {
         write(androidSh,(
             "#!/bin/bash\n"+
             "if [ \"$(id -u)\" != \"0\" ] || [ ! -d /proc/1/root/system ]; then\n"+
-            "  printf 'android-sh 只在 Root 模式下可用\\n' >&2\n"+
+            "  if [[ \"${LUMA_LANG:-zh}\" == zh* ]]; then printf 'android-sh 只在 Root 模式下可用\\n' >&2; else printf 'android-sh is only available in Root mode\\n' >&2; fi\n"+
             "  exit 1\n"+
             "fi\n"+
             "export PATH=/data/adb/runtime/bin:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/system/bin:/system/xbin:/odm/bin:/vendor/bin\n"+
@@ -59,10 +59,11 @@ final class RuntimeAssets {
         String computeBody=
             "#!/usr/bin/env node\n"+
             "const fs=require('node:fs'),cp=require('node:child_process');\n"+
+            "const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
             "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  let dir='';\n"+
             "  try{dir=fs.readFileSync('/opt/luma/native-lib-dir','utf8').trim();}catch{}\n"+
-            "  if(!dir){process.stderr.write('未找到原生库目录\\n');process.exit(1);}\n"+
+            "  if(!dir){process.stderr.write(_zh?'未找到原生库目录\\n':'Native library directory not found\\n');process.exit(1);}\n"+
             "  const r=cp.spawnSync('/opt/luma/bin/android-sh',[\n"+
             "    '/system/bin/sh','-c','d=\"$1\"; e=\"$2\"; shift 2; LD_LIBRARY_PATH=\"$d\" exec \"$e\" \"$@\"',\n"+
             "    '_',dir,dir+'/libluma_compute.so',...process.argv.slice(2)\n"+
@@ -73,10 +74,11 @@ final class RuntimeAssets {
         String androidRunBody=
             "#!/usr/bin/env node\n"+
             "const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');\n"+
+            "const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
             "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  const args=process.argv.slice(2);\n"+
             "  if(!args.length||args[0]==='--help'||args[0]==='-h'){\n"+
-            "    process.stdout.write('用法: android-run /workspace/program [参数]\\n');\n"+
+            "    process.stdout.write(_zh?'用法: android-run /workspace/program [参数]\\n':'Usage: android-run /workspace/program [args...]\\n');\n"+
             "    process.exit(args.length?0:1);\n"+
             "  }\n"+
             "  let p={};try{p=JSON.parse(fs.readFileSync('/opt/luma/host-paths.json','utf8'));}catch{}\n"+
@@ -99,11 +101,13 @@ final class RuntimeAssets {
             "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  const args=process.argv.slice(2);\n"+
             "  if(!args.length||args[0]==='--help'||args[0]==='-h'){\n"+
-            "    process.stdout.write('Root 模式已转发至 android-sh（宿主 root，无需 Shizuku）：\\n  adb-shell <command> [args...]\\n  adb-shell -c \"<script>\"\\n  adb-shell --status\\n');\n"+
+            "    const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
+            "    process.stdout.write(_zh?'Root 模式已转发至 android-sh（宿主 root，无需 Shizuku）：\\n  adb-shell <command> [args...]\\n  adb-shell -c \"<script>\"\\n  adb-shell --status\\n':'Root mode forwards to android-sh (host root, Shizuku not required):\\n  adb-shell <command> [args...]\\n  adb-shell -c \"<script>\"\\n  adb-shell --status\\n');\n"+
             "    process.exit(args.length?0:1);\n"+
             "  }\n"+
             "  if(args[0]==='--status'){\n"+
-            "    process.stdout.write('Root 模式：通过 android-sh 直接在宿主执行（uid=0，无需 Shizuku）\\n');\n"+
+            "    const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
+            "    process.stdout.write(_zh?'Root 模式：通过 android-sh 直接在宿主执行（uid=0，无需 Shizuku）\\n':'Root mode: executes directly on host via android-sh (uid=0, Shizuku not required)\\n');\n"+
             "    const r=cp.spawnSync('/opt/luma/bin/android-sh',['id'],{stdio:'inherit'});\n"+
             "    process.exit(r.status!==null?r.status:1);\n"+
             "  }\n"+
@@ -130,7 +134,7 @@ final class RuntimeAssets {
     }
     static synchronized void ensureGuest(Context c)throws Exception {
         File root=LinuxEnvironment.root(c);
-        File mount=new File(root,"opt/luma");if(!mount.isDirectory() && !mount.mkdirs())throw new IOException("无法准备运行目录");
+        File mount=new File(root,"opt/luma");if(!mount.isDirectory() && !mount.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法准备运行目录","Failed to prepare runtime directory"));
         repairDebianRoot(root);
         write(new File(root,"etc/profile.d/luma.sh"),profileScript(c,root).getBytes(StandardCharsets.UTF_8));
         File bashrc=new File(LinuxEnvironment.root(c),"root/.bashrc");
@@ -220,20 +224,20 @@ final class RuntimeAssets {
         }
         File pnpmConfig=new File(root,"root/.config/pnpm/config.yaml");
         if(!pnpmConfig.exists())write(pnpmConfig,"packageImportMethod: copy\n".getBytes(StandardCharsets.UTF_8));
-        File home=new File(root,"root/.local/share/pnpm");if(!home.isDirectory() && !home.mkdirs())throw new IOException("无法创建 pnpm 目录");
+        File home=new File(root,"root/.local/share/pnpm");if(!home.isDirectory() && !home.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建 pnpm 目录","Failed to create pnpm directory"));
     }
     static void prepareDebianSkeleton(File root)throws Exception {
         if(!new File(root,"etc/debian_version").isFile())return;
         for(String path:new String[]{"var/log","var/log/apt","var/lib/systemd","var/cache/debconf","var/cache/apt/archives","var/lib/apt/lists","run"}){
             File dir=new File(root,path);
-            if(!dir.isDirectory()){if(!dir.mkdirs()&&!dir.isDirectory())throw new IOException("无法创建目录："+dir);Os.chmod(dir.getAbsolutePath(),0755);}
+            if(!dir.isDirectory()){if(!dir.mkdirs()&&!dir.isDirectory())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录：","Failed to create directory: ")+dir);Os.chmod(dir.getAbsolutePath(),0755);}
         }
         for(String path:new String[]{"var/cache/apt/archives/partial","var/lib/apt/lists/partial"}){
             File dir=new File(root,path);
-            if(!dir.isDirectory()){if(!dir.mkdirs()&&!dir.isDirectory())throw new IOException("无法创建目录："+dir);Os.chmod(dir.getAbsolutePath(),0700);}
+            if(!dir.isDirectory()){if(!dir.mkdirs()&&!dir.isDirectory())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录：","Failed to create directory: ")+dir);Os.chmod(dir.getAbsolutePath(),0700);}
         }
         File runLock=new File(root,"run/lock");
-        if(!runLock.isDirectory()){if(!runLock.mkdirs()&&!runLock.isDirectory())throw new IOException("无法创建目录："+runLock);Os.chmod(runLock.getAbsolutePath(),01777);}
+        if(!runLock.isDirectory()){if(!runLock.mkdirs()&&!runLock.isDirectory())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录：","Failed to create directory: ")+runLock);Os.chmod(runLock.getAbsolutePath(),01777);}
         for(String path:new String[]{"run/utmp","var/log/wtmp","var/log/lastlog"}){
             File file=new File(root,path);
             if(!Files.exists(file.toPath(),LinkOption.NOFOLLOW_LINKS)){write(file,new byte[0]);Os.chmod(file.getAbsolutePath(),0664);}
@@ -305,9 +309,9 @@ final class RuntimeAssets {
     private static void copy(Context c,String asset,File target)throws IOException {
         cancelled();
         String[] names=c.getAssets().list(asset);
-        if(names!=null && names.length>0){if(!target.isDirectory() && !target.mkdirs())throw new IOException("无法创建运行目录");for(String name:names)copy(c,asset+"/"+name,new File(target,name));}
+        if(names!=null && names.length>0){if(!target.isDirectory() && !target.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建运行目录","Failed to create runtime directory"));for(String name:names)copy(c,asset+"/"+name,new File(target,name));}
         else {
-            File parent=target.getParentFile();if(!parent.isDirectory() && !parent.mkdirs())throw new IOException("无法创建目录");
+            File parent=target.getParentFile();if(!parent.isDirectory() && !parent.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录","Failed to create directory"));
             File temp=File.createTempFile("luma-",".tmp",parent);boolean script=false;
             try {
                 try(InputStream in=c.getAssets().open(asset);FileOutputStream out=new FileOutputStream(temp)){
@@ -317,21 +321,21 @@ final class RuntimeAssets {
                 cancelled();
                 if(!temp.renameTo(target)){
                     Files.deleteIfExists(target.toPath());
-                    if(!temp.renameTo(target))throw new IOException("无法更新运行文件："+target);
+                    if(!temp.renameTo(target))throw new IOException(com.termux.terminal.LumaLang.tr("无法更新运行文件：","Failed to update runtime file: ")+target);
                 }
                 if(script)try{Os.chmod(target.getPath(),0755);}catch(Exception e){throw new IOException(e);}
             } finally {temp.delete();}
         }
     }
-    private static void cancelled()throws IOException{if(Thread.currentThread().isInterrupted())throw new IOException("已停止");}
+    private static void cancelled()throws IOException{if(Thread.currentThread().isInterrupted())throw new IOException(com.termux.terminal.LumaLang.tr("已停止","Stopped"));}
     static void write(File target,byte[] data)throws IOException {
-        File parent=target.getParentFile();if(!parent.isDirectory() && !parent.mkdirs())throw new IOException("无法创建目录");
+        File parent=target.getParentFile();if(!parent.isDirectory() && !parent.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录","Failed to create directory"));
         File temp=File.createTempFile("luma-",".tmp",parent);
         try {
             try(FileOutputStream out=new FileOutputStream(temp)){out.write(data);out.getFD().sync();}
             if(!temp.renameTo(target)){
                 Files.deleteIfExists(target.toPath());
-                if(!temp.renameTo(target))throw new IOException("无法更新运行文件："+target);
+                if(!temp.renameTo(target))throw new IOException(com.termux.terminal.LumaLang.tr("无法更新运行文件：","Failed to update runtime file: ")+target);
             }
         } finally {temp.delete();}
     }

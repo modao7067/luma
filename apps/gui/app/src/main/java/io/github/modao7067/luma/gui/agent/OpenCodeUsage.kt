@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.Metric
 import org.json.JSONArray
 import org.json.JSONObject
@@ -40,7 +42,7 @@ internal object OpenCodeUsage {
                 val ref = latest.optJSONObject("model")
                 val model = models.objects().firstOrNull { ref != null && it.optString("providerID") == ref.optString("providerID") && it.optString("id") == ref.optString("id") }
                 val limit = model?.optJSONObject("limit")?.count("context")?.takeIf { it.signum() > 0 }
-                add(Metric("上下文", if (limit == null) used.countText() else
+                add(Metric(tr("上下文", "Context"), if (limit == null) used.countText() else
                     "${used.countText()} / ${limit.countText()} · ${percent(used, limit, 0)}%"))
             }
         }
@@ -51,9 +53,9 @@ internal object OpenCodeUsage {
         val write = cache?.count("write")
         val allInput = if (input != null && read != null && write != null) input + read + write else null
         if (allInput != null && allInput.signum() > 0) {
-            add(Metric("累计输入缓存命中", "${read!!.countText()} / ${allInput.countText()} · ${percent(read, allInput, 1)}%"))
+            add(Metric(tr("累计输入缓存命中", "Total input cache hit"), "${read!!.countText()} / ${allInput.countText()} · ${percent(read, allInput, 1)}%"))
         }
-        session.count("cost")?.let { add(Metric("CLI 记录费用 · USD", String.format(Locale.US, "$%.6f", it))) }
+        session.count("cost")?.let { add(Metric(tr("CLI 记录费用 · USD", "CLI recorded cost · USD"), String.format(Locale.US, "$%.6f", it))) }
     }
 
     internal fun lastAssistantWithUsage(messages: List<JSONObject>, boundary: String?): JSONObject? {

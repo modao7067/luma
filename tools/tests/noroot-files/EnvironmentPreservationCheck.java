@@ -102,17 +102,19 @@ public final class EnvironmentPreservationCheck {
         Path failedStage=stages(failure).get(0);Map<String,String> failedBefore=snapshot(failedStage);
         write(asset.resolve("pnpm/package.json"),"{\"version\":\"test\"}");EnvironmentInstaller.install(failure,m->{});
         check(LinuxEnvironment.ready(failure)&&snapshot(failedStage).equals(failedBefore),"retry uses a new stage and retains all previous extracted files");
+        String extracting=com.termux.terminal.LumaLang.tr("正在解压","Extracting Debian");
+        String initializing=com.termux.terminal.LumaLang.tr("初始化工作区","Initializing workspace");
         Context cancelled=new Context(base.resolve("cancelled").toFile(),asset.toFile());
-        try{rejected(cancelled,m->{if(m.startsWith("正在解压"))Thread.currentThread().interrupt();});}finally{Thread.interrupted();}
+        try{rejected(cancelled,m->{if(m.startsWith(extracting))Thread.currentThread().interrupt();});}finally{Thread.interrupted();}
         Path cancelledStage=stages(cancelled).get(0);Map<String,String> cancelledBefore=snapshot(cancelledStage);
         EnvironmentInstaller.install(cancelled,m->{});
         check(LinuxEnvironment.ready(cancelled)&&snapshot(cancelledStage).equals(cancelledBefore),"interrupted extraction and retry retain the interrupted environment");
         Context collision=new Context(base.resolve("collision").toFile(),asset.toFile());Path occupied=LinuxEnvironment.root(collision).toPath();
-        rejected(collision,m->{if(m.startsWith("初始化工作区"))try{write(occupied.resolve("keep.txt"),"concurrent existing environment");}catch(Exception e){throw new RuntimeException(e);}});
+        rejected(collision,m->{if(m.startsWith(initializing))try{write(occupied.resolve("keep.txt"),"concurrent existing environment");}catch(Exception e){throw new RuntimeException(e);}});
         check(Files.readString(occupied.resolve("keep.txt")).equals("concurrent existing environment")&&!LinuxEnvironment.ready(collision),"destination appearing during extraction is never replaced");
         check(stages(collision).stream().anyMatch(p->Files.isRegularFile(p.resolve(".luma-ready"))),"commit conflict retains the fully prepared staged environment");
         Context emptyCollision=new Context(base.resolve("empty-collision").toFile(),asset.toFile());
-        rejected(emptyCollision,m->{if(m.startsWith("初始化工作区"))LinuxEnvironment.root(emptyCollision).mkdirs();});
+        rejected(emptyCollision,m->{if(m.startsWith(initializing))LinuxEnvironment.root(emptyCollision).mkdirs();});
         check(LinuxEnvironment.root(emptyCollision).isDirectory()&&!LinuxEnvironment.ready(emptyCollision),"even an existing empty destination is preserved");
         Context linked=new Context(base.resolve("linked").toFile(),asset.toFile());Path linkedRoot=LinuxEnvironment.root(linked).toPath();
         Files.createDirectories(linkedRoot.getParent());Files.createSymbolicLink(linkedRoot,base.resolve("missing-target"));rejected(linked,m->{});

@@ -8,8 +8,10 @@ import threading
 import uuid
 import time
 from pathlib import Path
+from .i18n import lang_code, tr
 from .transport import Peer, Rejected, Conflict
 from .media import media_blocks, display_content
+from .native_owner import non_mcp_background_child_alive
 
 _MEDIA_CACHE_LOCK = threading.Lock()
 _IMAGE_EXTENSIONS = {
@@ -89,9 +91,9 @@ def image_blocks(paths):
         path = Path(name)
         mime = mimetypes.guess_type(name)[0]
         if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
-            raise Rejected("不支持的图片类型")
+            raise Rejected(tr("不支持的图片类型", "Unsupported image type"))
         if not path.is_file() or path.stat().st_size > 20 * 1024 * 1024:
-            raise Rejected("图片不可读或超过 20 MiB")
+            raise Rejected(tr("图片不可读或超过 20 MiB", "Image is unreadable or exceeds 20 MiB"))
         result.append({"type": "image", "data": base64.b64encode(path.read_bytes()).decode(), "mimeType": mime})
     return result
 
@@ -107,13 +109,14 @@ def _same_json(a, b):
 class DeliveryPersistenceError(OSError):
     def __init__(self, phase, cause):
         self.phase = phase
-        super().__init__(f"发送账本保存失败（{type(cause).__name__}），待发已暂停")
+        super().__init__(tr(f"发送账本保存失败（{type(cause).__name__}），待发已暂停", f"Failed to save delivery ledger ({type(cause).__name__}); pending messages paused"))
 
 class Session:
     input_evidence_protocol = 0
     dialect = "rpc"
     correlated_delivery = False
     busy_default_steer = True
+    check_peer_background_children = True
     def __init__(self, config, save):
         self.config, self.save = config, save
         self.lock = threading.RLock()
@@ -133,7 +136,11 @@ class Session:
         self.close_error = None
         self.terminate_on_close = False
         self.action_leases = 0
+        self.last_activity = time.monotonic()
         self.release_snapshot_state = (False, False, False, False)
+        self._probe_lock = threading.Lock()
+        self._probe_cache = {}
+        self._snapshot_probe_tls = threading.local()
         for delivery in config.get("deliveries", {}).values():
             if delivery["state"] == "dispatching": delivery["state"] = "unknown"
         self.data = {"cli": config["cli"], "nativeId": config.get("nativeId", ""), "title": "",
@@ -141,9 +148,14 @@ class Session:
                      "models": [], "permissions": [], "permission": "", "queue": [], "requests": [],
                      "metrics": [], "skills": [], "mcp": [], "capabilities": {}, "notice": "", "error": None}
 
+    def touch(self):
+        self.last_activity = time.monotonic()
+
     def update(self, **fields):
         if not fields: return
         with self.lock:
+            if fields.get("running") or self.data.get("running"):
+                self.touch()
             changed = any(k not in self.data or not _same_json(self.data[k], v) for k, v in fields.items())
             if fields.get("nativeId"):
                 if self.config.get("nativeId") != fields["nativeId"]:
@@ -153,6 +165,7 @@ class Session:
             if not changed:
                 return
             self.data.update(fields)
+            self.touch()
             self.seq += 1
             self.delivery_wake.set()
 
@@ -168,7 +181,7 @@ class Session:
                     fcntl.flock(handle, fcntl.LOCK_EX)
                     return self._media(content)
             except OSError:
-                return [{**r, "source": "luma-error:无法保存会话附件"} if r["source"].startswith("data:") else r for r in resources]
+                return [{**r, "source": "luma-error:" + tr("无法保存会话附件", "Unable to save session attachment")} if r["source"].startswith("data:") else r for r in resources]
 
     def _media(self, content):
         resources = media_blocks(content)
@@ -188,7 +201,7 @@ class Session:
             path = target / (str(uuid.uuid4()) + _media_extension(resource["mimeType"]))
             try:
                 raw = base64.b64decode(data, validate=True)
-                if len(raw) > 64 * 1024 * 1024: raise ValueError("附件过大")
+                if len(raw) > 64 * 1024 * 1024: raise ValueError(tr("附件过大", "Attachment too large"))
                 with path.open("xb") as out:
                     os.chmod(path, 0o600); out.write(raw)
                 ensure_root_media_cache_access(target.parent, path)
@@ -203,7 +216,7 @@ class Session:
                 resource["source"] = str(path); resource["sizeBytes"] = len(raw)
             except (OSError, ValueError):
                 path.unlink(missing_ok=True)
-                resource["source"] = "luma-error:内嵌附件损坏或不可保存"
+                resource["source"] = "luma-error:" + tr("内嵌附件损坏或不可保存", "Embedded attachment is corrupted or cannot be saved")
         return resources
 
     def row(self, value):
@@ -216,6 +229,7 @@ class Session:
             if old is not None and _same_json(old, value):
                 return
             self.rows[value["id"]] = value
+            self.touch()
             self.seq += 1
 
     def settle_incomplete_rows(self, status):
@@ -235,6 +249,7 @@ class Session:
             if existing is not None and _same_json(existing, nxt):
                 return
             self.subagents[ident] = nxt
+            self.touch()
             self.seq += 1
 
     def _save_delivery_state(self, phase):
@@ -275,55 +290,130 @@ class Session:
                 self.seq += 1
                 self.delivery_wake.set()
 
-    def snapshot(self, since=None):
+    def is_snapshot_probe(self):
+        return bool(getattr(self._snapshot_probe_tls, "active", False))
+
+    def cached_snapshot_probe(self, key, probe_fn, ttl=1.0, cold_timeout=0.2, pending_value=None):
+        if not self.is_snapshot_probe():
+            return probe_fn()
+        now = time.monotonic()
+        with self._probe_lock:
+            if len(self._probe_cache) > 8:
+                self._probe_cache.clear()
+            entry = self._probe_cache.get(key)
+            if entry is not None and not entry["running"] and entry["ts"] is not None and now - entry["ts"] < ttl:
+                return entry["value"]
+            if entry is not None and entry["ts"] is not None:
+                if not entry["running"] and now - entry["ts"] >= ttl:
+                    self._start_snapshot_probe_locked(key, probe_fn)
+                return entry["value"]
+            if entry is None:
+                entry = {"ts": None, "value": pending_value, "running": False, "done": threading.Event()}
+                self._probe_cache[key] = entry
+            if not entry["running"]:
+                self._start_snapshot_probe_locked(key, probe_fn)
+            done = entry["done"]
+        done.wait(cold_timeout)
+        with self._probe_lock:
+            cur = self._probe_cache.get(key)
+            if cur is not None and cur["ts"] is not None:
+                return cur["value"]
+            return pending_value
+
+    def _start_snapshot_probe_locked(self, key, probe_fn):
+        entry = self._probe_cache.get(key)
+        if entry is None:
+            entry = {"ts": None, "value": None, "running": False, "done": threading.Event()}
+            self._probe_cache[key] = entry
+        entry["running"] = True
+        done = entry["done"]
+        def run():
+            try:
+                value = probe_fn()
+            except Exception:
+                value = entry["value"]
+            now = time.monotonic()
+            changed = False
+            with self._probe_lock:
+                cur = self._probe_cache.get(key)
+                if cur is entry:
+                    changed = entry["ts"] is not None and entry["value"] != value
+                    entry["ts"] = now
+                    entry["value"] = value
+                    entry["running"] = False
+            done.set()
+            if changed:
+                with self.lock:
+                    self.seq += 1
+        threading.Thread(target=run, daemon=True, name="LumaReleaseProbe").start()
+
+    def _build_snapshot_locked(self, since, mode, releasable):
+        release_state = (bool(mode), releasable, self.released, self.close_pending)
+        if release_state != self.release_snapshot_state:
+            self.release_snapshot_state = release_state
+            self.seq += 1
+        if since == self.seq: return {"unchanged": True, "revision": self.seq}
+        observer = {"connected": False, "connecting": False, "canOpenTui": False} if self.close_pending else {}
+        data_copy = {
+            k: ([dict(x) if isinstance(x, dict) else x for x in v] if isinstance(v, list)
+                else dict(v) if isinstance(v, dict) else v)
+            for k, v in self.data.items()
+        }
+        messages_copy = [dict(r) for r in self.rows.values()]
+        subagents_copy = [
+            {**a, "messages": [dict(m) for m in a["messages"]]} if isinstance(a.get("messages"), list) else dict(a)
+            for a in self.subagents.values()
+        ]
+        deliveries = self.config.get("deliveries", {})
+        return {
+            **data_copy, **observer,
+            "capabilities": {**self.data["capabilities"], "release": bool(mode)},
+            "releasable": releasable, "released": self.released, "releasePending": self.close_pending,
+            "error": self.delivery_storage_error or self.close_error or self.data.get("error"),
+            "messages": messages_copy, "subAgents": subagents_copy, "revision": self.seq,
+            "receipts": dict(self.config.get("receipts", {})),
+            "inputEvidenceProtocol": self.input_evidence_protocol,
+            "consumedSubmissions": dict(self.config.get("consumedSubmissions", {})),
+            "admittedDisplaySubmissions": dict(self.config.get("admittedDisplaySubmissions", {})),
+            "deliveries": {key: {"state": value["state"]} for key, value in deliveries.items()},
+            "takebacks": {key: {"operationId": value["takebackId"], "payload": dict(value["payload"])}
+                          for key, value in deliveries.items()
+                          if value.get("takebackId") and value["state"] == "cancelled"},
+            "hostQueue": [{"id": key, "text": value["payload"]["text"],
+                           "status": tr("插话 · 等待接收", "Steer · Waiting") if value["payload"].get("steer") else tr("待发", "Queued"),
+                           "clientUserMessageId": key,
+                           "canRemove": not bool(value["payload"].get("steer")),
+                           "canSteer": bool(self.data["running"] and not value["payload"].get("steer") and self.can_steer(value["payload"])),
+                           "canEdit": not bool(value["payload"].get("steer")), "hostOwned": True}
+                          for key, value in deliveries.items() if value["state"] == "queued"] + self.extra_host_queue(),
+        }
+
+    def snapshot(self, since=None, touch=True):
+        with self.lock:
+            if touch:
+                self.touch()
+            mode = self.release_mode()
+            mem_blocker = self.fast_release_blocker()
+            if not mode or mem_blocker is not None:
+                return self._build_snapshot_locked(since, mode, False)
+        prev_probe = getattr(self._snapshot_probe_tls, "active", False)
+        self._snapshot_probe_tls.active = True
+        try:
+            external_blocker = self.release_blocker()
+        finally:
+            self._snapshot_probe_tls.active = prev_probe
         with self.lock:
             mode = self.release_mode()
-            releasable = self.release_blocker() is None
-            release_state = (bool(mode), releasable, self.released, self.close_pending)
-            if release_state != self.release_snapshot_state:
-                self.release_snapshot_state = release_state
-                self.seq += 1
-            if since == self.seq: return {"unchanged": True, "revision": self.seq}
-            observer = {"connected": False, "connecting": False, "canOpenTui": False} if self.close_pending else {}
-            data_copy = {
-                k: ([dict(x) if isinstance(x, dict) else x for x in v] if isinstance(v, list)
-                    else dict(v) if isinstance(v, dict) else v)
-                for k, v in self.data.items()
-            }
-            messages_copy = [dict(r) for r in self.rows.values()]
-            subagents_copy = [
-                {**a, "messages": [dict(m) for m in a["messages"]]} if isinstance(a.get("messages"), list) else dict(a)
-                for a in self.subagents.values()
-            ]
-            deliveries = self.config.get("deliveries", {})
-            return {
-                **data_copy, **observer,
-                "capabilities": {**self.data["capabilities"], "release": bool(mode)},
-                "releasable": releasable, "released": self.released, "releasePending": self.close_pending,
-                "error": self.delivery_storage_error or self.close_error or self.data.get("error"),
-                "messages": messages_copy, "subAgents": subagents_copy, "revision": self.seq,
-                "receipts": dict(self.config.get("receipts", {})),
-                "inputEvidenceProtocol": self.input_evidence_protocol,
-                "consumedSubmissions": dict(self.config.get("consumedSubmissions", {})),
-                "admittedDisplaySubmissions": dict(self.config.get("admittedDisplaySubmissions", {})),
-                "deliveries": {key: {"state": value["state"]} for key, value in deliveries.items()},
-                "takebacks": {key: {"operationId": value["takebackId"], "payload": dict(value["payload"])}
-                              for key, value in deliveries.items()
-                              if value.get("takebackId") and value["state"] == "cancelled"},
-                "hostQueue": [{"id": key, "text": value["payload"]["text"],
-                               "status": "插话 · 等待接收" if value["payload"].get("steer") else "待发",
-                               "clientUserMessageId": key,
-                               "canRemove": not bool(value["payload"].get("steer")),
-                               "canSteer": bool(self.data["running"] and not value["payload"].get("steer") and self.can_steer(value["payload"])),
-                               "canEdit": not bool(value["payload"].get("steer")), "hostOwned": True}
-                              for key, value in deliveries.items() if value["state"] == "queued"] + self.extra_host_queue(),
-            }
+            mem_blocker = self.fast_release_blocker()
+            releasable = bool(mode) and mem_blocker is None and external_blocker is None
+            return self._build_snapshot_locked(since, mode, releasable)
 
     def extra_host_queue(self):
         return []
 
     def start(self, argv, env_overrides=None):
         env = os.environ.copy()
+        env["LUMA_LANG"] = lang_code()
         if self.config.get("browserConfig"):
             env["LUMA_BROWSER_CONFIG"] = self.config["browserConfig"]
         if env_overrides: env.update(env_overrides)
@@ -400,34 +490,34 @@ class Session:
 
     def validate_prompt(self, payload):
         if not self.data["connected"]:
-            raise Rejected("CLI 未连接")
+            raise Rejected(tr("CLI 未连接", "CLI is not connected"))
         if not payload.get("text", "").strip() and not payload.get("images"):
-            raise Rejected("请输入消息或图片")
+            raise Rejected(tr("请输入消息或图片", "Enter a message or attach an image"))
         caps = self.data["capabilities"]
         if payload.get("images") and not caps.get("images"):
-            raise Rejected("此 CLI 协议当前不支持图片")
+            raise Rejected(tr("此 CLI 协议当前不支持图片", "This CLI protocol does not support images"))
         if payload.get("skills") and not caps.get("skills"):
-            raise Rejected("此 CLI 未提供逐消息 Skill 选择")
+            raise Rejected(tr("此 CLI 未提供逐消息 Skill 选择", "This CLI does not support per-message skill selection"))
         if payload.get("steer") and not self.can_steer(payload):
-            raise Rejected("此 CLI 未提供运行中引导")
+            raise Rejected(tr("此 CLI 未提供运行中引导", "This CLI does not support steering while running"))
         if self.data["running"] and not caps.get("queue") and not payload.get("steer"):
-            raise Rejected("此 CLI 没有原生待发队列，请等待当前回合结束")
+            raise Rejected(tr("此 CLI 没有原生待发队列，请等待当前回合结束", "This CLI has no native pending queue; wait for the current turn to finish"))
 
     def admit(self, payload):
         ident = payload["submissionId"]
-        if not isinstance(ident, str) or not ident or len(ident) > 160: raise Rejected("无效发送标识")
+        if not isinstance(ident, str) or not ident or len(ident) > 160: raise Rejected(tr("无效发送标识", "Invalid submission ID"))
         payload = copy.deepcopy(payload)
         with self.lock:
             self.require_observer()
             deliveries = self.config.setdefault("deliveries", {})
             old = deliveries.get(ident)
             if old:
-                if old["payload"] != payload: raise Rejected("发送标识已用于不同内容")
+                if old["payload"] != payload: raise Rejected(tr("发送标识已用于不同内容", "Submission ID was already used for different content"))
                 return {"hostAdmitted": True, "deliveryState": old["state"]}
             if ident in self.config.get("receipts", {}):
                 return {"hostAdmitted": True, "deliveryState": self.config["receipts"][ident]}
             if not payload.get("text", "").strip() and not payload.get("images"):
-                raise Rejected("请输入消息或图片")
+                raise Rejected(tr("请输入消息或图片", "Enter a message or attach an image"))
             deliveries[ident] = {"state": "queued", "payload": payload,
                 "settings": {k: self.data.get(k, "") for k in ("model", "effort", "permission", "speed")}}
             try: self._save_delivery_state("admission")
@@ -487,7 +577,7 @@ class Session:
                         self.seq += 1
                     try:
                         if any(self.data.get(k, "") != v for k, v in delivery["settings"].items()):
-                            raise Rejected("待发消息的会话设置已改变")
+                            raise Rejected(tr("待发消息的会话设置已改变", "Session settings changed while message was queued"))
                         self.validate_prompt(payload)
                     except Rejected as exc:
                         delivery["error"] = str(exc)
@@ -525,10 +615,10 @@ class Session:
     def steer_pending(self, ident):
         with self.lock:
             self.require_observer()
-            if not self.data["running"]: raise Rejected("当前任务已结束，消息将按队列顺序发送")
+            if not self.data["running"]: raise Rejected(tr("当前任务已结束，消息将按队列顺序发送", "Current turn has ended; message will be sent in queue order"))
             delivery = self.config.get("deliveries", {}).get(ident)
-            if not delivery or delivery["state"] != "queued": raise Rejected("消息已离开待发队列")
-            if not self.can_steer(delivery["payload"]): raise Rejected("此消息不支持在运行中插话")
+            if not delivery or delivery["state"] != "queued": raise Rejected(tr("消息已离开待发队列", "Message is no longer in the pending queue"))
+            if not self.can_steer(delivery["payload"]): raise Rejected(tr("此消息不支持在运行中插话", "This message cannot steer while running"))
             if delivery["payload"].get("steer"): return {"steered": True}
             delivery["payload"]["steer"] = True
             try: self._save_delivery_state("steer")
@@ -544,7 +634,7 @@ class Session:
         with self.lock:
             self.require_observer()
             delivery = self.config.get("deliveries", {}).get(ident)
-            if not delivery or delivery["state"] != "queued": raise Rejected("消息已离开待发队列")
+            if not delivery or delivery["state"] != "queued": raise Rejected(tr("消息已离开待发队列", "Message is no longer in the pending queue"))
             delivery["state"] = "cancelled"
             try: self._save_delivery_state("cancellation")
             except DeliveryPersistenceError:
@@ -556,18 +646,18 @@ class Session:
 
     def take_back(self, ident, operation_id, expected):
         if not isinstance(operation_id, str) or not 0 < len(operation_id) <= 160:
-            raise Rejected("无效取回标识")
+            raise Rejected(tr("无效取回标识", "Invalid take-back ID"))
         with self.lock:
             self.require_observer()
             delivery = self.config.get("deliveries", {}).get(ident)
-            if not delivery: raise Rejected("消息已离开待发队列")
+            if not delivery: raise Rejected(tr("消息已离开待发队列", "Message is no longer in the pending queue"))
             payload = delivery["payload"]
             actual = {key: payload.get(key, [] if key != "text" else "") for key in ("text", "images", "skills")}
-            if actual != expected: raise Rejected("取回内容与原待发身份不一致")
+            if actual != expected: raise Rejected(tr("取回内容与原待发身份不一致", "Take-back payload does not match queued item"))
             if delivery.get("takebackId") == operation_id and delivery["state"] == "cancelled":
                 return {"takenBack": True}
             if delivery["state"] != "queued" or delivery.get("takebackId") or ident in self.config.get("receipts", {}):
-                raise Rejected("消息已开始投递，不能返回输入框")
+                raise Rejected(tr("消息已开始投递，不能返回输入框", "Message dispatch has started and cannot be returned to composer"))
             delivery["state"] = "cancelled"
             delivery["takebackId"] = operation_id
             try: self._save_delivery_state("takeback")
@@ -582,10 +672,13 @@ class Session:
     def action(self, name, data):
         with self.lock:
             self.require_observer()
+            self.touch()
             self.action_leases += 1
         try: return self._action(name, data)
         finally:
-            with self.lock: self.action_leases -= 1
+            with self.lock:
+                self.action_leases -= 1
+                self.touch()
 
     def _action(self, name, data):
         if name == "submit": return self.admit(data)
@@ -606,57 +699,87 @@ class Session:
                 return result
             if name == "configure":
                 if any(d["state"] in ("queued", "dispatching", "unknown") for d in self.config.get("deliveries", {}).values()):
-                    raise Rejected("请等待已提交消息结算后修改设置")
+                    raise Rejected(tr("请等待已提交消息结算后修改设置", "Wait for submitted messages to settle before changing settings"))
                 return self.configure(data)
             if name == "rename": return self.rename(data["title"])
             if name == "compact": return self.compact()
             if name == "queue": return self.queue_change(data)
-        raise Rejected("不支持的操作：" + name)
+        raise Rejected(tr("不支持的操作：", "Unsupported action: ") + name)
 
     def require_observer(self):
-        if self.close_pending: raise Conflict("会话资源正在释放，请使用原会话身份重新连接完成清理")
-        if self.released: raise Conflict("会话运行资源已释放，请使用原会话身份重新连接")
+        if self.close_pending: raise Conflict(tr("会话资源正在释放，请使用原会话身份重新连接完成清理", "Session resources are being released; reconnect with original session identity to finish cleanup"))
+        if self.released: raise Conflict(tr("会话运行资源已释放，请使用原会话身份重新连接", "Session runtime resources have been released; reconnect with original session identity"))
 
     def release_mode(self):
         return None
 
+    def fast_release_blocker(self):
+        with self.lock:
+            if self.released: return tr("会话运行资源已释放", "Session runtime resources already released")
+            if self.close_pending: return tr("会话资源释放尚未完成", "Session resource release is still in progress")
+            if not self.release_mode(): return tr("此原生入口尚不支持安全释放后恢复", "This native entry does not support safe release and resume")
+            if not self.config.get("nativeId"): return tr("原生会话身份尚未确认", "Native session identity has not been confirmed")
+            if self.action_leases: return tr("会话操作仍在进行", "Session action is still in progress")
+            if not self.data["connected"] or self.data.get("connecting") or not self.peer or self.peer.closed:
+                return tr("原生连接状态尚未确认", "Native connection state has not been confirmed")
+            if self.data["running"] or getattr(self, "current_submission", None): return tr("原生回合尚未结算", "Native turn has not settled")
+            if self.pending_requests or self.data["requests"]: return tr("原生请求等待处理", "Native request is awaiting user action")
+            if self.data["queue"] or self.data.get("nativeQueuePending"): return tr("原生队列尚未清空", "Native queue is not empty")
+            if self.delivery_storage_error is not None: return tr("发送账本尚未可靠保存", "Delivery ledger has not been reliably saved")
+            if any(d["state"] in ("queued", "dispatching", "unknown", "pending") for d in self.config.get("deliveries", {}).values()):
+                return tr("后台消息尚未结算", "Background messages have not settled")
+            if any(r in ("unknown", "pending", "dispatching", "queued") for r in self.config.get("receipts", {}).values()):
+                return tr("原生送达尚未确认", "Native delivery receipt has not been confirmed")
+            terminal = {"succeeded", "completed", "failed", "cancelled", "closed", "aborted"}
+            if any(a.get("status") not in terminal for a in self.subagents.values()): return tr("子代理尚未确认结束", "Subagent has not been confirmed finished")
+            if any(r.get("role") == "tool" and r.get("status") in ("running", "in_progress", "pending", "unknown") for r in self.rows.values()):
+                return tr("工具状态尚未确认结束", "Tool status has not been confirmed finished")
+            if getattr(self.peer, "pending", {}): return tr("原生协议请求尚未结束", "Native protocol request is still pending")
+            return None
+
     def release_blocker(self):
-        if self.released: return "会话运行资源已释放"
-        if self.close_pending: return "会话资源释放尚未完成"
-        if not self.release_mode(): return "此原生入口尚不支持安全释放后恢复"
-        if not self.config.get("nativeId"): return "原生会话身份尚未确认"
-        if self.action_leases: return "会话操作仍在进行"
-        if not self.data["connected"] or self.data.get("connecting") or not self.peer or self.peer.closed:
-            return "原生连接状态尚未确认"
-        if self.data["running"] or getattr(self, "current_submission", None): return "原生回合尚未结算"
-        if self.pending_requests or self.data["requests"]: return "原生请求等待处理"
-        if self.data["queue"] or self.data.get("nativeQueuePending"): return "原生队列尚未清空"
-        if self.delivery_storage_error is not None: return "发送账本尚未可靠保存"
-        if any(d["state"] in ("queued", "dispatching", "unknown", "pending") for d in self.config.get("deliveries", {}).values()):
-            return "后台消息尚未结算"
-        if any(r in ("unknown", "pending", "dispatching", "queued") for r in self.config.get("receipts", {}).values()):
-            return "原生送达尚未确认"
-        terminal = {"succeeded", "completed", "failed", "cancelled", "closed", "aborted"}
-        if any(a.get("status") not in terminal for a in self.subagents.values()): return "子代理尚未确认结束"
-        if any(r.get("role") == "tool" and r.get("status") in ("running", "in_progress", "pending", "unknown") for r in self.rows.values()):
-            return "工具状态尚未确认结束"
-        if getattr(self.peer, "pending", {}): return "原生协议请求尚未结束"
-        return None
+        with self.lock:
+            blocker = self.fast_release_blocker()
+            if blocker is not None:
+                return blocker
+            pid = None
+            if self.check_peer_background_children:
+                proc = getattr(self.peer, "proc", None) if self.peer else None
+                cand = getattr(proc, "pid", None)
+                if isinstance(cand, int) and cand > 0:
+                    pid = cand
+        if pid is None:
+            return None
+        return self.cached_snapshot_probe(
+            ("peer-bg", pid),
+            lambda: tr("后台子进程仍在运行", "Background subprocess is still running") if non_mcp_background_child_alive(pid) else None,
+            pending_value=tr("正在确认后台子进程状态", "Checking background subprocess status"),
+        )
 
     def release_resources(self, native, protocol=None):
-        if not self.operation.acquire(blocking=False): raise Conflict("会话操作仍在进行")
+        if not self.operation.acquire(blocking=False): raise Conflict(tr("会话操作仍在进行", "Session action is still in progress"))
         try:
             self.terminate_on_close = True
             with self.lock:
-                if not native or native != self.config.get("nativeId"): raise Conflict("原生会话身份不匹配")
-                if protocol is not None and protocol != self.config.get("nativeProtocol"): raise Conflict("原生协议身份不匹配")
-                if not self.close_pending:
-                    blocker = self.release_blocker()
+                if not native or native != self.config.get("nativeId"): raise Conflict(tr("原生会话身份不匹配", "Native session identity mismatch"))
+                if protocol is not None and protocol != self.config.get("nativeProtocol"): raise Conflict(tr("原生协议身份不匹配", "Native protocol identity mismatch"))
+                already_pending = self.close_pending
+                if not already_pending:
+                    blocker = self.fast_release_blocker()
                     if blocker: raise Conflict(blocker)
-                    self.save()
-                    self.close_pending = True
-                    self.seq += 1
-                    self.delivery_wake.set()
+            if not already_pending:
+                blocker = self.release_blocker()
+                if blocker: raise Conflict(blocker)
+                with self.lock:
+                    if not native or native != self.config.get("nativeId"): raise Conflict(tr("原生会话身份不匹配", "Native session identity mismatch"))
+                    if protocol is not None and protocol != self.config.get("nativeProtocol"): raise Conflict(tr("原生协议身份不匹配", "Native protocol identity mismatch"))
+                    if not self.close_pending:
+                        blocker = self.fast_release_blocker()
+                        if blocker: raise Conflict(blocker)
+                        self.save()
+                        self.close_pending = True
+                        self.seq += 1
+                        self.delivery_wake.set()
             self.finish_observer_close()
             original_protocol = self.config.get("nativeProtocol")
             return {"released": True, "nativeId": native, **({"nativeProtocol": original_protocol} if original_protocol is not None else {})}
@@ -692,6 +815,8 @@ class Session:
             try: temp_mod.unlink(missing_ok=True)
             except OSError: pass
             self.permission_module = None
+        with self._probe_lock:
+            self._probe_cache.clear()
         with self.lock:
             self.close_pending = False
             self.close_error = None
@@ -700,10 +825,10 @@ class Session:
             self.seq += 1
 
     def retire_observer(self):
-        if not self.operation.acquire(blocking=False): raise Conflict("旧会话操作仍在进行")
+        if not self.operation.acquire(blocking=False): raise Conflict(tr("旧会话操作仍在进行", "Previous session action is still in progress"))
         try:
             with self.lock:
-                if self.action_leases: raise Conflict("旧会话操作仍在进行")
+                if self.action_leases: raise Conflict(tr("旧会话操作仍在进行", "Previous session action is still in progress"))
                 self.close_pending = True
                 self.seq += 1
                 self.delivery_wake.set()
@@ -723,10 +848,12 @@ class Session:
                 self.permission_module = None
         except Exception as exc:
             with self.lock:
-                self.close_error = "会话资源释放未完成，请重试释放或使用原记录重新连接完成清理"
+                self.close_error = tr("会话资源释放未完成，请重试释放或使用原记录重新连接完成清理", "Session resource release incomplete; retry release or reconnect with original record to finish cleanup")
                 self.seq += 1
             self.diagnostic("observer-close-failed", exc)
             raise OSError(self.close_error) from exc
+        with self._probe_lock:
+            self._probe_cache.clear()
         with self.lock:
             self.released = True
             self.close_pending = False
@@ -738,10 +865,10 @@ class Session:
 
     def event(self, frame): pass
     def refresh(self): return {}
-    def configure(self, data): raise Rejected("此原生协议未提供当前设置接口")
-    def rename(self, title): raise Rejected("此原生协议未提供改名接口")
-    def compact(self): raise Rejected("此原生协议未提供压缩接口")
-    def stop(self): raise Rejected("此原生协议未提供中断接口")
-    def queue_change(self, data): raise Rejected("此原生队列没有该操作")
-    def answer(self, data): raise Rejected("审批不存在或已过期")
-    def terminal(self): raise Rejected("此原生入口尚未提供共享 TUI")
+    def configure(self, data): raise Rejected(tr("此原生协议未提供当前设置接口", "This native protocol does not support changing settings"))
+    def rename(self, title): raise Rejected(tr("此原生协议未提供改名接口", "This native protocol does not support renaming"))
+    def compact(self): raise Rejected(tr("此原生协议未提供压缩接口", "This native protocol does not support compaction"))
+    def stop(self): raise Rejected(tr("此原生协议未提供中断接口", "This native protocol does not support stopping"))
+    def queue_change(self, data): raise Rejected(tr("此原生队列没有该操作", "This native queue does not support that action"))
+    def answer(self, data): raise Rejected(tr("审批不存在或已过期", "Approval request does not exist or has expired"))
+    def terminal(self): raise Rejected(tr("此原生入口尚未提供共享 TUI", "This native entry does not support shared TUI"))

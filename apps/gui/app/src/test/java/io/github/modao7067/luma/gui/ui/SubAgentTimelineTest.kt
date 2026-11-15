@@ -1,17 +1,43 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.session.ConversationItem
 import io.github.modao7067.luma.gui.session.SubAgentState
+import java.util.Locale
 import org.junit.Assert.*
 import org.junit.Test
 
 class SubAgentTimelineTest {
+    private fun withLocale(locale: Locale, block: () -> Unit) {
+        val savedLocale = Locale.getDefault()
+        val savedOverride = LumaI18n.overrideLanguage
+        val savedProp = System.getProperty("luma.lang")
+        try {
+            System.clearProperty("luma.lang")
+            Locale.setDefault(locale)
+            LumaI18n.resetForTest()
+            block()
+        } finally {
+            Locale.setDefault(savedLocale)
+            if (savedProp == null) System.clearProperty("luma.lang") else System.setProperty("luma.lang", savedProp)
+            LumaI18n.resetForTest()
+            LumaI18n.overrideLanguage = savedOverride
+        }
+    }
+
     @Test fun namelessAgentsDoNotShareTheirRoleAsTheirOnlyIdentity() {
         val first = SubAgentState("019a4100-7b31-75dd-bb19-26344622aa53", role = "worker")
         val second = first.copy(id = "019a4100-7b31-75dd-bb19-26344622bb64")
-        assertNotEquals(subAgentTitle(first), subAgentTitle(second))
-        assertEquals("子代理 · 4622aa53", subAgentTitle(first))
-        assertEquals("LumaChild", subAgentTitle(first.copy(id = "LumaChild")))
+        withLocale(Locale.CHINA) {
+            assertNotEquals(subAgentTitle(first), subAgentTitle(second))
+            assertEquals("子代理 · 4622aa53", subAgentTitle(first))
+            assertEquals("LumaChild", subAgentTitle(first.copy(id = "LumaChild")))
+        }
+        withLocale(Locale.US) {
+            assertNotEquals(subAgentTitle(first), subAgentTitle(second))
+            assertEquals("Sub-agent · 4622aa53", subAgentTitle(first))
+            assertEquals("LumaChild", subAgentTitle(first.copy(id = "LumaChild")))
+        }
     }
 
     @Test fun nativeIdentityStaysWithFirstToolAcrossWaitAndAnswer() {
@@ -37,11 +63,28 @@ class SubAgentTimelineTest {
         val rows = conversationRows(listOf(ConversationItem("spawn", "tool", outcome = "succeeded")),
             listOf(SubAgentState("child", itemId = "spawn", status = "running")))
         assertEquals("running", rows.single().agents.single().status)
-        assertEquals("等待中", subAgentStatus("pending"))
-        assertEquals("已关闭", subAgentStatus("closed"))
-        assertEquals("状态待确认", subAgentStatus("anything"))
+        withLocale(Locale.CHINA) {
+            assertEquals("等待中", subAgentStatus("pending"))
+            assertEquals("已关闭", subAgentStatus("closed"))
+            assertEquals("状态待确认", subAgentStatus("anything"))
+        }
+        withLocale(Locale.US) {
+            assertEquals("Pending", subAgentStatus("pending"))
+            assertEquals("Closed", subAgentStatus("closed"))
+            assertEquals("Pending", subAgentStatus("anything"))
+        }
         assertFalse(processEntryRetained(ConversationItem("closed", "tool", kind = "subAgent", outcome = "closed")))
         assertTrue(processEntryRetained(ConversationItem("legacy-closed", "tool", outcome = "closed")))
         assertTrue(processEntryRetained(ConversationItem("unknown", "tool", outcome = "unknown")))
+    }
+
+    @Test fun subAgentProcessItemUsesLocalizedNamelessTitle() {
+        val nameless = SubAgentState("019a4100-7b31-75dd-bb19-26344622aa53", role = "swarm")
+        withLocale(Locale.CHINA) {
+            assertEquals("子代理 · 4622aa53", subAgentProcessItem(nameless).text)
+        }
+        withLocale(Locale.US) {
+            assertEquals("Sub-agent · 4622aa53", subAgentProcessItem(nameless).text)
+        }
     }
 }

@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.activity.compose.PredictiveBackHandler
 import kotlinx.coroutines.CancellationException
 import androidx.compose.animation.AnimatedVisibility
@@ -359,7 +362,8 @@ private fun SessionDetailContent(
                                 val request = currentRequest ?: retainedRequest
                                 if (request != null) {
                                     val bannerPalette = rememberRequestSheetPalette()
-                                    val bannerTitle = remember(request.title, request.body, request.questions) {
+                                    val langCode = LumaI18n.langCode()
+                                    val bannerTitle = remember(request.title, request.body, request.questions, langCode) {
                                         requestBannerTitle(request)
                                     }
                                     Surface(
@@ -397,7 +401,7 @@ private fun SessionDetailContent(
                                                 )
                                                 if (view.requests.size > 1) {
                                                     Text(
-                                                        "${view.requests.size} 项待处理",
+                                                        tr("${view.requests.size} 项待处理", "${view.requests.size} pending"),
                                                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                                                         color = bannerPalette.textMuted,
                                                     )
@@ -419,7 +423,7 @@ private fun SessionDetailContent(
                                                     contentAlignment = Alignment.Center,
                                                 ) {
                                                     Text(
-                                                        if (request.answering) "提交中" else "处理",
+                                                        if (request.answering) tr("提交中", "Sending") else tr("处理", "Review"),
                                                         style = MaterialTheme.typography.labelMedium.copy(
                                                             fontSize = 12.5.sp,
                                                             fontWeight = FontWeight.SemiBold,
@@ -859,7 +863,7 @@ internal fun ConversationMessage(item: ConversationItem, actions: CockpitActions
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                     modifier = Modifier.height(32.dp),
                 ) {
-                    Text(if (expanded) "收起详情" else "展开详情", style = MaterialTheme.typography.labelMedium)
+                    Text(if (expanded) tr("收起详情", "Less") else tr("展开详情", "Details"), style = MaterialTheme.typography.labelMedium)
                 }
                 TopReveal(expanded = expanded) {
                     Box(Modifier.padding(top = 4.dp)) {
@@ -971,8 +975,8 @@ internal fun BoxScope.ConversationScrollOverlay(
                                 onClick = { menuOpen = !menuOpen },
                             )
                             .semantics(mergeDescendants = true) {
-                                contentDescription = "子代理 ${displayedAgents.size} 个"
-                                stateDescription = if (menuActive) "已展开" else "已收起"
+                                contentDescription = tr("子代理 ${displayedAgents.size} 个", "${displayedAgents.size} sub-agents")
+                                stateDescription = if (menuActive) tr("已展开", "Expanded") else tr("已收起", "Collapsed")
                             },
                         cornerRadius = FloatingChromeRadius,
                         alphaProvider = { subAgentsProgressState.value.coerceIn(0f, 1f) },
@@ -1025,7 +1029,7 @@ internal fun BoxScope.ConversationScrollOverlay(
                             cornerRadius = FloatingChromeRadius,
                             onClick = onJump,
                         )
-                        .semantics { contentDescription = "↓ 回到底部" },
+                        .semantics { contentDescription = tr("↓ 回到底部", "↓ Scroll to bottom") },
                     cornerRadius = FloatingChromeRadius,
                     alphaProvider = { jumpProgressState.value.coerceIn(0f, 1f) },
                 ) {

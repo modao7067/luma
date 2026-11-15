@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.graphics.Bitmap
 import android.util.LruCache
 import androidx.compose.animation.core.animateFloatAsState
@@ -222,9 +224,9 @@ private fun MarkdownPluginCard(catalogId: String, authUrl: String?) {
         else -> catalogId.trim().replace('-', ' ').replaceFirstChar { it.uppercase() }
     }
     val subtitle = when {
-        authUrl != null && idLower in setOf("gdrive", "google-drive") -> "云盘插件授权 · $catalogId"
-        authUrl != null -> "插件账号授权 · $catalogId"
-        else -> "插件连接 · 请点击下方授权链接登录"
+        authUrl != null && idLower in setOf("gdrive", "google-drive") -> tr("云盘插件授权 · $catalogId", "Cloud Drive auth · $catalogId")
+        authUrl != null -> tr("插件账号授权 · $catalogId", "Plugin account auth · $catalogId")
+        else -> tr("插件连接 · 请点击下方授权链接登录", "Plugin connection · Tap the link below to sign in")
     }
     DisableSelection {
         Surface(
@@ -282,7 +284,7 @@ private fun MarkdownPluginCard(catalogId: String, authUrl: String?) {
                         contentColor = colors.onSurfaceVariant,
                     ) {
                         Text(
-                            "待授权",
+                            tr("待授权", "Auth required"),
                             Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             style = MaterialTheme.typography.labelMedium,
                         )
@@ -679,7 +681,7 @@ private fun buildRichText(
                 } else {
                     val rendered = renderAndCacheFormula(context, expression, sizePx, argb, padding = 0)
                     if (rendered == null) {
-                        append("[公式未能排版：${match.value}]")
+                        append(tr("[公式未能排版：${match.value}]", "[Formula render failed: ${match.value}]"))
                     } else {
                         val id = "formula-${images.size}"
                         images[id] = rendered
@@ -936,9 +938,9 @@ internal fun MarkdownDocumentCard(
             .testTag("markdown-document-card")
             .semantics {
                 stateDescription = if (expanded) {
-                    if (effectiveShowSource) "已展开 Markdown 源码" else "已展开 Markdown 预览"
+                    if (effectiveShowSource) tr("已展开 Markdown 源码", "Expanded Markdown source") else tr("已展开 Markdown 预览", "Expanded Markdown preview")
                 } else {
-                    "已折叠 Markdown 文档卡片"
+                    tr("已折叠 Markdown 文档卡片", "Collapsed Markdown card")
                 }
             },
     ) {
@@ -1043,7 +1045,7 @@ internal fun MarkdownDocumentCard(
                                 }
                                 Spacer(Modifier.width(5.dp))
                                 Text(
-                                    "展开",
+                                    tr("展开", "Expand"),
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                                     color = colors.onSurface,
                                     maxLines = 1,
@@ -1057,7 +1059,7 @@ internal fun MarkdownDocumentCard(
                                     .background(actionBtnBg, LumaCardShape(9.dp))
                                     .border(0.5.dp, borderColor, LumaCardShape(9.dp))
                                     .clickable(onClick = copyMarkdown)
-                                    .semantics { contentDescription = "复制" }
+                                    .semantics { contentDescription = tr("复制", "Copy") }
                                     .padding(horizontal = 10.dp),
                                 horizontalArrangement = Arrangement.Center,
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1067,7 +1069,7 @@ internal fun MarkdownDocumentCard(
                                 }
                                 Spacer(Modifier.width(5.dp))
                                 Text(
-                                    if (copied) "已复制" else "复制",
+                                    if (copied) tr("已复制", "Copied") else tr("复制", "Copy"),
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                                     color = if (copied) copiedTint else colors.onSurface,
                                     maxLines = 1,
@@ -1117,7 +1119,7 @@ internal fun MarkdownDocumentCard(
                                 maxLines = 1,
                             )
                             Text(
-                                "· ${summary.lineCount} 行",
+                                tr("· ${summary.lineCount} 行", "· ${summary.lineCount} lines"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colors.onSurfaceVariant.copy(alpha = 0.72f),
                                 fontFamily = terminalFont(),
@@ -1160,7 +1162,7 @@ internal fun MarkdownDocumentCard(
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text(
-                                            "预览",
+                                            tr("预览", "Preview"),
                                             style = MaterialTheme.typography.labelSmall.copy(
                                                 fontWeight = if (!showSource) FontWeight.Medium else FontWeight.Normal,
                                             ),
@@ -1190,7 +1192,7 @@ internal fun MarkdownDocumentCard(
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text(
-                                            "源码",
+                                            tr("源码", "Source"),
                                             style = MaterialTheme.typography.labelSmall.copy(
                                                 fontWeight = if (showSource) FontWeight.Medium else FontWeight.Normal,
                                             ),
@@ -1216,7 +1218,7 @@ internal fun MarkdownDocumentCard(
                                     MenuIcon(MenuSymbol.DOWN, size = 13.dp, rotationProvider = { 180f })
                                 }
                                 Text(
-                                    "收起",
+                                    tr("收起", "Collapse"),
                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
                                     color = colors.onSurfaceVariant,
                                 )
@@ -1226,7 +1228,7 @@ internal fun MarkdownDocumentCard(
                                     .size(28.dp)
                                     .clip(LumaCardShape(8.dp))
                                     .clickable(onClick = copyMarkdown)
-                                    .semantics { contentDescription = "复制" },
+                                    .semantics { contentDescription = tr("复制", "Copy") },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
@@ -1273,7 +1275,7 @@ internal fun MarkdownDocumentCard(
                                 }
                                 if (exceedsPreviewCap) {
                                     Text(
-                                        "… 文档超过 128 KiB，已切换为截断源码视图（共 ${visibleCode.length / 1024} KiB）",
+                                        tr("… 文档超过 128 KiB，已切换为截断源码视图（共 ${visibleCode.length / 1024} KiB）", "… Document exceeds 128 KiB; showing truncated source (${visibleCode.length / 1024} KiB total)"),
                                         fontFamily = terminalFont(),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = colors.onSurfaceVariant.copy(alpha = 0.75f),
@@ -1373,7 +1375,7 @@ internal fun CodeBlock(
     bodyVerticalScrollState: ScrollState = rememberScrollState(),
     bodyHorizontalScrollState: ScrollState = rememberScrollState(),
     visibleCharacters: Int = Int.MAX_VALUE,
-    caption: String = language.ifBlank { "代码" },
+    caption: String = language.ifBlank { tr("代码", "Code") },
     softWrap: Boolean = false,
 ) {
     val visibleEnd = markdownVisibleEnd(code, visibleCharacters)
@@ -1441,7 +1443,7 @@ internal fun CodeBlock(
                             runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }
                             copied = true
                         }
-                        .semantics { contentDescription = "复制" },
+                        .semantics { contentDescription = tr("复制", "Copy") },
                     contentAlignment = Alignment.Center,
                 ) {
                     CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
@@ -1562,7 +1564,7 @@ private fun FormulaBlock(expression: String) {
             }
         }
         FormulaBlockState.Failed -> {
-            Text("公式未能排版", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+            Text(tr("公式未能排版", "Formula render failed"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             CodeBlock(expression, "LaTeX")
         }
         is FormulaBlockState.Ready -> {
@@ -1575,7 +1577,7 @@ private fun FormulaBlock(expression: String) {
             ) {
                 Image(
                     bitmap = formula.bitmap,
-                    contentDescription = "公式：$expression",
+                    contentDescription = tr("公式：$expression", "Formula: $expression"),
                     modifier = Modifier.size(
                         with(density) { formula.widthPx.toDp() },
                         with(density) { formula.heightPx.toDp() },

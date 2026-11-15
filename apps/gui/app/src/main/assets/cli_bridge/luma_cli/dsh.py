@@ -7,6 +7,7 @@ import uuid
 from .acp import AcpSession
 from .balances import account_rows, official_result, official_rows
 from .base import item, text
+from .i18n import tr
 from .transport import Rejected
 
 class DshSession(AcpSession):
@@ -37,9 +38,9 @@ class DshSession(AcpSession):
         try:
             official = official_result()
             wallets = official.get('wallets') if official.get('status') == 'ready' else None
-            self._set_balance_rows(official_rows(official) if wallets else [{'label': '余额', 'value': '不可用'}])
+            self._set_balance_rows(official_rows(official) if wallets else [{'label': tr('余额', 'Balance'), 'value': tr('不可用', 'Unavailable')}])
         except Exception:
-            self._set_balance_rows([{'label': '余额', 'value': '不可用'}])
+            self._set_balance_rows([{'label': tr('余额', 'Balance'), 'value': tr('不可用', 'Unavailable')}])
 
     def can_steer(self, payload):
         return (
@@ -48,8 +49,8 @@ class DshSession(AcpSession):
             and not payload.get('text', '').lstrip().startswith('/')
         )
 
-    def snapshot(self, since=None):
-        value = super().snapshot(since)
+    def snapshot(self, since=None, touch=True):
+        value = super().snapshot(since, touch=touch)
         if not value.get('unchanged'):
             if self.balance_rows:
                 value['metrics'] = [*value.get('metrics', []), *self.balance_rows]
@@ -70,7 +71,7 @@ class DshSession(AcpSession):
     def start(self, argv):
         self.permission_protocol = False
         self.permission_revision = 0
-        self.permission_unavailable = '当前 DSH 版本未提供已验证的权限扩展；保留官方 ACP。'
+        self.permission_unavailable = tr('当前 DSH 版本未提供已验证的权限扩展；保留官方 ACP。', 'Current DSH version lacks verified permission extensions; keeping official ACP.')
         self.permission_patch = None
         self.permission_module = None
         self.commands = set()
@@ -119,6 +120,14 @@ class DshSession(AcpSession):
         self.remove_patch()
         super().exited(error)
 
+    def destroy_resources(self):
+        try: return super().destroy_resources()
+        finally: self.remove_patch()
+
+    def finish_observer_close(self):
+        try: return super().finish_observer_close()
+        finally: self.remove_patch()
+
     def connect(self):
         restoring = bool(self.config.get('nativeId'))
         self.update(historyReady=False)
@@ -131,9 +140,9 @@ class DshSession(AcpSession):
             try:
                 self.restore_history()
             except Exception as exc:
-                self.update(error='DSH 原生历史读取失败：' + str(exc))
+                self.update(error=tr('DSH 原生历史读取失败：', 'Failed to read native DSH history: ') + str(exc))
         elif restoring:
-            self.update(error='当前 DSH 原生历史读取能力不可用；已有会话引用保持不变。')
+            self.update(error=tr('当前 DSH 原生历史读取能力不可用；已有会话引用保持不变。', 'Native DSH history replay is unavailable; existing session reference preserved.'))
         else:
             self.update(historyReady=True)
         capability = meta.get('lumaPermissions', {})
@@ -146,8 +155,12 @@ class DshSession(AcpSession):
         else:
             self.permission_unavailable = capability.get('reason', self.permission_unavailable)
         self._sync_extensions(meta)
-        self.update(notice=self.data['notice'] + (' 权限选项由同一 DSH 进程的原生权限预设服务提供，仅明确选择后改变本会话；无文件沙箱或不逐次审批会降低对应保护，以每项实际组合为准。' if available else
-                    ' DSH 官方 ACP 不提供会话模式切换；权限扩展不可用：' + self.permission_unavailable))
+        self.update(notice=self.data['notice'] + (
+            tr(' 权限选项由同一 DSH 进程的原生权限预设服务提供，仅明确选择后改变本会话；无文件沙箱或不逐次审批会降低对应保护，以每项实际组合为准。',
+               ' Permission presets are provided by the same DSH process and only change this session when selected; disabling sandbox or per-call approval reduces protection.')
+            if available else
+            tr(' DSH 官方 ACP 不提供会话模式切换；权限扩展不可用：',
+               ' Official DSH ACP does not support mode switching; permission extension unavailable: ') + self.permission_unavailable))
         self.refresh_balances()
 
     def _sync_extensions(self, meta):
@@ -189,25 +202,25 @@ class DshSession(AcpSession):
             params = {'sessionId': self.data['nativeId'], 'offset': offset}
             if through is not None: params['throughSeq'] = through
             restored = self.call('luma/history/read', params)
-            if restored.get('sessionId') != self.data['nativeId']: raise Rejected('DSH 历史返回了不同会话身份')
-            if type(restored.get('throughSeq')) is not int or restored['throughSeq'] < -1: raise Rejected('DSH 原生历史缺少有效快照边界')
-            if through is not None and restored.get('throughSeq') != through: raise Rejected('DSH 历史分页边界改变')
+            if restored.get('sessionId') != self.data['nativeId']: raise Rejected(tr('DSH 历史返回了不同会话身份', 'DSH history returned a different session identity'))
+            if type(restored.get('throughSeq')) is not int or restored['throughSeq'] < -1: raise Rejected(tr('DSH 原生历史缺少有效快照边界', 'Native DSH history is missing a valid snapshot boundary'))
+            if through is not None and restored.get('throughSeq') != through: raise Rejected(tr('DSH 历史分页边界改变', 'DSH history pagination boundary changed'))
             through = restored.get('throughSeq')
             page = restored.get('messages')
             if not isinstance(page, list) or any(not isinstance(row, dict) or not isinstance(row.get('id'), str) for row in page):
-                raise Rejected('DSH 原生历史格式不兼容')
+                raise Rejected(tr('DSH 原生历史格式不兼容', 'Incompatible native DSH history format'))
             messages.extend(page)
             following = restored.get('nextOffset')
             if following is None: break
-            if type(following) is not int or following <= offset or following != len(messages): raise Rejected('DSH 原生历史分页没有前进')
+            if type(following) is not int or following <= offset or following != len(messages): raise Rejected(tr('DSH 原生历史分页没有前进', 'Native DSH history pagination did not advance'))
             offset = following
-        if len({row['id'] for row in messages}) != len(messages): raise Rejected('DSH 原生历史身份重复')
+        if len({row['id'] for row in messages}) != len(messages): raise Rejected(tr('DSH 原生历史身份重复', 'Duplicate message IDs in native DSH history'))
         admissions = {native: ident for ident, native in self.config.get('submissionNativeIds', {}).items()}
         for row in messages:
             if row.get('role') == 'user' and row.get('nativeMessageId') in admissions:
                 row['id'] = admissions[row['nativeMessageId']]
         with self.lock:
-            if self.data['running']: raise Rejected('会话已开始运行，不能覆盖实时输出')
+            if self.data['running']: raise Rejected(tr('会话已开始运行，不能覆盖实时输出', 'Session is already running; cannot overwrite live output'))
             for row in messages: self.row(row)
             for sub in restored.get('subagents', []) if isinstance(restored.get('subagents'), list) else []:
                 if isinstance(sub, dict) and sub.get('id'):
@@ -216,24 +229,30 @@ class DshSession(AcpSession):
             if isinstance(restored_usage, dict):
                 self.cache_usage = {k: restored_usage.get(k) for k in ('input', 'cacheRead', 'cacheWrite', 'output')}
                 self.apply_usage(restored_usage)
-            self.update(historyReady=True, title=restored.get('title', ''), notice=self.data['notice'].replace('原生恢复不重放历史，重启托管服务后只显示本次连接输出。', '') + '历史由同一原生会话的完整日志恢复。')
+            cleaned_notice = (
+                self.data['notice']
+                .replace('原生恢复不重放历史，重启托管服务后只显示本次连接输出。', '')
+                .replace(' Native resume does not replay history; only output from the current connection is shown after host restart.', '')
+            )
+            self.update(historyReady=True, title=restored.get('title', ''),
+                        notice=cleaned_notice + tr('历史由同一原生会话的完整日志恢复。', ' History restored from the full native session log.'))
 
     def apply_permissions(self, value):
-        if not isinstance(value, dict): raise Rejected('DSH 原生权限状态不兼容')
-        if value.get('sessionId') != self.data['nativeId']: raise Rejected('DSH 权限状态返回了不同会话身份')
+        if not isinstance(value, dict): raise Rejected(tr('DSH 原生权限状态不兼容', 'Incompatible native DSH permission state'))
+        if value.get('sessionId') != self.data['nativeId']: raise Rejected(tr('DSH 权限状态返回了不同会话身份', 'DSH permission state returned a different session identity'))
         current = value.get('currentValue')
         options = value.get('options')
-        if not isinstance(current, str) or not isinstance(options, list): raise Rejected('DSH 原生权限状态不兼容')
+        if not isinstance(current, str) or not isinstance(options, list): raise Rejected(tr('DSH 原生权限状态不兼容', 'Incompatible native DSH permission state'))
         rows = []
         for option in options:
-            if not isinstance(option, dict) or not isinstance(option.get('value'), str) or not isinstance(option.get('name'), str): raise Rejected('DSH 原生权限选项不兼容')
+            if not isinstance(option, dict) or not isinstance(option.get('value'), str) or not isinstance(option.get('name'), str): raise Rejected(tr('DSH 原生权限选项不兼容', 'Incompatible native DSH permission option'))
             rows.append({'id': option['value'], 'label': option['name'], 'description': option.get('description', ''),
                          'sandbox': option.get('sandbox', ''), 'approval': option.get('approval', '')})
         self.permission_revision += 1
         self.update(permission=current, permissions=rows)
 
     def refresh_permissions(self):
-        if not self.permission_protocol: raise Rejected('当前 DSH ACP 未提供可用的会话权限切换')
+        if not self.permission_protocol: raise Rejected(tr('当前 DSH ACP 未提供可用的会话权限切换', 'Current DSH ACP does not support session permission switching'))
         self.apply_permissions(self.call('luma/permissions/read', {'sessionId': self.data['nativeId']}))
 
     def _append_stream_delta(self, kind, delta_text):
@@ -278,17 +297,17 @@ class DshSession(AcpSession):
         raw_questions = value.get('questions') or []
         if isinstance(intent, dict) and intent.get('kind') == 'plan-review':
             plan_q = raw_questions[0] if raw_questions and isinstance(raw_questions[0], dict) else {}
-            body = plan_q.get('question', '请审阅当前计划')
+            body = plan_q.get('question', tr('请审阅当前计划', 'Please review the current plan'))
             questions = [{
                 'id': '0',
                 'header': plan_q.get('header', 'Plan'),
                 'prompt': body,
-                'options': ['批准计划 (Approve)', '拒绝/取消'],
+                'options': [tr('批准计划 (Approve)', 'Approve plan'), tr('拒绝/取消', 'Reject / Cancel')],
                 'multiple': False,
             }]
             self.request(
-                req_id, value, '计划审阅 (Plan Review)', body,
-                [{'id': 'allow', 'label': '提交'}, {'id': 'deny', 'label': '取消'}],
+                req_id, value, tr('计划审阅 (Plan Review)', 'Plan Review'), body,
+                [{'id': 'allow', 'label': tr('提交', 'Submit')}, {'id': 'deny', 'label': tr('取消', 'Cancel')}],
                 questions, submit_choice='allow', skip_choice='deny',
             )
             return
@@ -304,8 +323,8 @@ class DshSession(AcpSession):
                 'multiple': bool(q.get('multiSelect', False)),
             })
         self.request(
-            req_id, value, value.get('title') or '问题确认', '',
-            [{'id': 'allow', 'label': '提交'}, {'id': 'deny', 'label': '跳过'}],
+            req_id, value, value.get('title') or tr('问题确认', 'Question'), '',
+            [{'id': 'allow', 'label': tr('提交', 'Submit')}, {'id': 'deny', 'label': tr('跳过', 'Skip')}],
             questions, submit_choice='allow', skip_choice='deny',
         )
 
@@ -327,20 +346,20 @@ class DshSession(AcpSession):
             self.answered(req_id)
             return {}
         if choice != 'allow':
-            raise Rejected('无效审批选项')
+            raise Rejected(tr('无效审批选项', 'Invalid approval choice'))
         if isinstance(intent, dict) and intent.get('kind') == 'plan-review':
             plan_q = raw_questions[0] if raw_questions and isinstance(raw_questions[0], dict) else {}
             q_text = plan_q.get('question', '')
             vals = (p.get('answers') or {}).get('0') or []
             val = vals[0] if vals else 'Approve'
-            if val in ('批准计划 (Approve)', 'Approve'):
+            if val in ('批准计划 (Approve)', 'Approve plan', 'Approve'):
                 ans = {q_text: intent.get('approve', 'Approve')}
                 self.call('luma/questions/answer', {
                     'sessionId': self.data['nativeId'],
                     'requestId': req_id,
                     'answers': ans,
                 })
-            elif val == '拒绝/取消':
+            elif val in ('拒绝/取消', 'Reject / Cancel'):
                 self.call('luma/questions/answer', {
                     'sessionId': self.data['nativeId'],
                     'requestId': req_id,
@@ -362,9 +381,9 @@ class DshSession(AcpSession):
             q_text = q.get('question', '')
             vals = (p.get('answers') or {}).get(str(idx)) or []
             if not vals:
-                raise Rejected('请回答：' + q_text)
+                raise Rejected(tr('请回答：', 'Please answer: ') + q_text)
             if not q.get('multiSelect') and len(vals) != 1:
-                raise Rejected('此问题只允许一个回答')
+                raise Rejected(tr('此问题只允许一个回答', 'Only one answer is allowed for this question'))
             answers[q_text] = ', '.join(vals)
         self.call('luma/questions/answer', {
             'sessionId': self.data['nativeId'],
@@ -397,7 +416,7 @@ class DshSession(AcpSession):
             if value.get('sessionId') == self.data['nativeId']:
                 try: self.apply_permissions(value)
                 except (Rejected, ValueError, TypeError) as exc:
-                    self.update(permission='', permissions=[], error='DSH 权限状态不可用：' + str(exc))
+                    self.update(permission='', permissions=[], error=tr('DSH 权限状态不可用：', 'DSH permission state unavailable: ') + str(exc))
             return
         if method == 'luma/stream/frame':
             value = frame.get('params', {})
@@ -422,12 +441,16 @@ class DshSession(AcpSession):
             if value.get('sessionId') == self.data['nativeId']:
                 raw_sub = value.get('submissionId')
                 sub_id = raw_sub if isinstance(raw_sub, str) and raw_sub else ''
-                if sub_id and sub_id in self.config.get('receipts', {}):
-                    self.receipt(sub_id, 'accepted')
-                    self.consumed(sub_id)
+                if sub_id:
+                    pending_cmd = getattr(self, 'pending_command_texts', {}).get(sub_id)
+                    if isinstance(pending_cmd, str) and sub_id not in self.rows:
+                        self.row(item(sub_id, 'user', pending_cmd, origin='native', status='completed'))
+                    if sub_id in self.config.get('receipts', {}):
+                        self.receipt(sub_id, 'accepted')
+                        self.consumed(sub_id)
                 msg = value.get('message') or value.get('text') or ''
                 if isinstance(msg, str) and msg.strip():
-                    row_id = str(uuid.uuid4())
+                    row_id = f'{sub_id}:cmd' if sub_id else str(uuid.uuid4())
                     self.row(item(row_id, 'assistant', msg.strip(), status='completed'))
                 if sub_id and sub_id == self.current_submission:
                     self.finish_chunk()
@@ -444,7 +467,7 @@ class DshSession(AcpSession):
                         'text': it.get('text', ''),
                         'canRemove': bool(it.get('canRemove', True)),
                         'canSteer': bool(it.get('canSteer', True)),
-                        'canEdit': bool(it.get('canEdit', True)),
+                        'canEdit': bool(it.get('canEdit', False)),
                         'hostOwned': False,
                     }
                     for it in items if isinstance(it, dict) and it.get('id')
@@ -497,7 +520,7 @@ class DshSession(AcpSession):
                     'text': it.get('text', ''),
                     'canRemove': bool(it.get('canRemove', True)),
                     'canSteer': bool(it.get('canSteer', True)),
-                    'canEdit': bool(it.get('canEdit', True)),
+                    'canEdit': bool(it.get('canEdit', False)),
                     'hostOwned': False,
                 }
                 for it in items if isinstance(it, dict) and it.get('id')
@@ -508,9 +531,9 @@ class DshSession(AcpSession):
             with self.lock:
                 delivery = self.config.get('deliveries', {}).get(ident)
                 if not delivery or delivery.get('state') != 'queued':
-                    raise Rejected('消息已离开待发队列')
+                    raise Rejected(tr('消息已离开待发队列', 'Message is no longer in the pending queue'))
                 if not self.data.get('running') or not self.can_steer(delivery.get('payload', {})):
-                    raise Rejected('当前消息不支持运行中引导')
+                    raise Rejected(tr('当前消息不支持运行中引导', 'This message cannot steer while running'))
                 delivery['payload']['steer'] = True
                 self.seq += 1
                 self.delivery_wake.set()
@@ -521,14 +544,14 @@ class DshSession(AcpSession):
         super().validate_prompt(payload)
         skills = payload.get('skills') or []
         if len(skills) > 1:
-            raise Rejected('DeepSeek Harness 每条消息最多选择一个 Skill')
+            raise Rejected(tr('DeepSeek Harness 每条消息最多选择一个 Skill', 'DeepSeek Harness allows at most one skill per message'))
         if any(s not in {k['id'] for k in self.data.get('skills', [])} for s in skills):
-            raise Rejected('Skill 不在原生目录中')
+            raise Rejected(tr('Skill 不在原生目录中', 'Skill is not in the native catalog'))
         raw_text = payload.get('text', '').lstrip()
         if not skills and raw_text:
             head = raw_text.split(maxsplit=1)[0]
             if head in ('/clear', '/reset', '/new'):
-                raise Rejected('此原生命令会更换会话 ID；请使用 GUI 新建会话，保留当前会话的身份与历史')
+                raise Rejected(tr('此原生命令会更换会话 ID；请使用 GUI 新建会话，保留当前会话的身份与历史', 'This native command replaces the session ID; start a new session in GUI to preserve current identity and history'))
 
     def prompt(self, p):
         ident = p['submissionId']
@@ -543,7 +566,7 @@ class DshSession(AcpSession):
                 'text': body,
             })
             if not res.get('accepted'):
-                raise Rejected(res.get('reason') or '当前回合无法引导')
+                raise Rejected(res.get('reason') or tr('当前回合无法引导', 'Cannot steer the current turn'))
             with self.lock:
                 self.finish_chunk()
                 self.chunk_id = self.chunk_kind = None
@@ -559,13 +582,24 @@ class DshSession(AcpSession):
             if cmd_token in self.commands:
                 self.current_submission = ident
                 self.update(running=True, error=None)
-                self.row(item(ident, 'user', stripped, origin='native', status='completed'))
-                res = self.call('luma/commands/execute', {
-                    'sessionId': self.data['nativeId'],
-                    'submissionId': ident,
-                    'text': stripped,
-                })
+                if not hasattr(self, 'pending_command_texts'):
+                    self.pending_command_texts = {}
+                self.pending_command_texts[ident] = stripped
+                try:
+                    res = self.call('luma/commands/execute', {
+                        'sessionId': self.data['nativeId'],
+                        'submissionId': ident,
+                        'text': stripped,
+                    })
+                except Exception:
+                    if self.current_submission == ident:
+                        self.current_submission = None
+                        self.update(running=False)
+                    raise
+                finally:
+                    self.pending_command_texts.pop(ident, None)
                 if res.get('handled') is True:
+                    self.row(item(ident, 'user', stripped, origin='native', status='completed'))
                     snap = res.get('snapshot')
                     if isinstance(snap, dict):
                         try: self.apply_permissions(snap)
@@ -573,11 +607,15 @@ class DshSession(AcpSession):
                     out_text = res.get('text', '')
                     if isinstance(out_text, str) and out_text.strip():
                         self.row(item(f'{ident}:cmd', 'assistant', out_text.strip(), status='completed'))
+                    if ident in self.config.get('receipts', {}):
+                        self.receipt(ident, 'accepted')
                     self.consumed(ident)
                     if not res.get('running'):
                         self.current_submission = None
                         self.update(running=False)
                     return True
+                if self.current_submission == ident:
+                    self.current_submission = None
         if skills:
             p = {**p, 'text': body}
         self.live_streamed = set()
@@ -594,24 +632,24 @@ class DshSession(AcpSession):
             return super().rename(title)
         title = (title or '').strip()
         if not title:
-            raise Rejected('会话标题不能为空')
+            raise Rejected(tr('会话标题不能为空', 'Session title cannot be empty'))
         res = self.call('luma/session/rename', {'sessionId': self.data['nativeId'], 'title': title})
         self.update(title=res.get('title', title))
         return {}
 
     def configure(self, values):
         if 'permission' not in values: return super().configure(values)
-        if self.data['running']: raise Rejected('请等待回合结束再更改权限')
-        if not self.permission_protocol: raise Rejected('当前 DSH ACP 未提供可用的会话权限切换')
+        if self.data['running']: raise Rejected(tr('请等待回合结束再更改权限', 'Wait for the current turn to finish before changing permissions'))
+        if not self.permission_protocol: raise Rejected(tr('当前 DSH ACP 未提供可用的会话权限切换', 'Current DSH ACP does not support session permission switching'))
         selected = values['permission']
-        if selected not in {p['id'] for p in self.data['permissions']}: raise Rejected('权限预设不在 DSH 原生目录中')
+        if selected not in {p['id'] for p in self.data['permissions']}: raise Rejected(tr('权限预设不在 DSH 原生目录中', 'Permission preset is not in the native DSH catalog'))
         other = {k: v for k, v in values.items() if k != 'permission'}
         if other: super().configure(other)
         revision = self.permission_revision
         try:
             actual = self.call('luma/permissions/set', {'sessionId': self.data['nativeId'], 'value': selected})
             self.apply_permissions(actual)
-            if self.data['permission'] != selected: raise Rejected('DSH 尚未确认所选权限')
+            if self.data['permission'] != selected: raise Rejected(tr('DSH 尚未确认所选权限', 'DSH has not confirmed the selected permission'))
         except Rejected:
             try: self.refresh_permissions()
             except Exception: self.update(permission='', permissions=[])

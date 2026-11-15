@@ -2,7 +2,9 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),cp=require('node:child_process');
 const TEXT=1024*1024,OUTPUT=8*TEXT;
-function output(data){const b=Buffer.isBuffer(data)?data:Buffer.from(data);for(let at=0;at<b.length;){const n=fs.writeSync(1,b,at,b.length-at);if(n<1)throw new Error('文件输出中断');at+=n;}}
+const ZH=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');
+const tr=(z,e)=>ZH?z:e;
+function output(data){const b=Buffer.isBuffer(data)?data:Buffer.from(data);for(let at=0;at<b.length;){const n=fs.writeSync(1,b,at,b.length-at);if(n<1)throw new Error(tr('文件输出中断','File output interrupted'));at+=n;}}
 function find(name){for(const dir of (process.env.PATH||'').split(':')){const p=path.join(dir,name);try{fs.accessSync(p,fs.constants.X_OK);return p;}catch{}}return null;}
 function run(tool,args,input,env){const r=cp.spawnSync(tool,args,{input,env,timeout:10000,maxBuffer:OUTPUT,encoding:null,stdio:['pipe','pipe','pipe']});return r.status===0&&!r.error?r.stdout:null;}
 function basic(raw){
@@ -39,32 +41,32 @@ function safeGuestPath(raw){
   const seg=stack.shift();
   if(seg==='..'){cur=path.posix.dirname(cur.replace(/\/+$/,''))||'/';continue;}
   const nxt=path.posix.join(cur,seg);
-  if(isForbiddenPseudoPath(nxt))throw new Error('不允许预览系统伪文件系统路径');
+  if(isForbiddenPseudoPath(nxt))throw new Error(tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'));
   let st;
   try{st=fs.lstatSync(nxt);}catch(e){if(e.code==='ENOENT')throw e;throw e;}
   if(st.isSymbolicLink()){
-   if(++hops>40)throw new Error('符号链接层级过深');
+   if(++hops>40)throw new Error(tr('符号链接层级过深','Too many symbolic link levels'));
    const target=fs.readlinkSync(nxt);
    const joined=path.posix.isAbsolute(target)?target:path.posix.join(cur,target);
    const normT=path.posix.normalize(joined);
-   if(isForbiddenPseudoPath(normT))throw new Error('不允许预览系统伪文件系统路径');
+   if(isForbiddenPseudoPath(normT))throw new Error(tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'));
    cur='/';
    stack.unshift(...normT.split('/').filter(s=>s&&s!=='.'));
   }else cur=nxt;
  }
  const real=fs.realpathSync(cur);
- if(isForbiddenPseudoPath(real))throw new Error('不允许预览系统伪文件系统路径');
+ if(isForbiddenPseudoPath(real))throw new Error(tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'));
  return real;
 }
 let requested=process.argv[2]||'',fd;
 try{
  const limit=Number(process.argv[3]),mode=process.argv[4],columns=Math.max(12,Math.min(1000,Number(process.argv[5])||80));
- if(!Number.isSafeInteger(limit)||limit<0)throw new Error('无效大小限制');
+ if(!Number.isSafeInteger(limit)||limit<0)throw new Error(tr('无效大小限制','Invalid size limit'));
  if(requested==='~'||requested.startsWith('~/'))requested=path.join(os.homedir(),requested.slice(1));
  requested=path.resolve('/workspace',requested);
  const safeTarget=safeGuestPath(requested);
  fd=fs.openSync(safeTarget,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK);
- const info=fs.fstatSync(fd);if(!info.isFile())throw new Error('只能预览普通文件');
+ const info=fs.fstatSync(fd);if(!info.isFile())throw new Error(tr('只能预览普通文件','Only regular files can be previewed'));
  if(mode==='ansi'){
   const data=Buffer.alloc(Math.min(TEXT,info.size));let n=0;
   while(n<data.length){const count=fs.readSync(fd,data,n,data.length-n,null);if(!count)break;n+=count;}let raw=data.subarray(0,n);fs.closeSync(fd);fd=undefined;
@@ -80,11 +82,11 @@ try{
    }
   }
   if(rendered)raw=rendered;else if(markdown)raw=basic(raw);
-  output(soft(raw));if(info.size>TEXT)output('\r\n\x1b[0;90m（仅预览前 1 MiB）\x1b[0m\r\n');
+  output(soft(raw));if(info.size>TEXT)output('\r\n\x1b[0;90m'+tr('（仅预览前 1 MiB）','(Showing first 1 MiB)')+'\x1b[0m\r\n');
  }else{
-  if(info.size>limit)throw new Error('文件超过预览大小限制');
+  if(info.size>limit)throw new Error(tr('文件超过预览大小限制','File exceeds preview size limit'));
   const data=Buffer.alloc(65536);let total=0,n;
-  while((n=fs.readSync(fd,data,0,data.length,null))>0){total+=n;if(total>limit)throw new Error('文件超过预览大小限制');output(data.subarray(0,n));}
+  while((n=fs.readSync(fd,data,0,data.length,null))>0){total+=n;if(total>limit)throw new Error(tr('文件超过预览大小限制','File exceeds preview size limit'));output(data.subarray(0,n));}
  }
-}catch(error){const message=error.code==='ENOENT'?'找不到文件：'+requested:error.code==='EACCES'?'没有文件读取权限：'+requested:error.message;fs.writeSync(2,message);process.exitCode=2;}
+}catch(error){const message=error.code==='ENOENT'?tr('找不到文件：','File not found: ')+requested:error.code==='EACCES'?tr('没有文件读取权限：','Permission denied reading file: ')+requested:error.message;fs.writeSync(2,message);process.exitCode=2;}
 finally{if(fd!==undefined)fs.closeSync(fd);}

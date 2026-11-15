@@ -10,31 +10,35 @@ import threading
 import uuid
 from .acp import AcpSession
 from .base import item, text, image_blocks
+from .i18n import lang_code, tr
 from .metrics import grok_context, grok_usage
 from .media import display_content, display_object
 from .transport import Rejected, RpcRejected, spawn_process
-from .native_owner import NativeOwner, grok_lock_leader, process_start
+from .native_owner import NativeOwner, grok_lock_leader, non_mcp_background_child_alive, process_start
 
 EXT_UPDATES = {"x.ai/session_notification", "x.ai/session/update"}
 CONTENT = {"agent_message_chunk": "assistant", "agent_thought_chunk": "reasoning", "user_message_chunk": "user"}
-GROK_PERMISSIONS = [
-    {"id": "default", "label": "逐次审批"},
-    {"id": "auto", "label": "自动审批"},
-    {"id": "plan", "label": "规划模式"},
-    {"id": "always-approve", "label": "跳过审批"},
-]
+
+def _grok_permissions():
+    return [
+        {"id": "default", "label": tr("逐次审批", "Ask each time")},
+        {"id": "auto", "label": tr("自动审批", "Auto-approve")},
+        {"id": "plan", "label": tr("规划模式", "Plan mode")},
+        {"id": "always-approve", "label": tr("跳过审批", "Always approve")},
+    ]
 
 def safe_reason(value):
-    if not isinstance(value, str): return "Grok 未返回可显示的错误原因"
+    if not isinstance(value, str): return tr("Grok 未返回可显示的错误原因", "Grok did not return a displayable error reason")
+    raw_redacted = tr("[已隐藏]", "[redacted]")
     value = value[:4096]
     value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
-    value = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [已隐藏]", value)
-    value = re.sub(r'''(?ix)(["']?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password|secret|cookie)["']?\s*[:=]\s*)["']?[^\s,;\n}]+''', r"\1[已隐藏]", value)
-    value = re.sub(r"\b(?:xai-|sk-)[A-Za-z0-9_-]+", "[已隐藏]", value)
-    value = re.sub(r"\beyJ[A-Za-z0-9_.-]+", "[已隐藏]", value)
-    value = re.sub(r"https?://[^\s<>]+", "[服务地址]", value)
-    value = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[账号已隐藏]", value)
-    return value.strip()[:1200] or "Grok 执行失败"
+    value = re.sub(r"(?i)\bBearer\s+\S+", f"Bearer {raw_redacted}", value)
+    value = re.sub(r'''(?ix)(["']?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password|secret|cookie)["']?\s*[:=]\s*)["']?[^\s,;\n}]+''', rf"\1{raw_redacted}", value)
+    value = re.sub(r"\b(?:xai-|sk-)[A-Za-z0-9_-]+", raw_redacted, value)
+    value = re.sub(r"\beyJ[A-Za-z0-9_.-]+", raw_redacted, value)
+    value = re.sub(r"https?://[^\s<>]+", tr("[服务地址]", "[endpoint]"), value)
+    value = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", tr("[账号已隐藏]", "[account redacted]"), value)
+    return value.strip()[:1200] or tr("Grok 执行失败", "Grok execution failed")
 
 def error_info(error, kind="request"):
     code = error.code if isinstance(error, RpcRejected) else None
@@ -69,7 +73,7 @@ class GrokSession(AcpSession):
     busy_default_steer = False
 
     def extra_host_queue(self):
-        return [{"id": entry["id"], "text": entry["text"], "status": "插话 · 等待当前步骤结束",
+        return [{"id": entry["id"], "text": entry["text"], "status": tr("插话 · 等待当前步骤结束", "Steer · Waiting for current step"),
                  "clientUserMessageId": entry["id"], "canRemove": False, "canSteer": False,
                  "canEdit": False, "hostOwned": True}
                 for entry in self.config.get("pendingInterjections", [])]
@@ -111,8 +115,9 @@ class GrokSession(AcpSession):
         info = error_info(error, kind)
         if info["kind"] == "request" and self.data.get("lifecycle", {}).get("phase") == "blocked":
             return self.data.get("error") or self.data["lifecycle"]["message"]
-        if info["kind"] == "authentication" and "手动重连" not in info["message"]:
-            info["message"] += "；请在普通终端核对 Grok 登录/认证配置，完成后手动重连。"
+        if info["kind"] == "authentication" and "手动重连" not in info["message"] and "reconnect manually" not in info["message"].lower():
+            info["message"] += tr("；请在普通终端核对 Grok 登录/认证配置，完成后手动重连。",
+                                  "; check Grok sign-in/auth config in a regular terminal, then reconnect manually.")
         self.update(error=info["message"], errorInfo=info)
         if info["kind"] in ("authentication", "model", "configuration"):
             self.lifecycle("blocked", info["kind"], info["message"])
@@ -123,14 +128,55 @@ class GrokSession(AcpSession):
     def exited(self, error):
         if self.data.get("lifecycle", {}).get("phase") != "blocked": self.fail(error, "transport")
         self.diagnostic("observer-disconnected", error)
-        self.update(connected=False, requests=[])
+        getattr(self, "autonomous_prompts", set()).clear()
+        getattr(self, "observed_prompts", set()).clear()
+        self.last_task_completed_at = None
+        fields = {"connected": False, "requests": []}
+        if getattr(self, "current_submission", None) is None and self.data.get("running"):
+            fields["running"] = False
+        self.update(**fields)
 
     def release_mode(self):
         if self.config.get("pendingInterjections"): return None
-        if any(value == "accepted" and not self.config.get("consumedSubmissions", {}).get(ident)
+        consumed = self.config.get("consumedSubmissions", {})
+        admitted = self.config.get("admittedDisplaySubmissions", {})
+        if any(value == "accepted" and not consumed.get(ident) and not admitted.get(ident)
                for ident, value in self.config.get("receipts", {}).items()): return None
         mode = super().release_mode()
         return "observer" if mode and hasattr(self, "owner") else mode
+
+    def fast_release_blocker(self):
+        with self.lock:
+            blocker = super().fast_release_blocker()
+            if blocker in ("工具状态尚未确认结束", "Tool status has not been confirmed finished"):
+                if any(
+                    self.rows.get(ident, {}).get("status") in ("running", "in_progress", "pending", "unknown")
+                    for ident in getattr(self, "background_tools", {}).values()
+                ):
+                    return tr("后台任务尚未确认结束", "Background task has not been confirmed finished")
+            if blocker:
+                return blocker
+            last_completed = getattr(self, "last_task_completed_at", None)
+            if getattr(self, "autonomous_prompts", None) or (last_completed is not None and time.monotonic() - last_completed < 5.0):
+                return tr("后台唤醒回合尚未结算", "Background wake-up turn has not settled")
+            return None
+
+    def release_blocker(self):
+        blocker = super().release_blocker()
+        if blocker is not None:
+            return blocker
+        with self.lock:
+            owner = getattr(self, "owner", None)
+            cand = owner.handle.get("pid") if owner else None
+            pid = cand if isinstance(cand, int) and cand > 0 else None
+        if pid is None:
+            return None
+        return self.cached_snapshot_probe(
+            ("grok-owner-bg", pid),
+            lambda: tr("后台子进程仍在运行", "Background subprocess is still running")
+            if non_mcp_background_child_alive(pid) else None,
+            pending_value=tr("正在确认后台子进程状态", "Checking background subprocess status"),
+        )
     argv = ["grok", "--no-auto-update", "agent", "--no-leader", "stdio"]
     desired_model_on_create = True
     permission_categories = ()
@@ -146,6 +192,7 @@ class GrokSession(AcpSession):
             self.owner = NativeOwner(self)
             if not self.owner.handle.get("kind"):
                 env = os.environ.copy()
+                env["LUMA_LANG"] = lang_code()
                 if env_overrides: env.update(env_overrides)
                 leader = spawn_process([binary, "--no-auto-update", "agent", "--leader-socket", self.owner.socket,
                     "leader", "--no-exit-on-disconnect", "--relay-on-demand"], cwd=self.config["cwd"], env=env,
@@ -166,10 +213,14 @@ class GrokSession(AcpSession):
                     self.owner.handle.update(pid=locked[0], processStart=locked[1])
                     self.save()
                 if (leader.poll() is not None and not locked) or not Path(self.owner.socket).exists():
-                    reason = "；当前原生 sandbox 不支持 leader，请保留原权限并使用原入口" if b"sandbox" in diagnostic.lower() else "；请在普通终端检查 Grok 原生配置"
-                    raise Rejected("Grok 私有 leader 未启动" + reason)
+                    reason = (
+                        tr("；当前原生 sandbox 不支持 leader，请保留原权限并使用原入口", "; native sandbox does not support leader, keep original permissions and entry")
+                        if b"sandbox" in diagnostic.lower() else
+                        tr("；请在普通终端检查 Grok 原生配置", "; verify native Grok config in a regular terminal")
+                    )
+                    raise Rejected(tr("Grok 私有 leader 未启动", "Grok private leader failed to start") + reason)
             elif not self.owner.alive():
-                raise Rejected("Grok 私有 leader 已退出，不能自动建立替代执行进程")
+                raise Rejected(tr("Grok 私有 leader 已退出，不能自动建立替代执行进程", "Grok private leader has exited; cannot automatically spawn a replacement process"))
             argv = [binary, "--no-auto-update", "agent", "--leader", "--leader-socket", self.owner.socket, "stdio"]
         try:
             result = super().start(argv, env_overrides)
@@ -177,7 +228,7 @@ class GrokSession(AcpSession):
                 self.owner.alive()
             return result
         except FileNotFoundError as exc:
-            raise Rejected("未找到 Grok Build：grok") from exc
+            raise Rejected(tr("未找到 Grok Build：grok", "Grok Build binary not found: grok")) from exc
 
     def connect(self):
         self.lifecycle("connecting")
@@ -210,6 +261,10 @@ class GrokSession(AcpSession):
         self.turns = {}
         self.chunk_prompt = None
         self.background_tools = {}
+        self.autonomous_prompts = set()
+        self.observed_prompts = set()
+        self.last_task_completed_at = None
+        self.roster_running = None
         self.child_sessions = {}
         self.spawn_tools = []
         self.metrics_lock = threading.Lock()
@@ -218,15 +273,21 @@ class GrokSession(AcpSession):
             super().connect()
         finally:
             self.loading = False
+        trailing = self.replay_frames
+        trailing_kind = trailing[-1].get("params", {}).get("update", {}).get("sessionUpdate") if trailing else None
+        unfinished_replay = bool(trailing) and trailing_kind != "turn_completed"
+        unfinished_prompt = None
+        if unfinished_replay:
+            for frame in reversed(trailing):
+                params = frame.get("params", {})
+                meta = params.get("_meta", {})
+                pid = meta.get("promptId") or params.get("update", {}).get("prompt_id") or params.get("update", {}).get("promptId")
+                if isinstance(pid, str) and pid:
+                    unfinished_prompt = pid
+                    break
         self.flush_replay()
         self.finish_chunk()
         self.chunk_id = self.chunk_kind = None
-        if not self.data["running"] and self.config.get("pendingInterjections"):
-            with self.lock:
-                for entry in self.config.pop("pendingInterjections", []):
-                    if self.config.get("receipts", {}).get(entry["id"]) == "accepted":
-                        self.config.setdefault("admittedDisplaySubmissions", {})[entry["id"]] = True
-                self._checkpoint_native_evidence("interjection-reconcile")
         self.update(historyReady=True, capabilities={**self.data["capabilities"],
                     "steer": self.is_grok, "queue": False, "skills": False, "compact": False})
         if hasattr(self, "owner"): self.update(canOpenTui=True, ownerInstanceId=self.owner.handle["instanceId"])
@@ -235,17 +296,32 @@ class GrokSession(AcpSession):
             try:
                 self.refresh_roster()
             except (Rejected, ConnectionError, TimeoutError):
-                self.update(permission="", permissions=[], notice="Grok 权限状态暂不可读；未更改原生权限。")
-                if selected: raise Rejected("无法确认已保存的 Grok 权限；请核对原生权限后手动重连")
+                self.update(permission="", permissions=[], notice=tr("Grok 权限状态暂不可读；未更改原生权限。", "Grok permission state is temporarily unreadable; native permissions unchanged."))
+                if selected: raise Rejected(tr("无法确认已保存的 Grok 权限；请核对原生权限后手动重连", "Unable to confirm saved Grok permission; verify native permissions and reconnect manually"))
             if selected:
                 self.set_native_permission(selected)
-        if self.peer.closed: raise ConnectionError("Grok 原生连接已断开，请重连")
+        if unfinished_replay and hasattr(self, "owner") and getattr(self, "roster_running", None) is not False and not self.data.get("running"):
+            if unfinished_prompt:
+                self._note_observed_prompt(unfinished_prompt)
+            else:
+                self.update(running=True)
+        if not self.data["running"] and self.config.get("pendingInterjections"):
+            with self.lock:
+                for entry in self.config.pop("pendingInterjections", []):
+                    if self.config.get("receipts", {}).get(entry["id"]) == "accepted":
+                        self.config.setdefault("admittedDisplaySubmissions", {})[entry["id"]] = True
+                self._checkpoint_native_evidence("interjection-reconcile")
+        if restored and not self.data["running"] and not self.data["queue"] and not self.config.get("pendingInterjections"):
+            for ident, value in list(self.config.get("receipts", {}).items()):
+                if value == "accepted":
+                    self.consumed(ident)
+        if self.peer.closed: raise ConnectionError(tr("Grok 原生连接已断开，请重连", "Grok native connection dropped; please reconnect"))
         if self.data.get("catalogState") != "ready":
-            raise Rejected("Grok 未返回会话模型目录，请核对原生模型配置后手动重连")
+            raise Rejected(tr("Grok 未返回会话模型目录，请核对原生模型配置后手动重连", "Grok did not return a session model catalog; verify native model config and reconnect manually"))
         self.update(connected=True)
         if self.data.get("lifecycle", {}).get("phase") != "blocked":
             if not self.data["models"]:
-                self.fail(Rejected("Grok 当前没有可用模型，请核对账号/模型配置"), "model")
+                self.fail(Rejected(tr("Grok 当前没有可用模型，请核对账号/模型配置", "Grok currently has no available models; verify account/model configuration")), "model")
             else:
                 self.lifecycle("ready")
         threading.Thread(target=self.refresh_metrics, daemon=True, name="LumaGrokUsage").start()
@@ -260,7 +336,6 @@ class GrokSession(AcpSession):
                 params = frame.get("params", {})
                 if params.get("update", {}).get("sessionUpdate") == "user_message_chunk":
                     batch[index] = {**frame, "params": {**params, "_meta": {**params.get("_meta", {}), "lumaReplayPromptId": ident}}}
-                    break
         self.processing_replay = True
         try:
             for frame in batch: self.event(frame)
@@ -272,7 +347,7 @@ class GrokSession(AcpSession):
         result = super().call(method, params, **kwargs)
         if method == "initialize":
             self.is_grok = result.get("_meta", {}).get("grokShell") is True
-            if not self.is_grok: raise Rejected("不是官方 Grok Build ACP 服务")
+            if not self.is_grok: raise Rejected(tr("不是官方 Grok Build ACP 服务", "Not an official Grok Build ACP server"))
             self.native_model_state = result.get("_meta", {}).get("modelState", {})
         elif method in ("session/new", "session/load", "session/resume"):
             self.native_model_state = result.get("models", self.native_model_state)
@@ -286,9 +361,11 @@ class GrokSession(AcpSession):
         if not selected and "xai.api_key" in methods:
             selected = "xai.api_key"
         if selected != "xai.api_key":
-            message = ("Grok 需要用户登录；请在普通终端运行 grok login，完成后手动重连。"
+            message = (tr("Grok 需要用户登录；请在普通终端运行 grok login，完成后手动重连。",
+                          "Grok requires sign-in; run `grok login` in a regular terminal, then reconnect manually.")
                        if not selected or selected in ("grok.com", "oidc") else
-                       "Grok 返回了当前入口不支持的默认认证方式；请在普通终端核对原生认证配置后手动重连。")
+                       tr("Grok 返回了当前入口不支持的默认认证方式；请在普通终端核对原生认证配置后手动重连。",
+                          "Grok returned an unsupported default auth method; verify native auth config in a regular terminal, then reconnect manually."))
             self.fail(Rejected(message), "authentication" if not selected or selected in ("grok.com", "oidc") else "configuration")
             raise Rejected(self.data["error"])
         result = self.call("authenticate", {"methodId": selected})
@@ -311,25 +388,44 @@ class GrokSession(AcpSession):
     def refresh_roster(self):
         value = extension_result(self.call("_x.ai/sessions/list", {}))
         actual = self.apply_roster(value.get("sessions", []))
-        if actual is None: raise Rejected("Grok 未返回当前会话的权限状态")
+        if actual is None: raise Rejected(tr("Grok 未返回当前会话的权限状态", "Grok did not return permission state for the current session"))
         return actual
 
     def apply_roster(self, sessions):
         for entry in sessions:
             if entry.get("sessionId") != self.data["nativeId"]: continue
             if entry.get("title"): self.update(title=entry["title"])
+            active_prompt = entry.get("runningPromptId") or entry.get("activePromptId")
+            active_flag = next((entry[k] for k in ("running", "isRunning", "isProcessing") if isinstance(entry.get(k), bool)), None)
+            if active_flag is None and isinstance(entry.get("status"), str):
+                status = entry["status"].lower()
+                if status in ("running", "busy", "processing", "streaming", "in_progress"): active_flag = True
+                elif status in ("idle", "ready", "completed", "stopped"): active_flag = False
+            if active_flag is not None or (isinstance(active_prompt, str) and active_prompt):
+                self.roster_running = bool(active_flag or active_prompt)
+                if self.roster_running:
+                    if isinstance(active_prompt, str) and active_prompt:
+                        self._note_observed_prompt(active_prompt)
+                    elif not self.data.get("running"):
+                        self.update(running=True)
+                elif getattr(self, "current_submission", None) is None and self.data.get("running"):
+                    with self.lock:
+                        getattr(self, "observed_prompts", set()).clear()
+                        getattr(self, "autonomous_prompts", set()).clear()
+                        self._flush_interjections(force=True)
+                        self.update(running=False)
             if isinstance(entry.get("yolo"), bool):
                 if entry["yolo"]:
                     self.auto_mode_active = False
                 self.permission_revision += 1
                 self.update(permission=self._effective_permission(entry["yolo"]),
-                            permissions=[dict(p) for p in GROK_PERMISSIONS])
+                            permissions=_grok_permissions())
                 return self.data["permission"]
         return None
 
     def set_native_permission(self, value):
         if value not in {p["id"] for p in self.data["permissions"]}:
-            raise Rejected("权限不在原生目录中")
+            raise Rejected(tr("权限不在原生目录中", "Permission is not in the native catalog"))
         revision = self.permission_revision
         prev_perm = self.data.get("permission", "")
         prev_known = prev_perm in {"default", "auto", "plan", "always-approve"}
@@ -392,19 +488,19 @@ class GrokSession(AcpSession):
             else:
                 actual_yolo = actual == "always-approve"
                 self.update(permission=self._effective_permission(actual_yolo) if prev_known else "default")
-            raise Rejected("Grok 尚未确认权限设置")
+            raise Rejected(tr("Grok 尚未确认权限设置", "Grok has not confirmed the permission setting"))
         return actual
 
     def terminal(self):
         if not hasattr(self, "owner"): return super().terminal()
-        if not self.owner.alive(): raise Rejected("Grok 私有 leader 已退出")
+        if not self.owner.alive(): raise Rejected(tr("Grok 私有 leader 已退出", "Grok private leader has exited"))
         return {"nativeId": self.data["nativeId"], "instanceId": self.owner.handle["instanceId"], "argv": [
             self.owner.handle["binary"], "--no-auto-update", "--leader", "--leader-socket", self.owner.socket,
             "--resume", self.data["nativeId"]]}
 
     def configure(self, payload):
         if not getattr(self, "initializing", False) and self.data.get("lifecycle", {}).get("phase") != "ready":
-            raise Rejected(self.data.get("error") or "Grok 尚未就绪，请先完成连接或核对原生配置")
+            raise Rejected(self.data.get("error") or tr("Grok 尚未就绪，请先完成连接或核对原生配置", "Grok is not ready yet; finish connecting or verify native config first"))
         try:
             return self._configure(payload)
         except (RpcRejected, ConnectionError, TimeoutError) as exc:
@@ -425,7 +521,8 @@ class GrokSession(AcpSession):
             except Exception as exc:
                 if previous is None: self.config.pop("selectedPermission", None)
                 else: self.config["selectedPermission"] = previous
-                raise RuntimeError("权限已在当前 Grok 进程生效，但会话选择保存失败；重启仍使用上次保存值") from exc
+                raise RuntimeError(tr("权限已在当前 Grok 进程生效，但会话选择保存失败；重启仍使用上次保存值",
+                                      "Permission took effect in the current Grok process, but saving session selection failed; restart will use previous value")) from exc
         return result
 
     def apply_options(self, options):
@@ -463,11 +560,11 @@ class GrokSession(AcpSession):
     def validate_prompt(self, payload):
         state = self.data.get("lifecycle", {})
         if state and state.get("phase") != "ready":
-            raise Rejected(state.get("message") or "Grok 尚未就绪，请等待原生连接完成")
+            raise Rejected(state.get("message") or tr("Grok 尚未就绪，请等待原生连接完成", "Grok is not ready yet; wait for native connection"))
         super().validate_prompt(payload)
         first = payload.get("text", "").strip().split(maxsplit=1)
         if first and first[0].lower() in ("/clear", "/reset", "/new", "/rewind", "/compact", "/always-approve"):
-            raise Rejected("此命令由 Grok 原生界面管理，不能作为托管会话消息执行")
+            raise Rejected(tr("此命令由 Grok 原生界面管理，不能作为托管会话消息执行", "This command is managed by the native Grok UI and cannot be sent as a managed message"))
 
     def prompt(self, payload):
         ident = payload["submissionId"]
@@ -479,7 +576,7 @@ class GrokSession(AcpSession):
                         "text": payload["text"], "content": blocks, "interjectionId": ident}))
                     if not isinstance(value, dict) or value.get("status") != "queued":
                         self.receipt(ident, "rejected")
-                        self.update(error="Grok 插话未确认")
+                        self.update(error=tr("Grok 插话未确认", "Grok interjection was not confirmed"))
                 except Rejected as exc:
                     self.receipt(ident, "rejected")
                     self.fail(exc)
@@ -523,13 +620,99 @@ class GrokSession(AcpSession):
         threading.Thread(target=execute, daemon=True, name="LumaGrokPrompt").start()
         return False
 
-    def complete_turn(self, ident, result):
-        if not ident or ident.startswith("task-completed-"): return
+    def _note_autonomous_prompt(self, prompt):
+        if not isinstance(prompt, str) or not prompt.startswith("task-completed-"):
+            return
+        if getattr(self, "processing_replay", False):
+            return
+        with self.lock:
+            prompts = getattr(self, "autonomous_prompts", None)
+            if prompts is None:
+                prompts = set()
+                self.autonomous_prompts = prompts
+            prompts.add(prompt)
+            self.last_task_completed_at = None
+            if getattr(self, "current_submission", None) is None and not self.data.get("running"):
+                self.update(running=True)
+
+    def _note_observed_prompt(self, prompt):
+        if not isinstance(prompt, str) or not prompt:
+            return
+        if prompt == getattr(self, "current_submission", None) or prompt.startswith("interject-fallback-"):
+            return
+        if getattr(self, "processing_replay", False):
+            return
+        if prompt.startswith("task-completed-"):
+            self._note_autonomous_prompt(prompt)
+            return
+        with self.lock:
+            prompts = getattr(self, "observed_prompts", None)
+            if prompts is None:
+                prompts = set()
+                self.observed_prompts = prompts
+            prompts.add(prompt)
+            if getattr(self, "current_submission", None) is None and not self.data.get("running"):
+                self.update(running=True)
+
+    def complete_turn(self, ident, result, replay=False):
+        if not ident: return
+        if replay:
+            if ident in self.config.get("receipts", {}): self.receipt(ident, "accepted")
+            if ident in self.config.get("receipts", {}): self.consumed(ident)
+            return
+        if ident.startswith("task-completed-"):
+            stop = result.get("stopReason", result.get("stop_reason", "end_turn"))
+            status = "cancelled" if stop == "cancelled" else "failed" if stop == "error" else "completed"
+            settled_auto = False
+            with self.lock:
+                prompts = getattr(self, "autonomous_prompts", None)
+                was_tracked = bool(prompts and ident in prompts)
+                if prompts is not None:
+                    prompts.discard(ident)
+                self.last_task_completed_at = None
+                if self.chunk_prompt == ident:
+                    self.finish_chunk(status)
+                    self.chunk_id = self.chunk_kind = None
+                if getattr(self, "current_submission", None) is None and not prompts and not getattr(self, "observed_prompts", None) and (was_tracked or self.data.get("running")):
+                    self._flush_interjections(force=True)
+                    self.update(running=False)
+                    settled_auto = True
+            if settled_auto:
+                threading.Thread(target=self.refresh_metrics, daemon=True, name="LumaGrokUsage").start()
+            return
         if ident in self.config.get("receipts", {}): self.receipt(ident, "accepted")
         if ident in self.config.get("receipts", {}): self.consumed(ident)
         turn = self.turns.get(ident)
         if turn: turn["result"] = result; turn["event"].set()
-        if self.current_submission != ident: return
+        if self.current_submission != ident:
+            observed = getattr(self, "observed_prompts", None)
+            was_observed = bool(observed and ident in observed)
+            if not was_observed and (getattr(self, "current_submission", None) is not None or not self.data.get("running") or not hasattr(self, "owner") or observed):
+                return
+            stop = result.get("stopReason", result.get("stop_reason", "end_turn"))
+            status = "cancelled" if stop == "cancelled" else "failed" if stop == "error" else "completed"
+            settled_observed = False
+            with self.lock:
+                if observed is not None:
+                    observed.discard(ident)
+                if self.chunk_prompt == ident:
+                    self.finish_chunk(status)
+                    self.chunk_id = self.chunk_kind = None
+                if stop in ("cancelled", "error"):
+                    background = set(self.background_tools.values())
+                    for key, row in list(self.rows.items()):
+                        if key not in background and row.get("turnId") == ident and row.get("status") in ("running", "in_progress", "pending"):
+                            self.row({**row, "status": "cancelled" if stop == "cancelled" else "unknown"})
+                if getattr(self, "current_submission", None) is None and not observed and not getattr(self, "autonomous_prompts", None) and self.data.get("running"):
+                    self._flush_interjections(force=True)
+                    self.update(running=False)
+                    settled_observed = True
+                if stop == "error":
+                    self.fail(Rejected(safe_reason(result.get("agent_result") or result.get("agentResult") or tr("Grok 执行失败", "Grok execution failed"))))
+            if settled_observed:
+                threading.Thread(target=self.refresh_metrics, daemon=True, name="LumaGrokUsage").start()
+            return
+        getattr(self, "observed_prompts", set()).discard(ident)
         stop = result.get("stopReason", result.get("stop_reason", "end_turn"))
         status = "cancelled" if stop == "cancelled" else "failed" if stop == "error" else "completed"
         with self.lock:
@@ -545,7 +728,7 @@ class GrokSession(AcpSession):
             self.current_submission = None
             self.update(running=False)
             if stop == "error":
-                self.fail(Rejected(safe_reason(result.get("agent_result") or result.get("agentResult") or "Grok 执行失败")))
+                self.fail(Rejected(safe_reason(result.get("agent_result") or result.get("agentResult") or tr("Grok 执行失败", "Grok execution failed"))))
         threading.Thread(target=self.refresh_metrics, daemon=True, name="LumaGrokUsage").start()
 
     def fold_user_echo(self, prompt, body, content, replay):
@@ -564,7 +747,7 @@ class GrokSession(AcpSession):
         shown = {**old, "text": merged, "media": old.get("media", []) + self.media(content), "turnId": old.get("turnId") or ident}
         if replay: shown["status"] = "completed"
         self.row(shown)
-        if prompt and prompt == self.current_submission:
+        if prompt and (prompt == self.current_submission or (replay and prompt in self.config.get("receipts", {}))):
             self.receipt(prompt, "accepted")
             self.consumed(prompt)
         return True
@@ -614,7 +797,7 @@ class GrokSession(AcpSession):
                     self.finish_chunk()
                     self.chunk_id = self.chunk_kind = None
                 if isinstance(update.get("usage"), dict): self.grok_last_usage = update["usage"]
-                self.complete_turn(update.get("prompt_id") or update.get("promptId"), update)
+                self.complete_turn(update.get("prompt_id") or update.get("promptId"), update, replay=bool(meta.get("isReplay")))
                 return
             if kind == "session_summary_generated":
                 if update.get("session_summary"): self.update(title=update["session_summary"])
@@ -625,7 +808,7 @@ class GrokSession(AcpSession):
                 self.render_metrics(); return
             if kind == "model_auto_switched":
                 if meta.get("isReplay"): return
-                reason = safe_reason(update.get("reason") or "Grok 原生模型已变更")
+                reason = safe_reason(update.get("reason") or tr("Grok 原生模型已变更", "Grok native model changed"))
                 replacement = update.get("new_model_id")
                 if isinstance(replacement, str) and replacement:
                     self.grok_context_tokens = None
@@ -639,7 +822,7 @@ class GrokSession(AcpSession):
                 if update.get("type") == "failed":
                     tag = update.get("error_type")
                     kind = "authentication" if tag == "auth" else "model" if tag == "model" else "request"
-                    self.fail(Rejected(safe_reason(update.get("message") or "Grok 执行失败")), kind)
+                    self.fail(Rejected(safe_reason(update.get("message") or tr("Grok 执行失败", "Grok execution failed"))), kind)
                 elif update.get("message"):
                     self.update(notice=safe_reason(update["message"]))
                 return
@@ -674,6 +857,7 @@ class GrokSession(AcpSession):
                         self.update(running=True)
                     else:
                         self._flush_interjections()
+                        self._note_observed_prompt(prompt)
                 discrete = kind == "user_message_chunk"
                 reuse_prompt = (
                     kind == "user_message_chunk"
@@ -689,7 +873,7 @@ class GrokSession(AcpSession):
                     self.row(item(self.chunk_id, CONTENT[kind], "", turnId=prompt or "", kind="reasoning" if kind == "agent_thought_chunk" else ""))
                 old = self.rows[self.chunk_id]
                 self.row({**old, "text": old["text"] + body, "media": old.get("media", []) + self.media(content), "status": "completed" if meta.get("isReplay") else "running"})
-                if prompt == self.current_submission and prompt and (kind != "user_message_chunk" or self.chunk_id == prompt):
+                if prompt and (prompt == self.current_submission or (meta.get("isReplay") and prompt in self.config.get("receipts", {}))) and (kind != "user_message_chunk" or self.chunk_id == prompt):
                     self.receipt(prompt, "accepted")
                     self.consumed(prompt)
                 return
@@ -701,6 +885,7 @@ class GrokSession(AcpSession):
                         self.update(running=True)
                     else:
                         self._flush_interjections()
+                        self._note_observed_prompt(prompt)
                 if prompt == self.current_submission and prompt:
                     self.receipt(prompt, "accepted")
                     self.consumed(prompt)
@@ -708,7 +893,7 @@ class GrokSession(AcpSession):
                 self.finish_chunk()
                 self.chunk_id = self.chunk_kind = None
                 ident = "tool-" + update["toolCallId"]
-                old = self.rows.get(ident, item(ident, "tool", "工具", kind="tool"))
+                old = self.rows.get(ident, item(ident, "tool", tr("工具", "Tool"), kind="tool"))
                 fields = {"turnId": prompt} if prompt else {}
                 for source, target in (("title", "text"), ("kind", "toolKind"), ("status", "status")):
                     if source in update: fields[target] = update[source]
@@ -745,6 +930,8 @@ class GrokSession(AcpSession):
                     self._flush_interjections(force=True)
                     self.current_submission = running_prompt
                     self.update(running=True)
+                else:
+                    self._note_observed_prompt(running_prompt)
             return
         if method == "x.ai/session/prompt_complete":
             self.complete_turn(params.get("promptId"), params); return
@@ -767,14 +954,14 @@ class GrokSession(AcpSession):
             return
         if method == "x.ai/ask_user_question" and "id" in frame:
             questions = params.get("questions", [])
-            self.request(str(frame["id"]), frame, "Answer", "", [{"id": "accept", "label": "确认"}, {"id": "cancel", "label": "取消"}],
+            self.request(str(frame["id"]), frame, "Answer", "", [{"id": "accept", "label": tr("确认", "Confirm")}, {"id": "cancel", "label": tr("取消", "Cancel")}],
                 [{"id": str(i), "header": q.get("header", ""), "prompt": q.get("question", ""),
                   "options": [o["label"] for o in q.get("options", [])], "multiple": bool(q.get("multiSelect"))} for i,q in enumerate(questions)],
                 submit_choice="accept", skip_choice="cancel")
             return
         if method == "x.ai/exit_plan_mode" and "id" in frame:
-            self.request(str(frame["id"]), frame, "计划", params.get("planContent") or "", [
-                {"id": "approved", "label": "执行"}, {"id": "cancelled", "label": "取消"}, {"id": "abandoned", "label": "放弃"}]); return
+            self.request(str(frame["id"]), frame, tr("计划", "Plan"), params.get("planContent") or "", [
+                {"id": "approved", "label": tr("执行", "Execute")}, {"id": "cancelled", "label": tr("取消", "Cancel")}, {"id": "abandoned", "label": tr("放弃", "Abandon")}]); return
         if method == "session/request_permission" and "id" in frame:
             tool = params.get("toolCall", {})
             cancel = "luma:cancel"
@@ -783,10 +970,10 @@ class GrokSession(AcpSession):
             face = self.permission_face(tool if isinstance(tool, dict) else {})
             if face: title, body = face
             else:
-                title = tool.get("title", "工具授权") if isinstance(tool, dict) else "工具授权"
+                title = tool.get("title", tr("工具授权", "Tool permission")) if isinstance(tool, dict) else tr("工具授权", "Tool permission")
                 body = json.dumps(tool.get("rawInput", {}), ensure_ascii=False) if isinstance(tool, dict) else ""
             self.request(str(frame["id"]), {**frame, "_cancelChoice": cancel}, title, body,
-                         [{"id":o["optionId"], "label":o["name"]} for o in options] + [{"id":cancel,"label":"取消"}])
+                         [{"id":o["optionId"], "label":o["name"]} for o in options] + [{"id":cancel,"label":tr("取消", "Cancel")}])
             return
         if method in ("x.ai/task_backgrounded", "x.ai/task_completed"):
             self.project_task(params.get("update", {"sessionUpdate": method.split("/")[-1], **params})); return
@@ -802,7 +989,7 @@ class GrokSession(AcpSession):
         description = raw.get("description") if isinstance(raw.get("description"), str) else ""
         prompt = raw.get("prompt") if isinstance(raw.get("prompt"), str) else ""
         if not description and not prompt: return None
-        return "启动子代理", "\n\n".join(part for part in (description, prompt) if part)
+        return tr("启动子代理", "Spawn subagent"), "\n\n".join(part for part in (description, prompt) if part)
 
     def native_tool(self, update, old):
         meta = update.get("_meta") if isinstance(update.get("_meta"), dict) else {}
@@ -937,7 +1124,7 @@ class GrokSession(AcpSession):
         messages = self.child_messages(ident)
         row_id = ident + ":tool-" + call
         idx = next((i for i, m in enumerate(messages) if m.get("id") == row_id), -1)
-        old = messages[idx] if idx >= 0 else {"id": row_id, "role": "tool", "text": "工具", "kind": "tool"}
+        old = messages[idx] if idx >= 0 else {"id": row_id, "role": "tool", "text": tr("工具", "Tool"), "kind": "tool"}
         fields = {}
         for source, target in (("title", "text"), ("kind", "toolKind"), ("status", "status")):
             if source in update: fields[target] = update[source]
@@ -993,6 +1180,8 @@ class GrokSession(AcpSession):
         if kind == "task_completed":
             task = update.get("task_snapshot", {})
             ident = self.background_tools.get(task.get("id") or task.get("task_id"))
+            if not getattr(self, "processing_replay", False) and not getattr(self, "loading", False):
+                self.last_task_completed_at = time.monotonic()
             if ident and ident in self.rows:
                 self.row({**self.rows[ident], "status": "failed" if task.get("exit_code") not in (None, 0) or task.get("signal") else "completed", "outcome": text(task.get("output"))})
             return True
@@ -1026,8 +1215,8 @@ class GrokSession(AcpSession):
                 answers, annotations = {}, {}
                 for i,q in enumerate(raw["params"].get("questions", [])):
                     values = payload.get("answers", {}).get(str(i), [])
-                    if not values or any(not isinstance(v,str) or not v.strip() for v in values): raise Rejected("请回答问题")
-                    if not q.get("multiSelect") and len(values) != 1: raise Rejected("此问题只支持一个答案")
+                    if not values or any(not isinstance(v,str) or not v.strip() for v in values): raise Rejected(tr("请回答问题", "Please answer the question"))
+                    if not q.get("multiSelect") and len(values) != 1: raise Rejected(tr("此问题只支持一个答案", "Only one answer is supported for this question"))
                     selected = [v for v in values if v in {o["label"] for o in q.get("options", [])}]
                     notes = [v for v in values if v not in selected]
                     answers[q["question"]] = selected or ["Other"]
@@ -1037,9 +1226,9 @@ class GrokSession(AcpSession):
                     if preview and not q.get("multiSelect"): annotation["preview"] = preview
                     if annotation: annotations[q["question"]] = annotation
                 result = {"outcome": "accepted", "answers": answers, **({"annotations": annotations} if annotations else {})}
-            else: raise Rejected("无效回答")
+            else: raise Rejected(tr("无效回答", "Invalid answer"))
         elif method == "x.ai/exit_plan_mode":
-            if payload["choice"] not in ("approved", "cancelled", "abandoned"): raise Rejected("无效计划选项")
+            if payload["choice"] not in ("approved", "cancelled", "abandoned"): raise Rejected(tr("无效计划选项", "Invalid plan option"))
             result = {"outcome": payload["choice"]}
         else: return super().answer(payload)
         self.peer.send({"jsonrpc": "2.0", "id": raw["id"], "result": result})

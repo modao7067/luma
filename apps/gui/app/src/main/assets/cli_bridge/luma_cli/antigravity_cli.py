@@ -10,6 +10,7 @@ import time
 import urllib.parse
 from .agy_stream import AgyPeer
 from .base import Session, item
+from .i18n import lang_code, tr
 from .transport import Rejected
 from .metrics import agy_usage, agy_steps, agy_session_metrics
 
@@ -19,12 +20,21 @@ _ID = re.compile(r"[a-zA-Z0-9_-]{1,128}")
 _CHILD_TERMINAL = {"succeeded", "failed", "cancelled", "closed"}
 _LOG_TAIL = ("brain", ".system_generated", "logs", "transcript.jsonl")
 _ROW_INDEX = re.compile(r"agy:(.+):(\d+):(agent_response|tool)")
+_SWARM_BOARD_PING_RE = re.compile(r"^\[swarm\] new board message #\d+$")
+_SWARM_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_-])@([A-Za-z0-9_.-]*[A-Za-z0-9_-])")
+_SWARM_STATUS_MAP = {
+    "working": ("running", "swarm:working"),
+    "waiting": ("succeeded", "swarm:waiting"),
+    "stopped": ("succeeded", "swarm:stopped"),
+    "killed": ("closed", "swarm:killed"),
+}
 STREAM_STALL_SECONDS = 3.0
 
 def native_error(value):
-    message = value if isinstance(value, str) else "agy 返回了错误"
+    message = value if isinstance(value, str) else tr("agy 返回了错误", "agy returned an error")
     if re.search(r"auth|sign.?in|log.?in", message, re.I):
-        return "agy 尚未登录；请在当前运行环境的终端运行 agy，完成原生登录后重连。"
+        return tr("agy 尚未登录；请在当前运行环境的终端运行 agy，完成原生登录后重连。",
+                  "agy is not signed in; run `agy` in a terminal of the current environment to sign in, then reconnect.")
     return message
 
 def json_values(text):
@@ -45,6 +55,171 @@ def invoke_child(output):
             uri = value.get("logAbsoluteUri")
             return ident, uri if isinstance(uri, str) else ""
     return "", ""
+
+def _iter_json_dicts(output):
+    if isinstance(output, dict):
+        yield output
+        return
+    if isinstance(output, str):
+        yield from json_values(output)
+
+def _parse_json_dict(raw):
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+def _swarm_role(params):
+    ws = params.get("workspace") if isinstance(params, dict) and isinstance(params.get("workspace"), str) else ""
+    return f"swarm · {ws}" if ws in ("share", "branch") else "swarm"
+
+def _swarm_task(brief, slice_text):
+    if slice_text and brief:
+        return f"{slice_text}\n\n{brief}"
+    return slice_text or brief
+
+def swarm_added_workers(params, output):
+    params = params if isinstance(params, dict) else {}
+    base_name = params.get("name") if isinstance(params.get("name"), str) else ""
+    brief = params.get("brief") if isinstance(params.get("brief"), str) else ""
+    param_model = params.get("model") if isinstance(params.get("model"), str) else ""
+    tasks = params.get("tasks") if isinstance(params.get("tasks"), list) else None
+    n = params.get("n")
+    role = _swarm_role(params)
+    workers, seen_ids = [], set()
+    single_index = 0
+    is_multi_param = bool(base_name) and (isinstance(tasks, list) or (isinstance(n, int) and n > 1))
+    for value in _iter_json_dicts(output):
+        if value.get("error"):
+            continue
+        resolved_model = value.get("model") if isinstance(value.get("model"), str) else param_model
+        cids = value.get("conversation_ids")
+        if isinstance(cids, list) and cids:
+            names = value.get("names") if isinstance(value.get("names"), list) else []
+            group = base_name if (is_multi_param or (bool(base_name) and len(cids) > 1)) else ""
+            for idx, cid in enumerate(cids):
+                if not isinstance(cid, str) or not _ID.fullmatch(cid) or cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                wname = names[idx] if idx < len(names) and isinstance(names[idx], str) and names[idx] else (
+                    f"{base_name}-{idx + 1}" if base_name else ""
+                )
+                slice_raw = tasks[idx] if tasks and idx < len(tasks) and isinstance(tasks[idx], str) else ""
+                workers.append({
+                    "id": cid, "name": wname, "role": role,
+                    "task": _swarm_task(brief, slice_raw.strip()),
+                    "model": resolved_model, "group": group,
+                })
+            continue
+        cid = value.get("conversation_id")
+        if isinstance(cid, str) and _ID.fullmatch(cid) and cid not in seen_ids:
+            seen_ids.add(cid)
+            wname = value.get("name") if isinstance(value.get("name"), str) and value.get("name") else (
+                f"{base_name}-{single_index + 1}" if is_multi_param and base_name else base_name
+            )
+            slice_raw = tasks[single_index] if tasks and single_index < len(tasks) and isinstance(tasks[single_index], str) else ""
+            workers.append({
+                "id": cid, "name": wname, "role": role,
+                "task": _swarm_task(brief, slice_raw.strip()),
+                "model": resolved_model, "group": base_name if is_multi_param else "",
+            })
+            single_index += 1
+    return workers
+
+def swarm_status_updates(output):
+    updates = []
+    for value in _iter_json_dicts(output):
+        if value.get("error"):
+            continue
+        members = value.get("members")
+        if not isinstance(members, list):
+            continue
+        for member in members:
+            if not isinstance(member, dict) or member.get("role") == "coordinator":
+                continue
+            name = member.get("name") if isinstance(member.get("name"), str) else ""
+            cid = member.get("conversation_id")
+            ident = cid if isinstance(cid, str) and _ID.fullmatch(cid) else ""
+            if not name and not ident:
+                continue
+            model = member.get("model") if isinstance(member.get("model"), str) else ""
+            killed = bool(member.get("killed"))
+            raw_state = member.get("state") if isinstance(member.get("state"), str) else ""
+            if killed or raw_state == "killed":
+                status, native_status = "closed", "swarm:killed"
+            elif raw_state in _SWARM_STATUS_MAP:
+                status, native_status = _SWARM_STATUS_MAP[raw_state]
+            else:
+                status, native_status = "", ""
+            updates.append({
+                "id": ident, "name": name, "model": model,
+                "status": status, "nativeStatus": native_status,
+            })
+    return updates
+
+def swarm_model_update(params, output):
+    params = params if isinstance(params, dict) else {}
+    parsed = False
+    for value in _iter_json_dicts(output):
+        parsed = True
+        if value.get("error"):
+            return "", ""
+        name = value.get("name") if isinstance(value.get("name"), str) else ""
+        model = value.get("model") if isinstance(value.get("model"), str) else ""
+        if model and (name or isinstance(params.get("name"), str)):
+            return name or (params.get("name") or ""), model
+    if parsed:
+        return "", ""
+    name = params.get("name") if isinstance(params.get("name"), str) else ""
+    model = params.get("model") if isinstance(params.get("model"), str) else ""
+    return (name, model) if model else ("", "")
+
+def swarm_kill_target(params, output):
+    params = params if isinstance(params, dict) else {}
+    parsed = False
+    for value in _iter_json_dicts(output):
+        parsed = True
+        if value.get("error"):
+            return ""
+        name = value.get("name") if isinstance(value.get("name"), str) else ""
+        if name or value.get("status") == "killed":
+            return name or (params.get("name") if isinstance(params.get("name"), str) else "")
+    if parsed:
+        return ""
+    return params.get("name") if isinstance(params.get("name"), str) else ""
+
+def swarm_mentions(text):
+    if not isinstance(text, str) or "@" not in text:
+        return [], False
+    names = _SWARM_MENTION_RE.findall(text)
+    return names, ("all" in names)
+
+def child_last_step_index(steps):
+    if not steps:
+        return -1
+    last = steps[-1]
+    if isinstance(last, dict) and type(last.get("step_index")) is int:
+        return last["step_index"]
+    return len(steps) - 1
+
+def child_transcript_detail(messages, reply_detail=""):
+    for message in reversed(messages):
+        if message.get("role") == "assistant" and message.get("text"):
+            return message["text"][:500]
+        if message.get("status") == "running" and message.get("toolName"):
+            return message["toolName"]
+    for message in reversed(messages):
+        if message.get("role") == "tool" and message.get("toolName") == "post_message" and message.get("status") != "failed":
+            parsed = _parse_json_dict(message.get("input"))
+            text_val = parsed.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                return text_val.strip()[:500]
+    return reply_detail
 
 def child_log_path(ident, uri):
     if not _ID.fullmatch(ident or ""): return ""
@@ -105,13 +280,29 @@ def read_transcript(path):
     return steps
 
 def child_transcript_state(steps):
-    for step in reversed(steps):
+    idx = len(steps) - 1
+    while idx >= 0:
+        step = steps[idx]
         kind, state = step.get("type"), step.get("status")
         if kind == "ERROR_MESSAGE": return "failed"
         if kind in ("SYSTEM_MESSAGE", "USER_INPUT"): return "running"
         if kind == "PLANNER_RESPONSE":
             return "idle" if state == "DONE" and not step.get("tool_calls") else "running"
-        if kind == "GENERIC": return "running"
+        if kind == "GENERIC":
+            start = idx
+            while start >= 0 and steps[start].get("type") == "GENERIC":
+                start -= 1
+            trailing = steps[start + 1 : idx + 1]
+            if any(g.get("status") in ("RUNNING", "ACTIVE") for g in trailing):
+                return "running"
+            if start >= 0 and steps[start].get("type") == "PLANNER_RESPONSE" and steps[start].get("status") == "DONE":
+                calls = steps[start].get("tool_calls")
+                if isinstance(calls, list) and len(calls) > 0 and len(trailing) == len(calls):
+                    wait_indices = [i for i, c in enumerate(calls) if isinstance(c, dict) and c.get("name") == "swarm_wait"]
+                    if wait_indices and all(trailing[i].get("status") == "DONE" for i in wait_indices):
+                        return "idle"
+            return "running"
+        idx -= 1
     return ""
 
 _AGY_DIRECTIVE_RE = re.compile(
@@ -123,6 +314,83 @@ _AGY_BG_META_RE = re.compile(
 _AGY_TASK_RESULT_HEADER_RE = re.compile(
     r'^Task id "[^"]+" [^\n]*?(?::\s*\n|\n|$)'
 )
+
+_BG_LAUNCH_TOOLS = {"run_command", "schedule", "run_workflow"}
+_BG_HEADER_LINE_RE = re.compile(r"^Tool is running as a background task with task id:\s*([A-Za-z0-9_./:-]{1,200})\s*$")
+_CRON_CANCELLED_MSG_RE = re.compile(r'^Cron schedule "([^"]+)" cancelled\b', re.M)
+_TASK_KILLED_MSG_RE = re.compile(r'^Task id "[^"]+" (?:killed|was cancel+ed|terminated|aborted)\b', re.I)
+
+def unwrap_agy_tool_text(raw):
+    if not isinstance(raw, str) or not raw.strip():
+        return "", False
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            has_exit = parsed.get("exit_code") is not None
+            out = parsed.get("output")
+            return (out if isinstance(out, str) else ""), has_exit
+    return raw, False
+
+def extract_agy_bg_task_id(raw, tool_name="", generic_state=None):
+    if generic_state is not None and generic_state not in ("RUNNING", "ACTIVE"):
+        return ""
+    if tool_name and tool_name not in _BG_LAUNCH_TOOLS:
+        return ""
+    body, has_exit = unwrap_agy_tool_text(raw)
+    if has_exit or not body.strip():
+        return ""
+    header_lines = [ln.strip() for ln in body.lstrip().splitlines()[:4]]
+    if any(
+        ln.startswith(("Completed At:", "Command exited with code", "The tool's output was truncated", "Showing lines "))
+        for ln in header_lines
+    ):
+        return ""
+    candidates = header_lines[:2]
+    if len(candidates) == 2 and not candidates[0].startswith("Created At:"):
+        candidates = candidates[:1]
+    for ln in candidates:
+        match = _BG_HEADER_LINE_RE.match(ln)
+        if match:
+            return match.group(1)
+    return ""
+
+def is_agy_oneshot_timer(raw_outcome, tool_name="", params=None):
+    body, _ = unwrap_agy_tool_text(raw_outcome)
+    if "Task Description: Timer:" in body:
+        return True
+    params = params if isinstance(params, dict) else {}
+    return tool_name == "schedule" and bool(params.get("DurationSeconds")) and not params.get("CronExpression")
+
+def agy_timer_condition(params):
+    if not isinstance(params, dict):
+        return ""
+    cond = str(params.get("TimerCondition") or "").strip()
+    return "" if not cond or cond.lower() == "never" else cond
+
+def _matching_bg_task_ids(task_id, bg_tasks):
+    if not task_id:
+        return []
+    if task_id in bg_tasks:
+        return [task_id]
+    suffix = "/" + task_id
+    return [tid for tid in bg_tasks if tid.endswith(suffix)]
+
+def _settle_terminal_child_messages(messages, child_status):
+    if child_status not in ("closed", "cancelled", "failed") or not isinstance(messages, list):
+        return messages
+    settled = []
+    changed = False
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("status") in ("running", "in_progress", "pending"):
+            settled.append({**msg, "status": "cancelled"})
+            changed = True
+        else:
+            settled.append(msg)
+    return settled if changed else messages
 
 def clean_agy_tool_output(raw):
     if not isinstance(raw, str) or not raw.strip():
@@ -155,39 +423,108 @@ def parse_system_message(content):
 
 def project_child_transcript(ident, steps):
     messages, open_tools = [], []
+    bg_tasks, oneshot_timers, conditional_timers = {}, set(), {}
+
+    def settle_open_tools(target_status):
+        while open_tools:
+            msg_idx, _, _ = open_tools.pop(0)
+            if 0 <= msg_idx < len(messages) and messages[msg_idx].get("status") in ("running", "in_progress", "pending"):
+                messages[msg_idx] = {**messages[msg_idx], "status": target_status}
+
+    def settle_bg(tid, target_status="completed", extra_outcome=""):
+        oneshot_timers.discard(tid)
+        conditional_timers.pop(tid, None)
+        msg_idx = bg_tasks.pop(tid, None)
+        if msg_idx is not None and 0 <= msg_idx < len(messages):
+            cur = messages[msg_idx]
+            updates = {}
+            if cur.get("status") in ("running", "in_progress", "pending"):
+                updates["status"] = target_status
+            if extra_outcome:
+                prev = (cur.get("outcome") or "").strip()
+                updates["outcome"] = f"{prev}\n{extra_outcome}" if prev and extra_outcome not in prev else extra_outcome
+            if updates:
+                messages[msg_idx] = {**cur, **updates}
+
+    def handle_manage_task(params, raw_output):
+        if not isinstance(params, dict):
+            return
+        action = params.get("Action")
+        task_id = params.get("TaskId") if isinstance(params.get("TaskId"), str) else ""
+        lower_out = (raw_output or "").lower()
+        if action == "kill" and task_id:
+            if not any(err in lower_out for err in ("invalid", "failed", "error")):
+                for matched in _matching_bg_task_ids(task_id, bg_tasks):
+                    settle_bg(matched, "cancelled")
+        elif action == "status" and task_id:
+            if any(term in lower_out for term in ("completed", "finished", "exited", "not running", "not found", "cancelled", "canceled", "killed")):
+                t_state = "cancelled" if ("cancel" in lower_out or "killed" in lower_out) else "completed"
+                for matched in _matching_bg_task_ids(task_id, bg_tasks):
+                    settle_bg(matched, t_state)
+        elif action == "list":
+            if "no running" in lower_out or "no background" in lower_out:
+                for tid in list(bg_tasks):
+                    settle_bg(tid, "completed")
+                return
+            try:
+                parsed = json.loads(raw_output or "")
+            except (ValueError, TypeError):
+                return
+            if isinstance(parsed, list):
+                live = {
+                    str(entry.get("taskId") or entry.get("TaskId") or entry.get("id") or "")
+                    for entry in parsed
+                    if isinstance(entry, dict)
+                }
+                live.discard("")
+                for tid in list(bg_tasks):
+                    if tid not in live and not any(tid.endswith("/" + l) or l.endswith("/" + tid) for l in live):
+                        settle_bg(tid, "completed")
+
     for step in steps:
         if not isinstance(step, dict): continue
         index, kind, state = step.get("step_index"), step.get("type"), step.get("status")
         status = "running" if state in ("RUNNING", "ACTIVE") else "failed" if state == "ERROR" else "completed"
         base = f"agy:{ident}:{index}:{kind}"
+        if kind in ("PLANNER_RESPONSE", "USER_INPUT", "SYSTEM_MESSAGE", "ERROR_MESSAGE") and open_tools:
+            settle_open_tools("failed" if kind == "ERROR_MESSAGE" else "cancelled")
         if kind == "PLANNER_RESPONSE":
             thinking = step.get("thinking")
+            calls = [c for c in (step.get("tool_calls") if isinstance(step.get("tool_calls"), list) else []) if isinstance(c, dict)]
             if isinstance(thinking, str) and thinking:
-                messages.append(item(base + ":think", "tool", thinking[:16000], kind="reasoning", status=status, turnId=ident))
-            calls = step.get("tool_calls") if isinstance(step.get("tool_calls"), list) else []
+                think_status = "completed" if calls or state == "DONE" else status
+                messages.append(item(base + ":think", "tool", thinking[:16000], kind="reasoning", status=think_status, turnId=ident))
             if calls:
                 for number, call in enumerate(calls):
-                    if not isinstance(call, dict): continue
                     name = call.get("name") if isinstance(call.get("name"), str) else ""
                     args = transcript_args(call)
                     raw = json.dumps(args, ensure_ascii=False)
+                    msg_idx = len(messages)
                     messages.append(item(f"{base}:tool:{number}", "tool", name, kind="tool", toolName=name,
                         input=raw[:16000], status="failed" if status == "failed" else "running", turnId=ident))
-                    open_tools.append(messages[-1]["id"])
+                    open_tools.append((msg_idx, name, args))
                 continue
             content = step.get("content") if isinstance(step.get("content"), str) else ""
             if content:
                 messages.append(item(base + ":text", "assistant", content[:16000], status=status, turnId=ident))
-                open_tools = []
         elif kind == "GENERIC":
             content = step.get("content") if isinstance(step.get("content"), str) else ""
             if open_tools:
+                msg_idx, cname, decoded = open_tools.pop(0)
                 cleaned = clean_agy_tool_output(content)
-                for number, message in enumerate(messages):
-                    if message["id"] == open_tools[0]:
-                        messages[number] = {**message, "outcome": cleaned[:16000], "status": status}
-                        break
-                if status != "running": open_tools.pop(0)
+                tid = extract_agy_bg_task_id(content, cname, generic_state=state)
+                tool_status = "running" if tid else ("running" if state in ("RUNNING", "ACTIVE") else status)
+                if 0 <= msg_idx < len(messages):
+                    messages[msg_idx] = {**messages[msg_idx], "outcome": cleaned[:16000], "status": tool_status}
+                if tid:
+                    bg_tasks[tid] = msg_idx
+                    if is_agy_oneshot_timer(content, cname, decoded):
+                        oneshot_timers.add(tid)
+                        cond = agy_timer_condition(decoded)
+                        if cond:
+                            conditional_timers[tid] = cond
+                if cname == "manage_task" and state == "DONE":
+                    handle_manage_task(decoded, content)
             elif content:
                 messages.append(item(base + ":out", "assistant", content[:16000], status=status, turnId=ident))
         elif kind == "USER_INPUT":
@@ -195,13 +532,279 @@ def project_child_transcript(ident, steps):
             if content: messages.append(item(base + ":user", "user", content[:16000], status="completed", turnId=ident))
         elif kind == "ERROR_MESSAGE":
             content = step.get("content") if isinstance(step.get("content"), str) else ""
-            messages.append(item(base + ":error", "assistant", content[:16000] or "agy 子代理错误", status="failed", turnId=ident))
+            messages.append(item(base + ":error", "assistant", content[:16000] or tr("agy 子代理错误", "agy subagent error"), status="failed", turnId=ident))
         elif kind == "SYSTEM_MESSAGE":
-            _, body = parse_system_message(step.get("content"))
-            if body: messages.append(item(base + ":system", "user", body[:16000], status="completed", turnId=ident))
+            sender, body = parse_system_message(step.get("content"))
+            if "All your subagents and background tasks have been stopped" in body:
+                for tid in list(bg_tasks):
+                    settle_bg(tid, "cancelled")
+            for cron_match in _CRON_CANCELLED_MSG_RE.finditer(body):
+                for matched in _matching_bg_task_ids(cron_match.group(1).strip(), bg_tasks):
+                    settle_bg(matched, "completed")
+            if sender and sender in bg_tasks:
+                if sender in oneshot_timers:
+                    settle_bg(sender, "completed")
+                else:
+                    t_status = "cancelled" if _TASK_KILLED_MSG_RE.match(body) else "completed"
+                    settle_bg(sender, t_status, extract_agy_task_result(body)[:16000])
+            elif conditional_timers and (sender or (body and not _SWARM_BOARD_PING_RE.match(body.strip()))):
+                for tid, cond in list(conditional_timers.items()):
+                    if cond.lower() == "any" or (sender and sender == cond):
+                        settle_bg(tid, "completed")
+            if body and not _SWARM_BOARD_PING_RE.match(body.strip()):
+                messages.append(item(base + ":system", "user", body[:16000], status="completed", turnId=ident))
     return messages[-500:]
 
 class AgyChildTailMixin:
+    def _swarm_state(self):
+        with self.lock:
+            groups = getattr(self, "swarm_groups", None)
+            if groups is None:
+                groups = {}
+                self.swarm_groups = groups
+            workers = getattr(self, "swarm_workers", None)
+            if workers is None:
+                workers = set()
+                self.swarm_workers = workers
+            revived = getattr(self, "swarm_revived_steps", None)
+            if revived is None:
+                revived = {}
+                self.swarm_revived_steps = revived
+            stopped = getattr(self, "swarm_stopped_steps", None)
+            if stopped is None:
+                stopped = {}
+                self.swarm_stopped_steps = stopped
+            highs = getattr(self, "child_step_highs", None)
+            if highs is None:
+                highs = {}
+                self.child_step_highs = highs
+        return groups, workers, revived, stopped, highs
+
+    def _is_swarm_subagent(self, cid, agent):
+        _, worker_set, _, _, _ = self._swarm_state()
+        if cid in worker_set:
+            return True
+        role = agent.get("role") or ""
+        return role == "swarm" or role.startswith("swarm · ")
+
+    def _resolve_swarm_member_ids(self, name="", ident=""):
+        if ident and ident in self.subagents:
+            return [ident]
+        if not name:
+            return []
+        exact = [cid for cid, agent in self.subagents.items() if agent.get("name") == name]
+        if len(exact) > 1:
+            live = [
+                cid for cid in exact
+                if self.subagents[cid].get("status") != "closed"
+                and self.subagents[cid].get("nativeStatus") not in ("swarm:killed", "manage_subagents")
+            ]
+            return [live[-1]] if live else [exact[-1]]
+        return exact
+
+    def _resolve_swarm_mention_ids(self, targets, mentions_all):
+        groups, _, _, _, _ = self._swarm_state()
+        matched, seen = [], set()
+        if mentions_all:
+            for cid, agent in self.subagents.items():
+                if not self._is_swarm_subagent(cid, agent):
+                    continue
+                if agent.get("status") == "closed" or agent.get("nativeStatus") in ("swarm:killed", "manage_subagents"):
+                    continue
+                if cid not in seen:
+                    seen.add(cid)
+                    matched.append(cid)
+            return matched
+        for target in targets:
+            for cid in groups.get(target, ()):
+                agent = self.subagents.get(cid)
+                if (agent and cid not in seen and agent.get("status") != "closed"
+                        and agent.get("nativeStatus") not in ("swarm:killed", "manage_subagents")):
+                    seen.add(cid)
+                    matched.append(cid)
+            exact, prefixed = [], []
+            prefix = target + "-"
+            for cid, agent in self.subagents.items():
+                if not self._is_swarm_subagent(cid, agent):
+                    continue
+                if agent.get("status") == "closed" or agent.get("nativeStatus") in ("swarm:killed", "manage_subagents"):
+                    continue
+                wname = agent.get("name") or ""
+                if wname == target:
+                    exact.append(cid)
+                elif wname.startswith(prefix) and wname[len(prefix):].isdigit():
+                    prefixed.append(cid)
+            candidates = (exact[-1:] if len(exact) > 1 else exact) + prefixed
+            for cid in candidates:
+                if cid not in seen:
+                    seen.add(cid)
+                    matched.append(cid)
+        return matched
+
+    def _current_child_step_high(self, cid):
+        _, _, _, _, highs = self._swarm_state()
+        if cid in highs:
+            return highs[cid]
+        path = self.subagents.get(cid, {}).get("logPath", "")
+        if path:
+            high = child_last_step_index(read_transcript(path))
+            highs[cid] = high
+            return high
+        return -1
+
+    def note_swarm_tool(self, ident, turn, params, output, allow_live=True, step_index=None):
+        params = params if isinstance(params, dict) else {}
+        action = params.get("action")
+        if action == "add":
+            workers = swarm_added_workers(params, output)
+            if not workers:
+                return False
+            sibling_ids = {w["id"] for w in workers}
+            groups, worker_set, _, _, _ = self._swarm_state()
+            for worker in workers:
+                cid = worker["id"]
+                with self.lock:
+                    worker_set.add(cid)
+                    if hasattr(self, "parent_children"):
+                        self.parent_children.add(cid)
+                    if worker.get("group"):
+                        lst = groups.setdefault(worker["group"], [])
+                        if cid not in lst:
+                            lst.append(cid)
+                self.register_swarm_child(cid, ident, turn, worker, params=params, siblings=sibling_ids, step_index=step_index)
+            return True
+        if action == "status":
+            updates = swarm_status_updates(output)
+            if not updates:
+                return False
+            _, worker_set, revived, stopped, _ = self._swarm_state()
+            with self.lock:
+                for entry in updates:
+                    for cid in self._resolve_swarm_member_ids(entry.get("name", ""), entry.get("id", "")):
+                        worker_set.add(cid)
+                        old = self.subagents.get(cid, {})
+                        fields = {}
+                        if entry.get("model"):
+                            fields["model"] = entry["model"]
+                        ns = entry.get("nativeStatus", "")
+                        st = entry.get("status", "")
+                        if ns == "swarm:killed":
+                            fields["status"] = "closed"
+                            fields["nativeStatus"] = "swarm:killed"
+                            settled_msgs = _settle_terminal_child_messages(old.get("messages", []), "closed")
+                            if settled_msgs != old.get("messages", []):
+                                fields["messages"] = settled_msgs
+                                fields["detail"] = child_transcript_detail(settled_msgs, old.get("detail", ""))
+                            revived.pop(cid, None)
+                            stopped.pop(cid, None)
+                        elif old.get("nativeStatus") not in ("swarm:killed", "manage_subagents"):
+                            if ns == "swarm:working":
+                                if allow_live or old.get("status", "unknown") in ("unknown", "pending"):
+                                    fields["status"] = st
+                                    fields["nativeStatus"] = ns
+                                    stopped.pop(cid, None)
+                            elif ns == "swarm:waiting":
+                                fields["status"] = st
+                                fields["nativeStatus"] = ns
+                                revived.pop(cid, None)
+                                stopped.pop(cid, None)
+                            elif ns == "swarm:stopped":
+                                fields["status"] = st
+                                fields["nativeStatus"] = ns
+                                revived.pop(cid, None)
+                                stopped[cid] = self._current_child_step_high(cid)
+                        if fields:
+                            self.subagent(cid, **fields)
+            return True
+        if action == "model":
+            name, model = swarm_model_update(params, output)
+            if not model:
+                return False
+            with self.lock:
+                targets = self._resolve_swarm_member_ids(name=name)
+                for cid in targets:
+                    self.subagent(cid, model=model)
+            return bool(targets)
+        if action == "kill":
+            name = swarm_kill_target(params, output)
+            if not name:
+                return False
+            _, worker_set, revived, stopped, _ = self._swarm_state()
+            with self.lock:
+                targets = self._resolve_swarm_member_ids(name=name)
+                for cid in targets:
+                    worker_set.add(cid)
+                    revived.pop(cid, None)
+                    stopped.pop(cid, None)
+                    old = self.subagents[cid]
+                    settled_msgs = _settle_terminal_child_messages(old.get("messages", []), "closed")
+                    if old.get("status") not in ("closed", "cancelled"):
+                        extra = {"messages": settled_msgs, "detail": child_transcript_detail(settled_msgs, old.get("detail", ""))} if settled_msgs != old.get("messages", []) else {}
+                        self.subagent(cid, status="closed", nativeStatus="swarm:killed", **extra)
+                    elif settled_msgs != old.get("messages", []):
+                        self.subagent(cid, messages=settled_msgs, detail=child_transcript_detail(settled_msgs, old.get("detail", "")))
+            return bool(targets)
+        return False
+
+    def note_post_message(self, params, output="", allow_revive=True):
+        params = params if isinstance(params, dict) else {}
+        text_val = params.get("text") if isinstance(params.get("text"), str) else ""
+        for value in _iter_json_dicts(output):
+            if value.get("error"):
+                return False
+        targets, mentions_all = swarm_mentions(text_val)
+        if not targets and not mentions_all:
+            return False
+        _, _, revived, stopped, _ = self._swarm_state()
+        with self.lock:
+            matched = self._resolve_swarm_mention_ids(targets, mentions_all)
+            if not allow_revive:
+                return bool(matched)
+            for cid in matched:
+                agent = self.subagents.get(cid, {})
+                if agent.get("status") == "closed" or agent.get("nativeStatus") in ("swarm:killed", "manage_subagents"):
+                    continue
+                stopped.pop(cid, None)
+                revived[cid] = self._current_child_step_high(cid)
+                if agent.get("status") != "running" or agent.get("nativeStatus") != "revived":
+                    self.subagent(cid, status="running", nativeStatus="revived")
+            return bool(matched)
+
+    def apply_child_transcript(self, ident, steps, reply_detail="", protected=("manage_subagents", "swarm:killed")):
+        messages = project_child_transcript(ident, steps)
+        state = child_transcript_state(steps)
+        last_idx = child_last_step_index(steps)
+        _, _, revived, stopped, highs = self._swarm_state()
+        with self.lock:
+            if self.close_pending or self.released:
+                return False
+            highs[ident] = last_idx
+            old = self.subagents.get(ident)
+            if not old:
+                return False
+            fields = {}
+            cur_native = old.get("nativeStatus")
+            if state and cur_native not in protected:
+                if cur_native == "revived":
+                    if state != "idle" or last_idx > revived.get(ident, -1):
+                        revived.pop(ident, None)
+                        fields.update(status="succeeded" if state == "idle" else state, nativeStatus="transcript:" + state)
+                elif cur_native == "swarm:stopped":
+                    if last_idx > stopped.get(ident, -1):
+                        stopped.pop(ident, None)
+                        fields.update(status="succeeded" if state == "idle" else state, nativeStatus="transcript:" + state)
+                else:
+                    fields.update(status="succeeded" if state == "idle" else state, nativeStatus="transcript:" + state)
+            eff_status = fields.get("status", old.get("status"))
+            messages = _settle_terminal_child_messages(messages, eff_status)
+            detail = reply_detail if state == "idle" and reply_detail else child_transcript_detail(messages, reply_detail)
+            fields["messages"] = messages
+            fields["detail"] = detail
+            if all(old.get(key) == value for key, value in fields.items()):
+                return False
+            self.subagent(ident, **fields)
+            return True
+
     def note_manage(self, params, known_children=None):
         if not isinstance(params, dict):
             return
@@ -214,8 +817,14 @@ class AgyChildTailMixin:
             return
         with self.lock:
             for ident in idents:
-                if ident in self.subagents and self.subagents[ident].get("status") not in ("cancelled", "closed"):
-                    self.subagent(ident, status="cancelled", nativeStatus="manage_subagents")
+                if ident in self.subagents:
+                    old = self.subagents[ident]
+                    settled_msgs = _settle_terminal_child_messages(old.get("messages", []), "cancelled")
+                    if old.get("status") not in ("cancelled", "closed"):
+                        extra = {"messages": settled_msgs, "detail": child_transcript_detail(settled_msgs, old.get("detail", ""))} if settled_msgs != old.get("messages", []) else {}
+                        self.subagent(ident, status="cancelled", nativeStatus="manage_subagents", **extra)
+                    elif settled_msgs != old.get("messages", []):
+                        self.subagent(ident, messages=settled_msgs, detail=child_transcript_detail(settled_msgs, old.get("detail", "")))
 
     def ensure_child_tail(self):
         if self.tail_thread and self.tail_thread.is_alive() and not self.tail_stop.is_set():
@@ -265,38 +874,47 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
         self.index_rows = {}
         self.restored_rows = set()
         self.restored_replay_buf = {}
+        self.swarm_groups = {}
+        self.swarm_workers = set()
+        self.swarm_revived_steps = {}
+        self.swarm_stopped_steps = {}
+        self.child_step_highs = {}
+        self.swarm_child_steps = {}
+        self.handled_swarm_steps = set()
+        self.swarm_replay_high = None
     def environment(self):
         env = os.environ.copy()
+        env["LUMA_LANG"] = lang_code()
         if self.config.get("browserConfig"): env["LUMA_BROWSER_CONFIG"] = self.config["browserConfig"]
         return env
 
     def discover(self):
-        if not shutil.which(self.argv[0]): raise Rejected("未找到 agy；请在当前运行环境安装并完成 agy 原生登录。")
+        if not shutil.which(self.argv[0]): raise Rejected(tr("未找到 agy；请在当前运行环境安装并完成 agy 原生登录。", "agy not found; install agy in the current environment and complete native sign-in."))
         try:
             version = subprocess.run([*self.argv, "--version"], env=self.environment(), cwd=self.config["cwd"],
                 capture_output=True, timeout=10, check=False)
             match = re.search(rb"(\d+)\.(\d+)\.(\d+)", version.stdout)
             if version.returncode or not match or tuple(map(int, match.groups())) < (1, 1, 15):
-                raise Rejected("此 agy 未提供所需 stream-json 接口；请使用 1.1.15 或更新版本。")
+                raise Rejected(tr("此 agy 未提供所需 stream-json 接口；请使用 1.1.15 或更新版本。", "This agy build lacks the required stream-json interface; upgrade to 1.1.15 or newer."))
             result = subprocess.run([*self.argv, "models"], env=self.environment(), cwd=self.config["cwd"],
                 capture_output=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise Rejected("agy 目录探测失败；请在终端核对安装与原生登录。") from exc
-        if result.returncode: raise Rejected("无法读取 agy 模型目录；请在终端运行 agy 完成原生登录并核对配置。")
+            raise Rejected(tr("agy 目录探测失败；请在终端核对安装与原生登录。", "Failed to probe agy catalog; check installation and native sign-in in terminal.")) from exc
+        if result.returncode: raise Rejected(tr("无法读取 agy 模型目录；请在终端运行 agy 完成原生登录并核对配置。", "Unable to read agy model catalog; run `agy` in terminal to complete sign-in and verify config."))
         models = []
         for line in result.stdout.decode("utf-8").strip().splitlines():
             parts = line.split("\t")
             if len(parts) != 2 or not all(parts) or any(m["id"] == parts[0] for m in models):
-                raise Rejected("agy 模型目录格式无效")
+                raise Rejected(tr("agy 模型目录格式无效", "Invalid agy model catalog format"))
             models.append({"id": parts[0], "label": parts[1], "efforts": [], "supportsImages": False})
-        if not models: raise Rejected("agy 未返回可用模型")
+        if not models: raise Rejected(tr("agy 未返回可用模型", "agy returned no available models"))
         self.update(models=models)
 
     def restore_projection(self):
         saved = self.config.get("localProjection")
         if not saved: return
         if (saved.get("version"), saved.get("nativeProtocol"), saved.get("nativeId")) != (1, PROTOCOL, self.data["nativeId"]):
-            raise Rejected("agy 本地投影与原生会话身份不匹配")
+            raise Rejected(tr("agy 本地投影与原生会话身份不匹配", "Local agy projection does not match native session identity"))
         for row in saved.get("messages", []):
             value = dict(row)
             if value.get("status") in ("running", "in_progress", "pending"): value["status"] = "unknown"
@@ -319,13 +937,29 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             if not fields.get("logPath"):
                 fields["logPath"] = child_log_path(child["id"], "")
             self.subagent(child["id"], **fields)
+            role_val = fields.get("role") or ""
+            if role_val == "swarm" or role_val.startswith("swarm · "):
+                self.swarm_workers.add(child["id"])
+                self.parent_children.add(child["id"])
+        saved_groups = saved.get("swarmGroups")
+        if isinstance(saved_groups, dict):
+            for group_name, cids in saved_groups.items():
+                if isinstance(group_name, str) and isinstance(cids, list):
+                    self.swarm_groups[group_name] = [c for c in cids if isinstance(c, str)]
+        saved_steps = saved.get("handledSwarmSteps")
+        if isinstance(saved_steps, list):
+            self.handled_swarm_steps.update(idx for idx in saved_steps if type(idx) is int)
+        self.swarm_replay_high = self.stream_high
         self.last_result_turn = saved.get("lastResultTurn")
         self.update(metrics=saved.get("metrics", []), historySource="luma-observed")
         if saved.get("unsettledSubmission"):
-            self.update(error="上次 agy 回合终态未确认；仅恢复本地已观察内容，未重发消息。")
+            self.update(error=tr("上次 agy 回合终态未确认；仅恢复本地已观察内容，未重发消息。",
+                                 "Previous agy turn final state was not confirmed; restored locally observed content without resending."))
 
     def checkpoint(self, force=False, strict=False):
         with self.lock:
+            if self.close_pending or self.released:
+                return
             left = 1 - (time.monotonic() - self.last_checkpoint)
             if not force and left > 0:
                 if self.checkpoint_timer is None:
@@ -335,30 +969,37 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             self.checkpoint_generation += 1
             if self.checkpoint_timer:
                 self.checkpoint_timer.cancel(); self.checkpoint_timer = None
-            self.config["localProjection"] = copy.deepcopy({"version": 1, "nativeProtocol": PROTOCOL,
+            projection = {"version": 1, "nativeProtocol": PROTOCOL,
                 "nativeId": self.data["nativeId"], "messages": list(self.rows.values()),
                 "subAgents": list(self.subagents.values()), "metrics": self.data["metrics"],
-                "lastResultTurn": self.last_result_turn, "unsettledSubmission": self.current_submission})
+                "lastResultTurn": self.last_result_turn, "unsettledSubmission": self.current_submission}
+            if self.swarm_groups:
+                projection["swarmGroups"] = self.swarm_groups
+            if self.handled_swarm_steps:
+                projection["handledSwarmSteps"] = sorted(self.handled_swarm_steps)
+            self.config["localProjection"] = copy.deepcopy(projection)
             try: self.save()
             except OSError:
-                self.update(error="无法保存 agy 本地投影；原生执行状态仍以实际事件为准。")
-                if strict: raise Rejected("无法保存发送状态，尚未写入 agy") from None
+                self.update(error=tr("无法保存 agy 本地投影；原生执行状态仍以实际事件为准。",
+                                     "Unable to save local agy projection; native execution state still follows live events."))
+                if strict: raise Rejected(tr("无法保存发送状态，尚未写入 agy", "Unable to save delivery state; not written to agy yet")) from None
             else: self.last_checkpoint = time.monotonic()
 
     def flush_projection(self, generation):
         with self.lock:
-            if generation != self.checkpoint_generation: return
+            if self.close_pending or self.released or generation != self.checkpoint_generation:
+                return
             self.checkpoint_timer = None
             self.checkpoint(force=True)
 
     def connect(self):
-        if self.config.get("nativeProtocol") != PROTOCOL: raise Rejected("此会话不属于 agy stream-json，不能切换原生协议")
+        if self.config.get("nativeProtocol") != PROTOCOL: raise Rejected(tr("此会话不属于 agy stream-json，不能切换原生协议", "This session does not belong to agy stream-json; cannot switch native protocol"))
         if self.config.get("creationUnknown") and not self.data["nativeId"]:
-            raise Rejected("上次 agy 创建结果未知；请在原生会话列表核对 ID，不能自动再建")
+            raise Rejected(tr("上次 agy 创建结果未知；请在原生会话列表核对 ID，不能自动再建", "Previous agy session creation result is unknown; verify ID in native session list instead of recreating"))
         self.restore_projection()
         self.discover()
         model = self.config.get("model", "")
-        if model and model not in {m["id"] for m in self.data["models"]}: raise Rejected("原会话模型不在 agy 当前目录中，请在终端核对")
+        if model and model not in {m["id"] for m in self.data["models"]}: raise Rejected(tr("原会话模型不在 agy 当前目录中，请在终端核对", "Original session model is not in the current agy catalog; verify in terminal"))
         self.launch(model)
 
     def launch(self, model):
@@ -383,16 +1024,16 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             deadline = time.monotonic() + self.startup_timeout
             while self.ready is None and self.startup_error is None:
                 left = deadline - time.monotonic()
-                if left <= 0: self.startup_error = "agy 未在 30 秒内返回原生 init；不要自动重建或重发"
+                if left <= 0: self.startup_error = tr("agy 未在 30 秒内返回原生 init；不要自动重建或重发", "agy did not return native init within 30s; do not recreate or resend automatically")
                 else: self.condition.wait(left)
             failure = self.startup_error
         if failure:
             peer.close(interrupt=True); raise Rejected(failure)
         if peer.closed or peer.proc.poll() is not None:
-            peer.close(); raise Rejected("agy 在初始化后退出，请在终端核对原生登录与配置")
+            peer.close(); raise Rejected(tr("agy 在初始化后退出，请在终端核对原生登录与配置", "agy exited after initialization; verify native sign-in and config in terminal"))
         self.config["model"] = model; self.save()
         self.update(connected=True, running=False, model=self.ready.get("model") or "", effort="", notice="",
-            permission=FULL_ACCESS, permissions=[{"id": FULL_ACCESS, "label": "全权限（跳过审批）"}],
+            permission=FULL_ACCESS, permissions=[{"id": FULL_ACCESS, "label": tr("全权限（跳过审批）", "Full access (skip approvals)")}],
             historySource="luma-observed", historyReady=True,
             capabilities={"queue": False, "steer": False, "stop": True, "images": False,
                           "skills": False, "compact": False, "rename": False})
@@ -403,12 +1044,12 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
         with self.condition:
             kind = frame.get("event")
             if kind == "init":
-                if self.ready is not None: raise ValueError("agy 重复 init")
+                if self.ready is not None: raise ValueError(tr("agy 重复 init", "Duplicate agy init"))
                 ident, info = frame.get("conversation_id"), frame.get("init")
-                if not isinstance(ident, str) or not _ID.fullmatch(ident) or not isinstance(info, dict): raise ValueError("agy init 身份无效")
-                if self.data["nativeId"] and ident != self.data["nativeId"]: raise ValueError("agy 恢复了不同原生会话，已拒绝接入")
-                if info.get("permission_mode") != FULL_ACCESS: raise ValueError("agy 未确认已选全权限模式")
-                if self.requested_model and info.get("model") != self.requested_model: raise ValueError("agy 未确认所选原生模型")
+                if not isinstance(ident, str) or not _ID.fullmatch(ident) or not isinstance(info, dict): raise ValueError(tr("agy init 身份无效", "Invalid agy init identity"))
+                if self.data["nativeId"] and ident != self.data["nativeId"]: raise ValueError(tr("agy 恢复了不同原生会话，已拒绝接入", "agy resumed a different native session; refused to attach"))
+                if info.get("permission_mode") != FULL_ACCESS: raise ValueError(tr("agy 未确认已选全权限模式", "agy did not confirm full-access mode"))
+                if self.requested_model and info.get("model") != self.requested_model: raise ValueError(tr("agy 未确认所选原生模型", "agy did not confirm the selected native model"))
                 self.config["creationUnknown"] = False
                 self.update(nativeId=ident)
                 self.ready = info; self.condition.notify_all(); return
@@ -433,7 +1074,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
 
     def step(self, step):
         index, state, kind = step.get("step_index"), step.get("state"), step.get("step_type")
-        if type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE", "ERROR"): raise ValueError("agy step 身份或状态无效")
+        if type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE", "ERROR"): raise ValueError(tr("agy step 身份或状态无效", "Invalid agy step identity or state"))
         turn = self.current_submission or "background"
         row_kind = "tool" if kind == "subagent" else kind
         self.last_frame = time.monotonic()
@@ -448,7 +1089,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
         status = {"ACTIVE": "running", "DONE": "completed", "ERROR": "failed"}[state]
         if kind == "agent_response":
             delta = step.get("text_delta", "")
-            if not isinstance(delta, str): raise ValueError("agy text_delta 无效")
+            if not isinstance(delta, str): raise ValueError(tr("agy text_delta 无效", "Invalid agy text_delta"))
             old = self.rows.get(ident, item(ident, "assistant", "", turnId=turn))
             if old.get("source") == "transcript":
                 delta = ""
@@ -482,6 +1123,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             if "output" in info: changes["outcome"] = info["output"]
             if info.get("error"): changes["outcome"] = json.dumps(info["error"], ensure_ascii=False)
             self.row({**old, **changes})
+            self._reanchor_cli_swarm(index, ident, turn)
             if not info.get("error") and state != "ERROR":
                 for child in (step.get("subagent_info") or {}).get("subagents", []):
                     child_id = child.get("conversation_id")
@@ -489,11 +1131,21 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
                         self.register_child(child_id, ident, turn, child.get("type_name", ""),
                             child.get("role", ""), child.get("initial_prompt", ""), child.get("log_uri", ""))
                 if name == "invoke_subagent": self.note_invoke(ident, turn, info)
-                elif name == "manage_subagents" and state == "DONE": self.note_manage(info.get("parameters") or json.loads(old.get("input") or "{}"))
+                elif name == "manage_subagents" and state == "DONE": self.note_manage(info.get("parameters") or _parse_json_dict(old.get("input")))
+                elif name == "swarm" and state == "DONE":
+                    params = info.get("parameters") if isinstance(info.get("parameters"), dict) else _parse_json_dict(old.get("input"))
+                    with self.lock:
+                        if self.note_swarm_tool(ident, turn, params, info.get("output", ""), allow_live=True, step_index=index):
+                            self.handled_swarm_steps.add(index)
+                elif name == "post_message" and state == "DONE":
+                    params = info.get("parameters") if isinstance(info.get("parameters"), dict) else _parse_json_dict(old.get("input"))
+                    with self.lock:
+                        if self.note_post_message(params, info.get("output", ""), allow_revive=True):
+                            self.handled_swarm_steps.add(index)
         if state == "DONE" and isinstance(step.get("usage"), dict):
             self.turn_steps[index] = step["usage"]
             total = agy_steps(list(self.turn_steps.values()))
-            self.usage(total, "本回合")
+            self.usage(total, tr("本回合", "This turn"))
         self.checkpoint(force=state != "ACTIVE")
 
     def note_invoke(self, ident, turn, info):
@@ -502,6 +1154,44 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
         if not child_id: return
         self.register_child(child_id, ident, turn, params.get("TypeName") or "",
             params.get("Role") or "", params.get("Prompt") or "", uri, params.get("Model", ""))
+
+    def register_swarm_child(self, child_id, ident, turn, worker, params=None, siblings=None, step_index=None):
+        if type(step_index) is int and child_id:
+            with self.lock:
+                self.swarm_child_steps[child_id] = step_index
+        self.register_child(
+            child_id,
+            ident,
+            turn,
+            worker.get("name", ""),
+            worker.get("role", "swarm"),
+            worker.get("task", ""),
+            "",
+            worker.get("model") or "inherit",
+        )
+
+    def _reanchor_cli_swarm(self, index, ident, turn):
+        if not ident:
+            return
+        with self.lock:
+            for cid, step_idx in list(self.swarm_child_steps.items()):
+                if step_idx == index:
+                    old = self.subagents.get(cid, {})
+                    if not old.get("itemId") or old["itemId"] not in self.rows:
+                        self.subagent(cid, itemId=ident, turnId=turn or old.get("turnId", ""))
+
+    def _reanchor_all_cli_swarm(self):
+        with self.lock:
+            if self.close_pending or self.released:
+                return
+            for cid, step_idx in list(self.swarm_child_steps.items()):
+                old = self.subagents.get(cid, {})
+                if old.get("itemId") and old["itemId"] in self.rows:
+                    continue
+                suffixes = (f":{step_idx}:tool", f":{step_idx}:subagent")
+                anchor = next((r for key, r in self.rows.items() if key.endswith(suffixes)), {})
+                if anchor.get("id"):
+                    self.subagent(cid, itemId=anchor["id"], turnId=anchor.get("turnId") or old.get("turnId", ""))
 
     def register_child(self, child_id, ident, turn, name, role, task, uri, model=""):
         fields = {"name": name, "role": role, "task": task, "itemId": ident, "turnId": turn}
@@ -520,7 +1210,10 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
         self.tail_thread.start()
 
     def refresh_parent_log(self):
-        path = child_log_path(self.data["nativeId"], "")
+        with self.lock:
+            if self.close_pending or self.released: return
+            native_id = self.data["nativeId"]
+        path = child_log_path(native_id, "")
         if not path: return
         full_path = str(pathlib.Path(path).with_name("transcript_full.jsonl"))
         changed = False
@@ -528,6 +1221,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             with open(path, "rb") as source:
                 if os.fstat(source.fileno()).st_size < self.parent_offset:
                     self.parent_offset = 0; self.parent_calls = []; self.parent_children.clear()
+                    self.swarm_child_steps.clear(); self.handled_swarm_steps.clear()
                 source.seek(self.parent_offset)
                 while True:
                     line = source.readline()
@@ -536,31 +1230,50 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
                     try: step = json.loads(line)
                     except ValueError: continue
                     if not isinstance(step, dict): continue
-                    if "content" in (step.get("truncated_fields") or []):
+                    if step.get("truncated_fields"):
                         step = read_full_step(full_path, step.get("step_index")) or step
                     self.note_transcript_step(step)
                     if step.get("type") == "PLANNER_RESPONSE":
                         self.parent_calls = [c for c in step.get("tool_calls", []) if isinstance(c, dict)]
                     elif step.get("type") == "GENERIC" and self.parent_calls:
-                        call = self.parent_calls[0]
-                        if step.get("status") not in ("RUNNING", "ACTIVE"): self.parent_calls.pop(0)
+                        call = self.parent_calls.pop(0)
                         if step.get("status") != "DONE": continue
                         index = step.get("step_index")
                         info = {"parameters": transcript_args(call), "output": step.get("content", "")}
+                        cname = call.get("name")
                         with self.lock:
-                            if call.get("name") == "invoke_subagent":
+                            if self.close_pending or self.released: return
+                            if cname == "invoke_subagent":
                                 child_id, _ = invoke_child(info["output"])
                                 if child_id: self.parent_children.add(child_id)
                                 suffixes = (f":{index}:tool", f":{index}:subagent")
                                 anchor = next((r for key, r in self.rows.items() if key.endswith(suffixes)), {})
                                 self.note_invoke(anchor.get("id", ""), anchor.get("turnId", ""), info)
                                 changed = bool(child_id) or changed
-                            elif call.get("name") == "manage_subagents":
+                            elif cname == "manage_subagents":
                                 self.note_manage(info["parameters"], self.parent_children)
                                 changed = True
+                            elif cname == "swarm" and index not in self.handled_swarm_steps:
+                                suffixes = (f":{index}:tool", f":{index}:subagent")
+                                anchor = next((r for key, r in self.rows.items() if key.endswith(suffixes)), {})
+                                turn_id = anchor.get("turnId") or self.current_submission or self.stream_turn or ""
+                                allow_live = self.swarm_replay_high is None or (type(index) is int and index > self.swarm_replay_high)
+                                if self.note_swarm_tool(anchor.get("id", ""), turn_id, info["parameters"], info["output"], allow_live=allow_live, step_index=index):
+                                    if type(index) is int:
+                                        self.handled_swarm_steps.add(index)
+                                    changed = True
+                            elif cname == "post_message" and index not in self.handled_swarm_steps:
+                                allow_live = self.swarm_replay_high is None or (type(index) is int and index > self.swarm_replay_high)
+                                if self.note_post_message(info["parameters"], info["output"], allow_revive=allow_live):
+                                    if type(index) is int:
+                                        self.handled_swarm_steps.add(index)
+                                    changed = True
         except OSError: return
-        if self.backfill_held_steps(): changed = True
-        if changed: self.checkpoint()
+        with self.lock:
+            if self.close_pending or self.released: return
+            if self.backfill_held_steps(): changed = True
+            self._reanchor_all_cli_swarm()
+            if changed: self.checkpoint()
 
     def note_transcript_step(self, step):
         index, kind = step.get("step_index"), step.get("type")
@@ -577,6 +1290,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
 
     def backfill_held_steps(self):
         with self.lock:
+            if self.close_pending or self.released: return False
             if self.stream_high is not None:
                 for index in [i for i in self.pending_transcript if i <= self.stream_high]:
                     del self.pending_transcript[index]
@@ -602,6 +1316,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
                     if not old.get("input"): changes["input"] = json.dumps(transcript_args(call), ensure_ascii=False)[:16000]
                     if content and status != "running": changes["outcome"] = content[:16000]
                     self.row({**old, **changes})
+                    self._reanchor_cli_swarm(index, ident, turn)
             self.pending_transcript.clear()
             return True
 
@@ -615,25 +1330,15 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
                 self.refresh_child_log(ident, path)
 
     def refresh_child_log(self, ident, path):
+        with self.lock:
+            if self.close_pending or self.released: return
         steps = self.changed_transcript(path)
         if steps is None: return
-        messages = project_child_transcript(ident, steps)
-        detail = ""
-        for message in reversed(messages):
-            if message.get("role") == "assistant" and message.get("text"):
-                detail = message["text"][:500]; break
-            if message.get("status") == "running" and message.get("toolName"):
-                detail = message["toolName"]; break
         with self.lock:
-            old = self.subagents.get(ident)
-            if not old: return
-            fields = {"messages": messages, "detail": detail}
-            state = child_transcript_state(steps)
-            if state and old.get("nativeStatus") != "manage_subagents":
-                fields.update(status="succeeded" if state == "idle" else state, nativeStatus="transcript:" + state)
-            if all(old.get(key) == value for key, value in fields.items()): return
-            self.subagent(ident, **fields)
-        self.checkpoint()
+            if self.close_pending or self.released: return
+            if not self.apply_child_transcript(ident, steps, protected=("manage_subagents", "swarm:killed")):
+                return
+            self.checkpoint()
 
     def usage(self, usage, scope):
         native_id = self.data.get("nativeId") or self.config.get("nativeId", "")
@@ -642,7 +1347,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             native_id,
             model=model,
             step_usages=list(self.turn_steps.values()) if self.turn_steps else None,
-            result_usage=usage if scope == "CLI 累计" else None,
+            result_usage=usage if scope in ("CLI 累计", "CLI total") else None,
         )
         if not rows:
             rows = agy_usage(usage, scope, model=model)
@@ -651,9 +1356,10 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
     def result(self, result):
         status = result.get("status")
         if status not in ("SUCCESS", "ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING", "RUNNING"):
-            raise ValueError("agy result 状态无效")
+            raise ValueError(tr("agy result 状态无效", "Invalid agy result status"))
         if status in ("WAITING", "RUNNING"):
-            self.update(error="agy 返回了非终态结果（" + status + "）；请核对，不会自动重发。")
+            self.update(error=tr(f"agy 返回了非终态结果（{status}）；请核对，不会自动重发。",
+                                 f"agy returned a non-terminal result ({status}); please verify, will not resend automatically."))
             self.checkpoint(force=True); return
         if status == "SUCCESS": self.accept_submission()
         turn = self.current_submission
@@ -666,12 +1372,13 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             if row.get("turnId") == turn and row.get("status") == "running" and row.get("role") == "assistant":
                 self.row({**row, "status": "cancelled" if cancelled else "completed" if status == "SUCCESS" else "failed"})
         self.settle_incomplete_rows("unknown")
-        if isinstance(result.get("usage"), dict): self.usage(result["usage"], "CLI 累计")
+        if isinstance(result.get("usage"), dict): self.usage(result["usage"], tr("CLI 累计", "CLI total"))
         self.last_result_turn = result.get("num_turns")
         self.current_submission = None
         error = None if status == "SUCCESS" or cancelled else native_error(result.get("error"))
         if result.get("denied_actions"):
-            error = "agy 原生策略拒绝了操作：" + "、".join(str(a.get("display_name") or a.get("action", "")) for a in result["denied_actions"])
+            sep = tr("、", ", ")
+            error = tr("agy 原生策略拒绝了操作：", "agy native policy denied actions: ") + sep.join(str(a.get("display_name") or a.get("action", "")) for a in result["denied_actions"])
         self.update(running=False, error=error)
         self.checkpoint(force=True)
 
@@ -686,7 +1393,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             self.current_submission = None; self.update(running=False); raise
         except Exception:
             self.update(connected=not self.peer.closed, running=not self.peer.closed,
-                        error="提交到 agy 的结果未知；请核对，不要自动重发。")
+                        error=tr("提交到 agy 的结果未知；请核对，不要自动重发。", "Submission result to agy is unknown; verify before resending."))
             self.checkpoint(force=True)
             raise
         return False
@@ -699,17 +1406,17 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             active = self.current_submission is not None
             if active: self.settle_incomplete_rows("unknown")
             self.tail_stop.set()
-            self.update(connected=False, running=False, **({"error": "agy 已退出，本回合未收到原生结算；结果未知，请核对后重连。"} if active else
+            self.update(connected=False, running=False, **({"error": tr("agy 已退出，本回合未收到原生结算；结果未知，请核对后重连。", "agy exited before the turn settled; result is unknown, verify before reconnecting.")} if active else
                 {} if peer.expected_close else {"error": str(error)}))
             self.checkpoint(force=True)
 
     def configure(self, payload):
-        if self.data["running"]: raise Rejected("请等待 agy 当前回合结束")
-        if payload.get("effort") or payload.get("speed"): raise Rejected("agy 强度随原生模型 ID 选择；没有独立强度或速度接口")
-        if payload.get("permission") and payload["permission"] != FULL_ACCESS: raise Rejected("此 agy 入口只支持已选全权限模式")
+        if self.data["running"]: raise Rejected(tr("请等待 agy 当前回合结束", "Wait for the current agy turn to finish"))
+        if payload.get("effort") or payload.get("speed"): raise Rejected(tr("agy 强度随原生模型 ID 选择；没有独立强度或速度接口", "agy effort is selected via native model ID; no separate effort or speed setting"))
+        if payload.get("permission") and payload["permission"] != FULL_ACCESS: raise Rejected(tr("此 agy 入口只支持已选全权限模式", "This agy entry only supports full-access mode"))
         model = payload.get("model")
         if model and model != self.data["model"]:
-            if model not in {m["id"] for m in self.data["models"]}: raise Rejected("模型不在 agy 原生目录中")
+            if model not in {m["id"] for m in self.data["models"]}: raise Rejected(tr("模型不在 agy 原生目录中", "Model is not in the native agy catalog"))
             self.update(connected=False)
             self.peer.close()
             self.launch(model)
@@ -733,3 +1440,40 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             finally:
                 self.update(connecting=False)
         return {}
+
+    def release_mode(self):
+        if (
+            self.config.get("nativeId")
+            and self.data.get("historyReady")
+            and isinstance(self.config.get("localProjection"), dict)
+            and self.config["localProjection"].get("nativeId") == self.config.get("nativeId")
+        ):
+            return "process"
+        return None
+
+    def fast_release_blocker(self):
+        with self.lock:
+            blocker = super().fast_release_blocker()
+            if blocker is not None:
+                return blocker
+            if getattr(self, "pending_transcript", None):
+                return tr("原生回合尚未结算", "Native turn has not settled")
+            return None
+
+    def release_blocker(self):
+        return super().release_blocker()
+
+    def finish_observer_close(self):
+        tail_stop = getattr(self, "tail_stop", None)
+        if tail_stop is not None:
+            tail_stop.set()
+        with self.lock:
+            self.checkpoint_generation = getattr(self, "checkpoint_generation", 0) + 1
+            timer = getattr(self, "checkpoint_timer", None)
+            if timer is not None:
+                timer.cancel()
+                self.checkpoint_timer = None
+            tail_thread = getattr(self, "tail_thread", None)
+        if tail_thread is not None and tail_thread.is_alive() and threading.current_thread() is not tail_thread:
+            tail_thread.join(timeout=2.0)
+        super().finish_observer_close()

@@ -28,7 +28,7 @@ public final class ShellService extends Service {
     private ManagedTerminalRequest savedRequest(String id){
         if(!managedWorkspace())return null;
         try{return ManagedTerminalRequest.restore(getSharedPreferences("root-managed-windows",MODE_PRIVATE).getString(id,null),"root");}
-        catch(java.io.IOException failure){throw new IllegalStateException("无法读取窗口归属，原记录已保留",failure);}
+        catch(java.io.IOException failure){throw new IllegalStateException(com.termux.terminal.LumaLang.tr("无法读取窗口归属，原记录已保留","Failed to read window ownership; existing record preserved"),failure);}
     }
     private boolean dedicated(RemoteWindow window){
         ManagedTerminalRequest request=savedRequest(window.id);
@@ -58,7 +58,7 @@ public final class ShellService extends Service {
     }
     private void rememberRequest(ManagedTerminalRequest request){
         if(managedWorkspace()&&!getSharedPreferences("root-managed-windows",MODE_PRIVATE).edit().putString(request.windowId,request.save()).commit())
-            throw new IllegalStateException("无法保存窗口归属，未启动终端");
+            throw new IllegalStateException(com.termux.terminal.LumaLang.tr("无法保存窗口归属，未启动终端","Failed to save window ownership; terminal not started"));
     }
     private RootBackend backend;
     private boolean backendConnected;
@@ -81,7 +81,7 @@ public final class ShellService extends Service {
     public void closeSession(TerminalSession closing,Runnable completion){
         RemoteWindow window=find(closing);if(window==null||backend==null)return;
         if(pendingCloses.containsKey(window.id))return;
-        if(!backendConnected){if(listener!=null)listener.onBackendError("连接尚未恢复，窗口已保留，请稍后关闭");return;}
+        if(!backendConnected){if(listener!=null)listener.onBackendError(com.termux.terminal.LumaLang.tr("连接尚未恢复，窗口已保留，请稍后关闭","Connection not restored yet; window kept, try closing later"));return;}
         pendingCloses.put(window.id,completion);
         window.repaint.cancel();window.ready=false;
         if(!window.created&&!window.createSent){completeClose(window);return;}
@@ -100,7 +100,7 @@ public final class ShellService extends Service {
     }
     public void renameSession(TerminalSession target,String name){
         RemoteWindow window=find(target);if(window==null)return;
-        if(!backendConnected){if(listener!=null)listener.onBackendError("连接尚未恢复，请稍后重命名");return;}
+        if(!backendConnected){if(listener!=null)listener.onBackendError(com.termux.terminal.LumaLang.tr("连接尚未恢复，请稍后重命名","Connection not restored yet; try renaming later"));return;}
         target.mSessionName=name;if(window.created)send("rename",window.id,"name",name);
     }
     private RemoteWindow find(TerminalSession target){
@@ -176,13 +176,13 @@ public final class ShellService extends Service {
     }
     public TerminalSession createSession(){
         if(backend==null||!backendConnected){
-            if(listener!=null)listener.onBackendError(backendError==null?"后端连接中，请稍候":backendError);
+            if(listener!=null)listener.onBackendError(backendError==null?com.termux.terminal.LumaLang.tr("后端连接中，请稍候","Connecting to backend, please wait"):backendError);
             return null;
         }
-        if(windows.size()>=MAX_WINDOWS){if(listener!=null)listener.onBackendError("终端窗口已达上限，请先关闭不用的窗口");return null;}
+        if(windows.size()>=MAX_WINDOWS){if(listener!=null)listener.onBackendError(com.termux.terminal.LumaLang.tr("终端窗口已达上限，请先关闭不用的窗口","Maximum terminal windows reached; close unused windows first"));return null;}
         String id=java.util.UUID.randomUUID().toString().replace("-","");
         getSharedPreferences("root-engines",MODE_PRIVATE).edit().putString(id,TerminalEngines.GHOSTTY).apply();
-        RemoteWindow window=addWindow(id,"窗口 "+nextWindowNumber++);
+        RemoteWindow window=addWindow(id,com.termux.terminal.LumaLang.tr("窗口 ","Window ")+nextWindowNumber++);
         window.created=false;
         session=window.terminal;
         return session;
@@ -194,7 +194,7 @@ public final class ShellService extends Service {
         if(existing!=null){
             if(managedWorkspace()){
                 ManagedTerminalRequest old=savedRequest(existing.id);
-                if(old!=null&&old.isSessionTerminal()!=request.isSessionTerminal())throw new IllegalStateException("窗口归属不匹配");
+                if(old!=null&&old.isSessionTerminal()!=request.isSessionTerminal())throw new IllegalStateException(com.termux.terminal.LumaLang.tr("窗口归属不匹配","Window ownership mismatch"));
                 rememberRequest(request);existing.startupScript=managedScript(request);
             }
             if(pendingCloses.containsKey(existing.id)){
@@ -217,7 +217,7 @@ public final class ShellService extends Service {
         return managedWorkspace()?RootShellIntegration.managedScript(getCacheDir(),getApplicationInfo().uid,request.script,request.isOrdinaryTerminal()):request.script;
     }
     private TerminalSession createManagedSession(ManagedTerminalRequest request){
-        if(windows.size()>=MAX_WINDOWS)throw new IllegalStateException("终端窗口已达上限，请先关闭不用的窗口");
+        if(windows.size()>=MAX_WINDOWS)throw new IllegalStateException(com.termux.terminal.LumaLang.tr("终端窗口已达上限，请先关闭不用的窗口","Maximum terminal windows reached; close unused windows first"));
         rememberRequest(request);
         rememberEngine(request.windowId,TerminalEngines.GHOSTTY);
         RemoteWindow window=addWindow(request.windowId,request.title);
@@ -307,7 +307,7 @@ public final class ShellService extends Service {
         try{
             String kind=event.getString("event");
             if(kind.equals("list")){
-                if(event.getInt("version")!=3)throw new org.json.JSONException("后端版本不匹配");
+                if(event.getInt("version")!=3)throw new org.json.JSONException(com.termux.terminal.LumaLang.tr("后端版本不匹配","Backend version mismatch"));
                 backendConnected=true;
                 String selected=getSharedPreferences("root-windows",MODE_PRIVATE).getString("selected","");
                 org.json.JSONArray entries=event.getJSONArray("windows");
@@ -326,8 +326,8 @@ public final class ShellService extends Service {
                     window.alive=entry.optBoolean("running");
                     if(!window.alive){window.ready=false;window.terminal.externalProcessExited(entry.optInt("exit",-1));}
                     if(session==null||id.equals(selected))session=window.terminal;
-                    if(window.terminal.mSessionName.matches("窗口 [0-9]+"))try{
-                        int number=Integer.parseInt(window.terminal.mSessionName.substring(3));
+                    if(window.terminal.mSessionName.matches("(窗口|Window) [0-9]+"))try{
+                        int number=Integer.parseInt(window.terminal.mSessionName.substring(window.terminal.mSessionName.indexOf(' ')+1));
                         if(number<Integer.MAX_VALUE)nextWindowNumber=Math.max(nextWindowNumber,number+1);
                     }catch(NumberFormatException ignored){}
                 }
@@ -351,7 +351,7 @@ public final class ShellService extends Service {
             }
             String id=event.optString("id","");RemoteWindow window=windows.get(id);
             if(kind.equals("error")){
-                String message=event.optString("message","后端操作失败");
+                String message=event.optString("message",com.termux.terminal.LumaLang.tr("后端操作失败","Backend operation failed"));
                 AgentWindowRequest check=checkingClaudeWindows.remove(id);
                 if(window!=null&&MISSING_WINDOW.equals(message)&&(check!=null||pendingCloses.containsKey(id))){
                     completeClose(window);
@@ -364,7 +364,7 @@ public final class ShellService extends Service {
                     if(listener!=null)listener.onWindowsChanged();
                 }
                 if(pendingCloses.containsKey(id)){pendingCloses.remove(id);if(window!=null)window.ready=window.alive;}
-                backendError=event.optString("message","后端操作失败");
+                backendError=event.optString("message",com.termux.terminal.LumaLang.tr("后端操作失败","Backend operation failed"));
                 if(listener!=null)listener.onBackendError(backendError);return;
             }
             if(window==null)return;

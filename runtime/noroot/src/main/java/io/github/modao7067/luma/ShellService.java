@@ -17,10 +17,10 @@ public final class ShellService extends Service {
     private static final String ACTION_DISABLE_WAKE_LOCK="io.github.modao7067.luma.DISABLE_WAKE_LOCK";
     private static final String WAKE_LOCK_PREFS="background";
     private static final String WAKE_LOCK_ENABLED="wakeLockEnabled";
-    private static final String DEFAULT_STATUS_TEXT="后台环境运行中";
+    private static String defaultStatusText(){return LumaLang.tr("后台环境运行中","Background environment running");}
     private static volatile ShellService activeInstance;
-    private static volatile String sessionStatusText=DEFAULT_STATUS_TEXT;
-    public volatile String preparation="准备 Debian 环境…";
+    private static volatile String sessionStatusText;
+    public volatile String preparation=LumaLang.tr("准备 Debian 环境…","Preparing Debian environment…");
     public volatile String preparationError;
     public volatile boolean environmentReady;
     private Thread installer;
@@ -103,7 +103,7 @@ public final class ShellService extends Service {
         if (!io.github.modao7067.luma.ghostty.GhosttyNative.configureFrameDirectory(getCacheDir()))
             android.util.Log.w("LumaFrames","Scoped file handoff unavailable; inline graphics remain enabled");
         NotificationManager nm=getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel("luma","Luma 运行中",NotificationManager.IMPORTANCE_LOW));
+        nm.createNotificationChannel(new NotificationChannel("luma",LumaLang.tr("Luma 运行中","Luma running"),NotificationManager.IMPORTANCE_LOW));
         wakeLock=getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"Luma:Terminal");
         wakeLock.setReferenceCounted(false);
         wakeLockEnabled=getSharedPreferences(WAKE_LOCK_PREFS,MODE_PRIVATE).getBoolean(WAKE_LOCK_ENABLED,false);
@@ -115,7 +115,7 @@ public final class ShellService extends Service {
     private synchronized void startInstaller(){
         if(destroyed || environmentReady || (installer!=null && installer.isAlive()))return;
         preparationError=null;
-        preparation="准备 Debian 环境…";
+        preparation=LumaLang.tr("准备 Debian 环境…","Preparing Debian environment…");
         installer=new Thread(()->{
             try {
                 EnvironmentInstaller.install(this,message->preparation=message);
@@ -123,7 +123,7 @@ public final class ShellService extends Service {
             } catch(Exception e){
                 android.util.Log.e("Luma","Environment initialization failed",e);
                 preparationError=e.getMessage()==null?e.toString():e.getMessage();
-                main.post(()->{if(!destroyed){listener.onTerminalError("环境准备失败："+preparationError);releaseWakeLock();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}});
+                main.post(()->{if(!destroyed){listener.onTerminalError(LumaLang.tr("环境准备失败：","Environment setup failed: ")+preparationError);releaseWakeLock();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}});
             }
         },"LumaEnvironmentInstaller");
         installer.start();
@@ -137,7 +137,7 @@ public final class ShellService extends Service {
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP|Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pi=PendingIntent.getActivity(context,0,open,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         String status=sessionStatusText;
-        if(status==null||status.trim().isEmpty())status=DEFAULT_STATUS_TEXT;
+        if(status==null||status.trim().isEmpty())status=defaultStatusText();
         return new Notification.Builder(context,"luma").setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Luma").setContentText(status)
             .setContentIntent(pi).setOngoing(true).setShowWhen(false).setOnlyAlertOnce(true)
@@ -162,8 +162,8 @@ public final class ShellService extends Service {
         if(active!=null && !active.destroyed)active.main.post(()->active.setWakeLockEnabled(enabled));
     }
     public static void updateSessionStatus(String statusText){
-        String normalized=(statusText==null||statusText.trim().isEmpty())?DEFAULT_STATUS_TEXT:statusText.trim();
-        if(normalized.equals(sessionStatusText))return;
+        String normalized=(statusText==null||statusText.trim().isEmpty())?null:statusText.trim();
+        if(java.util.Objects.equals(normalized,sessionStatusText))return;
         sessionStatusText=normalized;
         ShellService active=activeInstance;
         if(active!=null && !active.destroyed && active.preparationError==null){
@@ -183,7 +183,7 @@ public final class ShellService extends Service {
     }
     public void createSession(){
         if(!environmentReady || destroyed)return;
-        session=newSession("窗口 "+nextWindowNumber++);
+        session=newSession(LumaLang.tr("窗口 ","Window ")+nextWindowNumber++);
         windows.addOrdinary(session);
     }
     private final java.util.Map<String,TerminalSession> managedSessions=new java.util.HashMap<>();

@@ -1,16 +1,21 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.tr
 import org.json.JSONObject
 
 internal object NativeCliRuntimePolicy {
-    const val revision = "cli-bridge-v48"
+    const val revision = "cli-bridge-v55"
     private const val minimumGrokCarrier = 18
-    const val restartWarning = "此操作会停止当前 Luma CLI 桥服务，可能中断该服务上所有正在进行的任务。会话记录和草稿保留。旧版服务无法确认全部任务是否已结束。"
+    val restartWarning: String
+        get() = tr(
+            "此操作会停止当前 Luma CLI 桥服务，可能中断该服务上所有正在进行的任务。会话记录和草稿保留。旧版服务无法确认全部任务是否已结束。",
+            "This stops the current Luma CLI bridge service and may interrupt active tasks on it. Session history and drafts are preserved. Older services cannot verify whether all tasks have finished.",
+        )
     fun requireRestartConsent(cli: String, confirmed: Boolean) {
-        require(confirmed) { "必须明确确认后才能停止 CLI 桥服务" }
-        require(cli in io.github.modao7067.luma.gui.session.CliCatalog.bridged) { "此更新入口仅用于受托管的 CLI 桥服务" }
+        require(confirmed) { tr("必须明确确认后才能停止 CLI 桥服务", "Explicit confirmation is required before stopping the CLI bridge service") }
+        require(cli in io.github.modao7067.luma.gui.session.CliCatalog.bridged) { tr("此更新入口仅用于受托管的 CLI 桥服务", "This update entry is only for managed CLI bridge services") }
     }
-    class CarrierUpdateRequired : IllegalStateException("需更新CLI服务；当前任务结束后重启")
+    class CarrierUpdateRequired : IllegalStateException(tr("需更新CLI服务；当前任务结束后重启", "CLI service update required; restart after the current task finishes"))
     val isolatedAcpClis = setOf("Qoder CLI", "Grok Build")
     fun task(cli: String): String = when (cli) {
         "CodeBuddy Code" -> "luma-codebuddy-gui-v1"
@@ -32,11 +37,11 @@ internal object NativeCliRuntimePolicy {
     }
 
     fun acceptHealth(cli: String, health: JSONObject) {
-        check(health.optInt("protocol") == 1) { "CLI 服务协议不兼容" }
+        check(health.optInt("protocol") == 1) { tr("CLI 服务协议不兼容", "Incompatible CLI service protocol") }
         if (cli == "Grok Build" && (carrierVersion(health) ?: -1) < minimumGrokCarrier) throw CarrierUpdateRequired()
         val clis = health.optJSONArray("clis")
         check(clis != null && (0 until clis.length()).any { clis.optString(it) == cli }) {
-            "托管 CLI 服务未提供 $cli；请在任务结束后升级服务"
+            tr("托管 CLI 服务未提供 $cli；请在任务结束后升级服务", "Managed CLI service does not provide $cli; upgrade the service after the current task finishes")
         }
     }
 }

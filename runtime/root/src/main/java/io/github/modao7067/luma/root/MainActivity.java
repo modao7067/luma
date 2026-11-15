@@ -50,6 +50,26 @@ public final class MainActivity extends Activity {
     private ManagedTerminalRequest managedTerminalRequest;
     private boolean terminalClosing;
     private android.window.OnBackInvokedCallback backCallback;
+    private final String foregroundToken = java.util.UUID.randomUUID().toString();
+    private boolean activityStarted;
+    private final Handler foregroundHandler = new Handler(Looper.getMainLooper());
+    private final Runnable foregroundHeartbeat = new Runnable() {
+        public void run() {
+            if (activityStarted && isSessionTerminal() && !terminalClosing && !isFinishing()) {
+                ForegroundTerminalTracker.record(MainActivity.this, foregroundToken, managedTerminalRequest);
+                foregroundHandler.postDelayed(this, 60_000L);
+            }
+        }
+    };
+    private void syncForegroundTerminal() {
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        if (activityStarted && isSessionTerminal() && !terminalClosing && !isFinishing()) {
+            ForegroundTerminalTracker.record(this, foregroundToken, managedTerminalRequest);
+            foregroundHandler.postDelayed(foregroundHeartbeat, 60_000L);
+        } else {
+            ForegroundTerminalTracker.clear(this, foregroundToken);
+        }
+    }
     private boolean managedWorkspace(){return getResources().getBoolean(R.bool.root_gui_managed);}
     private boolean isSessionTerminal(){return managedWorkspace()&&managedTerminalRequest!=null&&managedTerminalRequest.isSessionTerminal();}
     private void updateDomainControls(){
@@ -86,7 +106,7 @@ public final class MainActivity extends Activity {
                     if(displayedSession()==null){openManagedTerminalIfReady();selectWindow(service.session);}
                 }
                 public void onBackendError(String message) {
-                    terminalClosing=false;
+                    if (!isFinishing()) terminalClosing = false;
                     Toast.makeText(MainActivity.this,message,Toast.LENGTH_LONG).show();
                     scheduleStatusUpdate();
                 }
@@ -114,6 +134,7 @@ public final class MainActivity extends Activity {
                 selectWindow(opened);
             }
             updateDomainControls();
+            syncForegroundTerminal();
         }catch(IllegalStateException error){
             Toast.makeText(this,error.getMessage(),Toast.LENGTH_LONG).show();
             if(managedWorkspace()){terminalClosing=true;leaveTerminal();}else managedTerminalRequest=null;
@@ -128,6 +149,7 @@ public final class MainActivity extends Activity {
         dismissActiveSheet();pendingPaste.cancel();
         if(managedWorkspace()){managedTerminalRequest=null;terminalClosing=false;if(terminal!=null)terminal.setVisibility(View.GONE);}
         takeManagedTerminalRequest(intent);updateDomainControls();
+        syncForegroundTerminal();
         openManagedTerminalIfReady();if(service!=null)selectWindow(service.session);
     }
 
@@ -201,7 +223,7 @@ public final class MainActivity extends Activity {
             if(!isSessionTerminal()&&service!=null){
                 v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                 TerminalSession created=service.createSession();
-                if(created!=null){selectWindow(created);Toast.makeText(this,"已新建 "+created.mSessionName,Toast.LENGTH_SHORT).show();}
+                if(created!=null){selectWindow(created);Toast.makeText(this,com.termux.terminal.LumaLang.tr("已新建 ","Created ")+created.mSessionName,Toast.LENGTH_SHORT).show();}
             }
             return true;
         });
@@ -337,7 +359,7 @@ public final class MainActivity extends Activity {
 
     private static String formatWindowTitle(TerminalSession s) {
         if (s == null) return "";
-        return s.mSessionName + (s.isRunning() ? "" : " · 已结束");
+        return s.mSessionName + (s.isRunning() ? "" : com.termux.terminal.LumaLang.tr(" · 已结束", " · Ended"));
     }
 
     private void dismissActiveSheet() {
@@ -352,13 +374,13 @@ public final class MainActivity extends Activity {
         if (isSessionTerminal() || service == null) return;
         dismissActiveSheet();
         ArrayList<TerminalSession> windows = new ArrayList<>(managedWorkspace()?service.getOrdinarySessions():service.getSessions());
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "终端窗口", service.isBackendConnected()?null:
-            (service.backendError==null?"正在连接 Ubuntu 后端…":service.backendError));
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("终端窗口", "Terminal windows"), service.isBackendConnected()?null:
+            (service.backendError==null?com.termux.terminal.LumaLang.tr("正在连接 Ubuntu 后端…", "Connecting to Ubuntu backend…"):service.backendError));
 
         if(!service.isBackendConnected()){
-            TextView retryBtn=LumaUi.primaryButton(this,"重试后端连接",v->{
+            TextView retryBtn=LumaUi.primaryButton(this,com.termux.terminal.LumaLang.tr("重试后端连接","Retry backend connection"),v->{
                 sheet.dismiss();
-                Toast.makeText(this,"正在重新连接 Ubuntu 后端…",Toast.LENGTH_SHORT).show();
+                Toast.makeText(this,com.termux.terminal.LumaLang.tr("正在重新连接 Ubuntu 后端…","Reconnecting to Ubuntu backend…"),Toast.LENGTH_SHORT).show();
                 service.retryBackend();
             });
             sheet.body.addView(retryBtn,LumaUi.vSpace(this,0));
@@ -399,7 +421,7 @@ public final class MainActivity extends Activity {
             row.addView(infoCol, new LinearLayout.LayoutParams(0, -2, 1f));
 
             if (!running) {
-                TextView reconnectChip = LumaUi.chipButton(this, "重连", true, v -> {
+                TextView reconnectChip = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("重连", "Reconnect"), true, v -> {
                     sheet.dismiss();
                     TerminalView oldView = terminalViews.remove(window);
                     if (oldView != null) {
@@ -415,7 +437,7 @@ public final class MainActivity extends Activity {
                 row.addView(reconnectChip, rcLp);
             }
 
-            TextView closeChip = LumaUi.chipButton(this, "关闭", false, v -> {
+            TextView closeChip = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("关闭", "Close"), false, v -> {
                 sheet.dismiss();
                 confirmCloseWindow(window);
             });
@@ -430,7 +452,7 @@ public final class MainActivity extends Activity {
             sheet.body.addView(row, LumaUi.vSpace(this, i == 0 ? 0 : 8));
         }
 
-        TextView newWinBtn = LumaUi.primaryButton(this, "+ 新建窗口", v -> {
+        TextView newWinBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("+ 新建窗口", "+ New window"), v -> {
             sheet.dismiss();
             TerminalSession created=service.createSession();
             if(created!=null)selectWindow(created);
@@ -445,12 +467,13 @@ public final class MainActivity extends Activity {
     private void renameWindow(TerminalSession target) {
         if (isSessionTerminal() || service == null || target == null || (managedWorkspace()&&!service.allowsSelection(null,target))) return;
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "重命名窗口", "为「" + target.mSessionName + "」设置便于识别的窗口名称");
-        EditText input = LumaUi.inputField(this, target.mSessionName, "输入窗口名称");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("重命名窗口", "Rename window"),
+            com.termux.terminal.LumaLang.isZh() ? ("为「" + target.mSessionName + "」设置便于识别的窗口名称") : ("Set a display name for \"" + target.mSessionName + "\""));
+        EditText input = LumaUi.inputField(this, target.mSessionName, com.termux.terminal.LumaLang.tr("输入窗口名称", "Enter window name"));
         sheet.body.addView(input, LumaUi.vSpace(this, 2));
 
-        TextView cancelBtn = LumaUi.secondaryButton(this, "取消", v -> sheet.dismiss());
-        TextView saveBtn = LumaUi.primaryButton(this, "保存", v -> {
+        TextView cancelBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("取消", "Cancel"), v -> sheet.dismiss());
+        TextView saveBtn = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("保存", "Save"), v -> {
             String name = input.getText().toString().trim();
             if (!name.isEmpty()) {
                 service.renameSession(target,name);
@@ -468,11 +491,18 @@ public final class MainActivity extends Activity {
         dismissActiveSheet();
         boolean isLast = service.getSessions().size() == 1;
         boolean lastOrdinary=managedWorkspace()&&service.getOrdinarySessions().size()==1;
-        String desc = "关闭后，「" + closing.mSessionName + "」内的前台进程与终端会话将立即结束。"
-            + (managedWorkspace()&&lastOrdinary ? "\n关闭后返回会话，其它会话和专属终端继续运行。" : (!managedWorkspace()&&isLast ? "\n这是最后一个窗口，关闭后将一并退出 Luma Root。" : ""));
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "关闭 " + closing.mSessionName + "？", desc);
-        TextView cancelBtn = LumaUi.secondaryButton(this, "保留窗口", v -> sheet.dismiss());
-        TextView closeBtn = LumaUi.dangerButton(this, managedWorkspace()&&lastOrdinary ? "关闭并返回" : (!managedWorkspace()&&isLast ? "关闭并退出" : "确认关闭"), v -> {
+        String desc = (com.termux.terminal.LumaLang.isZh()
+            ? ("关闭后，「" + closing.mSessionName + "」内的前台进程与终端会话将立即结束。")
+            : ("Closing \"" + closing.mSessionName + "\" immediately terminates its foreground processes and terminal session."))
+            + (managedWorkspace()&&lastOrdinary
+                ? com.termux.terminal.LumaLang.tr("\n关闭后返回会话，其它会话和专属终端继续运行。", "\nReturns to session; other sessions and dedicated terminals keep running.")
+                : (!managedWorkspace()&&isLast ? com.termux.terminal.LumaLang.tr("\n这是最后一个窗口，关闭后将一并退出 Luma Root。", "\nThis is the last window; closing it also exits Luma Root.") : ""));
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this,
+            com.termux.terminal.LumaLang.isZh() ? ("关闭 " + closing.mSessionName + "？") : ("Close " + closing.mSessionName + "?"), desc);
+        TextView cancelBtn = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("保留窗口", "Keep window"), v -> sheet.dismiss());
+        TextView closeBtn = LumaUi.dangerButton(this, managedWorkspace()&&lastOrdinary
+            ? com.termux.terminal.LumaLang.tr("关闭并返回", "Close & return")
+            : (!managedWorkspace()&&isLast ? com.termux.terminal.LumaLang.tr("关闭并退出", "Close & exit") : com.termux.terminal.LumaLang.tr("确认关闭", "Close")), v -> {
             sheet.dismiss();
             terminalClosing=managedWorkspace()&&lastOrdinary;
             service.closeSession(closing,()->{
@@ -518,7 +548,9 @@ public final class MainActivity extends Activity {
         int winCount = service == null ? 1 : (managedWorkspace()?service.getOrdinarySessions():service.getSessions()).size();
         if (windowsIcon != null) windowsIcon.setCount(winCount);
         if (windowsButton != null) {
-            windowsButton.setContentDescription("多窗口，共 " + winCount + " 个窗口，点击切换，长按新建");
+            windowsButton.setContentDescription(com.termux.terminal.LumaLang.isZh()
+                ? ("多窗口，共 " + winCount + " 个窗口，点击切换，长按新建")
+                : ("Windows (" + winCount + "), tap to switch, long-press for new"));
         }
     }
 
@@ -577,12 +609,12 @@ public final class MainActivity extends Activity {
                     temporary = File.createTempFile("wallpaper-", ".tmp", getFilesDir());
                     try (InputStream in = getContentResolver().openInputStream(source);
                          OutputStream out = new FileOutputStream(temporary)) {
-                        if (in == null) throw new IOException("无法读取图片");
+                        if (in == null) throw new IOException(com.termux.terminal.LumaLang.tr("无法读取图片", "Unable to read image"));
                         byte[] bytes = new byte[65536]; long total = 0; int count;
                         while ((count = in.read(bytes)) != -1) {
                             if (Thread.currentThread().isInterrupted() || generation != wallpaperGeneration) return;
                             total += count;
-                            if (total > WallpaperImages.MAX_SOURCE_BYTES) throw new IOException("图片文件过大");
+                            if (total > WallpaperImages.MAX_SOURCE_BYTES) throw new IOException(com.termux.terminal.LumaLang.tr("图片文件过大", "Image file is too large"));
                             out.write(bytes, 0, count);
                         }
                     }
@@ -594,7 +626,7 @@ public final class MainActivity extends Activity {
                         if (decoded != null) decoded.recycle();
                         return;
                     }
-                    if (temporary != null && !temporary.renameTo(custom)) throw new IOException("无法保存图片");
+                    if (temporary != null && !temporary.renameTo(custom)) throw new IOException(com.termux.terminal.LumaLang.tr("无法保存图片", "Failed to save image"));
                 }
                 final Bitmap result = decoded;
                 runOnUiThread(() -> {
@@ -605,7 +637,7 @@ public final class MainActivity extends Activity {
             } catch (Exception | OutOfMemoryError e) {
                 if (decoded != null) decoded.recycle();
                 if (generation == wallpaperGeneration) runOnUiThread(() -> {
-                    if (!isDestroyed()) Toast.makeText(this, "无法加载图片，已保留原背景", Toast.LENGTH_SHORT).show();
+                    if (!isDestroyed()) Toast.makeText(this, com.termux.terminal.LumaLang.tr("无法加载图片，已保留原背景", "Failed to load image; previous background kept"), Toast.LENGTH_SHORT).show();
                 });
             } finally { if (temporary != null) temporary.delete(); }
         });
@@ -617,7 +649,7 @@ public final class MainActivity extends Activity {
             wallpaperGeneration++;
             File custom = new File(getFilesDir(), "wallpaper");
             if (custom.exists() && !custom.delete()) {
-                Toast.makeText(this, "无法删除背景图片", Toast.LENGTH_SHORT).show(); return;
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("无法删除背景图片", "Failed to delete background image"), Toast.LENGTH_SHORT).show(); return;
             }
         }
         loadWallpaper();
@@ -640,8 +672,8 @@ public final class MainActivity extends Activity {
         if(managedWorkspace())return;
         dismissActiveSheet();
         LumaUi.Sheet sheet = new LumaUi.Sheet(this, "Luma", null);
-        sheet.body.addView(LumaUi.menuRow(this, "外观设置", null,
-            Math.round(fontSize) + "号", false, v -> { sheet.dismiss(); appearance(); }));
+        sheet.body.addView(LumaUi.menuRow(this, com.termux.terminal.LumaLang.tr("外观设置", "Appearance"), null,
+            Math.round(fontSize) + com.termux.terminal.LumaLang.tr("号", " pt"), false, v -> { sheet.dismiss(); appearance(); }));
         activeSheet = sheet;
         sheet.show();
     }
@@ -659,7 +691,7 @@ public final class MainActivity extends Activity {
                 fallback.setType("image/*");
                 startActivityForResult(fallback, 20);
             } catch (ActivityNotFoundException ignored) {
-                Toast.makeText(this, "未找到可用的相册或文件选择器", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, com.termux.terminal.LumaLang.tr("未找到可用的相册或文件选择器", "No gallery or file picker found"), Toast.LENGTH_SHORT).show();
             }
         }
     }
@@ -667,35 +699,35 @@ public final class MainActivity extends Activity {
     private void appearance() {
         if(managedWorkspace())return;
         dismissActiveSheet();
-        LumaUi.Sheet sheet = new LumaUi.Sheet(this, "外观设置", null);
+        LumaUi.Sheet sheet = new LumaUi.Sheet(this, com.termux.terminal.LumaLang.tr("外观设置", "Appearance"), null);
 
-        View opacitySlider = LumaUi.sliderCard(this, "背景深浅", "%", 25, 85, prefs.getInt("opacity", 60), v -> {
+        View opacitySlider = LumaUi.sliderCard(this, com.termux.terminal.LumaLang.tr("背景深浅", "Background tint"), "%", 25, 85, prefs.getInt("opacity", 60), v -> {
             prefs.edit().putInt("opacity", v).apply();
             applyAppearance();
         });
         sheet.body.addView(opacitySlider);
 
-        View blurSlider = LumaUi.sliderCard(this, "背景模糊", " dp", 0, 60, prefs.getInt("blur", 24), v -> {
+        View blurSlider = LumaUi.sliderCard(this, com.termux.terminal.LumaLang.tr("背景模糊", "Background blur"), " dp", 0, 60, prefs.getInt("blur", 24), v -> {
             prefs.edit().putInt("blur", v).apply();
             applyAppearance();
         });
         sheet.body.addView(blurSlider, LumaUi.vSpace(this, 8));
 
         File customWallpaper = new File(getFilesDir(), "wallpaper");
-        TextView changeWp = LumaUi.secondaryButton(this, "更换壁纸", v -> {
+        TextView changeWp = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("更换壁纸", "Change wallpaper"), v -> {
             sheet.dismiss();
             openWallpaperPicker();
         });
         sheet.body.addView(changeWp, LumaUi.vSpace(this, 10));
         if (customWallpaper.isFile()) {
-            TextView resetWp = LumaUi.secondaryButton(this, "恢复默认纯黑背景", v -> {
+            TextView resetWp = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("恢复默认纯黑背景", "Restore pure black background"), v -> {
                 resetWallpaper();
                 sheet.dismiss();
             });
             sheet.body.addView(resetWp, LumaUi.vSpace(this, 10));
         }
 
-        TextView done = LumaUi.primaryButton(this, "完成", v -> sheet.dismiss());
+        TextView done = LumaUi.primaryButton(this, com.termux.terminal.LumaLang.tr("完成", "Done"), v -> sheet.dismiss());
         sheet.body.addView(done, LumaUi.vSpace(this, 12));
 
         activeSheet = sheet;
@@ -712,10 +744,18 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        activityStarted = true;
+        syncForegroundTerminal();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         resumed = true;
         if(managedWorkspace())openManagedTerminalIfReady();
+        syncForegroundTerminal();
         updateTitle();
         if (terminal != null) {
             terminal.updateAccessibilityState();
@@ -734,6 +774,13 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    @Override
+    protected void onStop() {
+        activityStarted = false;
+        syncForegroundTerminal();
+        super.onStop();
+    }
+
     @Override public void onBackPressed(){handleTerminalBack();}
     private void handleTerminalBack(){
         if(linkOpener!=null&&linkOpener.dismiss())return;
@@ -744,6 +791,9 @@ public final class MainActivity extends Activity {
         if(managedWorkspace())leaveTerminal();else moveTaskToBack(true);
     }
     private void leaveTerminal(){
+        terminalClosing = true;
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        ForegroundTerminalTracker.clear(this, foregroundToken);
         if(isSessionTerminal()&&service!=null){
             service.closeDedicatedWindow(managedTerminalRequest.windowId);
         }
@@ -759,6 +809,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        foregroundHandler.removeCallbacks(foregroundHeartbeat);
+        ForegroundTerminalTracker.clear(this, foregroundToken);
         if(backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         pendingPaste.cancel();
         dismissActiveSheet();

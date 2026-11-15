@@ -15,11 +15,13 @@ import io.github.modao7067.luma.gui.ui.LocalAgentBrowser
 import io.github.modao7067.luma.gui.ui.SessionTypography
 
 class BrowserActivity : ComponentActivity() {
+    private var ownerSessionId: String? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val owner = intent.getStringExtra("sessionId") ?: run { finish(); return }
         val app = application as LumaApplication
         if (app.sessions.state.value.sessions.none { it.id == owner }) { finish(); return }
+        ownerSessionId = owner
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
@@ -48,5 +50,13 @@ class BrowserActivity : ComponentActivity() {
                 }
             }
         }
+    }
+    override fun onStart() {
+        super.onStart()
+        ownerSessionId?.let { (application as LumaApplication).sessions.onActivityStarted(this, it) }
+    }
+    override fun onStop() {
+        (application as LumaApplication).sessions.onActivityStopped(this)
+        super.onStop()
     }
 }

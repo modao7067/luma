@@ -10,13 +10,15 @@ import io.github.modao7067.luma.gui.session.SessionManagementServer
 
 class LumaApplication : Application() {
     val browser by lazy { io.github.modao7067.luma.gui.browser.AgentBrowser(this) }
-    val sessions: SessionController by lazy { SessionController(this) }
+    @Volatile private var sessionsReady = false
+    val sessions: SessionController by lazy { SessionController(this).also { sessionsReady = true } }
     private val managementScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val management by lazy {
         SessionManagementBinding(this) { token -> SessionManagementServer(token, { sessions.manage(it) }, managementScope) }
     }
     override fun onCreate() {
         super.onCreate()
+        io.github.modao7067.luma.gui.i18n.LumaI18n.onConfigurationChanged(resources.configuration)
         io.github.modao7067.luma.gui.ui.LumaSelectionConfiguration.initialize()
         if (getProcessName() == packageName) {
             management
@@ -24,5 +26,10 @@ class LumaApplication : Application() {
                 Thread({ io.github.modao7067.luma.gui.runtime.DebianRootMode.refreshInstalled(this) }, "LumaRootRefresh").start()
             }
         }
+    }
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        io.github.modao7067.luma.gui.i18n.LumaI18n.onConfigurationChanged(newConfig)
+        if (sessionsReady) sessions.onLocaleChanged()
     }
 }

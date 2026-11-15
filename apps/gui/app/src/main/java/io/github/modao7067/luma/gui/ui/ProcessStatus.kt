@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.infiniteRepeatable
@@ -48,7 +50,7 @@ internal fun processDotLift(phase: Float, dot: Int): Float {
 @Composable
 internal fun ProcessStatus(outcome: String, modifier: Modifier = Modifier) {
     val description = when (outcome) {
-        "running" -> "执行中"; "succeeded" -> "已完成"; "failed" -> "失败"; "cancelled" -> "已取消"; "closed" -> "已关闭"; "pending" -> "等待中"; else -> "待确认"
+        "running" -> tr("执行中", "Running"); "succeeded" -> tr("已完成", "Done"); "failed" -> tr("失败", "Failed"); "cancelled" -> tr("已取消", "Cancelled"); "closed" -> tr("已关闭", "Closed"); "pending" -> tr("等待中", "Pending"); else -> tr("待确认", "Pending")
     }
     Box(modifier.size(24.dp, 16.dp).semantics { stateDescription = description }, contentAlignment = Alignment.Center) {
         when (outcome) {

@@ -9,7 +9,7 @@ final class TerminalLinkReader {
     static void copy(Context context,String path,int pid,File destination,long limit,boolean highlight,int columns)throws IOException {
         boolean builtin=RootEntry.usesBuiltinChroot(context);
         String entry=RootEntry.launcher(context);
-        String command="exec "+(builtin?RootEntry.quote(entry):entry)+" /usr/bin/python3 -I -c "
+        String command="exec "+(builtin?RootEntry.quote(entry):entry)+" /usr/bin/env LUMA_LANG="+TerminalFileTransfer.quote(com.termux.terminal.LumaLang.code())+" /usr/bin/python3 -I -c "
                 +TerminalFileTransfer.quote(TerminalFileTransfer.SCRIPT)+" "+TerminalFileTransfer.quote(path)+" "+limit+" "+pid+" "+(highlight ? "ansi" : "raw")+" "+columns;
         TerminalFileTransfer.copy(new ProcessBuilder(RootEntry.suExecutable(),"-c",command),destination,limit);
     }

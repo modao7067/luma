@@ -1,10 +1,35 @@
 package io.github.modao7067.luma.gui.ui
 
+import com.termux.terminal.LumaLang
+import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.session.Metric
+import java.util.Locale
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 
 class DashboardMetricTest {
+    private lateinit var previousLocale: Locale
+    private var previousLangProp: String? = null
+
+    @Before fun setUp() {
+        previousLocale = Locale.getDefault()
+        previousLangProp = System.getProperty("luma.lang")
+        Locale.setDefault(Locale.SIMPLIFIED_CHINESE)
+        System.clearProperty("luma.lang")
+        LumaI18n.resetForTest()
+        LumaLang.setOverride(null)
+    }
+
+    @After fun tearDown() {
+        LumaI18n.resetForTest()
+        LumaLang.setOverride(null)
+        Locale.setDefault(previousLocale)
+        if (previousLangProp == null) System.clearProperty("luma.lang")
+        else System.setProperty("luma.lang", previousLangProp)
+    }
+
     @Test fun decimalCountsUseTwoPlacesWithoutTrailingZeros() {
         for ((raw, short) in listOf("0" to "0", "999" to "999", "1000" to "1K", "1234" to "1.23K", "16200" to "16.2K", "1000000" to "1M", "999999" to "1M", "1234567" to "1.23M")) assertEquals(short, compactCount(raw))
     }
@@ -52,6 +77,51 @@ class DashboardMetricTest {
         assertEquals(
             listOf(Metric("缓存命中", "8K / 10K · 80.0%")),
             dashboardMetrics(legacyAgy),
+        )
+    }
+    @Test fun dashboardMetricsDeduplicatesContextKeepingLastAuthoritativeEntry() {
+        val duplicated = listOf(
+            Metric("上下文", "15800 / 1048576 · 1.5%"),
+            Metric("上下文", "15800 / 256000 · 6.2%"),
+            Metric("本回合 · 输入缓存命中", "12000 / 15800 · 75.9%"),
+            Metric("CLI 累计估算 · USD", "0.08"),
+        )
+        assertEquals(
+            listOf(
+                Metric("上下文", "15.8K / 256K · 6.2%"),
+                Metric("缓存命中", "12K / 15.8K · 75.9%"),
+                Metric("费用", "USD 0.08"),
+            ),
+            dashboardMetrics(duplicated),
+        )
+    }
+    @Test fun englishLocaleFormatsAndSynthesizesDashboardMetrics() {
+        Locale.setDefault(Locale.US)
+        LumaI18n.overrideLanguage = "en"
+
+        assertEquals(Metric("Context", "16.2K / 258.4K · 6.3%"), dashboardMetric(Metric("Last request / Context window", "16200 / 258400 · 6.3%")))
+        assertEquals(Metric("Cache hit", "811.48K / 893.42K · 90.8%"), dashboardMetric(Metric("Total input cache hit", "811482 / 893422 · 90.8%")))
+        assertEquals(Metric("Cost", "$0.000123"), dashboardMetric(Metric("CLI recorded cost · USD", "$0.000123")))
+        assertEquals(Metric("Cost", "USD 0.000123"), dashboardMetric(Metric("CLI estimated cost · USD", "0.000123")))
+        assertEquals(Metric("Account balance · CNY", "¥1.50"), dashboardMetric(Metric("Account balance · CNY", "¥1.50")))
+        assertEquals(Metric("API key balance · CNY", "¥9.20"), dashboardMetric(Metric("API key balance · CNY", "¥9.20")))
+
+        val legacyEn = listOf(
+            Metric("Input", "2000"),
+            Metric("Cache read", "8000"),
+            Metric("Cache write", "0"),
+            Metric("Last request / Context window", "16200 / 258400 · 6.3%"),
+            Metric("CLI estimated cost · USD", "0.05"),
+            Metric("Account balance · CNY", "¥1.50"),
+        )
+        assertEquals(
+            listOf(
+                Metric("Context", "16.2K / 258.4K · 6.3%"),
+                Metric("Cache hit", "8K / 10K · 80.0%"),
+                Metric("Cost", "USD 0.05"),
+                Metric("Account balance · CNY", "¥1.50"),
+            ),
+            dashboardMetrics(legacyEn),
         )
     }
 }

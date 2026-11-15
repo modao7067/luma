@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.net.InetAddress
@@ -36,17 +38,17 @@ internal class SessionManagementServer(
             val raw = java.io.ByteArrayOutputStream()
             while (true) {
                 val byte = input.read()
-                require(byte >= 0) { "请求未完成" }
+                require(byte >= 0) { tr("请求未完成", "Incomplete request") }
                 if (byte == 10) break
-                require(raw.size() < 131072) { "请求超过 128 KiB" }
+                require(raw.size() < 131072) { tr("请求超过 128 KiB", "Request exceeds 128 KiB") }
                 raw.write(byte)
             }
             val request = JSONObject(raw.toString("UTF-8"))
-            require(request.optString("token") == token) { "会话管理接口未授权" }
+            require(request.optString("token") == token) { tr("会话管理接口未授权", "Unauthorized session management request") }
             request.remove("token")
             withContext(dispatcher) { execute(request) }
         } catch (e: Exception) {
-            JSONObject().put("ok", false).put("error", e.message ?: "会话管理失败")
+            JSONObject().put("ok", false).put("error", e.message ?: tr("会话管理失败", "Session management failed"))
         }
         socket.getOutputStream().write((result.toString() + "\n").toByteArray(Charsets.UTF_8))
     }

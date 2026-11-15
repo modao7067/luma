@@ -24,7 +24,7 @@ final class TerminalHeader extends LinearLayout {
         setBackgroundColor(Color.BLACK);
 
         back = button(new BackIcon(), 48);
-        back.setContentDescription("返回会话");
+        back.setContentDescription(com.termux.terminal.LumaLang.tr("返回会话", "Back to session"));
         addView(back);
 
         title = new TextView(context);
@@ -47,11 +47,11 @@ final class TerminalHeader extends LinearLayout {
         addView(group, new LinearLayout.LayoutParams(0, -1, 1f));
 
         keyboard = button(new ToolbarIcon(ToolbarIcon.Kind.KEYBOARD), 45);
-        keyboard.setContentDescription("显示或隐藏键盘");
+        keyboard.setContentDescription(com.termux.terminal.LumaLang.tr("显示或隐藏键盘", "Show or hide keyboard"));
         addView(keyboard);
         windowsIcon = new ToolbarIcon(ToolbarIcon.Kind.WINDOWS);
         windows = button(windowsIcon, 45);
-        windows.setContentDescription("多窗口：点击切换，长按新建");
+        windows.setContentDescription(com.termux.terminal.LumaLang.tr("多窗口：点击切换，长按新建", "Windows: tap to switch, long-press for new"));
         addView(windows);
     }
 

@@ -267,5 +267,78 @@ class ClaudeUserProjection(unittest.TestCase):
                 self.assertEqual(s.rows['u2:0']['text'], 'second turn')
                 self.assertNotIn('old-compacted:0', s.rows)
 
+    def test_background_task_and_autonomous_wakeup_block_idle_release(self):
+        from luma_cli.i18n import tr
+        with tempfile.TemporaryDirectory() as tmp:
+            hp = Path(tmp) / f'{NATIVE}.jsonl'
+            hp.write_text(json.dumps(entry('u1', 'user', 'run long tests')) + '\n', encoding='utf-8')
+            s = session()
+            s.history_path = lambda: hp
+            s.peer = type('P', (), {'closed': False, 'pending': {}, 'send': lambda *_: None})()
+            s.load_history()
+            s.update(connected=True, connecting=False)
+            self.assertIsNone(s.release_blocker())
+            a1 = entry('a1', 'assistant', [{'type': 'tool_use', 'id': 'tu-bash', 'name': 'Bash', 'input': {'command': 'sleep 60', 'run_in_background': True}}], 'u1')
+            tr1 = entry('tr1', 'user', [{'type': 'tool_result', 'tool_use_id': 'tu-bash', 'is_error': False, 'content': 'Running in background'}], 'a1')
+            s.event(a1)
+            s.event({'type': 'system', 'subtype': 'task_started', 'task_id': 'b1', 'tool_use_id': 'tu-bash', 'task_type': 'local_bash', 'description': 'long test'})
+            s.event(tr1)
+            self.assertEqual(s.rows['tool-tu-bash']['status'], 'running')
+            hp.write_text(''.join(json.dumps(x) + '\n' for x in [entry('u1', 'user', 'run long tests'), a1, tr1]), encoding='utf-8')
+            s.load_history()
+            self.assertEqual(s.rows['tool-tu-bash']['status'], 'running')
+            self.assertEqual(s.release_blocker(), tr('后台任务尚未确认结束', 'Background task has not been confirmed finished'))
+            s.event({'type': 'system', 'subtype': 'task_notification', 'task_id': 'b1', 'tool_use_id': 'tu-bash', 'status': 'completed', 'summary': 'all passed'})
+            self.assertEqual(s.rows['tool-tu-bash']['status'], 'completed')
+            self.assertEqual(s.release_blocker(), tr('后台唤醒回合尚未结算', 'Background wake-up turn has not settled'))
+            s.event({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {'id': 'm-bg'}}})
+            self.assertTrue(s.data['running'])
+            self.assertEqual(s.release_blocker(), tr('原生回合尚未结算', 'Native turn has not settled'))
+            s.event({'type': 'result', 'session_id': NATIVE, 'is_error': False})
+            self.assertFalse(s.data['running'])
+            self.assertIsNone(s.release_blocker())
+
+    def test_fresh_reconnect_history_restores_active_background_task_and_low_monotonic_unblocked(self):
+        from unittest.mock import patch
+        from luma_cli.i18n import tr
+        with tempfile.TemporaryDirectory() as tmp:
+            hp = Path(tmp) / f'{NATIVE}.jsonl'
+            u1 = entry('u1', 'user', 'run bg')
+            a1 = entry('a1', 'assistant', [{'type': 'tool_use', 'id': 'tu-bg', 'name': 'Bash', 'input': {'command': 'sleep 60', 'run_in_background': True}}], 'u1')
+            ts1 = {'type': 'system', 'subtype': 'task_started', 'task_id': 'bg1', 'tool_use_id': 'tu-bg', 'task_type': 'local_bash', 'description': 'bg job'}
+            tr1 = entry('tr1', 'user', [{'type': 'tool_result', 'tool_use_id': 'tu-bg', 'is_error': False, 'content': 'Running in background'}], 'a1')
+            hp.write_text(''.join(json.dumps(x) + '\n' for x in [u1, a1, ts1, tr1]), encoding='utf-8')
+            s = session()
+            s.history_path = lambda: hp
+            s.peer = type('P', (), {'closed': False, 'pending': {}, 'send': lambda *_: None})()
+            s.load_history()
+            s.update(connected=True, connecting=False)
+            self.assertEqual(s.background_tasks, {'bg1': 'tool-tu-bg'})
+            self.assertEqual(s.rows['tool-tu-bg']['status'], 'running')
+            self.assertEqual(s.release_blocker(), tr('后台任务尚未确认结束', 'Background task has not been confirmed finished'))
+            tn1 = {'type': 'system', 'subtype': 'task_notification', 'task_id': 'bg1', 'tool_use_id': 'tu-bg', 'status': 'completed', 'summary': 'finished'}
+            hp.write_text(''.join(json.dumps(x) + '\n' for x in [u1, a1, ts1, tr1, tn1]), encoding='utf-8')
+            with patch('luma_cli.claude.time.monotonic', return_value=1.0):
+                s2 = session()
+                s2.history_path = lambda: hp
+                s2.peer = type('P', (), {'closed': False, 'pending': {}, 'send': lambda *_: None})()
+                s2.load_history()
+                s2.update(connected=True, connecting=False)
+                self.assertEqual(s2.background_tasks, {})
+                self.assertEqual(s2.rows['tool-tu-bg']['status'], 'completed')
+                self.assertIsNone(s2.release_blocker())
+
+    def test_restore_unflushed_accepted_rows_preserves_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hp = Path(tmp) / f'{NATIVE}.jsonl'
+            s = session()
+            s.history_path = lambda: hp
+            s.config.setdefault('receipts', {})['u-img'] = 'accepted'
+            s.config.setdefault('deliveries', {})['u-img'] = {'state': 'accepted', 'payload': {'text': 'check image', 'images': ['/tmp/sample.png']}}
+            s.load_history()
+            row = s.rows['u-img:0']
+            self.assertEqual(row['text'], 'check image')
+            self.assertEqual(row['media'], [{'source': '/tmp/sample.png', 'mimeType': 'image/png'}])
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

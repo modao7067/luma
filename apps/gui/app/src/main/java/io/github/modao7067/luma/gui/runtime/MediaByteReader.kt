@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -17,7 +19,7 @@ internal object MediaByteReader {
         when {
             source.startsWith("data:") -> {
                 val comma = source.indexOf(',')
-                if (comma < 0) throw IOException("内嵌资源格式不完整")
+                if (comma < 0) throw IOException(tr("内嵌资源格式不完整", "Incomplete inline data URI"))
                 val descriptor = source.substring(5, comma)
                 mime = descriptor.substringBefore(';').ifBlank { mime }
                 val base64 = descriptor.split(';').any { it.equals("base64", true) }
@@ -27,8 +29,8 @@ internal object MediaByteReader {
                 if (base64) {
                     try {
                         Base64.getDecoder().wrap(raw).use { copy(it, destination, limit) }
-                        if (raw.read() != -1) throw IOException("内嵌资源编码损坏")
-                    } catch (_: IllegalArgumentException) { throw IOException("内嵌资源编码损坏") }
+                        if (raw.read() != -1) throw IOException(tr("内嵌资源编码损坏", "Corrupted inline resource encoding"))
+                    } catch (_: IllegalArgumentException) { throw IOException(tr("内嵌资源编码损坏", "Corrupted inline resource encoding")) }
                 } else raw.use { copy(it, destination, limit) }
             }
             source.startsWith("https:") || source.startsWith("http:") -> {
@@ -36,28 +38,28 @@ internal object MediaByteReader {
                 var redirects = 0
                 while (true) {
                     if (Thread.currentThread().isInterrupted) throw InterruptedException()
-                    if (url.protocol !in setOf("http", "https") || url.userInfo != null) throw IOException("不支持此资源地址")
-                    if (url.protocol == "http" && !allowHttp(url.host)) throw IOException("此 HTTP 明文地址被应用安全策略阻止，请使用 HTTPS 来源")
+                    if (url.protocol !in setOf("http", "https") || url.userInfo != null) throw IOException(tr("不支持此资源地址", "Unsupported resource URL"))
+                    if (url.protocol == "http" && !allowHttp(url.host)) throw IOException(tr("此 HTTP 明文地址被应用安全策略阻止，请使用 HTTPS 来源", "Cleartext HTTP URL blocked by app security policy; use HTTPS"))
                     val connection = (url.openConnection() as HttpURLConnection).apply {
                         connectTimeout = 10_000; readTimeout = 15_000; instanceFollowRedirects = false; useCaches = false
                     }
                     try {
                         val status = connection.responseCode
                         if (status in setOf(301,302,303,307,308)) {
-                            if (++redirects > 5) throw IOException("资源重定向过多")
-                            url = URL(url, connection.getHeaderField("Location") ?: throw IOException("资源重定向无效"))
+                            if (++redirects > 5) throw IOException(tr("资源重定向过多", "Too many redirects"))
+                            url = URL(url, connection.getHeaderField("Location") ?: throw IOException(tr("资源重定向无效", "Invalid redirect target")))
                             continue
                         }
-                        if (status !in 200..299) throw IOException("资源暂不可读（HTTP $status）")
+                        if (status !in 200..299) throw IOException(tr("资源暂不可读（HTTP $status）", "Resource unavailable (HTTP $status)"))
                         if (connection.contentLengthLong > limit) throw IOException(limitMessage(limit))
                         connection.contentType?.substringBefore(';')?.trim()?.lowercase(java.util.Locale.ROOT)?.takeIf { it.isNotBlank() && it != "application/octet-stream" }?.let { mime = it }
                         connection.inputStream.use { copy(it, destination, limit) }
-                        if (connection.contentLengthLong >= 0 && destination.length() != connection.contentLengthLong) throw IOException("资源响应不完整")
+                        if (connection.contentLengthLong >= 0 && destination.length() != connection.contentLengthLong) throw IOException(tr("资源响应不完整", "Incomplete resource response"))
                         break
                     } finally { connection.disconnect() }
                 }
             }
-            source.startsWith("codex-file:") -> throw IOException("此 Codex 附件仅提供文件 ID，原生接口未提供可读取地址")
+            source.startsWith("codex-file:") -> throw IOException(tr("此 Codex 附件仅提供文件 ID，原生接口未提供可读取地址", "This Codex attachment only provides a file ID without a readable path"))
             source.startsWith("luma-error:") -> throw IOException(source.removePrefix("luma-error:"))
             else -> {
                 val local = imported()
@@ -65,7 +67,7 @@ internal object MediaByteReader {
                 else {
                     val protectedPath = managedRootProtected?.invoke()
                     if (protectedPath != null) guest(protectedPath, destination, limit)
-                    else guest(MediaSourcePolicy.guestPath(source, cwd ?: throw IOException("资源缺少所属工作目录")), destination, limit)
+                    else guest(MediaSourcePolicy.guestPath(source, cwd ?: throw IOException(tr("资源缺少所属工作目录", "Resource is missing working directory"))), destination, limit)
                 }
             }
         }
@@ -82,7 +84,7 @@ internal object MediaByteReader {
             }
         }
     }
-    private fun limitMessage(limit: Long) = "附件超过 ${limit / (1024 * 1024)} MiB"
+    private fun limitMessage(limit: Long) = tr("附件超过 ${limit / (1024 * 1024)} MiB", "Attachment exceeds ${limit / (1024 * 1024)} MiB")
     private class DataInput(private val source: String, private var index: Int, private val base64: Boolean) : InputStream() {
         private var encoded = byteArrayOf(); private var next = 0
         override fun read(): Int {
@@ -91,13 +93,13 @@ internal object MediaByteReader {
                 while (index < source.length && source[index].isWhitespace()) index++
                 if (index == source.length) return -1
                 val char = source[index++]
-                if (char.code > 127) throw IOException("内嵌资源编码损坏")
+                if (char.code > 127) throw IOException(tr("内嵌资源编码损坏", "Corrupted inline resource encoding"))
                 return char.code
             }
             if (index == source.length) return -1
             if (source[index] == '%') {
-                if (index + 2 >= source.length) throw IOException("内嵌资源编码损坏")
-                val value = source.substring(index + 1, index + 3).toIntOrNull(16) ?: throw IOException("内嵌资源编码损坏")
+                if (index + 2 >= source.length) throw IOException(tr("内嵌资源编码损坏", "Corrupted inline resource encoding"))
+                val value = source.substring(index + 1, index + 3).toIntOrNull(16) ?: throw IOException(tr("内嵌资源编码损坏", "Corrupted inline resource encoding"))
                 index += 3; return value
             }
             val size = Character.charCount(source.codePointAt(index))

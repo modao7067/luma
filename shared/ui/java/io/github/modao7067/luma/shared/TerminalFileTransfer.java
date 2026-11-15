@@ -5,6 +5,8 @@ import java.util.concurrent.*;
 
 final class TerminalFileTransfer {
     static final String SCRIPT="import os,stat,sys,subprocess,shutil,tempfile,resource,re,json\n"
+        +"_zh=os.environ.get('LUMA_LANG','zh').lower().startswith('zh')\n"
+        +"def _tr(z,e):return z if _zh else e\n"
         +"\n"
         +"def basic_markdown(raw):\n"
         +" # Dependency-free fallback for guests without glow; never runs fenced code or HTML.\n"
@@ -42,18 +44,18 @@ final class TerminalFileTransfer {
         +"  seg=stack.pop(0)\n"
         +"  if seg=='..':cur=os.path.dirname(cur.rstrip('/')) or '/';continue\n"
         +"  nxt=os.path.join(cur,seg)\n"
-        +"  if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +"  if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):raise ValueError(_tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'))\n"
         +"  if os.path.islink(nxt):\n"
         +"   hops+=1\n"
-        +"   if hops>40:raise ValueError('符号链接层级过深')\n"
+        +"   if hops>40:raise ValueError(_tr('符号链接层级过深','Too many symbolic link levels'))\n"
         +"   target=os.readlink(nxt)\n"
         +"   joined=target if os.path.isabs(target) else os.path.join(cur,target)\n"
         +"   norm_t=os.path.normpath(joined)\n"
-        +"   if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +"   if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):raise ValueError(_tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'))\n"
         +"   cur='/';stack=[s for s in norm_t.split('/') if s and s!='.']+stack\n"
         +"  else:cur=nxt\n"
         +" real=os.path.realpath(cur)\n"
-        +" if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):raise ValueError('不允许预览系统伪文件系统路径')\n"
+        +" if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):raise ValueError(_tr('不允许预览系统伪文件系统路径','Previewing system pseudo-filesystem paths is not allowed'))\n"
         +" return real\n"
         +"\n"
         +"try:\n"
@@ -66,7 +68,7 @@ final class TerminalFileTransfer {
         +"  path=os.path.normpath(os.path.join(base,path))\n"
         +" safe_target=safe_guest_path(path)\n"
         +" fd=os.open(safe_target,os.O_RDONLY|os.O_NONBLOCK);info=os.fstat(fd)\n"
-        +" if not stat.S_ISREG(info.st_mode):raise ValueError('只能预览普通文件')\n"
+        +" if not stat.S_ISREG(info.st_mode):raise ValueError(_tr('只能预览普通文件','Only regular files can be previewed'))\n"
         +" if mode=='ansi':\n"
         +"  with os.fdopen(fd,'rb') as f:raw=f.read(1024*1024)\n"
         +"  markdown=os.path.splitext(path)[1].lower() in ('.md','.markdown')\n"
@@ -113,19 +115,20 @@ final class TerminalFileTransfer {
         +"  raw=re.sub(rb'\\x1b\\[([0-9;]*)m',soften,raw)\n"
         +"  raw=raw.replace(b'\\r\\n',b'\\n').replace(b'\\n',b'\\r\\n')\n"
         +"  sys.stdout.buffer.write(raw)\n"
-        +"  if info.st_size>1024*1024:sys.stdout.buffer.write('\\r\\n\\x1b[0;90m（仅预览前 1 MiB）\\x1b[0m\\r\\n'.encode())\n"
+        +"  if info.st_size>1024*1024:sys.stdout.buffer.write(('\\r\\n\\x1b[0;90m'+_tr('（仅预览前 1 MiB）','(Showing first 1 MiB)')+'\\x1b[0m\\r\\n').encode())\n"
         +" else:\n"
-        +"  if info.st_size>limit:raise ValueError('文件超过预览大小限制')\n"
+        +"  if info.st_size>limit:raise ValueError(_tr('文件超过预览大小限制','File exceeds preview size limit'))\n"
         +"  with os.fdopen(fd,'rb') as f:\n"
         +"   while True:\n"
         +"    chunk=f.read(65536)\n"
         +"    if not chunk:break\n"
         +"    sys.stdout.buffer.write(chunk)\n"
-        +"except FileNotFoundError:sys.stderr.write('找不到文件：'+path);sys.exit(2)\n"
-        +"except PermissionError:sys.stderr.write('没有文件读取权限：'+path);sys.exit(3)\n"
+        +"except FileNotFoundError:sys.stderr.write(_tr('找不到文件：','File not found: ')+path);sys.exit(2)\n"
+        +"except PermissionError:sys.stderr.write(_tr('没有文件读取权限：','Permission denied reading file: ')+path);sys.exit(3)\n"
         +"except (OSError,ValueError) as error:sys.stderr.write(str(error));sys.exit(4)\n";
     static String quote(String value){return "'"+value.replace("'","'\"'\"'")+"'";}
     static void copy(ProcessBuilder builder,File destination,long limit)throws IOException {
+        builder.environment().putIfAbsent("LUMA_LANG",com.termux.terminal.LumaLang.code());
         Process process=builder.start();
         ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"LumaFileTimeout");t.setDaemon(true);return t;});
         ScheduledFuture<?> timeout=timer.schedule(process::destroyForcibly,30,TimeUnit.SECONDS);
@@ -134,14 +137,14 @@ final class TerminalFileTransfer {
         try(InputStream in=process.getInputStream();OutputStream out=new FileOutputStream(destination)){
             byte[]data=new byte[65536];long total=0;int n;
             while((n=in.read(data))!=-1){
-                if(Thread.currentThread().isInterrupted())throw new IOException("已取消");
-                total+=n;if(total>limit)throw new IOException("文件过大");out.write(data,0,n);
+                if(Thread.currentThread().isInterrupted())throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
+                total+=n;if(total>limit)throw new IOException(com.termux.terminal.LumaLang.tr("文件过大","File is too large"));out.write(data,0,n);
             }
             if(!process.waitFor(2,TimeUnit.SECONDS)||process.exitValue()!=0){
                 errors.join(100);String message; synchronized(detail){message=detail.toString("UTF-8").trim();}
-                throw new IOException(message.isEmpty() ? "文件读取失败或超时" : message);
+                throw new IOException(message.isEmpty() ? com.termux.terminal.LumaLang.tr("文件读取失败或超时","File read failed or timed out") : message);
             }
-        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("已取消",e);}
+        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"),e);}
         finally{timeout.cancel(false);timer.shutdownNow();process.destroy();}
     }
 }

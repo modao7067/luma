@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -10,7 +12,7 @@ fun JSONArray.strings(): List<String> = (0 until length()).map { optString(it) }
 
 object CodexProjection {
     fun error(error: JSONObject): String = CodexCapabilities.redact(listOfNotNull(error.stringOrNull("message"), error.stringOrNull("additionalDetails"))
-        .distinct().joinToString("\n").ifBlank { "Codex 操作失败" })
+        .distinct().joinToString("\n").ifBlank { tr("Codex 操作失败", "Codex operation failed") })
     fun item(item: JSONObject, previous: ConversationItem? = null): ConversationItem {
         val type = item.optString("type")
         val id = item.optString("id")
@@ -21,9 +23,9 @@ object CodexProjection {
                     when (it.optString("type")) { "localImage" -> it.stringOrNull("path"); "image" -> it.stringOrNull("url"); else -> null }
                 }, userContent = UserMessageContent(inputs.objects().filter { it.optString("type") == "text" }.joinToString("\n") { it.optString("text") },
                     inputs.objects().mapNotNull { input -> when (input.optString("type")) {
-                        "localImage" -> SessionTitlePolicy.attachment("图片", input.stringOrNull("path"))
-                        "image" -> "图片"
-                        "mention" -> SessionTitlePolicy.attachment("文件", input.stringOrNull("path"), input.stringOrNull("name"))
+                        "localImage" -> SessionTitlePolicy.attachment(tr("图片", "Image"), input.stringOrNull("path"))
+                        "image" -> tr("图片", "Image")
+                        "mention" -> SessionTitlePolicy.attachment(tr("文件", "File"), input.stringOrNull("path"), input.stringOrNull("name"))
                         "skill" -> SessionTitlePolicy.attachment("Skill", input.stringOrNull("path"), input.stringOrNull("name"))
                         else -> null
                     } }))
@@ -34,25 +36,25 @@ object CodexProjection {
                     .filter { it.isNotBlank() }.joinToString("\n").ifBlank {
                         previous?.takeIf { it.id == id && it.kind == "reasoning" }?.detail.orEmpty()
                     }
-                ConversationItem(id, "tool", "推理摘要", detail, item.optString("status"))
+                ConversationItem(id, "tool", tr("推理摘要", "Reasoning summary"), detail, item.optString("status"))
             }
             "plan" -> ConversationItem(id, "assistant", item.optString("text"))
-            "commandExecution" -> ConversationItem(id, "tool", item.optString("command", "命令"), item.optString("aggregatedOutput"), item.optString("status"))
-            "fileChange" -> ConversationItem(id, "tool", "文件变更", (item.optJSONArray("changes") ?: JSONArray()).objects().joinToString("\n\n") {
+            "commandExecution" -> ConversationItem(id, "tool", item.optString("command", tr("命令", "Command")), item.optString("aggregatedOutput"), item.optString("status"))
+            "fileChange" -> ConversationItem(id, "tool", tr("文件变更", "File changes"), (item.optJSONArray("changes") ?: JSONArray()).objects().joinToString("\n\n") {
                 it.optString("path") + "\n" + it.optString("diff")
             }, item.optString("status"))
             "mcpToolCall" -> ConversationItem(id, "tool", item.optString("server") + " · " + item.optString("tool"), MediaProjection.display(item), item.optString("status"))
-            "webSearch" -> ConversationItem(id, "tool", "搜索 · " + item.optString("query"), item.optJSONObject("action")?.toString(2).orEmpty(), item.optString("status"))
+            "webSearch" -> ConversationItem(id, "tool", tr("搜索 · ", "Search · ") + item.optString("query"), item.optJSONObject("action")?.toString(2).orEmpty(), item.optString("status"))
             "collabAgentToolCall" -> ConversationItem(id, "tool", collabLabel(item.optString("tool")),
                 detail = item.optJSONObject("agentsStates")?.keys()?.asSequence()?.joinToString("\n") { target ->
                     val state = item.getJSONObject("agentsStates").optJSONObject(target)
                     listOf(target, state?.optString("status"), state?.stringOrNull("message")).filterNotNull().joinToString(" · ")
                 }.orEmpty(), status = item.optString("status"))
-            "subAgentActivity" -> ConversationItem(id, "tool", "子代理活动", item.optString("agentPath"), item.optString("kind"))
-            "imageGeneration" -> ConversationItem(id, "tool", "生成图片", status = item.optString("status"))
-            "dynamicToolCall" -> ConversationItem(id, "tool", item.optString("tool", "工具"), MediaProjection.display(item), item.optString("status"))
-            "imageView" -> ConversationItem(id, "tool", "查看图片", item.optString("path"), item.optString("status"))
-            else -> ConversationItem(id, "tool", type.ifEmpty { "工具事件" }, MediaProjection.display(item), item.optString("status"))
+            "subAgentActivity" -> ConversationItem(id, "tool", tr("子代理活动", "Sub-agent activity"), item.optString("agentPath"), item.optString("kind"))
+            "imageGeneration" -> ConversationItem(id, "tool", tr("生成图片", "Generate image"), status = item.optString("status"))
+            "dynamicToolCall" -> ConversationItem(id, "tool", item.optString("tool", tr("工具", "Tool")), MediaProjection.display(item), item.optString("status"))
+            "imageView" -> ConversationItem(id, "tool", tr("查看图片", "View image"), item.optString("path"), item.optString("status"))
+            else -> ConversationItem(id, "tool", type.ifEmpty { tr("工具事件", "Tool event") }, MediaProjection.display(item), item.optString("status"))
         }
         val outcome = when (item.optString("status")) {
             "inProgress", "running" -> "running"
@@ -75,9 +77,9 @@ object CodexProjection {
     }
 
     private fun collabLabel(tool: String) = when (tool) {
-        "spawnAgent" -> "分派子代理"; "wait" -> "等待子代理"; "sendInput", "sendMessage" -> "联系子代理"
-        "followupTask", "resumeAgent" -> "继续子代理"; "closeAgent" -> "关闭子代理"; "interruptAgent" -> "中断子代理"
-        "listAgents" -> "查看子代理"; else -> "子代理操作"
+        "spawnAgent" -> tr("分派子代理", "Spawn subagent"); "wait" -> tr("等待子代理", "Wait for subagent"); "sendInput", "sendMessage" -> tr("联系子代理", "Contact subagent")
+        "followupTask", "resumeAgent" -> tr("继续子代理", "Resume subagent"); "closeAgent" -> tr("关闭子代理", "Close subagent"); "interruptAgent" -> tr("中断子代理", "Interrupt subagent")
+        "listAgents" -> tr("查看子代理", "List subagents"); else -> tr("子代理操作", "Subagent operation")
     }
 
     fun clientMessageId(item: JSONObject): String? = item.stringOrNull("clientId") ?: item.stringOrNull("clientUserMessageId")
@@ -90,7 +92,7 @@ object CodexProjection {
         when (it.optString("type")) {
             "text" -> it.optString("text")
             "mention" -> "@" + it.optString("path")
-            "localImage", "image" -> "[图片]"
+            "localImage", "image" -> tr("[图片]", "[Image]")
             else -> null
         }
     }.joinToString("\n")
@@ -99,7 +101,7 @@ object CodexProjection {
             it.optJSONArray("supportedReasoningEfforts")?.objects()?.map { effort -> effort.optString("reasoningEffort") }.orEmpty(),
             it.optJSONArray("inputModalities")?.strings()?.contains("image") ?: false,
             it.optJSONArray("serviceTiers")?.objects()?.map { tier -> RequestChoice(tier.getString("id"), tier.getString("name")) }.orEmpty().let { tiers ->
-                if (tiers.isEmpty()) tiers else listOf(RequestChoice("default", "默认速度")) + tiers
+                if (tiers.isEmpty()) tiers else listOf(RequestChoice("default", tr("默认速度", "Default speed"))) + tiers
             }, it.stringOrNull("defaultReasoningEffort").orEmpty())
     }
     private val mentionRegex = Regex("@(?:\"([^\"]+)\"|(/[^\\s@\"]+))")
@@ -139,23 +141,23 @@ class PendingApproval(val rawId: Any, val method: String, val params: JSONObject
         return when (method) {
             "item/tool/requestUserInput", "tool/requestUserInput" -> UserRequest(id, "Answer", body,
                 questions = params.optJSONArray("questions")?.objects()?.map { q -> RequestQuestion(q.optString("id"), q.optString("header"), q.optString("question"), q.optJSONArray("options")?.objects()?.map { it.optString("label") }.orEmpty(), secret = q.optBoolean("isSecret"), allowOther = q.optBoolean("isOther")) }.orEmpty(), answering = answering, skipChoice = "skip")
-            "item/permissions/requestApproval" -> UserRequest(id, "请求额外权限", body,
-                listOf(RequestChoice("allow", "仅本轮允许"), RequestChoice("decline", "不授予")), answering = answering)
+            "item/permissions/requestApproval" -> UserRequest(id, tr("请求额外权限", "Additional permissions requested"), body,
+                listOf(RequestChoice("allow", tr("仅本轮允许", "Allow this turn")), RequestChoice("decline", tr("不授予", "Deny"))), answering = answering)
             "item/commandExecution/requestApproval", "item/fileChange/requestApproval" -> UserRequest(id,
-                if (method.contains("fileChange")) "文件修改审批" else "命令执行审批", body,
+                if (method.contains("fileChange")) tr("文件修改审批", "File change approval") else tr("命令执行审批", "Command approval"), body,
                 decisions.mapIndexed { i, d -> RequestChoice(i.toString(), decisionLabel(d)) }, answering = answering)
-            "mcpServer/elicitation/request" -> UserRequest(id, "外部工具需要确认", params.toString(2), listOf(RequestChoice("decline", "拒绝"), RequestChoice("cancel", "取消")), answering = answering)
-            else -> UserRequest(id, "请在官方 TUI 处理此请求", params.toString(2), answering = answering)
+            "mcpServer/elicitation/request" -> UserRequest(id, tr("外部工具需要确认", "External tool confirmation"), params.toString(2), listOf(RequestChoice("decline", tr("拒绝", "Decline")), RequestChoice("cancel", tr("取消", "Cancel"))), answering = answering)
+            else -> UserRequest(id, tr("请在官方 TUI 处理此请求", "Handle this request in official TUI"), params.toString(2), answering = answering)
         }
     }
     private fun decisionLabel(value: Any) = when (value) {
-        "accept" -> "允许这次"
-        "acceptForSession" -> if (method.contains("fileChange")) "允许这些文件的后续修改" else "允许本会话的同类命令"
-        "decline" -> "拒绝，继续任务"
-        "cancel" -> "拒绝并中断"
+        "accept" -> tr("允许这次", "Allow once")
+        "acceptForSession" -> if (method.contains("fileChange")) tr("允许这些文件的后续修改", "Allow future edits to these files") else tr("允许本会话的同类命令", "Allow similar commands in this session")
+        "decline" -> tr("拒绝，继续任务", "Deny & continue")
+        "cancel" -> tr("拒绝并中断", "Deny & abort")
         else -> when {
-            value is JSONObject && value.has("acceptWithExecpolicyAmendment") -> "允许并保存命令规则：\n" + value.toString(2)
-            value is JSONObject && value.has("applyNetworkPolicyAmendment") -> "保存网络规则：\n" + value.toString(2)
+            value is JSONObject && value.has("acceptWithExecpolicyAmendment") -> tr("允许并保存命令规则：\n", "Allow & save command rule:\n") + value.toString(2)
+            value is JSONObject && value.has("applyNetworkPolicyAmendment") -> tr("保存网络规则：\n", "Save network rule:\n") + value.toString(2)
             else -> value.toString()
         }
     }
@@ -164,7 +166,7 @@ class PendingApproval(val rawId: Any, val method: String, val params: JSONObject
         "item/permissions/requestApproval" -> obj("permissions" to (if (choice == "allow") params.getJSONObject("permissions") else JSONObject()), "scope" to "turn")
         "item/commandExecution/requestApproval", "item/fileChange/requestApproval" -> obj("decision" to decisions[choice.toInt()])
         "mcpServer/elicitation/request" -> obj("action" to choice, "content" to JSONObject.NULL)
-        else -> throw IllegalArgumentException("请在官方 TUI 中处理此类请求")
+        else -> throw IllegalArgumentException(tr("请在官方 TUI 中处理此类请求", "Handle this request in the official TUI"))
     }
 }
 

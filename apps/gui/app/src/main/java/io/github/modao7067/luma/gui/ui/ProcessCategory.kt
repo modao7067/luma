@@ -1,10 +1,14 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.ConversationItem
 import org.json.JSONObject
 
-internal enum class ProcessCategory(val caption: String) {
-    Terminal("终端"), Edit("编辑"), Read("读取"), Search("搜索"), WebSearch("网页搜索"), Browse("浏览"), Image("图片"), Tool("工具"),
+internal enum class ProcessCategory(private val zh: String, private val en: String) {
+    Terminal("终端", "Terminal"), Edit("编辑", "Edit"), Read("读取", "Read"), Search("搜索", "Search"), WebSearch("网页搜索", "Web search"), Browse("浏览", "Browse"), Image("图片", "Image"), Tool("工具", "Tool"),
+    ;
+    val caption: String get() = tr(zh, en)
 }
 
 private val piToolCategories = mapOf(
@@ -36,6 +40,77 @@ private val antigravityToolCategories = mapOf(
     "write_file" to ProcessCategory.Edit,
     "search_web" to ProcessCategory.WebSearch,
 )
+private val antigravitySwarmTools = setOf("swarm", "post_message", "read_board", "swarm_wait")
+
+private fun JSONObject.safeTrimmedString(key: String): String {
+    val value = opt(key)
+    return if (value == null || value == JSONObject.NULL) "" else value.toString().trim()
+}
+
+private fun antigravitySwarmContext(item: ConversationItem): String? {
+    if (item.input.isBlank()) return null
+    val obj = runCatching { JSONObject(item.input) }.getOrNull() ?: return null
+    return when (item.toolName) {
+        "swarm" -> when (val action = obj.safeTrimmedString("action")) {
+            "add" -> {
+                val name = obj.safeTrimmedString("name")
+                val tasksCount = obj.optJSONArray("tasks")?.length() ?: 0
+                val n = obj.optInt("n", 0)
+                val count = if (tasksCount > 0) tasksCount else if (n > 1) n else 0
+                when {
+                    count > 0 && name.isNotEmpty() -> tr("添加 $name ×$count", "Add $name ×$count")
+                    count > 0 -> tr("添加 $count 个成员", "Add $count workers")
+                    name.isNotEmpty() -> tr("添加 $name", "Add $name")
+                    else -> tr("添加成员", "Add worker")
+                }
+            }
+            "status" -> tr("查看状态", "Status")
+            "models" -> tr("模型列表", "Models")
+            "model" -> {
+                val name = obj.safeTrimmedString("name")
+                val model = obj.safeTrimmedString("model")
+                val suffix = listOfNotNull(name.takeIf { it.isNotEmpty() }, model.takeIf { it.isNotEmpty() }).joinToString(" · ")
+                if (suffix.isEmpty()) tr("切换模型", "Switch model") else tr("切换模型 · $suffix", "Switch model · $suffix")
+            }
+            "kill" -> {
+                val name = obj.safeTrimmedString("name")
+                if (name.isEmpty()) tr("结束成员", "Kill worker") else tr("结束 $name", "Kill $name")
+            }
+            "title" -> {
+                val title = obj.safeTrimmedString("title")
+                if (title.isEmpty()) tr("设置标题", "Set title") else tr("标题 · $title", "Title · $title")
+            }
+            else -> action.takeIf { it.isNotEmpty() }
+        }
+        "post_message" -> {
+            val singleLine = obj.safeTrimmedString("text").replace(Regex("\\s+"), " ").trim()
+            when {
+                singleLine.isEmpty() -> null
+                singleLine.length > 48 -> singleLine.take(48).trimEnd() + "…"
+                else -> singleLine
+            }
+        }
+        "read_board" -> when {
+            obj.optBoolean("status", false) -> tr("成员状态", "Roster status")
+            else -> {
+                val seqs = obj.optJSONArray("seqs")
+                if (seqs != null && seqs.length() > 0) {
+                    (0 until seqs.length()).mapNotNull { i -> seqs.optInt(i, -1).takeIf { it >= 0 }?.let { "#$it" } }
+                        .joinToString(", ").takeIf { it.isNotEmpty() }
+                } else if (obj.has("since")) {
+                    "since #${obj.optInt("since")}"
+                } else null
+            }
+        }
+        "swarm_wait" -> if (obj.has("since")) {
+            val base = "since #${obj.optInt("since")}"
+            if (obj.has("mentions_only") && !obj.optBoolean("mentions_only")) {
+                tr("$base · 全部消息", "$base · all messages")
+            } else base
+        } else null
+        else -> null
+    }
+}
 
 internal fun processCategory(item: ConversationItem, cli: String = "Codex"): ProcessCategory = when (item.kind) {
     "commandExecution" -> ProcessCategory.Terminal
@@ -82,8 +157,8 @@ internal fun processToolInvocations(entries: List<ConversationItem>): List<Conve
 internal fun processToolName(item: ConversationItem): String = item.toolName.takeIf { it.isNotBlank() }
     ?: when (item.kind) {
         "commandExecution" -> "shell"
-        "tool" -> item.toolKind.ifBlank { "工具调用" }
-        else -> item.kind.ifBlank { "工具事件" }
+        "tool" -> item.toolKind.ifBlank { tr("工具调用", "Tool call") }
+        else -> item.kind.ifBlank { tr("工具事件", "Tool event") }
     }
 
 private val agySystemActionDirectiveRegex = Regex(
@@ -159,19 +234,23 @@ internal fun processEntryContext(item: ConversationItem, cli: String): String {
         } else first
         chosen.replace("**", "")
     } else item.text
-    if (raw == label || raw in setOf("工具", "工具调用")) return ""
+    if (cli == "Antigravity" && item.toolName in antigravitySwarmTools) {
+        antigravitySwarmContext(item)?.takeIf { it.isNotEmpty() }?.let { return it }
+        if (raw == "Run $label") return ""
+    }
+    if (raw == label || raw in setOf("工具", "工具调用", "Tool", "Tool call")) return ""
     if (item.kind == "mcpToolCall" && raw.trim() == "·") return ""
     if (raw.startsWith("$label · ")) return raw.removePrefix("$label · ").trim()
     if (raw.startsWith("$label:")) return raw.removePrefix("$label:").trim()
     if (raw.endsWith(" · $label")) return raw.removeSuffix(" · $label").trim()
     return when (item.kind) {
-        "webSearch" -> raw.removePrefix("搜索 · ")
-        "fileChange" -> raw.takeUnless { it == "文件变更" }.orEmpty()
-        "imageView" -> raw.takeUnless { it == "查看图片" }.orEmpty()
-        "imageGeneration" -> raw.takeUnless { it == "生成图片" }.orEmpty()
-        "subAgentActivity" -> if (cli == "Codex" && raw == "子代理活动") "" else raw
-        "compaction" -> if (cli == "OpenCode" && raw == "上下文压缩") "" else raw
-        "commandExecution" -> if (cli == "Codex" && item.input.isBlank() && raw == "命令") "" else raw
+        "webSearch" -> raw.removePrefix("搜索 · ").removePrefix("Search · ")
+        "fileChange" -> raw.takeUnless { it == "文件变更" || it == "File changes" }.orEmpty()
+        "imageView" -> raw.takeUnless { it == "查看图片" || it == "View image" }.orEmpty()
+        "imageGeneration" -> raw.takeUnless { it == "生成图片" || it == "Generate image" }.orEmpty()
+        "subAgentActivity" -> if (cli == "Codex" && (raw == "子代理活动" || raw == "Sub-agent activity")) "" else raw
+        "compaction" -> if (cli == "OpenCode" && (raw == "上下文压缩" || raw == "Context compaction")) "" else raw
+        "commandExecution" -> if (cli == "Codex" && item.input.isBlank() && (raw == "命令" || raw == "Command")) "" else raw
         "collabAgentToolCall" -> if (cli == "Codex") when (raw) {
             "分派子代理" -> "Spawn subagent"
             "等待子代理" -> "Wait for subagent"
@@ -183,18 +262,18 @@ internal fun processEntryContext(item: ConversationItem, cli: String): String {
             "子代理操作" -> "Subagent operation"
             else -> raw
         } else raw
-        "" -> if ((cli == "OpenCode" && item.outcome == "failed" && raw == "执行失败") ||
-            (cli == "Codex" && raw == "工具事件")) "" else raw
+        "" -> if ((cli == "OpenCode" && item.outcome == "failed" && (raw == "执行失败" || raw == "Execution failed")) ||
+            (cli == "Codex" && (raw == "工具事件" || raw == "Tool event"))) "" else raw
         else -> raw
     }
 }
 
 internal fun processInputLanguage(item: ConversationItem, cli: String): String =
     if (item.kind == "commandExecution" ||
-        (processCategory(item, cli) == ProcessCategory.Terminal && item.toolName in setOf("bash", "powershell", "shell", "Bash"))) "shell" else "参数"
+        (processCategory(item, cli) == ProcessCategory.Terminal && item.toolName in setOf("bash", "powershell", "shell", "Bash"))) "shell" else tr("参数", "params")
 
 internal fun processOutputLanguage(item: ConversationItem): String = when {
-    item.outcome == "failed" -> "output · 错误"
+    item.outcome == "failed" -> tr("output · 错误", "output · error")
     item.kind == "fileChange" -> "diff"
     else -> "output"
 }
@@ -928,7 +1007,7 @@ internal fun mergeConsecutiveProcessEdits(entries: List<ConversationItem>, cli: 
             val rangePrefix = if (realLines && firstLine != null) {
                 if (lastLine != null && lastLine > firstLine) "L$firstLine–$lastLine · " else "L$firstLine · "
             } else ""
-            val label = if (total > 1) "${rangePrefix}第 ${idx + 1}/$total 处" else rangePrefix.removeSuffix(" · ")
+            val label = if (total > 1) tr("${rangePrefix}第 ${idx + 1}/$total 处", "${rangePrefix}Edit ${idx + 1}/$total") else rangePrefix.removeSuffix(" · ")
             ProcessEditHunk(label, lines)
         }
         val outcome = when {

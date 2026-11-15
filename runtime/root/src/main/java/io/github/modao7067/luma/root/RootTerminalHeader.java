@@ -17,7 +17,7 @@ final class RootTerminalHeader extends LinearLayout {
         super(context);setGravity(Gravity.CENTER_VERTICAL);
         setPadding(dp(18),0,dp(8),0);setBackgroundColor(managed?Color.BLACK:0x0affffff);
         back=managed?button(new ToolbarIcon(ToolbarIcon.Kind.BACK)):null;
-        if(back!=null){back.setContentDescription("返回会话");addView(back);}
+        if(back!=null){back.setContentDescription(com.termux.terminal.LumaLang.tr("返回会话","Back to session"));addView(back);}
         title=new TextView(context);title.setText("");title.setTextColor(0xffe4edf3);title.setTextSize(16f);
         title.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);title.setGravity(Gravity.CENTER_VERTICAL);
@@ -30,11 +30,11 @@ final class RootTerminalHeader extends LinearLayout {
             int max=Math.max(1,r-l-dp(18));if(title.getMaxWidth()!=max)title.setMaxWidth(max);
         });
         addView(group,new LinearLayout.LayoutParams(0,dp(48),1f));
-        keyboard=button(new ToolbarIcon(ToolbarIcon.Kind.KEYBOARD));keyboard.setContentDescription("显示或隐藏键盘");addView(keyboard);
+        keyboard=button(new ToolbarIcon(ToolbarIcon.Kind.KEYBOARD));keyboard.setContentDescription(com.termux.terminal.LumaLang.tr("显示或隐藏键盘","Show or hide keyboard"));addView(keyboard);
         windowsIcon=new ToolbarIcon(ToolbarIcon.Kind.WINDOWS);windows=button(windowsIcon);
-        windows.setContentDescription("多窗口：点击切换，长按新建");addView(windows);
+        windows.setContentDescription(com.termux.terminal.LumaLang.tr("多窗口：点击切换，长按新建","Windows: tap to switch, long-press for new"));addView(windows);
         settings=managed?null:button(new ToolbarIcon(ToolbarIcon.Kind.MORE));
-        if(settings!=null){settings.setContentDescription("更多选项");addView(settings);}
+        if(settings!=null){settings.setContentDescription(com.termux.terminal.LumaLang.tr("更多选项","More options"));addView(settings);}
     }
     void setSessionLocked(boolean locked){
         windows.setVisibility(locked?View.GONE:View.VISIBLE);windows.setEnabled(!locked);

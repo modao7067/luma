@@ -1,15 +1,37 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
+import java.util.Locale
 
 class NativeCliRuntimePolicyTest {
+    private lateinit var savedLocale: Locale
+    private var savedLangProp: String? = null
+
+    @Before fun setUp() {
+        savedLocale = Locale.getDefault()
+        savedLangProp = System.getProperty("luma.lang")
+        System.clearProperty("luma.lang")
+        Locale.setDefault(Locale.SIMPLIFIED_CHINESE)
+        LumaI18n.resetForTest()
+    }
+
+    @After fun tearDown() {
+        Locale.setDefault(savedLocale)
+        if (savedLangProp == null) System.clearProperty("luma.lang")
+        else System.setProperty("luma.lang", savedLangProp!!)
+        LumaI18n.resetForTest()
+    }
+
     @Test fun newAcpPeersHaveAnIndependentStableTaskWithoutMovingExistingCliTasks() {
-        assertEquals("cli-bridge-v48", NativeCliRuntimePolicy.revision)
+        assertEquals("cli-bridge-v55", NativeCliRuntimePolicy.revision)
         assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v38"}""")))
-        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v47"}""")))
-        assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v48"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v54"}""")))
+        assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v55"}""")))
         assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject()))
         assertTrue(NativeCliRuntimePolicy.isolatedAcpClis.contains("Grok Build"))
         NativeCliRuntimePolicy.isolatedAcpClis.forEach { assertEquals("luma-acp-cli-gui", NativeCliRuntimePolicy.task(it)) }
@@ -71,6 +93,17 @@ class NativeCliRuntimePolicyTest {
         assertTrue(NativeCliRuntimePolicy.restartWarning.contains("无法确认"))
         assertTrue(NativeCliRuntimePolicy.restartWarning.contains("记录和草稿保留"))
         assertEquals("luma-acp-cli-gui", NativeCliRuntimePolicy.task("Grok Build"))
+
+        LumaI18n.overrideLanguage = "en"
+        val enFailure = assertThrows(NativeCliRuntimePolicy.CarrierUpdateRequired::class.java) {
+            NativeCliRuntimePolicy.acceptHealth(
+                "Grok Build",
+                JSONObject().put("protocol", 1).put("clis", org.json.JSONArray().put("Grok Build")).put("carrierRevision", "cli-bridge-v17"),
+            )
+        }
+        assertEquals("CLI service update required; restart after the current task finishes", enFailure.message)
+        assertTrue(NativeCliRuntimePolicy.restartWarning.contains("active tasks"))
+        assertTrue(NativeCliRuntimePolicy.restartWarning.contains("Session history and drafts are preserved"))
     }
 
 }

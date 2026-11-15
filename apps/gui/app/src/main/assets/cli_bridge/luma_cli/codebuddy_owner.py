@@ -7,24 +7,25 @@ import socket
 import subprocess
 import time
 from .codebuddy_http import CodeBuddyHttpPeer
+from .i18n import tr
 from .native_owner import NativeOwner, process_start
 from .transport import Rejected, spawn_process
 
 class CodeBuddyOwner(NativeOwner):
     def launch(self,overrides=None):
         if self.handle.get("kind"):
-            if self.handle["kind"]!="codebuddy-server" or not self.alive():raise Rejected("CodeBuddy 原生执行所有者不可用")
+            if self.handle["kind"]!="codebuddy-server" or not self.alive():raise Rejected(tr("CodeBuddy 原生执行所有者不可用", "CodeBuddy native execution owner unavailable"))
             return
         binary=shutil.which("codebuddy")
-        if not binary:raise Rejected("未找到 CodeBuddy Code；请在当前 Linux 终端安装 @tencent-ai/codebuddy-code 并运行 codebuddy → /login")
+        if not binary:raise Rejected(tr("未找到 CodeBuddy Code；请在当前 Linux 终端安装 @tencent-ai/codebuddy-code 并运行 codebuddy → /login", "CodeBuddy Code not found; install @tencent-ai/codebuddy-code in the current Linux terminal and run codebuddy -> /login"))
         try:
             probe=subprocess.run([binary,"--version"],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=15,check=False)
         except (OSError,subprocess.TimeoutExpired) as exc:
-            raise Rejected("CodeBuddy 版本探测失败；请在当前 Linux 终端核对已安装版本") from exc
+            raise Rejected(tr("CodeBuddy 版本探测失败；请在当前 Linux 终端核对已安装版本", "CodeBuddy version probe failed; check the installed version in the current Linux terminal")) from exc
         version=probe.stdout.decode("utf-8",errors="replace").strip()
         match=re.search(r"(\d+)\.(\d+)\.(\d+)",version)
         if probe.returncode or not match or tuple(map(int,match.groups()))<(2,180,0):
-            raise Rejected("CodeBuddy GUI 需要 2.180.0 或更新版本；请核对已安装版本")
+            raise Rejected(tr("CodeBuddy GUI 需要 2.180.0 或更新版本；请核对已安装版本", "CodeBuddy GUI requires 2.180.0 or newer; check the installed version"))
         sock=socket.socket();sock.bind(("127.0.0.1",0));port=sock.getsockname()[1];sock.close()
         password=secrets.token_urlsafe(36)
         file=self.directory/"codebuddy-gateway-password"
@@ -51,7 +52,7 @@ class CodeBuddyOwner(NativeOwner):
                 self.handle["connectionId"]=peer.connection_id;self.session.save()
                 return peer
             except (ConnectionError,OSError):
-                if not self.alive() or time.monotonic()>=deadline:raise Rejected("CodeBuddy 原生服务未能启动") from None
+                if not self.alive() or time.monotonic()>=deadline:raise Rejected(tr("CodeBuddy 原生服务未能启动", "CodeBuddy native server failed to start")) from None
                 time.sleep(.1)
 
     def stop(self, force=False):
@@ -67,7 +68,7 @@ class CodeBuddyOwner(NativeOwner):
             except ProcessLookupError: pass
             until=time.monotonic()+1
             while process_start(pid)==start and time.monotonic()<until:time.sleep(.05)
-        if not force and process_start(pid)==start:raise OSError("CodeBuddy 原生进程尚未退出")
+        if not force and process_start(pid)==start:raise OSError(tr("CodeBuddy 原生进程尚未退出", "CodeBuddy native process has not exited"))
         proc=getattr(self,"proc",None)
         if proc is not None:
             try: proc.wait(timeout=1)

@@ -5,9 +5,11 @@ import time
 import threading
 from .acp import AcpSession
 from .base import item, text, image_blocks
+from .i18n import tr
 
 from .transport import Rejected, Conflict
 from .metrics import acp_usage, cache_ratio, estimate_cost, number
+from .native_owner import non_mcp_background_child_alive
 
 PROTOCOL = "codebuddy-http-acp"
 SEMANTIC = {"user_message_chunk": "user", "agent_message_chunk": "assistant", "agent_thought_chunk": "reasoning"}
@@ -29,12 +31,12 @@ class CodeBuddyProjection(AcpSession):
         result = super().call(method,params,**kwargs)
         if submission:
             returned = result.get("_meta",{}).get("codebuddy.ai/conversationRequestId")
-            if returned and returned != self.config["codebuddyRequests"][submission]: raise ConnectionError("CodeBuddy 回合身份不匹配")
+            if returned and returned != self.config["codebuddyRequests"][submission]: raise ConnectionError(tr("CodeBuddy 回合身份不匹配", "CodeBuddy turn request ID mismatch"))
             if result.get("userMessageId"):
                 mapping = self.config.setdefault("codebuddyUserMessages",{})
                 native = result["userMessageId"]
-                if native in mapping and mapping[native] != submission: raise ConnectionError("CodeBuddy 原生消息已绑定其它提交")
-                if any(k!=native and v==submission for k,v in mapping.items()): raise ConnectionError("CodeBuddy 提交已绑定其它原生消息")
+                if native in mapping and mapping[native] != submission: raise ConnectionError(tr("CodeBuddy 原生消息已绑定其它提交", "CodeBuddy native message is already bound to another submission"))
+                if any(k!=native and v==submission for k,v in mapping.items()): raise ConnectionError(tr("CodeBuddy 提交已绑定其它原生消息", "CodeBuddy submission is already bound to another native message"))
                 mapping[native]=submission; self.save()
         return result
 
@@ -48,7 +50,7 @@ class CodeBuddyProjection(AcpSession):
     def answer(self,payload):
         raw=self.pending_requests.get(payload["id"])
         if raw and (raw.get("_codebuddyAskPermission") or raw.get("_codebuddyInterruption")):
-            if raw.get("_answerDispatched"):raise Rejected("此 CodeBuddy 答复已提交，结果待确认")
+            if raw.get("_answerDispatched"):raise Rejected(tr("此 CodeBuddy 答复已提交，结果待确认", "This CodeBuddy answer has already been submitted; awaiting confirmation"))
             option=next((v for v in raw["params"].get("options",[]) if v["optionId"]==payload["choice"]),None)
             allowed=option and option.get("kind") in ("allow_once","allow_always")
             answers={}
@@ -56,14 +58,14 @@ class CodeBuddyProjection(AcpSession):
                 for index,question in enumerate(raw["params"]["toolCall"].get("rawInput",{}).get("questions",[])):
                     ident=question.get("id") or f"q_{index}"
                     values=payload.get("answers",{}).get(ident,[])
-                    if not values or any(not isinstance(v,str) or not v.strip() for v in values):raise Rejected("请回答："+question.get("question",""))
-                    if not question.get("multiSelect") and len(values)!=1:raise Rejected("此问题只能提交一个答案")
+                    if not values or any(not isinstance(v,str) or not v.strip() for v in values):raise Rejected(tr("请回答：", "Please answer: ")+question.get("question",""))
+                    if not question.get("multiSelect") and len(values)!=1:raise Rejected(tr("此问题只能提交一个答案", "Only one answer can be submitted for this question"))
                     answers[ident]=values
-            elif not option and payload["choice"]!=raw.get("_cancelChoice"):raise Rejected("无效 CodeBuddy 答复选项")
+            elif not option and payload["choice"]!=raw.get("_cancelChoice"):raise Rejected(tr("无效 CodeBuddy 答复选项", "Invalid CodeBuddy answer choice"))
             raw["_answerDispatched"]=True
             result=self.call("_codebuddy.ai/resolveInterruption",{"sessionId":self.data["nativeId"],"toolCallId":raw["params"]["toolCall"]["toolCallId"],
                 "decision":option.get("_decision",("allowAll" if option.get("kind")=="allow_always" else "allow") if allowed else "deny") if option else "deny",**({"answers":answers} if allowed else {})})
-            if result.get("resolved") is not True:raise Rejected("CodeBuddy 问题已失效或尚未确认答复")
+            if result.get("resolved") is not True:raise Rejected(tr("CodeBuddy 问题已失效或尚未确认答复", "CodeBuddy question has expired or answer was not confirmed"))
             self.drain_permission(raw)
             self.answered(payload["id"]);return {}
         if not raw or not raw.get("_codebuddyQuestion"):return super().answer(payload)
@@ -73,11 +75,11 @@ class CodeBuddyProjection(AcpSession):
             answers={}
             for question in raw["params"]["schema"]["questions"]:
                 values=payload.get("answers",{}).get(question["id"],[])
-                if not values or any(not isinstance(v,str) or not v.strip() for v in values):raise Rejected("请回答："+question.get("question",""))
-                if not question.get("multiSelect") and len(values)!=1:raise Rejected("此问题只能提交一个答案")
+                if not values or any(not isinstance(v,str) or not v.strip() for v in values):raise Rejected(tr("请回答：", "Please answer: ")+question.get("question",""))
+                if not question.get("multiSelect") and len(values)!=1:raise Rejected(tr("此问题只能提交一个答案", "Only one answer can be submitted for this question"))
                 answers[question["id"]]=values
             result={"outcome":"submitted","answers":answers}
-        else:raise Rejected("无效 CodeBuddy 答复选项")
+        else:raise Rejected(tr("无效 CodeBuddy 答复选项", "Invalid CodeBuddy answer choice"))
         self.peer.send({"jsonrpc":"2.0","id":raw["id"],"result":result});self.answered(payload["id"]);return {}
 
     def apply_commands(self,commands):
@@ -98,11 +100,12 @@ class CodeBuddyProjection(AcpSession):
                     "_meta":{"lumaSubmissionId":ident}},on_uncertain=lambda error:self.diagnostic("codebuddy-steer-result-unknown",error))
                 if result.get("steered") is True:self.receipt(ident,"accepted")
                 elif result.get("steered") is False:
-                    self.receipt(ident,"rejected");self.update(error="CodeBuddy 未接纳插话（"+str(result.get("reason","not-steered"))+"）")
-                else:raise ConnectionError("CodeBuddy 插话返回缺少原生受理结果")
+                    reason = str(result.get("reason","not-steered"))
+                    self.receipt(ident,"rejected");self.update(error=tr(f"CodeBuddy 未接纳插话（{reason}）", f"CodeBuddy did not accept steer ({reason})"))
+                else:raise ConnectionError(tr("CodeBuddy 插话返回缺少原生受理结果", "CodeBuddy steer response lacked native acceptance result"))
             except Exception as error:
                 self.diagnostic("codebuddy-steer-result-unknown",error)
-                self.update(error="CodeBuddy 插话结果待确认（"+type(error).__name__+"）")
+                self.update(error=tr(f"CodeBuddy 插话结果待确认（{type(error).__name__}）", f"CodeBuddy steer result pending confirmation ({type(error).__name__})"))
         threading.Thread(target=dispatch,daemon=True,name="LumaCodeBuddySteer").start()
         return False
 
@@ -111,11 +114,11 @@ class CodeBuddyProjection(AcpSession):
 
     def validate_prompt(self,payload):
         super().validate_prompt(payload)
-        if len(payload.get("skills",[]))>1:raise Rejected("CodeBuddy 每条消息最多调用一个原生 Skill")
-        if any(k not in {v["id"] for v in self.data["skills"]} for k in payload.get("skills",[])):raise Rejected("Skill 不在 CodeBuddy 原生目录中")
+        if len(payload.get("skills",[]))>1:raise Rejected(tr("CodeBuddy 每条消息最多调用一个原生 Skill", "CodeBuddy allows at most one native skill per message"))
+        if any(k not in {v["id"] for v in self.data["skills"]} for k in payload.get("skills",[])):raise Rejected(tr("Skill 不在 CodeBuddy 原生目录中", "Skill is not in the CodeBuddy native catalog"))
         words=payload.get("text","").strip().split(maxsplit=1)
         if words and words[0].lower() in ("/clear","/new","/reset","/rewind","/fork","/branch","/fork-bg","/bg","/background"):
-            raise Rejected("此命令会改变托管会话身份或执行所有者；请使用新建会话")
+            raise Rejected(tr("此命令会改变托管会话身份或执行所有者；请使用新建会话", "This command changes the managed session identity or execution owner; start a new session instead"))
 
     def apply_options(self, options):
         super().apply_options(options)
@@ -136,8 +139,8 @@ class CodeBuddyProjection(AcpSession):
             cached=(usage.get("prompt_tokens_details") or {}).get("cached_tokens")
             prompt_tok=usage.get("prompt_tokens")
             out_tok=usage.get("completion_tokens") or 0
-            self.request_metrics=cache_ratio(cached,prompt_tok,"最近请求输入缓存命中")
-            if not any(r["label"].startswith(("CLI 记录费用","CLI 累计估算")) for r in self.acp_metrics):
+            self.request_metrics=cache_ratio(cached,prompt_tok,tr("最近请求输入缓存命中", "Last request input cache hit"))
+            if not any(r["label"].startswith(("CLI 记录费用","CLI 累计估算","CLI recorded cost","CLI estimated cost")) for r in self.acp_metrics):
                 uncached=max(0,(number(prompt_tok) or 0)-(number(cached) or 0))
                 self.request_metrics+=estimate_cost(model,uncached_input=uncached,cache_read=number(cached) or 0,output=number(out_tok) or 0)
         self.update(metrics=self.acp_metrics+getattr(self,"request_metrics",[]))
@@ -150,9 +153,9 @@ class CodeBuddyProjection(AcpSession):
         if expected and params.get("sessionId") and params["sessionId"] != expected: return
         if frame.get("method")=="_codebuddy.ai/question" and "id" in frame:
             questions=params.get("schema",{}).get("questions",[])
-            if params.get("inputType")!="question" or not isinstance(questions,list):raise Rejected("CodeBuddy 未提供可识别的问题表单")
+            if params.get("inputType")!="question" or not isinstance(questions,list):raise Rejected(tr("CodeBuddy 未提供可识别的问题表单", "CodeBuddy did not return a recognized question form"))
             raw={**frame,"_codebuddyQuestion":True,"_cancelChoice":"cancel"}
-            self.request(str(frame["id"]),raw,"Answer","",[{"id":"submit","label":"提交"},{"id":"cancel","label":"取消"}],
+            self.request(str(frame["id"]),raw,"Answer","",[{"id":"submit","label":tr("提交", "Submit")},{"id":"cancel","label":tr("取消", "Cancel")}],
                 [{"id":q["id"],"header":q.get("header",""),"prompt":q.get("question",""),"options":[v["label"] for v in q.get("options",[])],"multiple":bool(q.get("multiSelect"))} for q in questions],submit_choice="submit",skip_choice="cancel")
             return
         if frame.get("method")=="session/request_permission" and "id" in frame:
@@ -181,13 +184,13 @@ class CodeBuddyProjection(AcpSession):
             if tool_id in getattr(self,"resolved_interruption_tools",set()):return
             if not any(v.get("params",{}).get("toolCall",{}).get("toolCallId")==tool_id for v in self.pending_requests.values()):
                 ident=interruption["interruptionId"]
-                options=[{"optionId":v,"name":{"allow":"允许一次","allowAll":"始终允许","deny":"拒绝","rejectAndExitPlan":"拒绝并退出计划"}.get(v,v),
+                options=[{"optionId":v,"name":{"allow":tr("允许一次","Allow once"),"allowAll":tr("始终允许","Always allow"),"deny":tr("拒绝","Deny"),"rejectAndExitPlan":tr("拒绝并退出计划","Deny and exit plan")}.get(v,v),
                     "kind":{"allow":"allow_once","allowAll":"allow_always"}.get(v,"reject_once"),"_decision":v} for v in interruption.get("options",[])]
                 tool={"toolCallId":tool_id,"rawInput":interruption.get("toolInput") or {},"_meta":{"codebuddy.ai/toolName":interruption.get("toolName")}}
                 raw={"_codebuddyInterruption":True,"_cancelChoice":"cancel","params":{"toolCall":tool,"options":options}}
                 questions=tool["rawInput"].get("questions",[]) if interruption.get("toolName")=="AskUserQuestion" else []
-                self.request(ident,raw,interruption.get("toolTitle","工具授权"),json.dumps(tool["rawInput"],ensure_ascii=False),
-                    [{"id":v["optionId"],"label":v["name"]} for v in options]+[{"id":"cancel","label":"取消"}],
+                self.request(ident,raw,interruption.get("toolTitle",tr("工具授权","Tool permission")),json.dumps(tool["rawInput"],ensure_ascii=False),
+                    [{"id":v["optionId"],"label":v["name"]} for v in options]+[{"id":"cancel","label":tr("取消","Cancel")}],
                     [{"id":q.get("id") or f"q_{i}","header":q.get("header",""),"prompt":q.get("question",""),"options":[v["label"] for v in q.get("options",[])],"multiple":bool(q.get("multiSelect"))} for i,q in enumerate(questions)],
                     submit_choice="allow" if questions and "allow" in interruption.get("options",[]) else None,skip_choice="cancel")
             return
@@ -207,7 +210,7 @@ class CodeBuddyProjection(AcpSession):
             if kind in SEMANTIC: detail+=text(update.get("content"))
             elif kind in ("tool_call","tool_call_update"):
                 detail+="\n"+str(meta.get("codebuddy.ai/toolName") or update.get("title", ""))
-            self.subagent(ident,task=old.get("task","CodeBuddy 子代理任务"),detail=detail,status=old.get("status","running"),itemId="tool-"+parent)
+            self.subagent(ident,task=old.get("task",tr("CodeBuddy 子代理任务","CodeBuddy subagent task")),detail=detail,status=old.get("status","running"),itemId="tool-"+parent)
             return
         team=meta.get("codebuddy.ai/teamUpdate")
         if isinstance(team,dict):
@@ -289,16 +292,16 @@ class CodeBuddySession(CodeBuddyProjection):
 
     def connect(self):
         self.external_request = None; self.replaying_history = True; self.history_seen = set()
-        if self.config.setdefault("nativeProtocol","codebuddy-http-acp") != "codebuddy-http-acp":raise Rejected("CodeBuddy 原生协议身份不匹配")
+        if self.config.setdefault("nativeProtocol","codebuddy-http-acp") != "codebuddy-http-acp":raise Rejected(tr("CodeBuddy 原生协议身份不匹配", "CodeBuddy native protocol identity mismatch"))
         self.save()
         self.model_metadata = {}
         try: AcpSession.connect(self)
         finally: self.replaying_history = False
         self.finish_chunk(); self.chunk_kind = self.chunk_id = None
-        self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False, notice="CodeBuddy 使用安全 GUI 接入，不提供同会话原生终端。",
+        self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False, notice=tr("CodeBuddy 使用安全 GUI 接入，不提供同会话原生终端。", "CodeBuddy uses secure GUI attachment without a shared native terminal."),
             capabilities={**self.data["capabilities"],"steer":True})
         controls=self.config.get("codebuddyControls",{})
-        if any(self.data.get(k)!=v for k,v in controls.items()):raise Rejected("CodeBuddy 尚未恢复已确认的会话设置")
+        if any(self.data.get(k)!=v for k,v in controls.items()):raise Rejected(tr("CodeBuddy 尚未恢复已确认的会话设置", "CodeBuddy has not restored confirmed session settings"))
         self.update_model_capabilities()
         self.refresh()
 
@@ -327,7 +330,7 @@ class CodeBuddySession(CodeBuddyProjection):
     def configure(self,payload):
         effort=payload.get("effort")
         current=next((m for m in self.data["models"] if m["id"]==payload.get("model",self.data["model"])),None)
-        if effort and current is not None and effort not in current.get("efforts",[]):raise Rejected("当前 CodeBuddy 模型未声明此思考强度")
+        if effort and current is not None and effort not in current.get("efforts",[]):raise Rejected(tr("当前 CodeBuddy 模型未声明此思考强度", "Current CodeBuddy model does not support this effort level"))
         result=AcpSession.configure(self,payload)
         self.update_model_capabilities()
         self.config["codebuddyControls"]={k:self.data[k] for k in ("permission","effort") if self.data.get(k)}
@@ -339,21 +342,47 @@ class CodeBuddySession(CodeBuddyProjection):
         self.update(capabilities={**self.data["capabilities"],"images":bool(current.get("supportsImages"))})
 
     def release_mode(self): return AcpSession.release_mode(self)
+
+    def fast_release_blocker(self):
+        with self.lock:
+            blocker = super().fast_release_blocker()
+            if blocker is not None:
+                return blocker
+            if getattr(self, "external_request", None):
+                return tr("原生回合尚未结算", "Native turn has not settled")
+            return None
+
+    def release_blocker(self):
+        blocker = super().release_blocker()
+        if blocker is not None:
+            return blocker
+        with self.lock:
+            owner = getattr(self, "owner", None)
+            cand = owner.handle.get("pid") if owner else None
+            pid = cand if isinstance(cand, int) and cand > 0 else None
+        if pid is None:
+            return None
+        return self.cached_snapshot_probe(
+            ("codebuddy-owner-bg", pid),
+            lambda: tr("后台子进程仍在运行", "Background subprocess is still running")
+            if non_mcp_background_child_alive(pid) else None,
+            pending_value=tr("正在确认后台子进程状态", "Checking background subprocess status"),
+        )
     def refresh(self):
         result=self.call("_codebuddy.ai/goalControl",{"sessionId":self.data["nativeId"],"action":"snapshot"})
         if result.get("ok") is not True or result.get("applied")!="snapshot" or not isinstance(result.get("runInFlight"),bool):
-            raise Rejected("CodeBuddy 未返回可确认的原生运行状态")
+            raise Rejected(tr("CodeBuddy 未返回可确认的原生运行状态", "CodeBuddy did not return a confirmable native run state"))
         if self.current_submission is None:self.update(running=result["runInFlight"])
         connection=None
         try:
             connection,response=self.peer.request("GET","/api/v1/mcp/servers")
-            if response.status!=200:raise Rejected("无法获取 MCP")
+            if response.status!=200:raise Rejected(tr("无法获取 MCP", "Unable to fetch MCP servers"))
             data=json.loads(response.read(1024*1024+1)).get("data",[])
-            if not isinstance(data,list):raise Rejected("无法获取 MCP")
+            if not isinstance(data,list):raise Rejected(tr("无法获取 MCP", "Unable to fetch MCP servers"))
             self.update(mcp=[{"name":v["name"],"detail":" · ".join(str(v[k]) for k in ("transport","scope","status") if v.get(k))} for v in data if isinstance(v,dict) and isinstance(v.get("name"),str)],mcpAvailable=True,mcpError=None)
         except Exception:
-            self.update(mcpAvailable=True,mcpError="无法获取 MCP")
+            self.update(mcpAvailable=True,mcpError=tr("无法获取 MCP", "Unable to fetch MCP servers"))
         finally:
             if connection:self.peer.finish(connection)
         return {}
-    def terminal(self): raise Rejected("CodeBuddy 当前未提供安全的同执行所有者交互终端")
+    def terminal(self): raise Rejected(tr("CodeBuddy 当前未提供安全的同执行所有者交互终端", "CodeBuddy currently does not provide a secure shared interactive terminal"))

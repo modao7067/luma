@@ -45,11 +45,11 @@ final class RootBackend implements AutoCloseable {
             try {
                 Files.write(temp.toPath(),value.getBytes(StandardCharsets.UTF_8));
                 try {Os.chmod(temp.getAbsolutePath(),0600);} catch(Exception e){throw new IOException(e);}
-                if(!temp.renameTo(tokenFile))throw new IOException("无法保存后端认证文件");
+                if(!temp.renameTo(tokenFile))throw new IOException(com.termux.terminal.LumaLang.tr("无法保存后端认证文件","Failed to save backend auth token"));
             } finally {temp.delete();}
         }
         token=new String(Files.readAllBytes(tokenFile.toPath()),StandardCharsets.UTF_8).trim();
-        if(!token.matches("[a-f0-9]{64}"))throw new IOException("后端认证文件无效");
+        if(!token.matches("[a-f0-9]{64}"))throw new IOException(com.termux.terminal.LumaLang.tr("后端认证文件无效","Invalid backend auth token"));
         socketName="luma.root.direct."+uid+"."+token.substring(0,12);
     }
 
@@ -64,7 +64,7 @@ final class RootBackend implements AutoCloseable {
             try {write(value);} catch(IOException e){disconnectSocket();}
         });} catch(RejectedExecutionException ignored) {
             disconnectSocket();
-            main.post(()->{if(!closed)listener.onDisconnected("连接繁忙，正在重新连接");});
+            main.post(()->{if(!closed)listener.onDisconnected(com.termux.terminal.LumaLang.tr("连接繁忙，正在重新连接","Connection busy; reconnecting"));});
         }
     }
 
@@ -80,7 +80,7 @@ final class RootBackend implements AutoCloseable {
         LocalSocket current=new LocalSocket();
         try {
             current.connect(new LocalSocketAddress(socketName,LocalSocketAddress.Namespace.ABSTRACT));
-            if(current.getPeerCredentials().getUid()!=0)throw new IOException("后端连接身份不是 Root");
+            if(current.getPeerCredentials().getUid()!=0)throw new IOException(com.termux.terminal.LumaLang.tr("后端连接身份不是 Root","Backend peer UID is not root"));
             return current;
         }
         catch(IOException e){current.close();throw e;}
@@ -94,9 +94,9 @@ final class RootBackend implements AutoCloseable {
             int value=input.read();
             FileDescriptor[] received=socket.getAncillaryFileDescriptors();
             if(received!=null)for(FileDescriptor fd:received)descriptors.add(fd);
-            if(value<0)throw new EOFException("PTY 连接已断开");
+            if(value<0)throw new EOFException(com.termux.terminal.LumaLang.tr("PTY 连接已断开","PTY connection closed"));
             if(value=='\n')return new JSONObject(data.toString("UTF-8"));
-            if(data.size()>=128*1024)throw new IOException("PTY 响应过大");
+            if(data.size()>=128*1024)throw new IOException(com.termux.terminal.LumaLang.tr("PTY 响应过大","PTY response too large"));
             data.write(value);
         }
     }
@@ -107,17 +107,17 @@ final class RootBackend implements AutoCloseable {
             try{
                 current=connect();current.setSoTimeout(15000);
                 OutputStream out=current.getOutputStream();
-                out.write((new JSONObject().put("op","hello").put("token",token).put("role","lease").toString()+"\n").getBytes(StandardCharsets.UTF_8));
+                out.write((new JSONObject().put("op","hello").put("token",token).put("role","lease").put("lang",com.termux.terminal.LumaLang.code()).toString()+"\n").getBytes(StandardCharsets.UTF_8));
                 JSONObject greeting=readPacket(current,descriptors);
-                if(greeting.optInt("version")!=3)throw new IOException("Ubuntu 后端版本不匹配");
+                if(greeting.optInt("version")!=3)throw new IOException(com.termux.terminal.LumaLang.tr("Ubuntu 后端版本不匹配","Ubuntu backend version mismatch"));
                 boolean sharedModes=greeting.optBoolean("modeMetadataFd");
                 if(sharedModes)current.setFileDescriptorsForSend(new FileDescriptor[]{modes.descriptor()});
                 out.write((new JSONObject().put("op","lease").put("id",id).put("modeMetadataFd",sharedModes).toString()+"\n").getBytes(StandardCharsets.UTF_8));
                 current.setFileDescriptorsForSend(null);
                 JSONObject response=readPacket(current,descriptors);
-                if(!response.optString("event").equals("leased"))throw new IOException(response.optString("message","无法接回窗口"));
+                if(!response.optString("event").equals("leased"))throw new IOException(response.optString("message",com.termux.terminal.LumaLang.tr("无法接回窗口","Failed to reattach window")));
                 if(response.optBoolean("hasFd")){
-                    if(descriptors.size()!=1)throw new IOException("未收到 PTY 文件描述符");
+                    if(descriptors.size()!=1)throw new IOException(com.termux.terminal.LumaLang.tr("未收到 PTY 文件描述符","Did not receive PTY file descriptor"));
                     pty=new DirectPty(current,descriptors.remove(0));current=null;
                 }
                 response.put("modeStateCaps",greeting.optInt("modeStateCaps",0));
@@ -125,7 +125,7 @@ final class RootBackend implements AutoCloseable {
                 main.post(()->{if(closed){if(adopted!=null)adopted.release();}else target.onPty(adopted,response);});
             }catch(Exception e){
                 if(pty!=null)pty.release();
-                String message=e.getMessage()==null?"PTY 连接失败":e.getMessage();
+                String message=e.getMessage()==null?com.termux.terminal.LumaLang.tr("PTY 连接失败","PTY connection failed"):e.getMessage();
                 main.post(()->{if(!closed)target.onError(message);});
             }finally{
                 for(FileDescriptor fd:descriptors)try{Os.close(fd);}catch(Exception ignored){}
@@ -137,10 +137,10 @@ final class RootBackend implements AutoCloseable {
     private static String quote(String value){return "'"+value.replace("'","'\"'\"'")+"'";}
 
     private String installPrivateKeeper() throws Exception {
-        File directory=new File(app.getFilesDir(),"root-keeper-v2");
+        File directory=new File(app.getFilesDir(),"root-keeper-v3");
         if(!directory.isDirectory()){
             File staging=new File(app.getFilesDir(),"root-keeper-"+UUID.randomUUID());
-            if(!staging.mkdir())throw new IOException("无法创建私有 Root 后端目录");
+            if(!staging.mkdir())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建私有 Root 后端目录","Failed to create private Root backend directory"));
             Os.chmod(staging.getAbsolutePath(),0700);
             try {
                 for(String name:new String[]{"daemon.py","mode_state.py"}){
@@ -148,7 +148,7 @@ final class RootBackend implements AutoCloseable {
                     try(InputStream input=app.getAssets().open("root-keeper/"+name);OutputStream out=new FileOutputStream(target)){input.transferTo(out);}
                     Os.chmod(target.getAbsolutePath(),0600);
                 }
-                if(!staging.renameTo(directory))throw new IOException("无法发布私有 Root 后端");
+                if(!staging.renameTo(directory))throw new IOException(com.termux.terminal.LumaLang.tr("无法发布私有 Root 后端","Failed to publish private Root backend"));
             }finally{for(File file:staging.listFiles()==null?new File[0]:staging.listFiles())file.delete();staging.delete();}
         }
         return "/proc/1/root"+new File(directory,"daemon.py").getAbsolutePath();
@@ -159,13 +159,13 @@ final class RootBackend implements AutoCloseable {
         if(privateKeeper)daemon=installPrivateKeeper();
         boolean builtin=RootEntry.usesBuiltinChroot(app);
         String entry=RootEntry.launcher(app);
-        String command="exec "+(builtin?quote(entry):entry)+" /usr/bin/python3 -I "+(privateKeeper?"-B ":"")+quote(daemon)+" --daemonize --socket "
+        String command="exec "+(builtin?quote(entry):entry)+" /usr/bin/env LUMA_LANG="+quote(com.termux.terminal.LumaLang.code())+" /usr/bin/python3 -I "+(privateKeeper?"-B ":"")+quote(daemon)+" --daemonize --socket "
             +quote(socketName)+" --uid "+uid+" --token-file "+quote("/proc/1/root"+tokenFile.getAbsolutePath());
         Process process;
         try {
             process=new ProcessBuilder(RootEntry.suExecutable(),"-c",command).redirectErrorStream(true).start();
         } catch(IOException startError) {
-            if(builtin)throw new IOException("没拿到 Root 权限。用临时 Root 的话，重新激活后再试",startError);
+            if(builtin)throw new IOException(com.termux.terminal.LumaLang.tr("没拿到 Root 权限。用临时 Root 的话，重新激活后再试","Root permission denied. If using temporary Root, re-activate it and try again"),startError);
             throw startError;
         }
         ByteArrayOutputStream errors=new ByteArrayOutputStream();
@@ -175,14 +175,14 @@ final class RootBackend implements AutoCloseable {
                 while((n=in.read(data))!=-1)if(errors.size()<8192)errors.write(data,0,Math.min(n,8192-errors.size()));
             }catch(IOException ignored){}
         },"LumaRootBootstrap");drain.setDaemon(true);drain.start();
-        if(!process.waitFor(15,TimeUnit.SECONDS)){process.destroy();throw new IOException("Root 后端启动超时");}
+        if(!process.waitFor(15,TimeUnit.SECONDS)){process.destroy();throw new IOException(com.termux.terminal.LumaLang.tr("Root 后端启动超时","Root backend startup timed out"));}
         drain.join(500);
         if(process.exitValue()!=0){
             if(builtin){
                 String detail=errors.toString("UTF-8").trim();
-                throw new IOException(detail.isEmpty()?"Root 模式后端没启动起来。用临时 Root 的话，确认 Root 还在后再试":detail);
+                throw new IOException(detail.isEmpty()?com.termux.terminal.LumaLang.tr("Root 模式后端没启动起来。用临时 Root 的话，确认 Root 还在后再试","Root backend failed to start. If using temporary Root, confirm Root is active and try again"):detail);
             }
-            throw new IOException(privateKeeper?"Ubuntu Root 后端启动失败，请确认 Root 授权与 /data/local/linux/bin/ubuntu 可用":"Ubuntu 后端不可用，请确认 /opt/luma-root/daemon.py 已安装且 Root 授权可用");
+            throw new IOException(privateKeeper?com.termux.terminal.LumaLang.tr("Ubuntu Root 后端启动失败，请确认 Root 授权与 /data/local/linux/bin/ubuntu 可用","Failed to start Ubuntu Root backend; check Root access and /data/local/linux/bin/ubuntu"):com.termux.terminal.LumaLang.tr("Ubuntu 后端不可用，请确认 /opt/luma-root/daemon.py 已安装且 Root 授权可用","Ubuntu backend unavailable; check /opt/luma-root/daemon.py and Root access"));
         }
     }
 
@@ -193,7 +193,7 @@ final class RootBackend implements AutoCloseable {
                 LocalSocket current;
                 try {current=connect();}
                 catch(IOException first){
-                    if(!bootstrapAllowed)throw new IOException("Ubuntu 后端未连接，请在窗口列表中重试后端连接");
+                    if(!bootstrapAllowed)throw new IOException(com.termux.terminal.LumaLang.tr("Ubuntu 后端未连接，请在窗口列表中重试后端连接","Ubuntu backend not connected; retry connection from the windows list"));
                     bootstrapAllowed=false;launch();current=connect();
                 }
                 if(closed){current.close();return;}
@@ -201,19 +201,19 @@ final class RootBackend implements AutoCloseable {
                 lastError=null;
                 synchronized(outputLock){
                     output=new BufferedWriter(new OutputStreamWriter(current.getOutputStream(),StandardCharsets.UTF_8));
-                    write(new JSONObject().put("op","hello").put("token",token));
+                    write(new JSONObject().put("op","hello").put("token",token).put("lang",com.termux.terminal.LumaLang.code()));
                 }
                 try(BufferedReader input=new BufferedReader(new InputStreamReader(current.getInputStream(),StandardCharsets.UTF_8))) {
                     String line;
                     while(!closed && (line=input.readLine())!=null) {
-                        if(line.length()>128*1024)throw new IOException("后端响应过大");
+                        if(line.length()>128*1024)throw new IOException(com.termux.terminal.LumaLang.tr("后端响应过大","Backend response too large"));
                         JSONObject event=new JSONObject(line);
                         deliver(()->listener.onEvent(event));
                     }
                 }
-                if(!closed)throw new IOException("连接已断开，正在重连原窗口");
+                if(!closed)throw new IOException(com.termux.terminal.LumaLang.tr("连接已断开，正在重连原窗口","Connection lost; reconnecting to window"));
             }catch(Exception e){
-                String message=e.getMessage()==null?"后端连接失败":e.getMessage();
+                String message=e.getMessage()==null?com.termux.terminal.LumaLang.tr("后端连接失败","Backend connection failed"):e.getMessage();
                 if(!closed&&!message.equals(lastError)){lastError=message;deliver(()->listener.onDisconnected(message));}
             }
             finally {disconnectSocket();}

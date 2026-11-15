@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import java.io.IOException
@@ -22,14 +24,14 @@ internal class OpenCodeSyncOutage(private val nanoTime: () -> Long = System::nan
         latest = failure
         if (!retryable(failure)) {
             terminal = true
-            notice = "OpenCode 无法同步，请检查认证或配置：${failure.message ?: "未知错误"}"
+            notice = tr("OpenCode 无法同步，请检查认证或配置：${failure.message ?: "未知错误"}", "OpenCode failed to sync; check auth or config: ${failure.message ?: "Unknown error"}")
             announced = true
         } else noticeIfDue()
     }
 
     fun noticeIfDue() {
         if (active && !announced && remainingMillis == 0L) {
-            notice = "OpenCode 状态暂未同步，正在重试：${latest?.message ?: "连接中断"}"
+            notice = tr("OpenCode 状态暂未同步，正在重试：${latest?.message ?: "连接中断"}", "OpenCode status out of sync, retrying: ${latest?.message ?: "Disconnected"}")
             announced = true
         }
     }
@@ -98,7 +100,7 @@ internal class OpenCodeSync(
                     full = false; catalog = false; dirtyMessages.clear()
                     try { refresh(all, ids, models) }
                     catch (failure: Exception) { catalog = catalog || models; throw failure }
-                    if (!streamConnected() || epoch != streamEpoch) throw IOException("OpenCode 事件连接已断开")
+                    if (!streamConnected() || epoch != streamEpoch) throw IOException(tr("OpenCode 事件连接已断开", "OpenCode event stream disconnected"))
                     if (all) {
                         outage.recovered(); noticeTimer?.cancel(); noticeTimer = null
                         changed(State(connected = true, recovering = false, notice = null))

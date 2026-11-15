@@ -86,11 +86,11 @@ public final class TerminalPaste {
         int status = emulator.pasteStatus(text, false);
         if (status == TerminalEmulator.PASTE_WRITTEN || status == TerminalEmulator.PASTE_NOTHING) return null;
         if (status == TerminalEmulator.PASTE_TOO_LARGE) {
-            Toast.makeText(activity, "粘贴内容过大，未写入", Toast.LENGTH_SHORT).show();
+            Toast.makeText(activity, com.termux.terminal.LumaLang.tr("粘贴内容过大，未写入", "Paste too large; nothing written"), Toast.LENGTH_SHORT).show();
             return null;
         }
         if (status != TerminalEmulator.PASTE_NEEDS_CONFIRMATION) {
-            Toast.makeText(activity, "粘贴失败，未写入", Toast.LENGTH_SHORT).show();
+            Toast.makeText(activity, com.termux.terminal.LumaLang.tr("粘贴失败，未写入", "Paste failed; nothing written"), Toast.LENGTH_SHORT).show();
             return null;
         }
         Request request = new Request(new ActivityHost(activity, selection), session, emulator, text);
@@ -99,8 +99,8 @@ public final class TerminalPaste {
     }
 
     private static void showConfirm(Activity activity, Request request) {
-        LumaUi.Sheet sheet = new LumaUi.Sheet(activity, "粘贴可能执行的文本？",
-            "文本包含换行或括号粘贴终止序列。确认后才会写入，取消不会发送任何内容。");
+        LumaUi.Sheet sheet = new LumaUi.Sheet(activity, com.termux.terminal.LumaLang.tr("粘贴可能执行的文本？", "Paste text that may execute?"),
+            com.termux.terminal.LumaLang.tr("文本包含换行或括号粘贴终止序列。确认后才会写入，取消不会发送任何内容。", "The text contains newlines or bracketed-paste end sequences. Confirm to send, or cancel to discard."));
         sheet.dialog.setOnDismissListener(dialog -> request.cancel());
 
         TextView preview = new TextView(activity);
@@ -116,15 +116,15 @@ public final class TerminalPaste {
         preview.setBackground(LumaUi.roundedRect(0x14ffffff, LumaUi.dp(activity, 14), 1, 0x1affffff));
         sheet.body.addView(preview, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView paste = LumaUi.primaryButton(activity, "粘贴", v -> {
+        TextView paste = LumaUi.primaryButton(activity, com.termux.terminal.LumaLang.tr("粘贴", "Paste"), v -> {
             int status = request.approve();
             sheet.dismiss();
             if (status == TerminalEmulator.PASTE_TOO_LARGE)
-                Toast.makeText(activity, "粘贴内容过大，未写入", Toast.LENGTH_SHORT).show();
+                Toast.makeText(activity, com.termux.terminal.LumaLang.tr("粘贴内容过大，未写入", "Paste too large; nothing written"), Toast.LENGTH_SHORT).show();
             else if (status == TerminalEmulator.PASTE_ERROR)
-                Toast.makeText(activity, "粘贴失败，未写入", Toast.LENGTH_SHORT).show();
+                Toast.makeText(activity, com.termux.terminal.LumaLang.tr("粘贴失败，未写入", "Paste failed; nothing written"), Toast.LENGTH_SHORT).show();
         });
-        TextView cancel = LumaUi.secondaryButton(activity, "取消", v -> {
+        TextView cancel = LumaUi.secondaryButton(activity, com.termux.terminal.LumaLang.tr("取消", "Cancel"), v -> {
             request.cancel();
             sheet.dismiss();
         });

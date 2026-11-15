@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.ConversationItem
 import io.github.modao7067.luma.gui.session.RequestQuestion
 import io.github.modao7067.luma.gui.session.UserRequest
@@ -19,7 +21,7 @@ object CodexAsyncQuestions {
         return item.optJSONArray("questions")?.objects()?.mapIndexed { index, q ->
             val options = q.optJSONArray("options")?.strings().orEmpty()
             RequestQuestion(JSONArray(listOf("request_user_input_async", itemId, index)).toString(),
-                "问题 ${index + 1}", q.getString("title"), options,
+                tr("问题 ${index + 1}", "Question ${index + 1}"), q.getString("title"), options,
                 defaultSelection = options.take(1))
         }.orEmpty()
     }
@@ -35,7 +37,7 @@ object CodexAsyncQuestions {
     }
 
     fun displayReply(text: String): String = replies(text).takeIf { it.isNotEmpty() }
-        ?.joinToString("\n\n") { "回复：${it.question}\n${it.answer}" } ?: text
+        ?.joinToString("\n\n") { tr("回复：${it.question}\n${it.answer}", "Reply: ${it.question}\n${it.answer}") } ?: text
 
     fun pending(items: Collection<ConversationItem>, nativeQueuedTexts: List<String> = emptyList(), submissions: List<Submission> = emptyList()): List<UserRequest> {
         val answered = (items.filter { it.role == "user" && it.nativeInputEvidence }.flatMap { replies(it.userContent?.text ?: it.text) } +
@@ -49,12 +51,12 @@ object CodexAsyncQuestions {
     }
 
     fun reply(request: UserRequest, answers: Map<String, List<String>>): String {
-        require(!request.answering) { "答复结果尚待确认，不会再次发送" }
-        require(answers.isNotEmpty() && answers.keys.all { key -> request.questions.any { it.id == key } }) { "问题已答复或不属于此请求" }
+        require(!request.answering) { tr("答复结果尚待确认，不会再次发送", "Reply confirmation is still pending; will not resend") }
+        require(answers.isNotEmpty() && answers.keys.all { key -> request.questions.any { it.id == key } }) { tr("问题已答复或不属于此请求", "Question already answered or does not belong to this request") }
         val rows = JSONArray()
         request.questions.filter { it.id in answers }.forEach { q ->
             val answer = answers.getValue(q.id)
-            require(answer.size == 1 && answer.single().isNotBlank()) { "请选择选项或填写回答" }
+            require(answer.size == 1 && answer.single().isNotBlank()) { tr("请选择选项或填写回答", "Select an option or enter a reply") }
             rows.put(obj("answer" to answer.single(), "question" to q.prompt, "questionItemId" to q.id))
         }
         return "$open\n$rows\n$close"
@@ -62,9 +64,9 @@ object CodexAsyncQuestions {
 
     fun submissionId(text: String, previous: List<Submission>): String {
         val ids = replies(text).map { it.questionId }.toSet()
-        require(ids.isNotEmpty()) { "答复缺少原生问题标识" }
+        require(ids.isNotEmpty()) { tr("答复缺少原生问题标识", "Reply is missing native question ID") }
         val related = previous.filter { old -> replies(old.text).any { it.questionId in ids } }
-        check(related.none { it.state !in setOf("rejected", "cancelled") }) { "答复已发送，等待原生确认" }
+        check(related.none { it.state !in setOf("rejected", "cancelled") }) { tr("答复已发送，等待原生确认", "Reply already sent; awaiting native confirmation") }
         return UUID.nameUUIDFromBytes(("luma-codex-async\n" + ids.sorted().joinToString("\n") + "\nattempt:${related.size}").toByteArray(Charsets.UTF_8)).toString()
     }
 }

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
@@ -23,12 +25,12 @@ internal class SessionCommandStore(file: File) {
                     row.optString("error").takeIf { !row.isNull("error") })
                 check(entries.put(entry.requestId, entry) == null)
             }
-        } catch (_: Exception) { error = "命令账本无法读取，原文件已保留；create/send 已停止以免重复执行"; entries.clear() }
+        } catch (_: Exception) { error = tr("命令账本无法读取，原文件已保留；create/send 已停止以免重复执行", "Command ledger unreadable (original file kept); create/send halted to prevent duplicate execution"); entries.clear() }
     }
     fun reserve(request: JSONObject, sessionId: String, submissionId: String? = null): Entry {
         check(error == null) { error!! }
         val key = request.getString("requestId")
-        check(key !in entries) { "requestId 已存在" }
+        check(key !in entries) { tr("requestId 已存在", "requestId already exists") }
         val entry = Entry(key, SessionManagementProtocol.canonical(request), sessionId, submissionId)
         entries[key] = entry
         try { save() } catch (e: Exception) { entries.remove(key); throw e }
@@ -37,7 +39,7 @@ internal class SessionCommandStore(file: File) {
     fun existing(request: JSONObject): Entry? {
         check(error == null) { error!! }
         return entries[request.getString("requestId")]?.also {
-            require(it.payload == SessionManagementProtocol.canonical(request)) { "requestId 已用于另一份请求；不会执行不同负载" }
+            require(it.payload == SessionManagementProtocol.canonical(request)) { tr("requestId 已用于另一份请求；不会执行不同负载", "requestId already used for a different payload") }
         }
     }
     fun update(entry: Entry, state: String, error: String? = null) {

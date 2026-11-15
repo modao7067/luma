@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -38,22 +40,22 @@ import io.github.modao7067.luma.gui.ui.thirdparty.miuix.LocalOverScrollState
 import io.github.modao7067.luma.gui.ui.thirdparty.miuix.overScrollVertical
 
 internal fun subAgentStatus(status: String) = when (status) {
-    "pending" -> "等待中"
-    "running" -> "进行中"
-    "succeeded" -> "已完成"
-    "failed" -> "失败"
-    "cancelled" -> "已取消"
-    "closed" -> "已关闭"
-    else -> "状态待确认"
+    "pending" -> tr("等待中", "Pending")
+    "running" -> tr("进行中", "Running")
+    "succeeded" -> tr("已完成", "Done")
+    "failed" -> tr("失败", "Failed")
+    "cancelled" -> tr("已取消", "Cancelled")
+    "closed" -> tr("已关闭", "Closed")
+    else -> tr("状态待确认", "Pending")
 }
 
 internal fun subAgentTitle(agent: SubAgentState): String = agent.name.ifBlank {
-    if (agent.id.length > 20) "子代理 · ${agent.id.takeLast(8)}" else agent.id
+    if (agent.id.length > 20) tr("子代理 · ${agent.id.takeLast(8)}", "Sub-agent · ${agent.id.takeLast(8)}") else agent.id
 }
 
 internal fun subAgentProcessItem(agent: SubAgentState) = ConversationItem(
     "subagent:${agent.id}", "tool",
-    text = agent.name.ifBlank { if (agent.id.length > 20) "Subagent · ${agent.id.takeLast(8)}" else agent.id },
+    text = subAgentTitle(agent),
     detail = agent.detail, input = agent.task, kind = "subAgent", outcome = agent.status,
     status = subAgentStatus(agent.status), toolName = agent.role, toolKind = agent.id, turnId = agent.turnId,
 )
@@ -79,7 +81,7 @@ internal fun SubAgentEntry(item: ConversationItem, initiallyExpanded: Boolean, p
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().clip(LumaCardShape(12.dp))
             .clickable { expanded = !expanded }
-            .semantics { stateDescription = "${item.status} · ${if (expanded) "收起" else "展开"}子代理详情" }
+            .semantics { stateDescription = "${item.status} · ${if (expanded) tr("收起子代理详情", "Collapse sub-agent details") else tr("展开子代理详情", "Expand sub-agent details")}" }
             .padding(horizontal = 6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             CompositionLocalProvider(LocalContentColor provides tint) { MenuIcon(MenuSymbol.MODEL, size = 20.dp) }
@@ -133,7 +135,7 @@ internal fun SubAgentDetailHeader(
     DetailPageHeader(
         title = subAgentTitle(detail.agent),
         subtitle = modelEffortLabel(detail.modelLabel, detail.effort),
-        backLabel = "返回父会话",
+        backLabel = tr("返回父会话", "Back to parent session"),
         onBack = onBack,
     ) {
         LiquidGlass(
@@ -281,7 +283,7 @@ internal fun SubAgentDetailScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Text(
-                                if (failed) "错误" else "结果",
+                                if (failed) tr("错误", "Error") else tr("结果", "Result"),
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                 color = if (failed) colors.error else colors.onSurfaceVariant,
                             )
@@ -319,7 +321,7 @@ internal fun SubAgentTaskBlock(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                "任务",
+                tr("任务", "Task"),
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = colors.onSurfaceVariant,
             )
@@ -330,7 +332,7 @@ internal fun SubAgentTaskBlock(
                     modifier = Modifier.height(30.dp),
                 ) {
                     Text(
-                        if (expanded) "收起任务" else "展开任务",
+                        if (expanded) tr("收起任务", "Collapse task") else tr("展开任务", "Expand task"),
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
@@ -370,7 +372,7 @@ internal fun SubAgentPopupItems(
     }
     current.forEach { agent -> key(agent.id) { AgentRow(agent) } }
     if (history.isNotEmpty()) {
-        ActionMenuItem(label = "历史", icon = MenuSymbol.FOLDER, badge = history.size.toString(),
+        ActionMenuItem(label = tr("历史", "History"), icon = MenuSymbol.FOLDER, badge = history.size.toString(),
             trailing = if (historyExpanded) MenuSymbol.UP else MenuSymbol.DOWN, enabled = enabled, onClick = onToggleHistory)
         AnimatedVisibility(historyExpanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
             CompositionLocalProvider(LocalMenuActive provides (menuActive && enabled && historyExpanded)) {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sqlite3
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -12,6 +13,9 @@ from .global_usage import (
     _lookup_model_rate,
     _price_record,
 )
+from .i18n import tr
+
+_SAFE_NATIVE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
 
 MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("gpt-4.1", 1_047_576),
@@ -23,6 +27,8 @@ MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("o3", 200_000),
     ("o4-", 200_000),
     ("claude-", 200_000),
+    ("gemini-4-", 256_000),
+    ("gemini-pro-orchestrator", 256_000),
     ("gemini-", 1_048_576),
     ("deepseek-", 128_000),
     ("grok-4", 256_000),
@@ -46,7 +52,10 @@ def number(value):
     return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
 def count(value):
-    return format(Decimal(str(value)).normalize(), 'f')
+    d = Decimal(str(value))
+    if d.is_finite() and d == 0:
+        return '0'
+    return format(d.normalize(), 'f')
 
 def row(label, value):
     return {'label': label, 'value': str(value)}
@@ -71,6 +80,8 @@ def _clean_model_name(model: Any) -> str:
             pass
     if '/' in m:
         m = m.split('/')[-1].strip()
+    if m.lower().endswith(':free'):
+        m = m[:-5].strip()
     if ':' in m and not m.lower().endswith(':fast'):
         m = m.split(':')[-1].strip()
     return m
@@ -98,13 +109,23 @@ def context(used, size=None, percent=None, model=None):
     if size is not None and size > 0:
         pct = number(percent)
         value += f' / {count(size)} · {percentage(used, size) if pct is None else percentage(pct, 100)}%'
-    return [row('上下文', value)]
+    return [row(tr('上下文', 'Context'), value)]
 
 def cost(amount, currency, estimated=False):
     amount = number(amount)
     if amount is None or not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
         return []
-    return [row(('CLI 累计估算' if estimated else 'CLI 记录费用') + ' · ' + currency.upper(), count(amount))]
+    prefix = tr('CLI 累计估算', 'CLI estimated cost') if estimated else tr('CLI 记录费用', 'CLI recorded cost')
+    return [row(prefix + ' · ' + currency.upper(), count(amount))]
+
+def _estimated_cost_rows(amount: float) -> list[dict[str, str]]:
+    val = number(amount)
+    if val is None or val <= 0.0:
+        return []
+    rounded = round(val, 6)
+    if rounded == 0.0:
+        rounded = float(f'{val:.6g}')
+    return cost(rounded, 'USD', estimated=True)
 
 def estimate_cost(
     model: Any,
@@ -139,15 +160,17 @@ def estimate_cost(
     cost_usd = number(priced.get('costUsd'))
     if cost_usd is None:
         return []
-    return cost(round(cost_usd, 6), 'USD', estimated=True)
+    return _estimated_cost_rows(cost_usd)
 
-def cache_ratio(read, total, label='缓存命中'):
+def cache_ratio(read, total, label=None):
+    label = label or tr('缓存命中', 'Cache hit')
     read, total = number(read), number(total)
     if read is None or total is None or total <= 0 or read > total:
         return []
     return [row(label, f'{count(read)} / {count(total)} · {percentage(read, total)}%')]
 
-def disjoint_cache(usage, keys, label='缓存命中'):
+def disjoint_cache(usage, keys, label=None):
+    label = label or tr('缓存命中', 'Cache hit')
     values = [number(usage.get(k)) for k in keys]
     return [] if any(v is None for v in values) else cache_ratio(values[1], sum(values), label)
 
@@ -170,7 +193,7 @@ def acp_usage(update, model=None):
             used = prompt_total
     rows = context(used, size)
     if read is not None and fresh is not None:
-        rows += cache_ratio(read, fresh + read + written, '缓存命中')
+        rows += cache_ratio(read, fresh + read + written, tr('缓存命中', 'Cache hit'))
     cost_rows = cost(money.get('amount'), money.get('currency'))
     if not cost_rows:
         cost_rows = estimate_cost(
@@ -190,7 +213,7 @@ def pi_usage(stats, state):
     raw_model = (state or {}).get('model')
     model = (raw_model.get('id') or raw_model.get('modelId') or raw_model.get('name')) if isinstance(raw_model, dict) else raw_model
     rows = context(current.get('tokens'), current.get('contextWindow'), current.get('percent'), model=model)
-    rows += disjoint_cache(usage, ('input', 'cacheRead', 'cacheWrite'), '累计 输入缓存命中')
+    rows += disjoint_cache(usage, ('input', 'cacheRead', 'cacheWrite'), tr('累计 输入缓存命中', 'Total input cache hit'))
     out_tok = number(usage.get('output')) or 0
     reason_tok = number(usage.get('reasoning')) or 0
     raw_cost = number(stats.get('cost'))
@@ -218,13 +241,13 @@ def claude_result(result, model=None):
             tot_in = sum(number(v.get('inputTokens')) or 0 for v in entries)
             tot_read = sum(number(v.get('cacheReadInputTokens')) or 0 for v in entries)
             tot_write = sum(number(v.get('cacheCreationInputTokens')) or 0 for v in entries)
-            rows += cache_ratio(tot_read, tot_in + tot_read + tot_write, '累计输入缓存命中')
+            rows += cache_ratio(tot_read, tot_in + tot_read + tot_write, tr('累计输入缓存命中', 'Total input cache hit'))
     if not rows:
         usage = result.get('usage') or {}
         rows += disjoint_cache(
             usage,
             ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'),
-            '本回合输入缓存命中',
+            tr('本回合输入缓存命中', 'Turn input cache hit'),
         )
     cost_rows = cost(result.get('total_cost_usd'), 'USD', estimated=True)
     if not cost_rows:
@@ -253,7 +276,8 @@ def claude_context(message, model_usage=None):
         return []
     return context(sum(parts), window)
 
-def agy_usage(usage, scope='CLI 累计', model=None, context_used=None, context_window=None):
+def agy_usage(usage, scope=None, model=None, context_used=None, context_window=None):
+    scope = scope or tr('CLI 累计', 'CLI total')
     if not isinstance(usage, dict):
         return []
     resolved_model = model or usage.get('model')
@@ -267,7 +291,7 @@ def agy_usage(usage, scope='CLI 累计', model=None, context_used=None, context_
     out = number(usage.get('output_tokens')) or 0
     think = number(usage.get('thinking_tokens')) or 0
     if inp is not None and c_read is not None and (inp + c_read + c_write) > 0:
-        rows += cache_ratio(c_read, inp + c_read + c_write, scope + ' · 输入缓存命中')
+        rows += cache_ratio(c_read, inp + c_read + c_write, scope + tr(' · 输入缓存命中', ' · input cache hit'))
     rows += estimate_cost(
         resolved_model,
         uncached_input=inp or 0,
@@ -278,35 +302,56 @@ def agy_usage(usage, scope='CLI 累计', model=None, context_used=None, context_
     )
     return rows
 
-def agy_acp_usage(usage, scope='本回合', model=None, context_used=None, context_window=None):
-    if not isinstance(usage, dict) or not any(
-        (number(usage.get(k)) or 0) > 0 for k in ('inputTokens', 'outputTokens', 'totalTokens', 'cachedReadTokens')
-    ):
+def agy_acp_usage(usage, scope=None, model=None, context_used=None, context_window=None):
+    scope = scope or tr('本回合', 'This turn')
+    token_keys = (
+        'inputTokens', 'outputTokens', 'totalTokens', 'cachedReadTokens', 'cachedWriteTokens', 'thoughtTokens',
+        'input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'used',
+    )
+    if not isinstance(usage, dict) or not any((number(usage.get(k)) or 0) > 0 for k in token_keys):
         win = number(context_window) or model_context_window(model)
         return context(context_used, win) if number(context_used) is not None and win else []
     resolved_model = model or usage.get('model')
     inp = number(usage.get('inputTokens'))
+    if inp is None:
+        inp = number(usage.get('input'))
     c_read = number(usage.get('cachedReadTokens'))
-    c_write = number(usage.get('cachedWriteTokens')) or 0
-    out = number(usage.get('outputTokens')) or 0
-    think = number(usage.get('thoughtTokens')) or 0
+    if c_read is None:
+        c_read = number(usage.get('cacheRead'))
+    c_write = number(usage.get('cachedWriteTokens'))
+    if c_write is None:
+        c_write = number(usage.get('cacheWrite')) or 0
+    out = number(usage.get('outputTokens'))
+    if out is None:
+        out = number(usage.get('output')) or 0
+    think = number(usage.get('thoughtTokens'))
+    if think is None:
+        think = number(usage.get('reasoning')) or 0
     win = number(context_window) or model_context_window(resolved_model)
     ctx = number(context_used)
-    if ctx is None and win and (inp is not None or c_read is not None):
-        prompt_tokens = (inp or 0) + (c_read or 0) + c_write
-        if prompt_tokens > 0:
-            ctx = prompt_tokens
+    if ctx is None:
+        used_val = number(usage.get('used'))
+        if used_val is not None and used_val > 0:
+            ctx = used_val
+        elif win and (inp is not None or c_read is not None):
+            prompt_tokens = (inp or 0) + (c_read or 0) + c_write
+            if prompt_tokens > 0:
+                ctx = prompt_tokens
     rows = context(ctx, win) if ctx is not None and win else []
     if inp is not None and c_read is not None and (inp + c_read + c_write) > 0:
-        rows += cache_ratio(c_read, inp + c_read + c_write, scope + ' · 输入缓存命中')
-    rows += estimate_cost(
-        resolved_model,
-        uncached_input=inp or 0,
-        cache_read=c_read or 0,
-        cache_write=c_write,
-        output=out,
-        reasoning=think,
-    )
+        rows += cache_ratio(c_read, inp + c_read + c_write, scope + tr(' · 输入缓存命中', ' · input cache hit'))
+    money = usage.get('cost') if isinstance(usage.get('cost'), dict) else {}
+    cost_rows = cost(money.get('amount'), money.get('currency')) if money else []
+    if not cost_rows:
+        cost_rows = estimate_cost(
+            resolved_model,
+            uncached_input=inp or 0,
+            cache_read=c_read or 0,
+            cache_write=c_write,
+            output=out,
+            reasoning=think,
+        )
+    rows += cost_rows
     return rows
 
 def agy_steps(steps):
@@ -327,12 +372,17 @@ def agy_session_metrics(
 ) -> list[dict[str, str]]:
     base_home = home or Path(os.environ.get('HOME') or str(Path.home()))
     db_path: Path | None = None
-    if native_id and isinstance(native_id, str):
+    if isinstance(native_id, str) and _SAFE_NATIVE_ID_RE.fullmatch(native_id):
         for sub in ('antigravity-cli', 'antigravity'):
-            candidate = base_home / '.gemini' / sub / 'conversations' / f'{native_id}.db'
-            if candidate.is_file():
-                db_path = candidate
-                break
+            conv_dir = base_home / '.gemini' / sub / 'conversations'
+            candidate = conv_dir / f'{native_id}.db'
+            try:
+                if candidate.is_file() and not candidate.is_symlink():
+                    if candidate.resolve(strict=True).parent == conv_dir.resolve(strict=True):
+                        db_path = candidate
+                        break
+            except OSError:
+                continue
 
     est_used = 0
     max_ctx = 0
@@ -386,17 +436,20 @@ def agy_session_metrics(
         ctx_win = max_ctx if max_ctx > 0 else (model_context_window(latest_model or model) or 256_000)
         rows = context(ctx_used, ctx_win) if ctx_used is not None else []
         if tot_uncached + tot_read + tot_write > 0:
-            rows += cache_ratio(tot_read, tot_uncached + tot_read + tot_write, '累计 · 输入缓存命中')
+            rows += cache_ratio(tot_read, tot_uncached + tot_read + tot_write, tr('累计 · 输入缓存命中', 'Total · input cache hit'))
         if has_cost:
-            rows += cost(round(tot_cost, 6), 'USD', estimated=True)
+            rows += _estimated_cost_rows(tot_cost)
         return rows
 
     if isinstance(result_usage, dict) and result_usage:
         eff_model = latest_model or model or result_usage.get('model')
-        prompt_in = (number(result_usage.get('input_tokens')) or 0) + (number(result_usage.get('cache_read_tokens')) or 0)
+        c_write = number(result_usage.get('cache_creation_tokens'))
+        if c_write is None:
+            c_write = number(result_usage.get('cache_write_tokens')) or 0
+        prompt_in = (number(result_usage.get('input_tokens')) or 0) + (number(result_usage.get('cache_read_tokens')) or 0) + c_write
         return agy_usage(
             result_usage,
-            scope='CLI 累计',
+            scope=tr('CLI 累计', 'CLI total'),
             model=eff_model,
             context_used=prompt_in if prompt_in > 0 else None,
             context_window=max_ctx if max_ctx > 0 else model_context_window(eff_model),
@@ -408,7 +461,7 @@ def agy_session_metrics(
         eff_model = latest_model or model or last_step.get('model')
         return agy_usage(
             summed,
-            scope='步骤累计',
+            scope=tr('步骤累计', 'Steps total'),
             model=eff_model,
             context_used=last_in if last_in > 0 else None,
             context_window=max_ctx if max_ctx > 0 else model_context_window(eff_model),
@@ -417,25 +470,26 @@ def agy_session_metrics(
         eff_model = latest_model or model or acp_usage_dict.get('model')
         return agy_acp_usage(
             acp_usage_dict,
-            scope='本回合',
+            scope=tr('本回合', 'This turn'),
             model=eff_model,
-            context_window=max_ctx if max_ctx > 0 else model_context_window(eff_model),
+            context_window=max_ctx if max_ctx > 0 else (model_context_window(eff_model) or 256_000),
         )
     return []
 
 def grok_context(used, window=None, model=None):
     return context(used, window, model=model)
 
-def grok_usage(usage, scope='进程累计', model=None):
+def grok_usage(usage, scope=None, model=None):
+    scope = scope or tr('进程累计', 'Process total')
     if not isinstance(usage, dict) or usage.get('usageIsIncomplete') is True:
         return []
     if not any((number(usage.get(k)) or 0) > 0 for k in ('inputTokens', 'outputTokens', 'modelCalls')):
         return []
-    rows = cache_ratio(usage.get('cachedReadTokens'), usage.get('inputTokens'), scope + ' · 输入缓存命中')
+    rows = cache_ratio(usage.get('cachedReadTokens'), usage.get('inputTokens'), scope + tr(' · 输入缓存命中', ' · input cache hit'))
     ticks = usage.get('costUsdTicks')
     cost_rows = []
     if usage.get('costIsPartial') is not True and number(ticks) is not None:
-        cost_rows = [row('CLI 记录费用 · USD', count(Decimal(str(ticks)) / Decimal(10_000_000_000)))]
+        cost_rows = [row(tr('CLI 记录费用 · USD', 'CLI recorded cost · USD'), count(Decimal(str(ticks)) / Decimal(10_000_000_000)))]
     if not cost_rows:
         resolved_model = model or usage.get('model')
         total_in = number(usage.get('inputTokens')) or 0

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -13,10 +15,12 @@ import android.os.SystemClock
 import io.github.modao7067.luma.gui.MainActivity
 import io.github.modao7067.luma.root.R as RuntimeR
 
-internal enum class SessionNotificationKind(val channelId: String, val bodyText: String) {
-    APPROVAL(SessionNotifications.ACTION_CHANNEL_ID, "等待你的审批"),
-    QUESTION(SessionNotifications.ACTION_CHANNEL_ID, "等待你的回答"),
-    COMPLETED(SessionNotifications.COMPLETE_CHANNEL_ID, "本轮回复已完成"),
+internal enum class SessionNotificationKind(val channelId: String, private val zh: String, private val en: String) {
+    APPROVAL(SessionNotifications.ACTION_CHANNEL_ID, "等待你的审批", "Waiting for your approval"),
+    QUESTION(SessionNotifications.ACTION_CHANNEL_ID, "等待你的回答", "Waiting for your reply"),
+    COMPLETED(SessionNotifications.COMPLETE_CHANNEL_ID, "本轮回复已完成", "Turn completed"),
+    ;
+    val bodyText: String get() = tr(zh, en)
 }
 
 internal sealed interface SessionNotificationDecision {
@@ -36,25 +40,25 @@ internal object SessionNotifications {
     private val LEGACY_CHANNELS = listOf("luma-agent-connection", "luma-agent-approval")
 
     fun formatTitle(sessionTitle: String, cli: String): String =
-        "${sessionTitle.trim().ifEmpty { "未命名会话" }} · ${CliCatalog.displayName(cli)}"
+        "${sessionTitle.trim().let { if (it.isEmpty() || SessionTitlePolicy.isUnnamed(it)) SessionTitlePolicy.unnamed else it }} · ${CliCatalog.displayName(cli)}"
 
     fun isQuestionRequest(request: UserRequest): Boolean =
         request.questions.isNotEmpty() || request.id.startsWith("form:")
 
     fun keepAliveSummaryText(runningCount: Int, waitingCount: Int): String = when {
-        runningCount > 0 && waitingCount > 0 -> "${runningCount} 个会话执行中 · ${waitingCount} 个待处理"
-        runningCount > 0 -> "${runningCount} 个会话执行中"
-        waitingCount > 0 -> "${waitingCount} 个会话待处理"
-        else -> "后台环境运行中"
+        runningCount > 0 && waitingCount > 0 -> tr("${runningCount} 个会话执行中 · ${waitingCount} 个待处理", "$runningCount running · $waitingCount waiting")
+        runningCount > 0 -> tr("${runningCount} 个会话执行中", "$runningCount session(s) running")
+        waitingCount > 0 -> tr("${waitingCount} 个会话待处理", "$waitingCount session(s) waiting")
+        else -> tr("后台环境运行中", "Background runtime active")
     }
 
     fun ensureChannels(manager: NotificationManager) {
         LEGACY_CHANNELS.forEach(manager::deleteNotificationChannel)
         manager.createNotificationChannel(
-            NotificationChannel(ACTION_CHANNEL_ID, "待审批与提问", NotificationManager.IMPORTANCE_HIGH)
+            NotificationChannel(ACTION_CHANNEL_ID, tr("待审批与提问", "Approvals & Questions"), NotificationManager.IMPORTANCE_HIGH)
         )
         manager.createNotificationChannel(
-            NotificationChannel(COMPLETE_CHANNEL_ID, "回合完成", NotificationManager.IMPORTANCE_HIGH)
+            NotificationChannel(COMPLETE_CHANNEL_ID, tr("回合完成", "Turn Completed"), NotificationManager.IMPORTANCE_HIGH)
         )
     }
 }
@@ -393,7 +397,7 @@ internal class AndroidSessionNotificationSink(
             val summary = Notification.Builder(context, SessionNotifications.COMPLETE_CHANNEL_ID)
                 .setSmallIcon(RuntimeR.drawable.ic_notification)
                 .setContentTitle("Luma")
-                .setContentText("多条会话通知")
+                .setContentText(tr("多条会话通知", "Multiple session notifications"))
                 .setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setContentIntent(openApp)
                 .setAutoCancel(true)

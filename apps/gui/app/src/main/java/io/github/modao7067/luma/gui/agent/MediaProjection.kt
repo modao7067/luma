@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.ConversationItem
 import io.github.modao7067.luma.gui.session.MediaResource
 import org.json.JSONArray
@@ -63,7 +65,7 @@ object MediaProjection {
             val resources = blocks(block)
             val linked = block.optString("type") == "resource_link" || block.optString("type") == "resource" && block.optJSONObject("resource")?.let { !it.has("blob") && !it.has("text") } == true
             if (!linked || item.optString("server").isBlank()) resources else resources.map { resource ->
-                resource.copy(name = resource.name.ifBlank { runCatching { java.net.URLDecoder.decode(resource.source.substringBefore('?').substringAfterLast('/').replace("+", "%2B"), "UTF-8") }.getOrDefault("附件") }, source = mcpReference(obj("server" to item.optString("server"), "originCallId" to item.optString("id"), "uri" to resource.source)))
+                resource.copy(name = resource.name.ifBlank { runCatching { java.net.URLDecoder.decode(resource.source.substringBefore('?').substringAfterLast('/').replace("+", "%2B"), "UTF-8") }.getOrDefault(tr("附件", "attachment")) }, source = mcpReference(obj("server" to item.optString("server"), "originCallId" to item.optString("id"), "uri" to resource.source)))
             }
         }
         "imageGeneration" -> {
@@ -78,7 +80,7 @@ object MediaProjection {
     private fun mcpReference(params: JSONObject) = "codex-mcp:" + Base64.getUrlEncoder().withoutPadding().encodeToString(params.toString().toByteArray())
     fun mcpParams(source: String): JSONObject? = if (!source.startsWith("codex-mcp:")) null else try {
         JSONObject(String(Base64.getUrlDecoder().decode(source.removePrefix("codex-mcp:")), Charsets.UTF_8))
-    } catch (_: Exception) { throw java.io.IOException("MCP 资源引用损坏") }
+    } catch (_: Exception) { throw java.io.IOException(tr("MCP 资源引用损坏", "Corrupted MCP resource reference")) }
     fun mcpThread(resource: MediaResource, threadId: String?): MediaResource {
         if (threadId == null) return resource
         val params = mcpParams(resource.source) ?: return resource
@@ -89,7 +91,7 @@ object MediaProjection {
         fun clean(v: Any?): Any? = when (v) {
             is JSONObject -> JSONObject().apply { v.keys().forEach { key ->
                 val x = v.opt(key)
-                put(key, if (x is String && (key in setOf("data", "blob", "result", "imageUrl", "audioUrl") && x.length > 256 || x.startsWith("data:") && x.length > 256)) "[附件数据]" else clean(x))
+                put(key, if (x is String && (key in setOf("data", "blob", "result", "imageUrl", "audioUrl") && x.length > 256 || x.startsWith("data:") && x.length > 256)) tr("[附件数据]", "[attachment data]") else clean(x))
             } }
             is JSONArray -> JSONArray().apply { (0 until v.length()).forEach { put(clean(v.opt(it))) } }
             else -> v

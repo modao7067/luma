@@ -79,7 +79,7 @@ final class LinuxEnvironment {
     }
     static String[] command(Context c,List<String> guestCommand,String cwd,Map<String,String> extraEnv){
         File temp=new File(c.getCacheDir(),"proot");
-        if(!temp.isDirectory() && !temp.mkdirs())throw new IllegalStateException("无法创建临时目录");
+        if(!temp.isDirectory() && !temp.mkdirs())throw new IllegalStateException(com.termux.terminal.LumaLang.tr("无法创建临时目录","Failed to create temporary directory"));
         String nativeDir=c.getApplicationInfo().nativeLibraryDir;
         updateDns(c);
         String proot=new File(nativeDir,"libproot_exec.so").getAbsolutePath();
@@ -106,6 +106,7 @@ final class LinuxEnvironment {
         guestEnv.put("COLORTERM","truecolor");
         guestEnv.put("LANG","C.UTF-8");
         guestEnv.put("LC_ALL","C.UTF-8");
+        guestEnv.put("LUMA_LANG",com.termux.terminal.LumaLang.code());
         guestEnv.put("TMPDIR","/tmp");
         guestEnv.put("PNPM_HOME","/root/.local/share/pnpm");
         String tz=timezoneId();

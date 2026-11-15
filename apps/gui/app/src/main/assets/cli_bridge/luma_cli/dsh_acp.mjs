@@ -7,6 +7,8 @@ export const inject = ['loader', 'agents', 'llm', 'sessionPersistence', 'session
 const PREFIX = 'luma/permissions/';
 const HISTORY = 'luma/history/read';
 const BALANCE = 'luma/balance/read';
+const isZh = () => String(process.env.LUMA_LANG ?? 'zh').trim().toLowerCase().startsWith('zh');
+const tr = (zh, en) => (isZh() ? zh : en);
 
 const TOOL_KINDS = {
   bash: 'execute', pwsh: 'execute', run_code: 'execute', terminal_open: 'execute', terminal_send: 'execute',
@@ -97,13 +99,28 @@ export async function apply(ctx) {
   const admissions = new Map();
   const steerAdmissions = new Map();
   const pendingQuestions = new Map();
+  const pendingApprovals = new Map();
+  const approvalMetaByCallId = new Map();
+  const toolCallsBySession = new Map();
   const agentPresetDisposers = new Map();
   const agentSelectedPresets = new Map();
   const trackedChildrenByParent = new Map();
   const childUpdateTimers = new Map();
   const scheduled = new Set();
   const cacheUsage = new Map();
+  const activeCommandSubmissions = new Map();
   let questionSeq = 0;
+  let approvalSeq = 0;
+
+  const resolveApprovalReason = request => {
+    const dr = request?.displayReason;
+    if (dr && typeof dr === 'object') {
+      const localized = isZh() ? (dr.zh ?? dr['zh-CN']) : dr.en;
+      if (typeof localized === 'string' && localized.trim()) return localized.trim();
+      if (typeof dr.en === 'string' && dr.en.trim()) return dr.en.trim();
+    }
+    return typeof request?.reason === 'string' ? request.reason.trim() : '';
+  };
 
   const service = () => {
     const value = ctx.get('permissionPresets');
@@ -259,10 +276,10 @@ export async function apply(ctx) {
     const textOf = blocks => Array.isArray(blocks) ? blocks.filter(b => b?.type === 'text').map(b => b.text).join('') : '';
     const items = [];
     for (const msg of inbox.nextStep ?? []) {
-      items.push({ id: msg.id, target: 'next-step', text: textOf(msg.content), status: '引导' });
+      items.push({ id: msg.id, target: 'next-step', text: textOf(msg.content), status: tr('引导', 'Steer'), canEdit: false });
     }
     for (const msg of inbox.nextTurn ?? []) {
-      items.push({ id: msg.id, target: 'next-turn', text: textOf(msg.content), status: '待执行' });
+      items.push({ id: msg.id, target: 'next-turn', text: textOf(msg.content), status: tr('待执行', 'Queued'), canEdit: false });
     }
     return items;
   }
@@ -450,12 +467,14 @@ export async function apply(ctx) {
         update: { sessionUpdate: 'session_info_update', title: event.data.title } } }).catch(() => {});
     }
     if (event.type === 'command/done') {
+      const submissionId = activeCommandSubmissions.get(session.id)?.[0] ?? '';
       void output.write({
         jsonrpc: '2.0',
         method: 'luma/command/done',
         params: {
           sessionId: session.id,
           seq: event.seq,
+          ...(submissionId ? { submissionId } : {}),
           command: event.data?.command ?? '',
           text: event.data?.text ?? '',
         },
@@ -529,6 +548,67 @@ export async function apply(ctx) {
           questions: request.questions ?? [],
           intent: request.intent ?? null,
           wait: request.wait ?? null,
+        },
+      }).catch(() => {});
+    });
+  });
+
+  ctx.on('approval/request', (request, next) => {
+    const agent = request?.agent;
+    const id = agent?.session?.id;
+    if (!id || owned.get(id) !== agent) return next();
+    const reason = resolveApprovalReason(request);
+    const toolName = typeof request?.toolName === 'string' ? request.toolName.trim() : '';
+    if (request.callId !== undefined) {
+      const cid = String(request.callId);
+      approvalMetaByCallId.set(cid, { sessionId: id, toolName, reason });
+      if (approvalMetaByCallId.size > 128) {
+        const oldest = approvalMetaByCallId.keys().next().value;
+        if (oldest !== undefined) approvalMetaByCallId.delete(oldest);
+      }
+      return next();
+    }
+    const rpcId = `luma-approval-${++approvalSeq}`;
+    return new Promise(resolve => {
+      let settled = false;
+      const cleanup = () => {
+        pendingApprovals.delete(rpcId);
+        request.signal?.removeEventListener?.('abort', onAbort);
+      };
+      const finish = outcome => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(outcome);
+      };
+      const onAbort = () => {
+        void output.write({
+          jsonrpc: '2.0',
+          method: 'luma/questions/cancelled',
+          params: { sessionId: id, requestId: rpcId },
+        }).catch(() => {});
+        finish('cancelled');
+      };
+      if (request.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      request.signal?.addEventListener?.('abort', onAbort, { once: true });
+      pendingApprovals.set(rpcId, { sessionId: id, finish });
+      void output.write({
+        jsonrpc: '2.0',
+        id: rpcId,
+        method: 'session/request_permission',
+        params: {
+          sessionId: id,
+          toolCall: {
+            title: toolName || tr('工具授权', 'Tool permission'),
+            ...(reason ? { rawInput: { reason } } : {}),
+          },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+          ],
         },
       }).catch(() => {});
     });
@@ -696,18 +776,34 @@ export async function apply(ctx) {
         }
         if (!line.startsWith('/')) line = '/' + line;
         const submissionId = typeof p.submissionId === 'string' ? p.submissionId.trim() : '';
+        const commandQueue = activeCommandSubmissions.get(id) ?? [];
+        if (submissionId) {
+          commandQueue.push(submissionId);
+          activeCommandSubmissions.set(id, commandQueue);
+        }
+        const ac = new AbortController();
+        let outcome;
+        try {
+          outcome = await commands.execute(agent, line, [], ac.signal);
+        } finally {
+          if (submissionId) {
+            const idx = commandQueue.indexOf(submissionId);
+            if (idx >= 0) commandQueue.splice(idx, 1);
+            if (commandQueue.length === 0 && activeCommandSubmissions.get(id) === commandQueue) {
+              activeCommandSubmissions.delete(id);
+            }
+          }
+        }
+        changed(id);
+        if (!outcome) {
+          return { jsonrpc: '2.0', id: message.id, result: { executed: false, handled: false } };
+        }
         if (submissionId) {
           void output.write({
             jsonrpc: '2.0',
             method: 'luma/submissions/accepted',
             params: { sessionId: id, submissionId, nativeMessageId: `cmd:${submissionId}` },
           }).catch(() => {});
-        }
-        const ac = new AbortController();
-        const outcome = await commands.execute(agent, line, [], ac.signal);
-        changed(id);
-        if (!outcome) {
-          return { jsonrpc: '2.0', id: message.id, result: { executed: false, handled: false } };
         }
         const res = outcome.result ?? {};
         return {
@@ -785,9 +881,11 @@ export async function apply(ctx) {
           if (!found) throw new Error('Message is no longer pending in next-turn inbox');
           agent.inbox.remove(messageId);
           agent.steer(found);
-        } else {
+        } else if (!p.action || p.action === 'remove' || p.action === 'cancel' || p.action === 'delete') {
           const removed = agent.inbox?.remove?.(messageId);
           if (!removed) throw new Error('Message is no longer pending in inbox');
+        } else {
+          throw new Error(`Unsupported DSH inbox action: ${String(p.action)}`);
         }
         const queue = inboxSnapshot(agent);
         return { jsonrpc: '2.0', id: message.id, result: { sessionId: id, queue, items: queue } };
@@ -819,12 +917,25 @@ export async function apply(ctx) {
           }
           continue;
         }
+        if (message && typeof message.id === 'string' && pendingApprovals.has(message.id) && !message.method) {
+          const pendingApproval = pendingApprovals.get(message.id);
+          if (message.error || message.result?.outcome?.outcome === 'cancelled') {
+            pendingApproval.finish('cancelled');
+          } else {
+            pendingApproval.finish(message.result?.outcome?.optionId === 'allow-once' ? 'allowed-once' : 'rejected');
+          }
+          continue;
+        }
         if (message?.method === HISTORY) {
-          if ('id' in message) await output.write(await history(message));
+          if ('id' in message) {
+            void history(message).then(reply => output.write(reply)).catch(() => {});
+          }
           continue;
         }
         if (message?.method === BALANCE || (typeof message?.method === 'string' && message.method.startsWith('luma/'))) {
-          if ('id' in message) await output.write(await control(message));
+          if ('id' in message) {
+            void control(message).then(reply => output.write(reply)).catch(() => {});
+          }
           continue;
         }
         if (message && 'id' in message && typeof message.method === 'string') {
@@ -883,6 +994,23 @@ export async function apply(ctx) {
       if (request.method === 'session/close' && message.result) {
         const id = request.sessionId;
         owned.delete(id);
+        prompting.delete(id);
+        admissions.delete(id);
+        cacheUsage.delete(id);
+        trackedChildrenByParent.delete(id);
+        activeCommandSubmissions.delete(id);
+        toolCallsBySession.delete(id);
+        for (const [cid, meta] of approvalMetaByCallId) {
+          if (meta.sessionId === id) approvalMetaByCallId.delete(cid);
+        }
+        for (const [, pendingApproval] of [...pendingApprovals]) {
+          if (pendingApproval.sessionId === id) pendingApproval.finish('cancelled');
+        }
+        const childTimer = childUpdateTimers.get(id);
+        if (childTimer) {
+          clearTimeout(childTimer);
+          childUpdateTimers.delete(id);
+        }
         agentSelectedPresets.delete(id);
         const dispose = agentPresetDisposers.get(id);
         if (typeof dispose === 'function') {
@@ -891,7 +1019,53 @@ export async function apply(ctx) {
         }
       }
     }
-    await output.write(toolUpdate(message));
+    let out = toolUpdate(message);
+    if (out?.method === 'session/update') {
+      const sid = out.params?.sessionId;
+      const u = out.params?.update;
+      if (sid && u && (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && typeof u.toolCallId === 'string' && u.toolCallId) {
+        let sessionTools = toolCallsBySession.get(sid);
+        if (!sessionTools) {
+          sessionTools = new Map();
+          toolCallsBySession.set(sid, sessionTools);
+        }
+        const prev = sessionTools.get(u.toolCallId) ?? {};
+        sessionTools.set(u.toolCallId, {
+          ...(prev.title || u.title ? { title: (typeof u.title === 'string' && u.title) ? u.title : prev.title } : {}),
+          ...(u.kind !== undefined || prev.kind !== undefined ? { kind: u.kind ?? prev.kind } : {}),
+          ...(u.rawInput !== undefined || prev.rawInput !== undefined ? { rawInput: u.rawInput !== undefined ? u.rawInput : prev.rawInput } : {}),
+        });
+        if (sessionTools.size > 128) {
+          const oldest = sessionTools.keys().next().value;
+          if (oldest !== undefined) sessionTools.delete(oldest);
+        }
+      }
+    }
+    if (out?.method === 'session/request_permission' && out.params?.toolCall) {
+      const sid = out.params.sessionId;
+      const tc = out.params.toolCall;
+      const cid = typeof tc.toolCallId === 'string' ? tc.toolCallId : '';
+      const cached = cid && sid ? toolCallsBySession.get(sid)?.get(cid) : undefined;
+      const meta = cid ? approvalMetaByCallId.get(cid) : undefined;
+      if (cid) approvalMetaByCallId.delete(cid);
+      const nextToolCall = { ...tc };
+      if (!nextToolCall.title) {
+        const resolvedTitle = cached?.title || meta?.toolName;
+        if (resolvedTitle) nextToolCall.title = resolvedTitle;
+      }
+      if (!nextToolCall.kind && cached?.kind) nextToolCall.kind = cached.kind;
+      let raw = nextToolCall.rawInput !== undefined ? nextToolCall.rawInput : cached?.rawInput;
+      if (meta?.reason) {
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          if (!raw.justification && !raw.reason && !raw.description) raw = { ...raw, reason: meta.reason };
+        } else if (raw === undefined) {
+          raw = { reason: meta.reason };
+        }
+      }
+      if (raw !== undefined) nextToolCall.rawInput = raw;
+      out = { ...out, params: { ...out.params, toolCall: nextToolCall } };
+    }
+    await output.write(out);
   } }) };
   native.apply(ctx, { ...config, stream });
 }
@@ -984,7 +1158,7 @@ export function projectHistory(events, api) {
     } else if (event.type === 'tool/result') {
       const id = 'tool-' + message.toolCallId;
       const status = data.error?.code === api.TOOL_OUTCOME_UNKNOWN ? 'unknown' : message.isError ? 'failed' : 'completed';
-      add({ ...rows.get(id), id, role: 'tool', kind: 'tool', text: rows.get(id)?.text ?? '工具',
+      add({ ...rows.get(id), id, role: 'tool', kind: 'tool', text: rows.get(id)?.text ?? tr('工具', 'Tool'),
         outcome: body(message.content), status, nativeResultMessageId: message.id,
         resultEventSeq: event.seq, ...(!rows.has(id) ? source : {}) });
     }

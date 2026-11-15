@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.content.FileProvider
+import io.github.modao7067.luma.gui.i18n.tr
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -23,16 +24,16 @@ internal class PhotoCaptureStore(private val context: Context) {
     private val authority = context.packageName + ".capture-files"
 
     fun create(): String {
-        if (!directory.isDirectory && !directory.mkdirs()) throw IOException("无法准备拍照文件")
+        if (!directory.isDirectory && !directory.mkdirs()) throw IOException(tr("无法准备拍照文件", "Failed to prepare photo file"))
         prune()
         val name = "capture-${UUID.randomUUID()}.jpg"
-        val file = file(name) ?: throw IOException("无法准备拍照文件")
-        if (!file.createNewFile()) throw IOException("无法准备拍照文件")
+        val file = file(name) ?: throw IOException(tr("无法准备拍照文件", "Failed to prepare photo file"))
+        if (!file.createNewFile()) throw IOException(tr("无法准备拍照文件", "Failed to prepare photo file"))
         return name
     }
 
     fun uri(name: String): Uri = FileProvider.getUriForFile(context, authority,
-        file(name) ?: throw IOException("拍照文件无效"))
+        file(name) ?: throw IOException(tr("拍照文件无效", "Invalid photo file")))
 
     fun file(name: String): File? {
         if (!NAME.matches(name)) return null
@@ -45,9 +46,9 @@ internal class PhotoCaptureStore(private val context: Context) {
         file(uri.pathSegments[1]) else null
 
     fun ready(name: String): Uri {
-        val file = file(name)?.takeIf { it.isFile && it.length() > 0 } ?: throw IOException("未取得照片，请重试")
+        val file = file(name)?.takeIf { it.isFile && it.length() > 0 } ?: throw IOException(tr("未取得照片，请重试", "No photo captured; please try again"))
         val marker = File(directory, "$name.ready")
-        if (!marker.createNewFile()) throw IOException("无法准备照片导入")
+        if (!marker.createNewFile()) throw IOException(tr("无法准备照片导入", "Failed to prepare photo import"))
         return uri(file.name)
     }
 

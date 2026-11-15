@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.runtime
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -152,19 +155,19 @@ internal object DebianRootMode {
         val app = context.applicationContext ?: context
         synchronized(switchStateFlow) {
             if (switchStateFlow.value.running || isEnabled(app)) return false
-            switchStateFlow.value = RootSwitchState(running = true, progress = "正在请求 Root 授权…")
+            switchStateFlow.value = RootSwitchState(running = true, progress = tr("正在请求 Root 授权…", "Requesting Root access…"))
         }
         switchScope.launch {
             val error = try {
                 switchToRoot(app) { message -> switchStateFlow.update { it.copy(progress = message) } }
                 null
             } catch (error: Throwable) {
-                error.message?.takeIf { it.isNotBlank() } ?: "出了点问题，再试一次"
+                error.message?.takeIf { it.isNotBlank() } ?: tr("出了点问题，再试一次", "Something went wrong; please try again")
             }
             switchStateFlow.value = RootSwitchState(error = error)
             mainHandler.post {
                 runCatching {
-                    Toast.makeText(app, if (error == null) "已切换到 Root 模式" else "切换没成功：$error", Toast.LENGTH_LONG).show()
+                    Toast.makeText(app, if (error == null) tr("已切换到 Root 模式", "Switched to Root mode") else tr("切换没成功：$error", "Switch failed: $error"), Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -172,7 +175,7 @@ internal object DebianRootMode {
     }
 
     suspend fun switchToRoot(context: Context, onProgress: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
-        check(isSupportedProduct) { "专用 Root 版本不支持切换模式" }
+        check(isSupportedProduct) { tr("专用 Root 版本不支持切换模式", "Mode switching is not supported in dedicated Root builds") }
         val app = context.applicationContext ?: context
         switchMutex.withLock { if (!isEnabled(app)) enableLocked(app, onProgress) }
     }
@@ -206,38 +209,39 @@ internal object DebianRootMode {
     }
 
     private fun enableLocked(app: Context, onProgress: (String) -> Unit) {
-        onProgress("正在请求 Root 授权…")
+        onProgress(tr("正在请求 Root 授权…", "Requesting Root access…"))
         val probe = runSu("id -u", 25_000L)
         if (!probe.isRootUid) {
             throw IOException(when {
-                probe.missingBinary -> "没找到 Root。用临时 Root 的话，先激活再试"
-                probe.timedOut -> "等 Root 授权超时了，确认弹窗后再试一次"
-                else -> "没拿到 Root 授权，在 Root 管理器里允许 Luma 后再试"
+                probe.missingBinary -> tr("没找到 Root。用临时 Root 的话，先激活再试", "Root binary not found. If using temporary root, activate it first")
+                probe.timedOut -> tr("等 Root 授权超时了，确认弹窗后再试一次", "Timed out waiting for Root grant; approve the prompt and try again")
+                else -> tr("没拿到 Root 授权，在 Root 管理器里允许 Luma 后再试", "Root access denied; grant Luma in your Root manager and try again")
             })
         }
 
-        onProgress("正在停止当前环境…")
+        onProgress(tr("正在停止当前环境…", "Stopping current environment…"))
         val prepareOverride = prepareHookForTesting
         if (prepareOverride != null) prepareOverride(app, onProgress) else NoRootRuntime.prepareForRootChroot(app, onProgress)
         val layout = writeScripts(app)
 
-        onProgress("正在调整文件权限，可能要一两分钟…")
+        onProgress(tr("正在调整文件权限，可能要一两分钟…", "Updating file ownership (may take 1–2 minutes)…"))
         val owned = runSu(buildOwnershipScript(layout), OWNERSHIP_TIMEOUT_MS)
         if (owned.missingBinary || owned.timedOut || owned.exitCode != 0) {
             rollback(layout)
-            throw IOException(if (owned.timedOut) "调整文件权限超时了" else lastLine(owned) ?: "调整文件权限失败")
+            throw IOException(if (owned.timedOut) tr("调整文件权限超时了", "Timed out updating file ownership") else lastLine(owned) ?: tr("调整文件权限失败", "Failed to update file ownership"))
         }
 
-        onProgress("正在准备环境文件…")
+        onProgress(tr("正在准备环境文件…", "Preparing environment files…"))
         NoRootRuntime.stageForRoot(app)
 
-        onProgress("正在检查环境…")
-        val preflight = buildPreflightScript(layout.rootfs) + "\nexec " + quote(layout.enter.absolutePath) +
+        onProgress(tr("正在检查环境…", "Verifying environment…"))
+        val preflight = "export LUMA_LANG=${quote(LumaI18n.langCode())}\n" +
+            buildPreflightScript(layout.rootfs) + "\nexec " + quote(layout.enter.absolutePath) +
             " /usr/bin/python3 -I -c 'import os; print(os.getuid())'"
         val verify = runSu(preflight, 60_000L)
         if (!verify.isRootUid) {
             rollback(layout)
-            throw IOException(lastLine(verify) ?: "环境检查没通过")
+            throw IOException(lastLine(verify) ?: tr("环境检查没通过", "Environment verification failed"))
         }
 
         writeAtomic(File(layout.state, ENABLED_FILE), "1\n", 0x180)
@@ -258,14 +262,15 @@ internal object DebianRootMode {
     private fun buildOwnershipScript(layout: Layout): String {
         val r = quote(layout.rootfs.absolutePath)
         val w = quote(File(layout.files, "workspace").absolutePath)
+        val notInstalled = quote(tr("内置 Debian 尚未安装", "Built-in Debian is not installed yet"))
+        val chownFailed = quote(tr("调整文件权限失败", "Failed to update file ownership"))
         return """
             tb() { if [ -x /system/bin/toybox ]; then /system/bin/toybox "${'$'}@"; else "${'$'}@"; fi; }
             ROOTFS=$r
             WORKSPACE=$w
-            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo '内置 Debian 还没装好' >&2; exit 126; }
+            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo $notInstalled >&2; exit 126; }
             tb mkdir -p "${'$'}WORKSPACE"
-            tb chown -hR 0:0 "${'$'}ROOTFS" "${'$'}WORKSPACE" || { echo '调整文件权限失败' >&2; exit 1; }
-            # DNS 仍由 App 按网络变化写入
+            tb chown -hR 0:0 "${'$'}ROOTFS" "${'$'}WORKSPACE" || { echo $chownFailed >&2; exit 1; }
             if [ -f "${'$'}ROOTFS/etc/resolv.conf" ] && [ ! -L "${'$'}ROOTFS/etc/resolv.conf" ]; then
               tb chown ${layout.uid}:${layout.uid} "${'$'}ROOTFS/etc/resolv.conf" 2>/dev/null || true
             fi
@@ -280,7 +285,7 @@ internal object DebianRootMode {
             runCatching { Os.chmod(temp.absolutePath, mode) }
             if (!temp.renameTo(target)) {
                 target.delete()
-                if (!temp.renameTo(target)) throw IOException("无法写入运行脚本：${target.name}")
+                if (!temp.renameTo(target)) throw IOException(tr("无法写入运行脚本：${target.name}", "Failed to write runtime script: ${target.name}"))
             }
             runCatching { Os.chmod(target.absolutePath, mode) }
             return target
@@ -293,10 +298,11 @@ internal object DebianRootMode {
 
     private fun buildPreflightScript(rootfs: File): String {
         val r = quote(rootfs.absolutePath)
+        val notReady = quote(tr("内置 Debian 环境尚未就绪", "Built-in Debian environment is not ready yet"))
         return """
             tb() { if [ -x /system/bin/toybox ]; then /system/bin/toybox "${'$'}@"; else "${'$'}@"; fi; }
             ROOTFS=$r
-            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo '内置 Debian 环境尚未准备完成' >&2; exit 126; }
+            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo $notReady >&2; exit 126; }
             tb mkdir -p "${'$'}ROOTFS/etc/apt/apt.conf.d" "${'$'}ROOTFS/usr/local/bin" "${'$'}ROOTFS/tmp" "${'$'}ROOTFS/storage/emulated/0"
             tb chmod 1777 "${'$'}ROOTFS/tmp" 2>/dev/null || true
             cat > "${'$'}ROOTFS/etc/apt/apt.conf.d/99luma-root" <<'LUMA_APT_EOF'
@@ -358,7 +364,7 @@ internal object DebianRootMode {
               STATE_DIR='"$sDir"'
               APP_UID='"$uid"'
 
-              tb mount -o rslave none /  # toybox needs DEVICE DIR here; one arg means an fstab lookup
+              tb mount -o rslave none /
               tb mkdir -p "${'$'}ROOTFS/proc" "${'$'}ROOTFS/sys" "${'$'}ROOTFS/dev" "${'$'}ROOTFS/dev/pts" "${'$'}ROOTFS/dev/shm" "${'$'}ROOTFS/dev/net"
               tb mount -t proc proc "${'$'}ROOTFS/proc" 2>/dev/null || tb mount -o bind /proc "${'$'}ROOTFS/proc"
               tb mount -o rbind /sys "${'$'}ROOTFS/sys" 2>/dev/null || tb mount -o bind /sys "${'$'}ROOTFS/sys" 2>/dev/null || true
@@ -408,7 +414,6 @@ internal object DebianRootMode {
             #!/system/bin/sh
             set -eu
             tb() { if [ -x /system/bin/toybox ]; then /system/bin/toybox "${'$'}@"; else "${'$'}@"; fi; }
-            # nsenter execs its command directly, so it can't run the tb shell function.
             if [ -x /system/bin/toybox ]; then TBX=/system/bin/toybox; else TBX=; fi
             FILES_DIR=$fDir
             ROOTFS=$rDir
@@ -427,7 +432,16 @@ internal object DebianRootMode {
               fi
             fi
 
-            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo '内置 Debian 环境尚未准备完成' >&2; exit 126; }
+            msg_not_ready='Built-in Debian environment is not ready yet'
+            msg_ns='Failed to create Debian chroot mount namespace'
+            case "${'$'}{LUMA_LANG:-}" in
+              zh*)
+                msg_not_ready='内置 Debian 环境尚未就绪'
+                msg_ns='创建 Debian chroot 挂载命名空间失败'
+                ;;
+            esac
+
+            [ -f "${'$'}ROOTFS/.luma-ready" ] || { echo "${'$'}msg_not_ready" >&2; exit 126; }
 
             read_holder() {
               [ -r "${'$'}STATE_DIR/ns.pid" ] || return 1
@@ -447,9 +461,6 @@ internal object DebianRootMode {
 
             HOLDER_PID=""
             if ! read_holder; then
-              # Android toybox flock only takes an fd. Close it for the setup script so the holder it
-              # spawns doesn't keep the lock for its whole lifetime. The holder daemonizes before it
-              # writes ns.pid, so wait for it while still holding the lock.
               {
                 tb flock 9
                 if ! read_holder; then
@@ -461,7 +472,7 @@ internal object DebianRootMode {
                   done
                 fi
               } 9>"${'$'}STATE_DIR/ns.lock"
-              read_holder || { echo '无法建立 Debian Chroot 挂载命名空间' >&2; exit 125; }
+              read_holder || { echo "${'$'}msg_ns" >&2; exit 125; }
             fi
 
             if [ -d /storage/emulated/0 ]; then
@@ -581,6 +592,8 @@ env = {
     'LUMA_WORKSPACE': '/workspace',
     'LUMA_BG_ANDROID_SH': '/opt/luma/bin/android-sh',
 }
+if os.environ.get('LUMA_LANG') in ('zh', 'en'):
+    env['LUMA_LANG'] = os.environ['LUMA_LANG']
 if tz:
     env['TZ'] = tz
 

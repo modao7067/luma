@@ -9,39 +9,70 @@ import threading
 from .acp import AcpSession
 from .antigravity import AntigravitySession
 from .antigravity_cli import (
+    _SWARM_BOARD_PING_RE,
+    _matching_bg_task_ids,
+    _settle_terminal_child_messages,
     AgyChildTailMixin,
+    agy_timer_condition,
     child_log_path,
-    child_transcript_state,
     clean_agy_tool_output,
+    extract_agy_bg_task_id,
     extract_agy_task_result,
     invoke_child,
+    is_agy_oneshot_timer,
     parse_system_message,
-    project_child_transcript,
     read_full_step,
     read_transcript,
     transcript_args,
 )
-from .base import display_content, item, text
+from .base import display_content, image_blocks, item, text
 from .external_browser import BrowserRelay
+from .i18n import lang_code, tr
 from .metrics import agy_acp_usage, agy_session_metrics
 from .transport import Rejected
 
 AGY_ACP_PROTOCOL = "antigravity-agy-acp"
 FULL_ACCESS = "always-proceed"
-FULL_ACCESS_OPTION = {
-    "id": FULL_ACCESS,
-    "label": "全权限（跳过审批）",
-    "description": "启用原生 --dangerously-skip-permissions，自动批准工具与命令执行",
-}
-_BG_TASK_RE = re.compile(r"Tool is running as a background task with task id:\s*(\S+)")
+
+def _full_access_option():
+    return {
+        "id": FULL_ACCESS,
+        "label": tr("全权限（跳过审批）", "Full access (skip approvals)"),
+        "description": tr("启用原生 --dangerously-skip-permissions，自动批准工具与命令执行",
+                          "Enable native --dangerously-skip-permissions to auto-approve tools and commands"),
+    }
 _CRON_CANCELLED_RE = re.compile(r"^\[([^\]]+)\]\s+Cron schedule cancelled\b", re.M)
+_CRON_CANCELLED_MSG_RE = re.compile(r'^Cron schedule "([^"]+)" cancelled\b', re.M)
 _BG_CANCELLED_RE = re.compile(r'^Task id "[^"]+" (?:was |has been )?(?:killed|cancell?ed)\b', re.I)
 
-def _oneshot_timer(output, tool_name="", params=None):
-    if "Task Description: Timer:" in (output or ""):
-        return True
+def _plan_tool_kind(name, title=""):
+    for candidate in (name, title):
+        if candidate in ("exit_plan_mode", "enter_plan_mode"):
+            return candidate
+    return ""
+
+def _plan_tool_title(plan_kind):
+    if plan_kind == "exit_plan_mode":
+        return tr("退出规划 · 交由执行模型", "Exit plan · Hand off to executor")
+    if plan_kind == "enter_plan_mode":
+        return tr("回交规划模型复盘", "Hand back to planner")
+    return ""
+
+def _plan_tool_outcome(plan_kind, params, cleaned_outcome, status=""):
     params = params if isinstance(params, dict) else {}
-    return tool_name == "schedule" and bool(params.get("DurationSeconds")) and not params.get("CronExpression")
+    stripped = (cleaned_outcome or "").strip()
+    if status == "failed" and stripped:
+        return cleaned_outcome
+    if plan_kind == "exit_plan_mode":
+        plan_body = params.get("plan")
+        if isinstance(plan_body, str) and plan_body.strip():
+            if stripped == "Plan mode is off." or (status in ("completed", "succeeded") and not stripped):
+                return plan_body.strip()
+    elif plan_kind == "enter_plan_mode":
+        reason = params.get("reason")
+        if isinstance(reason, str) and reason.strip() and stripped in ("", "Plan mode is on."):
+            return reason.strip()
+    return cleaned_outcome
 
 class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
     argv = ["agy", "acp", "--stdio"]
@@ -50,9 +81,17 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
     desired_model_on_create = False
     replay_release = True
     release_empty = True
-    notice = ("Google 官方 agy ACP；共享当前环境 agy CLI 的原生登录、会话与子代理目录，原生 load 重放历史。"
-              "支持原生模式切换与 --dangerously-skip-permissions 全权限跳过审批（保留提问表单）。"
-              "无可管理待发队列、逐消息 Skill、MCP 清单或实时 TUI 接管。")
+
+    @property
+    def notice(self):
+        return tr(
+            "Google 官方 agy ACP；共享当前环境 agy CLI 的原生登录、会话与子代理目录，原生 load 重放历史。"
+            "支持原生模式切换与 --dangerously-skip-permissions 全权限跳过审批（保留提问表单）。"
+            "无可管理待发队列、逐消息 Skill、MCP 清单或实时 TUI 接管。",
+            "Official Google agy ACP; shares the current environment's native agy CLI login, sessions, and subagent directory with native load history replay. "
+            "Supports native mode switching and --dangerously-skip-permissions full access (retaining question forms). "
+            "No managed pending queue, per-message skills, MCP list, or live TUI takeover.",
+        )
 
     def __init__(self, config, save):
         super().__init__(config, save)
@@ -62,24 +101,36 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self._reset_parent_tracking()
 
     def _reset_parent_tracking(self):
-        self.transcript_versions = {}
-        self.parent_offset = 0
-        self.parent_calls = []
-        self.parent_children = set()
-        self.parent_turn_settled = False
-        self.background_tasks = set()
-        self.settled_background_tasks = set()
-        self.background_task_rows = {}
-        self.oneshot_timers = set()
-        self.in_autonomous_turn = False
-        self.autonomous_running = False
-        self.autonomous_streamed = False
-        self.autonomous_open_tools = []
-        self.autonomous_row_ids = []
-        self.autonomous_catchup = []
-        self.catchup_tool_ids = set()
-        self.child_replies = {}
-        self.child_call_args = {}
+        with self.lock:
+            self.transcript_versions = {}
+            self.parent_offset = 0
+            self.parent_calls = []
+            self.parent_children = set()
+            self.parent_turn_settled = False
+            self.background_tasks = set()
+            self.settled_background_tasks = set()
+            self.background_task_rows = {}
+            self.oneshot_timers = set()
+            self.conditional_timers = {}
+            self.in_autonomous_turn = False
+            self.autonomous_running = False
+            self.autonomous_streamed = False
+            self.autonomous_open_tools = []
+            self.autonomous_row_ids = []
+            self.autonomous_catchup = []
+            self.catchup_tool_ids = set()
+            self.catchup_tool_rows = {}
+            self.child_replies = {}
+            self.child_call_args = {}
+            self.swarm_groups = {}
+            self.swarm_workers = set()
+            self.swarm_call_args = {}
+            self.swarm_revived_steps = {}
+            self.swarm_stopped_steps = {}
+            self.child_step_highs = {}
+            self.handled_swarm_rows = set()
+            self.steer_submission = None
+            self.pending_echo_submissions = []
 
     def update(self, **fields):
         with self.lock:
@@ -87,32 +138,40 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 fields["running"] = True
             super().update(**fields)
 
+    def fast_release_blocker(self):
+        with self.lock:
+            blocker = super().fast_release_blocker()
+            if blocker in ("工具状态尚未确认结束", "Tool status has not been confirmed finished") and self.background_tasks:
+                return tr("后台任务尚未确认结束", "Background task has not been confirmed finished")
+            if blocker:
+                return blocker
+            if self.autonomous_running or self.in_autonomous_turn:
+                return tr("后台唤醒回合尚未结算", "Background wake-up turn has not settled")
+            if self.background_tasks:
+                return tr("后台任务尚未确认结束", "Background task has not been confirmed finished")
+            return None
+
     def release_blocker(self):
-        blocker = super().release_blocker()
-        if blocker == "工具状态尚未确认结束" and self.background_tasks:
-            return "后台任务尚未确认结束"
-        if blocker:
-            return blocker
-        if self.autonomous_running or self.in_autonomous_turn:
-            return "后台唤醒回合尚未结算"
-        if self.background_tasks:
-            return "后台任务尚未确认结束"
-        return None
+        return super().release_blocker()
 
     def discover_binary(self):
         if not shutil.which(self.argv[0]):
-            raise Rejected("未找到 agy；请在当前运行环境的普通终端安装 agy（1.5.0 及以上）并完成原生登录。")
+            raise Rejected(tr("未找到 agy；请在当前运行环境的普通终端安装 agy（1.5.0 及以上）并完成原生登录。",
+                              "agy not found; install agy (1.5.0 or newer) in a regular terminal of the current environment and sign in."))
         env = os.environ.copy()
+        env["LUMA_LANG"] = lang_code()
         if self.config.get("browserConfig"):
             env["LUMA_BROWSER_CONFIG"] = self.config["browserConfig"]
         try:
             version = subprocess.run([self.argv[0], "--version"], env=env, cwd=self.config["cwd"],
                                      capture_output=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise Rejected("agy 版本探测失败；请在普通终端核对 agy 安装状态。") from exc
+            raise Rejected(tr("agy 版本探测失败；请在普通终端核对 agy 安装状态。",
+                              "Failed to probe agy version; check agy installation in a regular terminal.")) from exc
         match = re.search(rb"(\d+)\.(\d+)\.(\d+)", version.stdout)
         if version.returncode or not match or tuple(map(int, match.groups())) < (1, 5, 0):
-            raise Rejected("当前 agy 版本未提供稳定官方 acp 接口；请升级至 1.5.0 或更新版本。")
+            raise Rejected(tr("当前 agy 版本未提供稳定官方 acp 接口；请升级至 1.5.0 或更新版本。",
+                              "Current agy version lacks a stable official acp interface; upgrade to 1.5.0 or newer."))
 
     def start(self, argv):
         self.authenticating = False
@@ -163,28 +222,62 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         except Rejected as exc:
             if (not self.auth_cancelled and not self.auth_url_rejected
                     and re.search(r"web browser|unauthenticated|not logged in|login required", str(exc), re.I)):
-                raise Rejected("agy 尚未登录；请在当前运行环境的普通终端运行 agy acp --login（或 agy）完成原生登录后重连。") from None
+                raise Rejected(tr("agy 尚未登录；请在当前运行环境的普通终端运行 agy acp --login（或 agy）完成原生登录后重连。",
+                                  "agy is not signed in; run `agy acp --login` (or `agy`) in a regular terminal of the current environment, then reconnect.")) from None
             raise
 
     def apply_options(self, options):
         super().apply_options(options)
         permissions = list(self.data.get("permissions", []))
         if not any(p.get("id") == FULL_ACCESS for p in permissions):
-            permissions.append(dict(FULL_ACCESS_OPTION))
+            permissions.append(_full_access_option())
         fields = {"permissions": permissions}
         if getattr(self, "skip_permissions_active", False):
             fields["permission"] = FULL_ACCESS
         self.update(**fields)
 
-    def _clear_live_process_tasks(self):
+    def _settle_autonomous_open_tools(self, status="cancelled"):
+        while self.autonomous_open_tools:
+            rid = self.autonomous_open_tools.pop(0)
+            row = self.rows.get(rid)
+            if (
+                row
+                and rid not in set(self.background_task_rows.values())
+                and row.get("status") in ("running", "in_progress", "pending")
+            ):
+                self.row({**row, "status": status})
+
+    def _settle_turn_streamed_tools(self):
+        bg_row_ids = set(self.background_task_rows.values())
+        preexisting = getattr(self, "preexisting_tool_ids", set())
+        for rid, r in list(self.rows.items()):
+            if (
+                rid.startswith("tool-")
+                and rid[5:] not in preexisting
+                and rid not in bg_row_ids
+                and r.get("role") == "tool"
+                and r.get("status") in ("running", "in_progress", "pending")
+            ):
+                self.row({**r, "status": "completed"})
+
+    def _clear_live_process_tasks(self, settle_rows=False):
         with self.lock:
+            if settle_rows:
+                for tid in list(self.background_tasks):
+                    self._settle_background_task(tid, "cancelled")
+                self._settle_autonomous_open_tools("cancelled")
             self.background_tasks.clear()
-            self.settled_background_tasks.clear()
+            if not settle_rows:
+                self.settled_background_tasks.clear()
             self.background_task_rows.clear()
             self.oneshot_timers.clear()
+            self.conditional_timers.clear()
             self.in_autonomous_turn = False
             self.autonomous_running = False
             self.autonomous_open_tools.clear()
+            self.steer_submission = None
+            if hasattr(self, "pending_echo_submissions"):
+                self.pending_echo_submissions.clear()
 
     def exited(self, error):
         self.tail_stop.set()
@@ -200,7 +293,11 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
     def finish_observer_close(self):
         self.tail_stop.set()
         self.tail_wake.set()
-        self._clear_live_process_tasks()
+        tail_thread = getattr(self, "tail_thread", None)
+        if tail_thread is not None and tail_thread.is_alive() and threading.current_thread() is not tail_thread:
+            tail_thread.join(timeout=2.0)
+        with self.lock:
+            self._clear_live_process_tasks()
         super().finish_observer_close()
 
     def stop(self):
@@ -249,6 +346,18 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         if kind in ("tool_call", "tool_call_update"):
             tc_id = u.get("toolCallId")
             if tc_id and tc_id in self.catchup_tool_ids:
+                mapped_rid = self.catchup_tool_rows.get(tc_id, "")
+                if mapped_rid and mapped_rid in self.rows:
+                    old_auto = self.rows[mapped_rid]
+                    if (
+                        u.get("status") in ("completed", "failed", "cancelled")
+                        and old_auto.get("status") in ("running", "in_progress", "pending")
+                        and mapped_rid not in set(self.background_task_rows.values())
+                    ):
+                        changes = {"status": u["status"]}
+                        if "content" in u and not old_auto.get("outcome"):
+                            changes["outcome"] = clean_agy_tool_output(display_content(u["content"]))
+                        self.row({**old_auto, **changes})
                 return self._accept_catchup()
             if tc_id and f"tool-{tc_id}" in self.rows:
                 old = self.rows[f"tool-{tc_id}"]
@@ -276,6 +385,8 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                             self.autonomous_catchup.remove(prev)
                     if tc_id:
                         self.catchup_tool_ids.add(tc_id)
+                        if expected.get("row_id"):
+                            self.catchup_tool_rows[tc_id] = expected["row_id"]
                     return self._accept_catchup()
             return False
 
@@ -313,18 +424,36 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 and e.get("method") == "session/update"
                 and e.get("params", {}).get("update", {}).get("sessionUpdate") == "current_mode_update"):
             return
+        prev_tool_outcome = ""
+        prev_tool_status = ""
         if e.get("method") == "session/update":
             u = e.get("params", {}).get("update", {})
             kind = u.get("sessionUpdate")
             with self.lock:
                 if kind in ("agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"):
                     if getattr(self, "history_loaded", False) and (self.current_submission is None or self.in_autonomous_turn):
+                        if self.in_autonomous_turn and (self.autonomous_catchup or self.catchup_tool_ids):
+                            if self._consume_autonomous_catchup(u):
+                                return
                         self.autonomous_streamed = True
                     elif self.current_submission is not None and (self.autonomous_catchup or self.catchup_tool_ids):
                         if self._consume_autonomous_catchup(u):
                             return
                         if kind in ("tool_call", "tool_call_update") or bool(text(u.get("content"))):
                             self.autonomous_catchup.clear()
+            if kind in ("tool_call", "tool_call_update") and u.get("toolCallId"):
+                existing_tool = self.rows.get("tool-" + u["toolCallId"], {})
+                prev_tool_outcome = existing_tool.get("outcome", "")
+                prev_tool_status = existing_tool.get("status", "")
+                plan_kind = _plan_tool_kind(u.get("name") or existing_tool.get("toolName", ""), u.get("title", ""))
+                if plan_kind:
+                    e = {
+                        **e,
+                        "params": {
+                            **e["params"],
+                            "update": {**u, "name": plan_kind, "title": _plan_tool_title(plan_kind)},
+                        },
+                    }
         super().event(e)
         if e.get("method") == "session/update":
             u = e.get("params", {}).get("update", {})
@@ -364,30 +493,70 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                             self.tail_wake.set()
                 elif tool_name == "manage_subagents" and row.get("status") == "completed":
                     self.note_manage(raw_params)
+                elif tool_name == "swarm":
+                    if row.get("status") in ("completed", "succeeded"):
+                        with self.lock:
+                            unhandled = ident not in self.handled_swarm_rows
+                        if unhandled and (row.get("outcome") or raw_params.get("action") == "kill"):
+                            turn_id = row.get("turnId") or self.current_submission or ""
+                            with self.lock:
+                                if self.note_swarm_tool(ident, turn_id, raw_params, row.get("outcome", ""), allow_live=getattr(self, "history_loaded", False)):
+                                    self.handled_swarm_rows.add(ident)
+                        else:
+                            self._reanchor_subagents()
+                    elif raw_params.get("action") == "add":
+                        self._reanchor_subagents()
+                elif tool_name == "post_message" and row.get("status") in ("completed", "succeeded"):
+                    with self.lock:
+                        if ident not in self.handled_swarm_rows:
+                            allow_revive = getattr(self, "history_loaded", False)
+                            if self.note_post_message(raw_params, row.get("outcome", ""), allow_revive=allow_revive):
+                                self.handled_swarm_rows.add(ident)
                 if row.get("status") in ("completed", "succeeded") and not row.get("outcome"):
                     if getattr(self, "history_loaded", False):
                         self.ensure_child_tail()
                         self.tail_wake.set()
                 raw_outcome = row.get("outcome", "") or ""
-                bg_match = _BG_TASK_RE.search(raw_outcome)
+                tid = extract_agy_bg_task_id(raw_outcome, tool_name)
                 cleaned_outcome = clean_agy_tool_output(raw_outcome)
+                plan_kind = _plan_tool_kind(tool_name, u.get("title", ""))
                 with self.lock:
                     keep_running = False
-                    if bg_match:
-                        tid = bg_match.group(1).strip()
+                    preserve_settled = False
+                    if tid:
                         if tid not in self.settled_background_tasks:
                             self.background_tasks.add(tid)
                             self.background_task_rows[tid] = ident
-                            if _oneshot_timer(raw_outcome, tool_name, raw_params):
+                            if is_agy_oneshot_timer(raw_outcome, tool_name, raw_params):
                                 self.oneshot_timers.add(tid)
+                                cond = agy_timer_condition(raw_params)
+                                if cond:
+                                    self.conditional_timers[tid] = cond
                             keep_running = True
+                        else:
+                            preserve_settled = True
+                            if not cleaned_outcome and prev_tool_outcome:
+                                cleaned_outcome = prev_tool_outcome
                     cur = self.rows.get(ident)
                     if cur:
                         updates = {}
-                        if cleaned_outcome != raw_outcome:
-                            updates["outcome"] = cleaned_outcome
+                        final_outcome = (
+                            _plan_tool_outcome(plan_kind, raw_params, cleaned_outcome, cur.get("status", ""))
+                            if plan_kind
+                            else cleaned_outcome
+                        )
+                        if plan_kind:
+                            expected_title = _plan_tool_title(plan_kind)
+                            if cur.get("text") != expected_title:
+                                updates["text"] = expected_title
+                            if cur.get("toolName") != plan_kind:
+                                updates["toolName"] = plan_kind
+                        if final_outcome != raw_outcome:
+                            updates["outcome"] = final_outcome
                         if keep_running and cur.get("status") in ("completed", "succeeded"):
                             updates["status"] = "running"
+                        elif preserve_settled and prev_tool_status in ("completed", "cancelled", "failed") and cur.get("status") != prev_tool_status:
+                            updates["status"] = prev_tool_status
                         if updates:
                             self.row({**cur, **updates})
 
@@ -415,14 +584,108 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                     return row["id"]
         return candidates[0]["id"] if candidates else ""
 
+    def _find_swarm_row_id(self, child_id, entry):
+        existing = self.subagents.get(child_id, {}).get("itemId", "")
+        if existing and existing in self.rows:
+            return existing
+        if isinstance(entry, dict) and "params" in entry:
+            params = entry.get("params") or {}
+            siblings = entry.get("siblings") or {child_id}
+        else:
+            params = entry if isinstance(entry, dict) else {}
+            siblings = {child_id}
+        for sib in siblings:
+            if sib != child_id:
+                sib_item = self.subagents.get(sib, {}).get("itemId", "")
+                if sib_item and sib_item in self.rows:
+                    return sib_item
+        claimed_by_others = {
+            a.get("itemId")
+            for cid, a in self.subagents.items()
+            if cid not in siblings and a.get("itemId")
+        }
+        candidates = [
+            r for r in self.rows.values()
+            if r.get("toolName") == "swarm"
+        ]
+        for row in candidates:
+            outcome = row.get("outcome") or ""
+            if child_id and child_id in outcome:
+                return row["id"]
+        if params:
+            for prefer_unclaimed in (True, False):
+                for row in candidates:
+                    if prefer_unclaimed and row["id"] in claimed_by_others:
+                        continue
+                    raw_in = row.get("input")
+                    if not raw_in:
+                        continue
+                    try:
+                        parsed = json.loads(raw_in)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(parsed, dict) and parsed.get("action") == "add" and self._tool_params_match(params, parsed):
+                        return row["id"]
+        add_candidates = []
+        for row in candidates:
+            if row["id"] in claimed_by_others:
+                continue
+            raw_in = row.get("input")
+            if not raw_in:
+                add_candidates.append(row["id"])
+                continue
+            try:
+                parsed = json.loads(raw_in)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict) and parsed.get("action") == "add":
+                add_candidates.append(row["id"])
+        if len(add_candidates) == 1:
+            return add_candidates[0]
+        return ""
+
     def _reanchor_subagents(self):
         with self.lock:
+            if self.close_pending or self.released:
+                return
             for child_id, agent in list(self.subagents.items()):
                 if agent.get("itemId") and agent["itemId"] in self.rows:
                     continue
-                matched = self._find_invoke_row_id(child_id, self.child_call_args.get(child_id, {}))
+                if child_id in self.swarm_call_args:
+                    matched = self._find_swarm_row_id(child_id, self.swarm_call_args[child_id])
+                else:
+                    matched = self._find_invoke_row_id(child_id, self.child_call_args.get(child_id, {}))
                 if matched:
                     self.subagent(child_id, itemId=matched)
+
+    def register_swarm_child(self, child_id, ident, turn, worker, params=None, siblings=None, step_index=None):
+        with self.lock:
+            self.swarm_call_args[child_id] = {
+                "params": dict(params) if isinstance(params, dict) else {},
+                "siblings": set(siblings) if siblings else {child_id},
+            }
+            old = self.subagents.get(child_id, {})
+            anchor = ident or self._find_swarm_row_id(child_id, self.swarm_call_args[child_id])
+            wname = worker.get("name", "") or old.get("name", "")
+            wrole = worker.get("role", "") or old.get("role", "") or "swarm"
+            wtask = worker.get("task", "") or old.get("task", "")
+            wmodel = worker.get("model", "")
+            fields = {
+                "name": wname,
+                "role": wrole,
+                "task": wtask,
+                "itemId": anchor,
+                "turnId": turn or old.get("turnId", ""),
+                "model": wmodel if isinstance(wmodel, str) and wmodel else (old.get("model") or "inherit"),
+            }
+            path = child_log_path(child_id, "")
+            if path:
+                fields["logPath"] = path
+            if old.get("status", "unknown") == "unknown":
+                fields["status"] = "running"
+            self.subagent(child_id, **fields)
+        if path:
+            self.ensure_child_tail()
 
     def register_child(self, child_id, ident, turn, type_name, role, task, uri, model=""):
         with self.lock:
@@ -491,6 +754,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.settled_background_tasks.add(tid)
         self.background_tasks.discard(tid)
         self.oneshot_timers.discard(tid)
+        self.conditional_timers.pop(tid, None)
         rid = self.background_task_rows.pop(tid, "")
         if rid and rid in self.rows:
             cur = self.rows[rid]
@@ -511,7 +775,13 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         lower_out = (output or "").lower()
         if action == "kill" and isinstance(task_id, str) and task_id:
             if state == "DONE" or "not running" in lower_out or "not found" in lower_out:
-                self._settle_background_task(task_id, "cancelled")
+                for matched in (_matching_bg_task_ids(task_id, self.background_tasks) or [task_id]):
+                    self._settle_background_task(matched, "cancelled")
+        elif action == "status" and isinstance(task_id, str) and task_id and state == "DONE":
+            if any(term in lower_out for term in ("completed", "finished", "exited", "not running", "not found", "cancelled", "canceled", "killed")):
+                t_state = "cancelled" if ("cancel" in lower_out or "killed" in lower_out) else "completed"
+                for matched in (_matching_bg_task_ids(task_id, self.background_tasks) or [task_id]):
+                    self._settle_background_task(matched, t_state)
         elif action == "list" and state == "DONE":
             if "no running" in lower_out or "no background" in lower_out:
                 for tid in list(self.background_tasks):
@@ -529,7 +799,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 }
                 live.discard("")
                 for tid in list(self.background_tasks):
-                    if tid not in live:
+                    if tid not in live and not any(tid.endswith("/" + l) or l.endswith("/" + tid) for l in live):
                         self._settle_background_task(tid, "completed")
 
     def _sync_autonomous_running(self):
@@ -542,6 +812,8 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
 
     def refresh_parent_log(self):
         with self.lock:
+            if self.close_pending or self.released:
+                return
             native_id = self.data.get("nativeId") or self.config.get("nativeId", "")
             path = child_log_path(native_id, "")
             if not path:
@@ -559,9 +831,17 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                         self.settled_background_tasks.clear()
                         self.background_task_rows.clear()
                         self.oneshot_timers.clear()
+                        self.conditional_timers.clear()
                         self.in_autonomous_turn = False
                         self.autonomous_running = False
                         self.autonomous_open_tools.clear()
+                        self.swarm_groups.clear()
+                        self.swarm_workers.clear()
+                        self.swarm_call_args.clear()
+                        self.swarm_revived_steps.clear()
+                        self.swarm_stopped_steps.clear()
+                        self.child_step_highs.clear()
+                        self.handled_swarm_rows.clear()
                     source.seek(self.parent_offset)
                     while True:
                         line = source.readline()
@@ -584,27 +864,36 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                             self.parent_turn_settled = False
                             self.in_autonomous_turn = False
                             self.autonomous_running = False
-                            self.autonomous_open_tools.clear()
+                            self._settle_autonomous_open_tools("cancelled")
                         elif kind == "SYSTEM_MESSAGE":
                             sender, body = parse_system_message(step.get("content"))
                             if sender == "system" and "All your subagents" in body and "have been stopped" in body:
                                 for cid in self.parent_children:
                                     if cid in self.subagents and self.subagents[cid].get("status") == "running":
-                                        self.subagent(cid, status="cancelled", nativeStatus="server_restart")
+                                        settled_msgs = _settle_terminal_child_messages(self.subagents[cid].get("messages", []), "cancelled")
+                                        self.subagent(cid, status="cancelled", nativeStatus="server_restart", messages=settled_msgs)
                                 for tid in list(self.background_tasks):
                                     self._settle_background_task(tid, "cancelled")
                                 self.in_autonomous_turn = False
                                 self.autonomous_running = False
-                                self.autonomous_open_tools.clear()
+                                self._settle_autonomous_open_tools("cancelled")
                             else:
                                 if sender and body.startswith(f'Task id "{sender}" '):
                                     bg_state = "cancelled" if _BG_CANCELLED_RE.match(body) else "completed"
                                     self._settle_background_task(sender, bg_state, extract_agy_task_result(body))
                                 elif sender and sender in self.oneshot_timers:
                                     self._settle_background_task(sender, "completed")
+                                elif self.conditional_timers and (sender or (body and not _SWARM_BOARD_PING_RE.match(body.strip()))):
+                                    for ctid, cond in list(self.conditional_timers.items()):
+                                        if cond.lower() == "any" or (sender and sender == cond):
+                                            self._settle_background_task(ctid, "completed")
                                 for match in _CRON_CANCELLED_RE.finditer(body):
                                     self._settle_background_task(match.group(1).strip(), "completed")
-                                if sender and body:
+                                for match in _CRON_CANCELLED_MSG_RE.finditer(body):
+                                    for matched in (_matching_bg_task_ids(match.group(1).strip(), self.background_tasks) or [match.group(1).strip()]):
+                                        self._settle_background_task(matched, "completed")
+                                self._settle_autonomous_open_tools("cancelled")
+                                if sender and body and not body.lstrip().startswith("[swarm]"):
                                     self.child_replies[sender] = body[:500]
                                     if sender in self.subagents and self.subagents[sender].get("status") == "succeeded":
                                         self.subagent(sender, detail=body[:500])
@@ -619,6 +908,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                     self.autonomous_running = True
                                 self.parent_turn_settled = False
                         elif kind == "PLANNER_RESPONSE":
+                            self._settle_autonomous_open_tools("cancelled")
                             if (
                                 getattr(self, "history_loaded", False)
                                 and self.current_submission is None
@@ -645,11 +935,16 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                     cname = call.get("name") or "tool"
                                     params = transcript_args(call)
                                     rid = f"agy-auto:{index}:tool:{num}"
-                                    title = params.get("toolSummary") or params.get("CommandLine") or params.get("Path") or cname
+                                    plan_kind = _plan_tool_kind(cname)
+                                    title = _plan_tool_title(plan_kind) if plan_kind else (
+                                        params.get("toolSummary") or params.get("CommandLine") or params.get("Path") or cname
+                                    )
+                                    init_outcome = _plan_tool_outcome(plan_kind, params, "", "running") if plan_kind else ""
                                     self.row({
                                         **item(rid, "tool", str(title), status="running", kind="tool"),
-                                        "toolName": cname,
+                                        "toolName": plan_kind or cname,
                                         "input": json.dumps(params, ensure_ascii=False),
+                                        **({"outcome": init_outcome} if init_outcome else {}),
                                         "origin": "native",
                                     })
                                     self._record_autonomous_row(rid, {"kind": "tool", "name": cname, "params": params})
@@ -659,9 +954,11 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                 if self.in_autonomous_turn:
                                     if self.autonomous_streamed:
                                         self.finish_chunk("completed")
+                                    if self.current_submission is None:
+                                        self._settle_turn_streamed_tools()
                                     self.in_autonomous_turn = False
                                     self.autonomous_running = False
-                                    self.autonomous_open_tools.clear()
+                                    self._settle_autonomous_open_tools("cancelled")
                             else:
                                 self.parent_turn_settled = False
                                 if self.in_autonomous_turn:
@@ -669,21 +966,40 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                         elif kind == "GENERIC":
                             output = step.get("content") if isinstance(step.get("content"), str) else ""
                             cleaned_output = clean_agy_tool_output(output)
-                            bg_match = _BG_TASK_RE.search(output)
+                            head_call = self.parent_calls[0] if self.parent_calls else {}
+                            head_name = head_call.get("name") or ""
+                            head_params = transcript_args(head_call) if head_call else {}
+                            tid = extract_agy_bg_task_id(output, head_name, generic_state=state)
                             tool_row_id = ""
-                            if self.in_autonomous_turn and not self.autonomous_streamed and self.autonomous_open_tools:
+                            if self.in_autonomous_turn and self.autonomous_open_tools:
                                 tool_row_id = self.autonomous_open_tools.pop(0)
                                 old_tool = self.rows.get(tool_row_id)
                                 if old_tool:
-                                    tool_status = "failed" if state == "ERROR" else ("running" if bg_match else "completed")
-                                    self.row({**old_tool, "status": tool_status, "outcome": cleaned_output})
-                            if bg_match:
-                                tid = bg_match.group(1).strip()
+                                    if old_tool.get("status") in ("running", "in_progress", "pending") or (tid and tid not in self.settled_background_tasks):
+                                        tool_status = "failed" if state == "ERROR" else ("running" if tid else "completed")
+                                    else:
+                                        tool_status = old_tool["status"]
+                                    plan_kind = _plan_tool_kind(old_tool.get("toolName", ""))
+                                    old_params = {}
+                                    if plan_kind and old_tool.get("input"):
+                                        try:
+                                            parsed = json.loads(old_tool["input"])
+                                            if isinstance(parsed, dict):
+                                                old_params = parsed
+                                        except (ValueError, TypeError):
+                                            pass
+                                    final_out = _plan_tool_outcome(plan_kind, old_params, cleaned_output, tool_status) if plan_kind else cleaned_output
+                                    if not final_out and old_tool.get("outcome"):
+                                        final_out = old_tool["outcome"]
+                                    self.row({**old_tool, "status": tool_status, "outcome": final_out})
+                            if tid:
                                 if tid not in self.settled_background_tasks:
                                     self.background_tasks.add(tid)
-                                    head_call = self.parent_calls[0] if self.parent_calls else {}
-                                    if _oneshot_timer(output, head_call.get("name") or "", transcript_args(head_call) if head_call else {}):
+                                    if is_agy_oneshot_timer(output, head_name, head_params):
                                         self.oneshot_timers.add(tid)
+                                        cond = agy_timer_condition(head_params)
+                                        if cond:
+                                            self.conditional_timers[tid] = cond
                                     if tool_row_id:
                                         self.background_task_rows[tid] = tool_row_id
                                     elif tid not in self.background_task_rows:
@@ -691,7 +1007,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                         for r in self.rows.values():
                                             if (r.get("role") == "tool"
                                                     and r["id"] not in claimed
-                                                    and r.get("toolName") in ("run_command", "schedule", "")
+                                                    and r.get("toolName") in ("run_command", "schedule", "run_workflow", "")
                                                     and r.get("status") in ("running", "in_progress", "pending")):
                                                 self.background_task_rows[tid] = r["id"]
                                                 break
@@ -699,24 +1015,35 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                 call = self.parent_calls.pop(0)
                                 params = transcript_args(call)
                                 cname = call.get("name")
-                                if cleaned_output and not tool_row_id and cname:
+                                if not tool_row_id and cname and (cleaned_output or cname in ("swarm", "post_message")):
+                                    fallback_id = ""
                                     for r in self.rows.values():
-                                        if r.get("role") == "tool" and r.get("toolName") == cname and not r.get("outcome"):
-                                            raw_in = r.get("input")
-                                            if not raw_in:
-                                                r_params = {}
-                                            else:
-                                                try:
-                                                    parsed_in = json.loads(raw_in)
-                                                except (ValueError, TypeError):
-                                                    continue
-                                                if not isinstance(parsed_in, dict):
-                                                    continue
-                                                r_params = parsed_in
-                                            if self._tool_params_match(params, r_params):
+                                        if r.get("role") != "tool" or r.get("toolName") != cname:
+                                            continue
+                                        needs_outcome = bool(cleaned_output) and not r.get("outcome")
+                                        unhandled_swarm = cname in ("swarm", "post_message") and r["id"] not in self.handled_swarm_rows
+                                        if not needs_outcome and not unhandled_swarm:
+                                            continue
+                                        raw_in = r.get("input")
+                                        if not raw_in:
+                                            r_params = {}
+                                        else:
+                                            try:
+                                                parsed_in = json.loads(raw_in)
+                                            except (ValueError, TypeError):
+                                                continue
+                                            if not isinstance(parsed_in, dict):
+                                                continue
+                                            r_params = parsed_in
+                                        if self._tool_params_match(params, r_params):
+                                            if needs_outcome:
                                                 tool_row_id = r["id"]
                                                 self.row({**r, "outcome": cleaned_output})
                                                 break
+                                            if not fallback_id:
+                                                fallback_id = r["id"]
+                                    if not tool_row_id and fallback_id:
+                                        tool_row_id = fallback_id
                                 if cname == "manage_task":
                                     self._note_manage_task(params, state, output)
                                 elif state == "DONE":
@@ -741,6 +1068,15 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                         if isinstance(recipient, str) and recipient in self.subagents:
                                             if self.subagents[recipient].get("nativeStatus") in ("manage_subagents", "server_restart", "process_exited"):
                                                 self.subagent(recipient, status="running", nativeStatus="revived")
+                                    elif cname == "swarm":
+                                        if not tool_row_id or tool_row_id not in self.handled_swarm_rows:
+                                            turn_id = self.rows.get(tool_row_id, {}).get("turnId") or self.current_submission or ""
+                                            if self.note_swarm_tool(tool_row_id, turn_id, params, output, allow_live=getattr(self, "history_loaded", False)) and tool_row_id:
+                                                self.handled_swarm_rows.add(tool_row_id)
+                                    elif cname == "post_message":
+                                        if not tool_row_id or tool_row_id not in self.handled_swarm_rows:
+                                            if self.note_post_message(params, output, allow_revive=getattr(self, "history_loaded", False)) and tool_row_id:
+                                                self.handled_swarm_rows.add(tool_row_id)
                         elif kind == "ERROR_MESSAGE":
                             err_raw = (
                                 step.get("error")
@@ -767,7 +1103,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                 self.parent_turn_settled = self.current_submission is None
                                 self.in_autonomous_turn = False
                                 self.autonomous_running = False
-                                self.autonomous_open_tools.clear()
+                                self._settle_autonomous_open_tools("failed")
             except OSError:
                 return
             if before_bg != self.background_tasks:
@@ -776,53 +1112,52 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self._sync_autonomous_running()
 
     def refresh_child_log(self, ident, path):
+        with self.lock:
+            if self.close_pending or self.released:
+                return
         steps = self.changed_transcript(path)
         if steps is None:
             return
-        messages = project_child_transcript(ident, steps)
-        state = child_transcript_state(steps)
-        detail = ""
         with self.lock:
+            if self.close_pending or self.released:
+                return
             reply_detail = self.child_replies.get(ident, "")
-        if state == "idle" and reply_detail:
-            detail = reply_detail
-        else:
-            for message in reversed(messages):
-                if message.get("role") == "assistant" and message.get("text"):
-                    detail = message["text"][:500]
-                    break
-                if message.get("status") == "running" and message.get("toolName"):
-                    detail = message["toolName"]
-                    break
-            if not detail and reply_detail:
-                detail = reply_detail
-        with self.lock:
-            old = self.subagents.get(ident)
-            if not old:
-                return
-            fields = {"messages": messages, "detail": detail}
-            if state and old.get("nativeStatus") not in ("manage_subagents", "server_restart"):
-                fields.update(
-                    status="succeeded" if state == "idle" else state,
-                    nativeStatus="transcript:" + state,
-                )
-            if all(old.get(key) == value for key, value in fields.items()):
-                return
-            self.subagent(ident, **fields)
+            self.apply_child_transcript(
+                ident,
+                steps,
+                reply_detail=reply_detail,
+                protected=("manage_subagents", "server_restart", "swarm:killed"),
+            )
 
     def sync_transcripts_once(self, settle_exited=False):
+        with self.lock:
+            if self.close_pending or self.released:
+                return
         self.refresh_parent_log()
         self._reanchor_subagents()
         with self.lock:
+            if self.close_pending or self.released:
+                return
             jobs = [(ident, child.get("logPath")) for ident, child in self.subagents.items() if child.get("logPath")]
         for ident, path in jobs:
+            with self.lock:
+                if self.close_pending or self.released:
+                    return
             self.refresh_child_log(ident, path)
         if settle_exited:
-            self._clear_live_process_tasks()
             with self.lock:
+                if self.close_pending or self.released:
+                    return
+                self._clear_live_process_tasks(settle_rows=True)
                 for ident, child in list(self.subagents.items()):
-                    if child.get("status") in ("running", "pending", "unknown"):
-                        self.subagent(ident, status="cancelled", nativeStatus="process_exited")
+                    cstatus = child.get("status")
+                    if cstatus in ("running", "pending", "unknown"):
+                        settled_msgs = _settle_terminal_child_messages(child.get("messages", []), "cancelled")
+                        self.subagent(ident, status="cancelled", nativeStatus="process_exited", messages=settled_msgs)
+                    elif cstatus in ("closed", "cancelled", "failed"):
+                        settled_msgs = _settle_terminal_child_messages(child.get("messages", []), cstatus)
+                        if settled_msgs != child.get("messages", []):
+                            self.subagent(ident, messages=settled_msgs)
 
     def tail_children(self, stop, wake):
         while not stop.is_set():
@@ -843,7 +1178,11 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self.save()
         wanted_effort = self.config.get("selectedEffort")
         efforts = next((m.get("efforts", []) for m in self.data["models"] if m["id"] == self.data["model"]), [])
-        if wanted_effort and wanted_effort in efforts and wanted_effort != self.data["effort"]:
+        if not efforts:
+            if "selectedEffort" in self.config:
+                self.config.pop("selectedEffort", None)
+                self.save()
+        elif wanted_effort and wanted_effort in efforts and wanted_effort != self.data["effort"]:
             AcpSession.configure(self, {"effort": wanted_effort})
         wanted_perm = self.config.get("selectedPermission")
         if wanted_perm and wanted_perm != FULL_ACCESS:
@@ -862,12 +1201,17 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         except Exception:
             self._close_current_peer()
             raise
-        self.settle_incomplete_rows("completed")
         self.sync_transcripts_once(settle_exited=True)
+        self.settle_incomplete_rows("unknown")
         self._refresh_agy_metrics()
         self.history_loaded = True
         self.restart_child_tail()
-        self.update(connected=True, notice=self.notice, historyReady=True)
+        self.update(
+            connected=True,
+            capabilities={**self.data["capabilities"], "steer": True},
+            notice=self.notice,
+            historyReady=True,
+        )
 
     def _refresh_agy_metrics(self, acp_usage_dict=None):
         native_id = self.data.get("nativeId") or self.config.get("nativeId", "")
@@ -876,8 +1220,21 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         if not rows and isinstance(acp_usage_dict, dict):
             rows = agy_acp_usage(acp_usage_dict, model=model)
         if rows:
+            self.acp_metrics = []
             self.request_metrics = rows
-            self.update(metrics=getattr(self, "acp_metrics", []) + self.request_metrics)
+            self.update(metrics=self.request_metrics)
+
+    def apply_usage(self, update):
+        self.acp_metrics = []
+        self._refresh_agy_metrics(acp_usage_dict=update)
+
+    def invalidate_context(self):
+        self.acp_metrics = []
+        self.request_metrics = [
+            r for r in getattr(self, "request_metrics", [])
+            if r.get("label") not in ("上下文", "Context")
+        ]
+        self.update(metrics=self.request_metrics)
 
     def refresh(self):
         self.sync_transcripts_once()
@@ -887,43 +1244,56 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
     def connect(self):
         self.update(notice=self.notice, historyReady=False)
         if self.config.get("nativeProtocol") != AGY_ACP_PROTOCOL:
-            raise Rejected("此会话不属于 Google 官方 agy ACP；请使用原入口恢复，不能切换协议或会话存储。")
+            raise Rejected(tr("此会话不属于 Google 官方 agy ACP；请使用原入口恢复，不能切换协议或会话存储。",
+                              "This session does not belong to official Google agy ACP; resume via its original entry without switching protocol or storage."))
         if self.config.get("creationUnknown") and not self.config.get("nativeId"):
-            raise Rejected("上次原生创建结果未知；请从 CLI 会话列表取得原 ID 后接入，不能自动再建")
+            raise Rejected(tr("上次原生创建结果未知；请从 CLI 会话列表取得原 ID 后接入，不能自动再建",
+                              "Previous native session creation result is unknown; attach using the original ID from CLI session list instead of recreating"))
         self.discover_binary()
         is_new = not bool(self.config.get("nativeId"))
         self._connect_acp(is_new)
 
+    def _validate_effort_against_current_options(self, effort_value):
+        effort_opt = next((o for o in self.options if o.get("category", o["id"]) in ("thought_level", "reasoning_effort")), None)
+        if not effort_opt:
+            raise Rejected(tr("CLI 未提供此设置接口", "CLI does not support this setting"))
+        if effort_value not in {v["value"] for v in self.flatten(effort_opt.get("options", []))}:
+            raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
+
     def configure(self, p):
         if self.data["running"]:
-            raise Rejected("请等待回合结束再更改设置")
+            raise Rejected(tr("请等待回合结束再更改设置", "Wait for the current turn to finish before changing settings"))
         if p.get("speed"):
             return AcpSession.configure(self, p)
         if p.get("model") and p["model"] not in {m["id"] for m in self.data["models"]}:
-            raise Rejected("选项不在原生目录中")
-        if p.get("effort"):
-            effort_opt = next((o for o in self.options if o.get("category", o["id"]) in ("thought_level", "reasoning_effort")), None)
-            if not effort_opt:
-                raise Rejected("CLI 未提供此设置接口")
-            if p["effort"] not in {v["value"] for v in self.flatten(effort_opt.get("options", []))}:
-                raise Rejected("选项不在原生目录中")
+            raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
         target_perm = p.get("permission")
         if target_perm and target_perm not in {perm["id"] for perm in self.data["permissions"]}:
-            raise Rejected("选项不在原生目录中")
+            raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
 
         need_relaunch = bool(target_perm) and ((target_perm == FULL_ACCESS) != getattr(self, "skip_permissions_active", False))
+        if p.get("effort") and not p.get("model") and not need_relaunch:
+            self._validate_effort_against_current_options(p["effort"])
+
         if not need_relaunch:
-            acp_patch = {k: v for k, v in p.items() if k in ("model", "effort") or (k == "permission" and v != FULL_ACCESS)}
-            if acp_patch:
-                AcpSession.configure(self, acp_patch)
             if p.get("model"):
+                AcpSession.configure(self, {"model": p["model"]})
                 self.config["selectedModel"] = self.data["model"]
             if p.get("effort"):
+                self._validate_effort_against_current_options(p["effort"])
+                AcpSession.configure(self, {"effort": p["effort"]})
                 self.config["selectedEffort"] = self.data["effort"]
             if target_perm:
+                if target_perm != FULL_ACCESS:
+                    AcpSession.configure(self, {"permission": target_perm})
                 self.config["selectedPermission"] = target_perm
                 if target_perm == FULL_ACCESS:
                     self.update(permission=FULL_ACCESS)
+            cur_efforts = next((m.get("efforts", []) for m in self.data["models"] if m["id"] == self.data["model"]), [])
+            if not cur_efforts or not self.data.get("effort"):
+                self.config.pop("selectedEffort", None)
+            elif self.config.get("selectedEffort") and self.config["selectedEffort"] not in cur_efforts:
+                self.config["selectedEffort"] = self.data["effort"]
             self.save()
             return {}
 
@@ -945,6 +1315,12 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             self.rows.clear()
         try:
             self._connect_acp(is_new=False)
+            if p.get("effort"):
+                self._validate_effort_against_current_options(p["effort"])
+                if self.data.get("effort") != p["effort"]:
+                    AcpSession.configure(self, {"effort": p["effort"]})
+                self.config["selectedEffort"] = self.data["effort"]
+                self.save()
         except Exception:
             for k, v in prev_saved.items():
                 if v is None:
@@ -964,28 +1340,102 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             raise
         return {}
 
+    def can_steer(self, payload):
+        if not super().can_steer(payload):
+            return False
+        if not self.data.get("running") or self.current_submission is None:
+            return False
+        if self.steer_submission is not None:
+            return False
+        if self.data.get("requests"):
+            return False
+        txt = (payload.get("text") or "").strip()
+        if txt.startswith("/"):
+            return False
+        return True
+
     def validate_prompt(self, p):
         super().validate_prompt(p)
         command = p.get("text", "").strip().split(maxsplit=1)[0].lower() if p.get("text", "").strip() else ""
         if command in ("/clear", "/reset", "/new"):
-            raise Rejected("请使用新建会话；此命令会清空当前原生会话历史")
+            raise Rejected(tr("请使用新建会话；此命令会清空当前原生会话历史", "Start a new session instead; this command clears the current native session history"))
+
+    def _steer_uncertain(self, ident, error):
+        with self.lock:
+            self.diagnostic("agy-acp-steer-result-unknown", error)
+            self.update(error=tr(
+                f"ACP 插话结果待确认（{type(error).__name__}）",
+                f"ACP steer result pending confirmation ({type(error).__name__})",
+            ))
 
     def prompt(self, p):
+        if p.get("steer"):
+            ident = p["submissionId"]
+            blocks = ([{"type": "text", "text": p["text"]}] if p.get("text") else []) + image_blocks(p.get("images", []))
+            with self.lock:
+                self.steer_submission = ident
+                if not hasattr(self, "pending_echo_submissions"):
+                    self.pending_echo_submissions = []
+                if ident not in self.pending_echo_submissions:
+                    self.pending_echo_submissions.append(ident)
+                self.row(item(ident, "user", p.get("text", ""), origin="local"))
+
+            def dispatch_steer():
+                try:
+                    params = {"sessionId": self.data["nativeId"], "prompt": blocks}
+                    if getattr(self, "initialize_info", {}).get("_meta", {}).get("lumaSubmissions", {}).get("protocol") == 1:
+                        params["_meta"] = {"lumaSubmissionId": ident}
+                    result = self.call(
+                        "session/prompt",
+                        params,
+                        timeout=self.prompt_wait_timeout,
+                        on_uncertain=lambda err: self._steer_uncertain(ident, err),
+                    )
+                    with self.lock:
+                        if not isinstance(result, dict) or not isinstance(result.get("stopReason"), str) or not result["stopReason"]:
+                            raise ValueError("ACP steer response has no stopReason")
+                        self.receipt(ident, "accepted")
+                        self.consumed(ident)
+                except Rejected as exc:
+                    with self.lock:
+                        pending = getattr(self, "pending_echo_submissions", None)
+                        if pending and ident in pending:
+                            pending.remove(ident)
+                        existing = self.rows.get(ident)
+                        if existing and existing.get("origin") == "local":
+                            self.rows.pop(ident, None)
+                            self.touch()
+                            self.seq += 1
+                        self.receipt(ident, "rejected")
+                        self.update(error=str(exc))
+                except Exception as exc:
+                    self._steer_uncertain(ident, exc)
+                finally:
+                    with self.lock:
+                        if self.steer_submission == ident:
+                            self.steer_submission = None
+
+            threading.Thread(target=dispatch_steer, daemon=True, name="LumaAgyAcpSteer").start()
+            return False
+
         self.sync_transcripts_once()
         with self.lock:
             self.in_autonomous_turn = False
             self.autonomous_running = False
             self.parent_turn_settled = False
-            self.autonomous_open_tools.clear()
+            self._settle_autonomous_open_tools("cancelled")
         return super().prompt(p)
 
     def apply_prompt_result(self, result):
         with self.lock:
             self.autonomous_catchup.clear()
             self.catchup_tool_ids.clear()
+            self.catchup_tool_rows.clear()
             self.in_autonomous_turn = False
             self.autonomous_running = False
-            self.autonomous_open_tools.clear()
+            self._settle_autonomous_open_tools("cancelled")
             self.refresh_parent_log()
+            if isinstance(result, dict) and result.get("stopReason") == "end_turn":
+                self._settle_turn_streamed_tools()
             self.parent_turn_settled = True
         self._refresh_agy_metrics(result.get("usage"))

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.runtime.*
@@ -34,8 +36,8 @@ internal fun pasteClipboardImages(context: Context, addImage: (String) -> Unit, 
         val images = (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
             .filter { context.contentResolver.getType(it)?.startsWith("image/") == true }.distinct()
         if (images.isEmpty()) {
-            if (declaredImage) error("无法读取剪贴板图片")
+            if (declaredImage) error(tr("无法读取剪贴板图片", "Unable to read clipboard image"))
             declaredImage
         } else { images.forEach { addImage(it.toString()) }; true }
-    } catch (_: Exception) { error("无法读取剪贴板图片"); true }
+    } catch (_: Exception) { error(tr("无法读取剪贴板图片", "Unable to read clipboard image")); true }
 }

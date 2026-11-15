@@ -19,9 +19,9 @@ final class TerminalDocuments {
             while(total<MAX_TEXT_BYTES&&(n=in.read(buffer,0,Math.min(buffer.length,MAX_TEXT_BYTES-total)))!=-1){out.write(buffer,0,n);total+=n;}
             bytes=out.toByteArray();
         }
-        for(byte b:bytes)if(b==0)throw new IOException("该文件不是可预览的文本");
+        for(byte b:bytes)if(b==0)throw new IOException(com.termux.terminal.LumaLang.tr("该文件不是可预览的文本","File is not previewable text"));
         String text=new String(bytes,StandardCharsets.UTF_8);
-        return file.length()>MAX_TEXT_BYTES ? text+"\n\n（内容较长，仅预览前 1 MiB）" : text;
+        return file.length()>MAX_TEXT_BYTES ? text+com.termux.terminal.LumaLang.tr("\n\n（内容较长，仅预览前 1 MiB）","\n\n(Truncated: showing first 1 MiB)") : text;
     }
     static final class PdfPage {
         final Bitmap bitmap;final int count;
@@ -29,7 +29,7 @@ final class TerminalDocuments {
     }
     static PdfPage pdf(File file,int page,int width,int height)throws IOException {
         try(ParcelFileDescriptor fd=ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);PdfRenderer renderer=new PdfRenderer(fd)){
-            int count=renderer.getPageCount();if(page<0||page>=count)throw new IOException("PDF 页码无效");
+            int count=renderer.getPageCount();if(page<0||page>=count)throw new IOException(com.termux.terminal.LumaLang.tr("PDF 页码无效","Invalid PDF page number"));
             try(PdfRenderer.Page current=renderer.openPage(page)){
                 float scale=Math.min((float)Math.max(1,Math.min(2048,width))/current.getWidth(),(float)Math.max(1,Math.min(2048,height))/current.getHeight());
                 int w=Math.max(1,(int)(current.getWidth()*scale)),h=Math.max(1,(int)(current.getHeight()*scale));

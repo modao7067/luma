@@ -12,16 +12,16 @@
     "sha256": "5eb84651184e7decba75bf6688229f7f48ebe90960119c96d6410ed7617aa729"
   },
   "apps/gui/app/src/main/assets/browser/actions.js": {
-    "bytes": 52176,
-    "sha256": "5621f5ced51a1715758bf8193530e73923760c387a95a4337a1e057603174223"
+    "bytes": 53848,
+    "sha256": "a1bc518890e61f601cc8666eff61d5109c69bc7ea7729ac776250a718691fa46"
   },
   "apps/gui/app/src/main/assets/browser/ego-lite-MIT.txt": {
     "bytes": 1066,
     "sha256": "325b6f26ca9452fcfb81cc6f52e3889573a7c141e9d07ab35f678b7d95d48e52"
   },
   "apps/gui/app/src/main/assets/browser/luma-browser": {
-    "bytes": 23399,
-    "sha256": "4ab6bf40779f83b797eef8e73078e64bab11227f2b86485ebed47cf63d48c1c7"
+    "bytes": 25133,
+    "sha256": "f0637b6785b4b6dd622d8130e2098b6efaa63537679b9005af703dae5b6c6dce"
   },
   "apps/gui/app/src/main/assets/cli_bridge/CLAUDE-SDK-LICENSE.txt": {
     "bytes": 1070,
@@ -32,124 +32,128 @@
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/acp.py": {
-    "bytes": 25508,
-    "sha256": "8e2c2df0082100415d404af15bad42fb64225d057dff972bbda0d35d38a5f79a"
+    "bytes": 29230,
+    "sha256": "f2ebdc7708ce5228ddcfc064d1d49f9b6d7cf706bd09d7b2933623c32ede9f95"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/agy_stream.py": {
-    "bytes": 3158,
-    "sha256": "bbb4f8092c1b4ac4186aa5c4e3749337a9c76a87e0035e906c9417a978022231"
+    "bytes": 3362,
+    "sha256": "07ef268bc3e72d445828cf8315d938fc1460bc5b25840d01c9e1f6f598c5ed27"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/antigravity.py": {
-    "bytes": 5749,
-    "sha256": "97cc37dbabcba6f9a3bb9505ccc4e49aac918888fd176439f91d4711034b69e8"
+    "bytes": 7519,
+    "sha256": "da4413d82d1f8cbcd7a175ed61dc15a988b5530769bfaefd8bdd9d129a51a0f2"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/antigravity_agy_acp.py": {
-    "bytes": 50375,
-    "sha256": "d285e4e49990e02b879930de8ca53b329a436f5fadb1a301bc7e670e394eb115"
+    "bytes": 76140,
+    "sha256": "3cde39a25bb93dd1b7dc1bb685a175b51b42b7de5f2cf2ddeb7ab5c6c963509e"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/antigravity_cli.py": {
-    "bytes": 39432,
-    "sha256": "88354c048f5649bc86aa4ee665821ef40eb142056478bb0312b97296857423fe"
+    "bytes": 78174,
+    "sha256": "6f3d0fc78f91a1609d6f478683ac90fc356837092498627124f675ac4d041519"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/balances.py": {
-    "bytes": 6406,
-    "sha256": "0b1a444b08f87df9fa21c5a50d3c7fea1a021b954130828fc69bb79a2f02e876"
+    "bytes": 7918,
+    "sha256": "4cd26fa835d53644377aeec306ed323fe6ae261297e2e85ed9b22f75c2d90bf6"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/base.py": {
-    "bytes": 36688,
-    "sha256": "f55ddcf5d62e0a4dc6b2ee383979b6bb855d8ca695c24663e085f0cc07a92898"
+    "bytes": 45297,
+    "sha256": "516692412795b2521e9d00d926666de824314a87ab7941611b26a1484a5a9a51"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/claude.py": {
-    "bytes": 30381,
-    "sha256": "41959b52529ec25bb9be27301b0b7d24e5957f1564a331dcd4d34ba80429e263"
+    "bytes": 38199,
+    "sha256": "bc8d266319b042aee5c1c12f3f8c3401648044e14aa828b14537421669dc3a0d"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/claude_history.py": {
     "bytes": 12060,
     "sha256": "9405ec3f6448c25f1a303406aa688cff06ba1060e4b946cf29a1b9fab0268e62"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/codebuddy.py": {
-    "bytes": 24977,
-    "sha256": "3b26a9915b8f33e39966c028ea2d1c21c5b3aaeca48577cbf2d6882bb1cacf04"
+    "bytes": 27968,
+    "sha256": "ef394137bdc1d2f1187bbb495d069d2c8844f91f420d24287e80a69673856a34"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/codebuddy_http.py": {
-    "bytes": 6514,
-    "sha256": "5fb566186942ffb44a2605c16b17eb9039ee547e38bdaedc783515143ee731e3"
+    "bytes": 7341,
+    "sha256": "4fa9723e72bdb2ac273b1ca80f4cf3138a50f95462a45eea8295418848daec67"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/codebuddy_owner.py": {
-    "bytes": 4369,
-    "sha256": "0eb776612aa66ac23eb9e7d907a271a4249c4e3c53630b3c2ce0400167273eb2"
+    "bytes": 4835,
+    "sha256": "20726a1209c863653c4fbfe461410cb5e4ba9e5b1b115ea4c3a18fab7b6d6d19"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/dsh.py": {
-    "bytes": 31642,
-    "sha256": "2126a9d4d23b0d7696f3f5ea3912f971bfd2595ba54619ffd8e36ba45569464d"
+    "bytes": 35597,
+    "sha256": "004d0943c17c03ab2247603020f6f2df9a5e0f101f1ee6536dc7cf7fbf76a8f1"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/dsh_acp.mjs": {
-    "bytes": 45055,
-    "sha256": "5c5fff7b9eb6c4ca1c35f689654d1b5eff9ce8771868f5b935f30529fd94eeed"
+    "bytes": 52611,
+    "sha256": "b95fdd2a185eb5816c60ca90e324bc4fff2f0cd07877219bc0f28b606e514bea"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/external_browser.py": {
     "bytes": 3743,
     "sha256": "fbb8c6ebe34f5ad49397f07fd469660159808766b7a8722674f797a723de15af"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/global_usage.py": {
-    "bytes": 130956,
-    "sha256": "a479a3b822e7cd63fa8efdcb1d7e38d0f4c71c58047e6698b6348a353f6ac4c7"
+    "bytes": 262196,
+    "sha256": "e9b7225efd2cf7291ff17145a6812b305a20ff26d65e3bd7ce7712d802cea523"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/grok.py": {
-    "bytes": 58114,
-    "sha256": "c07748e35d1bd02ac57df975985a31aff9aa9874fdd9c2f8d7099241824377e2"
+    "bytes": 71241,
+    "sha256": "f4445ce2e4718293a2baa92616b78f52fff9f0a20b12258463a3ab0847d2c17b"
+  },
+  "apps/gui/app/src/main/assets/cli_bridge/luma_cli/i18n.py": {
+    "bytes": 806,
+    "sha256": "56163faf0154482cdb70fd5de3e31b94bb4964d9ff80299a6e77070f5d420c2f"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/kimi.py": {
-    "bytes": 1320,
-    "sha256": "6086efea28f0bbb920898ebfacb75525c096fed52c82fe282c8a89259237c31d"
+    "bytes": 1666,
+    "sha256": "b6aec707a003f995edad958bf73a750b699875892104b2e9b3fb7038c1d93ee4"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/media.py": {
-    "bytes": 3593,
-    "sha256": "a8baee8833c5784f9d7d905859d31c9df820ef9773a0f8fb654f4389df337cca"
+    "bytes": 3677,
+    "sha256": "bdceb99a5cc3b15a94d9f2e3a5978a9cb4160c4c4be229eae701899d62d8f52d"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/metrics.py": {
-    "bytes": 18575,
-    "sha256": "c27d7ddbfbc542770b442739b5a2436bcbf66b4f18873f6da4e4ab8c8011fd59"
+    "bytes": 21044,
+    "sha256": "931b37ca3242f17216c7a4aac98f4df3fd30bd4e6935b9af5207656272016458"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/native_owner.py": {
-    "bytes": 16578,
-    "sha256": "33bb629e772846bc0583127bb0cc406bf79055a8f60e6b603ff1b1894567e1a0"
+    "bytes": 41849,
+    "sha256": "fd82e301a7b0ffe154123a6580d48057334691f6a28fab2049c55c7e1ca9e3f1"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/pi.py": {
-    "bytes": 31315,
-    "sha256": "4f3262542df7649e7fa7e8156e89aa68536436564e584481a44513128b46e3d9"
+    "bytes": 34197,
+    "sha256": "ee2955487cbed692566fc8651aa74b7920aa02a9332f3717e1f05df0c83e1c6a"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/pi_native.py": {
-    "bytes": 10286,
-    "sha256": "bf9736e06998f5403ad1a989c1eb593a186e63d052d0704dbe34f8a3d79c63bc"
+    "bytes": 11196,
+    "sha256": "ba7eec17b09fb516cbd331326f8bd024ecafd123d4b889862579dade8521d46e"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/qoder.py": {
-    "bytes": 4242,
-    "sha256": "18c138073b377fdee7bad01ac0a1db6e3a1925a32fe4cfb3d355ebd41fb1eec1"
+    "bytes": 4458,
+    "sha256": "ad0b1dba43216fbdc73b9522e703f2aaf980cdabb72d6299ed5f8d8daa0e0981"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/server.py": {
-    "bytes": 20476,
-    "sha256": "780f9987ce905ff51eefcc1dd53df842f79f565c0e8c7f782c790c4560c4fecf"
+    "bytes": 36006,
+    "sha256": "c1d48b3dc189bb8679aee7f31254e9877072756870e19c42e19a79d6b88396d6"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/transport.py": {
-    "bytes": 8575,
-    "sha256": "52f2f1b4037ca781069015c741d37672c32050a47fc92d06b104d9ec520fe5f4"
+    "bytes": 9226,
+    "sha256": "52f651171bdc1621a5c52541ee9e72d2643a71977aac30093515c50bef82a7c2"
   },
   "apps/gui/app/src/main/assets/cli_bridge/main.py": {
     "bytes": 279,
     "sha256": "a4b210fa98fbdd1d1f8e5bea85db4afce50745385b0cd37913181cc5f6b8fdec"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/host-server.mjs": {
-    "bytes": 3468,
-    "sha256": "5557fc438440370a1adab60bcf5b8cae0ac7d70b1da9b7d8f89015fb9cfe8a9e"
+    "bytes": 3877,
+    "sha256": "e0f381c0f47ea9d1240b7430e474e87f7ddb8a2b4340fcf93883a2a8258ebcce"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/message-identity.mjs": {
     "bytes": 6908,
     "sha256": "3949af2a5b1b279d12da3c3abf1efef694672e9d92ca5bd7ebce72986a31bb56"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/pi-host.mjs": {
-    "bytes": 10364,
-    "sha256": "bea8c9809d77c4294bb6555b0f56718ac73b2c0688ee3340e832c6c90c233b04"
+    "bytes": 10824,
+    "sha256": "6fb73b7f7bfba48a87b9395c03a7a821d63e704a5fe3c35774afce1aa42daa74"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/tmux-debian-arm64.zip": {
     "bytes": 801339,
@@ -196,8 +200,8 @@
     "sha256": "d011935189407f0a261d4ba85b38be0c8313d7d57572578fa3fddcfa3b261c8f"
   },
   "apps/gui/app/src/main/assets/sessions/luma-sessions": {
-    "bytes": 3301,
-    "sha256": "2faaa85294e9015590ee4ab0cde2602d4f10431f9d60cab18f7d6889ff69df07"
+    "bytes": 4042,
+    "sha256": "394bd7784f15374dcdf6b5af6a237aa8f0d6ba6b42e2566b143749dc0cccf985"
   },
   "runtime/noroot/src/main/assets/JetBrainsMono-NerdFont-OFL.txt": {
     "bytes": 4399,
@@ -2140,16 +2144,16 @@
     "sha256": "208ac894799e23676a98cc74168f42e72f20ccb6693f3b174ddccea2a2ead352"
   },
   "runtime/noroot/src/main/assets/runtime/bin/luma-read-file": {
-    "bytes": 6398,
-    "sha256": "5b1d631f73eb9be2d85e8fedd030ede206ccc7e9131020fa3f32336bd38c84c6"
+    "bytes": 6993,
+    "sha256": "0a93cc33dbd9358d41810a9e05558e4117c186f7128efa98b719c28c925acb6e"
   },
   "runtime/noroot/src/main/assets/runtime/bin/luma-tools": {
-    "bytes": 869,
-    "sha256": "a636df975242ee4094250c0fb9dec69a7b1148d808cc00ca98b3b6876e34e759"
+    "bytes": 1272,
+    "sha256": "cfc8e62f10266948ad3d8cc67a73dcc87a48d032f3b212211f50db3df06e04b5"
   },
   "runtime/noroot/src/main/assets/runtime/bin/lumactl": {
-    "bytes": 12168,
-    "sha256": "e150ec21db9e6cfa4825bb1965166ae1d358d9aa502a45cc7f32527703962a7e"
+    "bytes": 12766,
+    "sha256": "54afe390557df41fb7d3abf098c6235273929c113313b7bfab0e6d85cd053bf7"
   },
   "runtime/noroot/src/main/assets/runtime/lib/native-client.cjs": {
     "bytes": 1914,
@@ -2280,8 +2284,8 @@
     "sha256": "7846757127cbef875081a42c4be9a4bac67933ef094f9759d547647a911150e6"
   },
   "backend/root/daemon.py": {
-    "bytes": 19472,
-    "sha256": "c2a3004854e4d46a5a1bab40de39e6f2a1649dbc6412152a88952aeb604b95c4"
+    "bytes": 19942,
+    "sha256": "2b1ce55fba0fcf5c041e4445fe56e1adb95579cdaa7471fb005b671dfef94826"
   },
   "backend/root/mode_state.py": {
     "bytes": 14480,

@@ -2,6 +2,8 @@
 
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.app.Activity
 import android.content.Intent
 import android.view.ActionMode
@@ -281,7 +283,7 @@ private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
         if (overrideLaunch != null) overrideLaunch(intent, result) else {
             resultHandler = result
             try { launcher.launch(intent) }
-            catch (_: Exception) { resultHandler = null; Toast.makeText(view.context, "无法打开", Toast.LENGTH_SHORT).show() }
+            catch (_: Exception) { resultHandler = null; Toast.makeText(view.context, tr("无法打开", "Unable to open"), Toast.LENGTH_SHORT).show() }
         }
     }
     val latestLaunch by rememberUpdatedState(launch)

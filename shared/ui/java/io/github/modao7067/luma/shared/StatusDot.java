@@ -56,9 +56,9 @@ final class StatusDot extends TextView {
         setVisibility(value == TerminalSession.COMMAND_NONE ? View.GONE : View.VISIBLE);
         setTextColor(value == TerminalSession.COMMAND_RUNNING ? 0xffffffff
             : value == TerminalSession.COMMAND_SUCCESS ? 0xff9fdf91 : 0xffff7777);
-        setContentDescription(value == TerminalSession.COMMAND_RUNNING ? "命令运行中"
-            : value == TerminalSession.COMMAND_SUCCESS ? "命令成功完成"
-            : value == TerminalSession.COMMAND_FAILED ? "命令失败或会话已结束" : "尚未运行命令");
+        setContentDescription(value == TerminalSession.COMMAND_RUNNING ? com.termux.terminal.LumaLang.tr("命令运行中", "Command running")
+            : value == TerminalSession.COMMAND_SUCCESS ? com.termux.terminal.LumaLang.tr("命令成功完成", "Command succeeded")
+            : value == TerminalSession.COMMAND_FAILED ? com.termux.terminal.LumaLang.tr("命令失败或会话已结束", "Command failed or session ended") : com.termux.terminal.LumaLang.tr("尚未运行命令", "No command run yet"));
         updateBlink();
     }
 

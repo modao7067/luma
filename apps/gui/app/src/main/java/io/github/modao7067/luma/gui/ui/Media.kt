@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.PredictiveBackHandler
@@ -63,7 +65,7 @@ internal fun MediaResource.inContext(context: MediaContext) = copy(
     sessionId = sessionId ?: context.sessionId, cwd = cwd ?: context.cwd,
 )
 internal fun mediaTitle(resource: MediaResource): String = resource.name.ifBlank {
-    if (resource.source.startsWith("data:")) "图片" else Uri.decode(resource.source.substringBefore('?').substringAfterLast('/')).ifBlank { "附件" }
+    if (resource.source.startsWith("data:")) tr("图片", "Image") else Uri.decode(resource.source.substringBefore('?').substringAfterLast('/')).ifBlank { tr("附件", "Attachment") }
 }
 internal fun mediaIsImage(resource: MediaResource) = resource.mimeType.startsWith("image/") ||
     resource.source.startsWith("data:image/") || resource.source.substringBefore('?').substringAfterLast('.').lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "heic", "heif", "svg")
@@ -93,7 +95,7 @@ internal fun MediaViewerHost(
         LocalOpenMedia provides open,
         LocalMediaOwnerKey provides ownerKey,
     ) {
-        Box(Modifier.fillMaxSize().onSizeChanged { rootSize = it }.testTag("media-host:$ownerKey").semantics { stateDescription = if (route != null) "正在查看媒体" else "来源页面" }) {
+        Box(Modifier.fillMaxSize().onSizeChanged { rootSize = it }.testTag("media-host:$ownerKey").semantics { stateDescription = if (route != null) tr("正在查看媒体", "Viewing media") else tr("来源页面", "Source page") }) {
             Box(Modifier.fillMaxSize().then(if (route == null && (previewFraction ?: animatedFraction) == 0f) Modifier else Modifier.clearAndSetSemantics {}.pointerInput(Unit) {
                 awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() } }
             })) {
@@ -159,7 +161,7 @@ private fun rememberMediaFrame(resource: MediaResource, maxDimension: Int, page:
         if (warmCached == null) value = FrameState()
         value = try {
             val frame = if (override != null) override(bound, maxDimension, page) else {
-                val resolved = requireNotNull(actions) { "无法读取" }.let { act ->
+                val resolved = requireNotNull(actions) { tr("无法读取", "Unable to read") }.let { act ->
                     if (retry > 0) act.resolveMedia(bound, forceRefresh = true) else act.resolveMedia(bound)
                 }
                 val key = MediaFrameKey(
@@ -179,7 +181,7 @@ private fun rememberMediaFrame(resource: MediaResource, maxDimension: Int, page:
             }
             FrameState(frame = frame)
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { FrameState(error = error.message?.take(120)?.ifBlank { null } ?: "无法预览") }
+        catch (error: Exception) { FrameState(error = error.message?.take(120)?.ifBlank { null } ?: tr("无法预览", "Preview unavailable")) }
     }.value
 }
 
@@ -211,13 +213,13 @@ internal fun MediaImageCard(
         modifier = modifier.then(if (crop) Modifier else Modifier.widthIn(max = 280.dp).heightIn(max = 360.dp).aspectRatio(aspect.coerceIn(.4f, 2f)))
             .onGloballyPositioned { origin = it.positionInRoot() + Offset(it.size.width / 2f, it.size.height / 2f) }
             .clip(LumaCardShape(18.dp)).clickable(enabled = open != null && interactive && !busy) { open?.invoke(bound, origin) }
-            .semantics { contentDescription = "查看图片：${mediaTitle(bound)}" }.testTag(mediaCardTag(resource))) {
+            .semantics { contentDescription = tr("查看图片：${mediaTitle(bound)}", "View image: ${mediaTitle(bound)}") }.testTag(mediaCardTag(resource))) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             state.frame?.let { frame ->
                 val imageBitmap = remember(frame.bitmap) { frame.bitmap.asImageBitmap() }
                 Image(imageBitmap, mediaTitle(bound), Modifier.fillMaxSize(), contentScale = if (crop || aspect < .4f || aspect > 2f) ContentScale.Crop else ContentScale.Fit)
             }
-                ?: if (state.error != null) Text("无法预览", style = MaterialTheme.typography.labelMedium)
+                ?: if (state.error != null) Text(tr("无法预览", "Preview unavailable"), style = MaterialTheme.typography.labelMedium)
                 else CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
             if (busy && state.frame != null) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
         }
@@ -355,7 +357,7 @@ internal fun MediaFileCard(
             MenuIcon(mediaFileSymbol(metadata), size = 24.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(mediaTitle(metadata), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
-                val kind = if (isDir) "文件夹" else metadata.sizeBytes?.let(::formatMediaSize) ?: mediaFormatLabel(metadata)
+                val kind = if (isDir) tr("文件夹", "Folder") else metadata.sizeBytes?.let(::formatMediaSize) ?: mediaFormatLabel(metadata)
                 Text(kind, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, maxLines = 1)
             }
         }
@@ -400,16 +402,16 @@ internal fun MediaViewerScreen(resource: MediaResource, previewLoading: Boolean 
     Surface(Modifier.fillMaxSize().testTag("media-viewer"), color = MaterialTheme.colorScheme.background) {
         LiquidScaffold(wrapTop = false, wrapBottom = false, edgeToEdgeContent = true,
             topBar = {
-                DetailPageHeader(mediaTitle(bound), onBack, backLabel = "返回来源") {
+                DetailPageHeader(mediaTitle(bound), onBack, backLabel = tr("返回来源", "Back")) {
                     MediaSaveButton(bound, saveActions) { message -> saveScope.launch { saveFeedback.showSnackbar(message) } }
                 }
             },
             bottomBar = {
                 val count = pageCount
                 if (count > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { page-- }, enabled = page > 0) { Text("上一页") }
+                    TextButton(onClick = { page-- }, enabled = page > 0) { Text(tr("上一页", "Previous")) }
                     Text("${page + 1} / $count", style = MaterialTheme.typography.labelLarge)
-                    TextButton(onClick = { page++ }, enabled = page + 1 < count) { Text("下一页") }
+                    TextButton(onClick = { page++ }, enabled = page + 1 < count) { Text(tr("下一页", "Next")) }
                 }
             },
         ) { padding ->
@@ -423,7 +425,7 @@ internal fun MediaViewerScreen(resource: MediaResource, previewLoading: Boolean 
                         TextButton(enabled = !openState.opening && saveActions != null, onClick = { openState.start(chooseApp = true) }) {
                             MenuIcon(MenuSymbol.OPEN_EXTERNAL, size = 18.dp)
                             Spacer(Modifier.width(8.dp))
-                            Text("用其他应用打开")
+                            Text(tr("用其他应用打开", "Open in another app"))
                         }
                     }
                 }
@@ -431,8 +433,8 @@ internal fun MediaViewerScreen(resource: MediaResource, previewLoading: Boolean 
                     activeFrame != null -> key(bound, page) { ZoomableMedia(activeFrame.bitmap, mediaTitle(bound), initialScale = previewZoom, fitPadding = padding) }
                     state.error != null -> Column(Modifier.padding(padding).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        TextButton(onClick = { retry++ }) { Text("重试") }
-                        ExternalMediaOpenButton(openState, saveActions != null, "用其他应用打开")
+                        TextButton(onClick = { retry++ }) { Text(tr("重试", "Retry")) }
+                        ExternalMediaOpenButton(openState, saveActions != null, tr("用其他应用打开", "Open in another app"))
                     }
                     raster -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(32.dp)) }
                     else -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { ExternalMediaContent(bound, openState, saveActions != null) }
@@ -478,7 +480,7 @@ internal fun ZoomableMedia(bitmap: Bitmap, name: String, initialScale: Float = 1
             semanticsScale = (initialScale * 100).roundToInt()
         }
     }
-        .testTag("media-zoom").semantics { contentDescription = "$name，缩放 $semanticsScale%" }
+        .testTag("media-zoom").semantics { contentDescription = tr("$name，缩放 $semanticsScale%", "$name, zoom $semanticsScale%") }
         .pointerInput(Unit) {
             awaitPointerEventScope {
                 while (true) {
@@ -538,7 +540,7 @@ private class ExternalMediaOpenState(
                 if (chooseApp) actions.openMediaWithChooser(resource)
                 else actions.openMediaExternally(resource)
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "无法打开" }
+            catch (failure: Exception) { error = failure.message ?: tr("无法打开", "Unable to open") }
             finally { opening = false; operation = null }
         }
     }
@@ -561,7 +563,7 @@ private fun ExternalMediaContent(resource: MediaResource, openState: ExternalMed
                 val targetPath = try { io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.guestPath(resource.source, resource.cwd ?: "/workspace") } catch (_: Exception) { resource.source }
                 actions.closePreview()
                 actions.browseFiles(targetPath)
-            }) { Text("浏览文件夹") }
+            }) { Text(tr("浏览文件夹", "Browse folder")) }
         } else {
             ExternalMediaOpenButton(openState, hasActions)
         }
@@ -569,14 +571,14 @@ private fun ExternalMediaContent(resource: MediaResource, openState: ExternalMed
 }
 
 @Composable
-private fun ExternalMediaOpenButton(openState: ExternalMediaOpenState, hasActions: Boolean, label: String = "打开") {
+private fun ExternalMediaOpenButton(openState: ExternalMediaOpenState, hasActions: Boolean, label: String = tr("打开", "Open")) {
     openState.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Button(enabled = !openState.opening && hasActions, onClick = { openState.start(chooseApp = false) }) {
-            Text(if (openState.opening) "正在打开…" else label)
+            Text(if (openState.opening) tr("正在打开…", "Opening…") else label)
         }
         if (openState.opening) TextButton(enabled = !openState.cancelling, onClick = openState::cancel) {
-            Text(if (openState.cancelling) "正在取消…" else "取消")
+            Text(if (openState.cancelling) tr("正在取消…", "Cancelling…") else tr("取消", "Cancel"))
         }
     }
 }
@@ -673,19 +675,19 @@ internal fun codeBlockSymbol(language: String, caption: String = ""): MenuSymbol
         tag in webLanguageTags -> MenuSymbol.BROWSER
         tag in plainTextLanguageTags -> MenuSymbol.TEXT
         tag.isNotEmpty() -> fileNameSymbol(tag) ?: fileNameSymbol("snippet.$tag") ?: MenuSymbol.CODE
-        caption.isNotBlank() && caption != "代码" -> fileNameSymbol(caption) ?: MenuSymbol.CODE
+        caption.isNotBlank() && caption != "代码" && caption != "Code" -> fileNameSymbol(caption) ?: MenuSymbol.CODE
         else -> MenuSymbol.CODE
     }
 }
 
 internal fun mediaFormatLabel(resource: MediaResource): String = when (mediaFileSymbol(resource)) {
-    MenuSymbol.FOLDER -> "文件夹"
+    MenuSymbol.FOLDER -> tr("文件夹", "Folder")
     MenuSymbol.PDF -> "PDF"
     MenuSymbol.APK -> "APK"
-    MenuSymbol.AUDIO -> "音频"
-    MenuSymbol.VIDEO -> "视频"
-    MenuSymbol.ARCHIVE -> "压缩文件"
-    else -> resource.source.substringBefore('?').substringAfterLast('/', "").substringAfterLast('.', "文件").uppercase().take(16)
+    MenuSymbol.AUDIO -> tr("音频", "Audio")
+    MenuSymbol.VIDEO -> tr("视频", "Video")
+    MenuSymbol.ARCHIVE -> tr("压缩文件", "Archive")
+    else -> resource.source.substringBefore('?').substringAfterLast('/', "").substringAfterLast('.', tr("文件", "FILE")).uppercase().take(16)
 }
 
 internal fun mediaCardTag(resource: MediaResource) = "media-card:" +

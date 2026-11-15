@@ -330,7 +330,7 @@ public final class ShizukuBridge {
 
     public static void requestPermission(Context context, int requestCode) throws RemoteException {
         IBinder binder = ensureBinder(context);
-        if (binder == null) throw new RemoteException("Shizuku 服务未运行");
+        if (binder == null) throw new RemoteException(com.termux.terminal.LumaLang.tr("Shizuku 服务未运行", "Shizuku service is not running"));
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
@@ -407,14 +407,14 @@ public final class ShizukuBridge {
         IBinder binder = ensureBinder(context);
         if (binder == null) {
             if (!isInstalled(context)) {
-                throw new IOException("未安装 Shizuku。请先安装并启动 Shizuku（https://shizuku.rikka.app），或在 Luma「设置 → 环境设置 → Shizuku 提权」中查看状态。");
+                throw new IOException(com.termux.terminal.LumaLang.tr("未安装 Shizuku。请先安装并启动 Shizuku（https://shizuku.rikka.app），或在 Luma「设置 → 环境设置 → Shizuku 提权」中查看状态。", "Shizuku is not installed. Install and start Shizuku (https://shizuku.rikka.app), or check status in Luma Settings -> Environment -> Shizuku."));
             }
-            throw new IOException("Shizuku 服务未运行。请先打开 Shizuku 应用并启动服务（无线调试或连接电脑激活），再重试。");
+            throw new IOException(com.termux.terminal.LumaLang.tr("Shizuku 服务未运行。请先打开 Shizuku 应用并启动服务（无线调试或连接电脑激活），再重试。", "Shizuku service is not running. Open the Shizuku app and start the service (via Wireless debugging or ADB), then retry."));
         }
         if (!isAuthorized(context)) {
             boolean granted = requestPermissionAndAwait(context, 15_000L);
             if (!granted) {
-                throw new IOException("Shizuku 未授权。请在弹出的授权框中点击允许，或在 Luma「设置 → 环境设置 → Shizuku 提权」及 Shizuku 应用中开启授权。");
+                throw new IOException(com.termux.terminal.LumaLang.tr("Shizuku 未授权。请在弹出的授权框中点击允许，或在 Luma「设置 → 环境设置 → Shizuku 提权」及 Shizuku 应用中开启授权。", "Shizuku permission not granted. Allow access in the prompt, or enable permission in Luma Settings -> Environment -> Shizuku or the Shizuku app."));
             }
         }
         Parcel data = Parcel.obtain();
@@ -428,13 +428,13 @@ public final class ShizukuBridge {
             reply.readException();
             IBinder processBinder = reply.readStrongBinder();
             if (processBinder == null) {
-                throw new IOException("Shizuku 无法创建远端进程");
+                throw new IOException(com.termux.terminal.LumaLang.tr("Shizuku 无法创建远端进程", "Shizuku failed to create remote process"));
             }
             return new RemoteProcessAdapter(processBinder);
         } catch (RemoteException e) {
-            throw new IOException("Shizuku 通信失败：" + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
+            throw new IOException(com.termux.terminal.LumaLang.tr("Shizuku 通信失败：", "Shizuku IPC failed: ") + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
         } catch (SecurityException e) {
-            throw new IOException("Shizuku 权限被拒绝：" + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
+            throw new IOException(com.termux.terminal.LumaLang.tr("Shizuku 权限被拒绝：", "Shizuku permission denied: ") + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
         } finally {
             reply.recycle();
             data.recycle();
@@ -765,18 +765,18 @@ public final class ShizukuBridge {
             String baseCanonical = hostBase.getPath();
             String fileCanonical = hostFile.getPath();
             if (!fileCanonical.equals(baseCanonical) && !fileCanonical.startsWith(baseCanonical + File.separator)) {
-                throw new IOException("路径越界：" + guestPath);
+                throw new IOException(com.termux.terminal.LumaLang.tr("路径越界：", "Path escapes root: ") + guestPath);
             }
             String relative = fileCanonical.equals(baseCanonical) ? "" : fileCanonical.substring(baseCanonical.length() + 1);
             File relayBase = new File(relayRoot, prefix);
             File relayFile = relative.isEmpty() ? relayBase : new File(relayBase, relative);
             File parent = relayFile.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
-                throw new IOException("无法创建 Shizuku 中转目录");
+                throw new IOException(com.termux.terminal.LumaLang.tr("无法创建 Shizuku 中转目录", "Failed to create Shizuku relay directory"));
             }
             if (hostFile.isDirectory()) {
                 if (!relayFile.isDirectory() && !relayFile.mkdirs()) {
-                    throw new IOException("无法创建 Shizuku 中转目录");
+                    throw new IOException(com.termux.terminal.LumaLang.tr("无法创建 Shizuku 中转目录", "Failed to create Shizuku relay directory"));
                 }
             } else if (hostFile.isFile() && !stagedSnapshots.containsKey(relayFile)) {
                 Files.copy(hostFile.toPath(), relayFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -874,7 +874,7 @@ public final class ShizukuBridge {
                     File dest = new File(hostBase, relative);
                     File destParent = dest.getParentFile();
                     if (destParent != null && !destParent.isDirectory() && !destParent.mkdirs()) {
-                        throw new IOException("无法创建目标目录：" + destParent);
+                        throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目标目录：", "Failed to create destination directory: ") + destParent);
                     }
                     RuntimeAssets.write(dest, Files.readAllBytes(child.toPath()));
                 }

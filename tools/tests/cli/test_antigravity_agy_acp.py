@@ -6,6 +6,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT / "apps/gui/app/src/main/assets/cli_bridge"))
 from luma_cli.antigravity import AntigravitySession
 from luma_cli.antigravity_agy_acp import AntigravityAgyAcpSession, AGY_ACP_PROTOCOL
 from luma_cli.antigravity_cli import AntigravityCliSession, PROTOCOL as STREAM_JSON_PROTOCOL
+from luma_cli.i18n import tr
 from luma_cli.server import Manager, NATIVE_PROTOCOLS
 from luma_cli.transport import Conflict, Rejected
 
@@ -28,6 +30,7 @@ AGY_ACP_OPTIONS = [
         "options": [
             {"value": "gemini-4-argon", "name": "Gemini 4 Argon"},
             {"value": "claude-opus-5-5", "name": "Claude Opus 5.5"},
+            {"value": "gemini-pro-orchestrator", "name": "Orchestrator (Carbon)"},
         ],
     },
     {
@@ -112,31 +115,35 @@ for raw in sys.stdin:
     elif method == "session/load":
         sid = params["sessionId"]
         state = json.loads((store / f"{sid}.json").read_text())
-        # Real agy acp resets configOptions to startup defaults on a fresh process session/load.
         session_options = copy.deepcopy(default_options)
         for turn in state["turns"]:
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": sid,
                 "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": turn["user"]}},
             }})
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {
-                "sessionId": sid,
-                "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": turn["thought"]}},
-            }})
-            for tc in turn.get("tool_calls", []):
-                # Real agy acp session/load omits rawOutput/content on replayed tool_call frames.
+            if turn.get("thought"):
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": sid,
-                    "update": {
-                        "sessionUpdate": "tool_call",
-                        "toolCallId": tc["id"],
-                        "name": tc["name"],
-                        "args": tc["args"],
-                        "rawInput": tc["args"],
-                        "status": "completed",
-                        "kind": "other",
-                        "title": "Run " + tc["name"],
-                    },
+                    "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": turn["thought"]}},
+                }})
+            for tc in turn.get("tool_calls", []):
+                upd = {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tc["id"],
+                    "name": tc["name"],
+                    "args": tc["args"],
+                    "rawInput": tc["args"],
+                    "status": tc.get("status", "completed"),
+                    "kind": tc.get("kind", "other"),
+                    "title": tc.get("title", "Run " + tc["name"]),
+                }
+                if "content" in tc:
+                    upd["content"] = tc["content"]
+                if "rawOutput" in tc:
+                    upd["rawOutput"] = tc["rawOutput"]
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": sid,
+                    "update": upd,
                 }})
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": sid,
@@ -150,6 +157,13 @@ for raw in sys.stdin:
         for opt in session_options:
             if opt["id"] == params["configId"]:
                 opt["currentValue"] = params["value"]
+        if params["configId"] == "model":
+            if params["value"].startswith("gemini-pro-orchestrator"):
+                session_options = [o for o in session_options if o["id"] != "thought_level"]
+            elif not any(o["id"] == "thought_level" for o in session_options):
+                default_tl = next((copy.deepcopy(o) for o in default_options if o["id"] == "thought_level"), None)
+                if default_tl:
+                    session_options.insert(1, default_tl)
         send({"jsonrpc": "2.0", "id": ident, "result": {"configOptions": session_options}})
     elif method == "session/cancel":
         with (store / "cancels.jsonl").open("a", encoding="utf-8") as cancel_out:
@@ -188,8 +202,6 @@ for raw in sys.stdin:
             parent_full.write_text("".join(json.dumps(s) + "\n" for s in steps), encoding="utf-8")
             send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
         elif prompt_text == "after_wakeup":
-            # Real agy acp flushes the previous turn's settled background tool_call_update AND unseen autonomous steps
-            # as catch-up session/update frames at the start of the next session/prompt!
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": sid,
                 "update": {
@@ -219,7 +231,6 @@ for raw in sys.stdin:
                 "sessionId": sid,
                 "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "All 12 unit tests passed cleanly!"}},
             }})
-            # Now stream the new prompt's own updates
             gemini = pathlib.Path(os.environ["GEMINI_HOME"]) / "antigravity-cli" / "brain"
             parent_log = gemini / sid / ".system_generated" / "logs" / "transcript.jsonl"
             with parent_log.open("a", encoding="utf-8") as f:
@@ -347,6 +358,69 @@ for raw in sys.stdin:
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 1200, "outputTokens": 80, "thoughtTokens": 40, "cachedReadTokens": 300, "totalTokens": 1320},
             }})
+        elif prompt_text == "orchestrator_steer_flow":
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": prompt_text}},
+            }})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Planning phase"}},
+            }})
+            plan_doc = "## Execution Plan\n1. Refactor parser\n2. Run verification"
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_exit_plan_1",
+                    "name": "exit_plan_mode",
+                    "title": "exit_plan_mode",
+                    "rawInput": {"plan": plan_doc},
+                    "status": "in_progress",
+                    "kind": "other",
+                },
+            }})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_exit_plan_1",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "Plan mode is off."}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Executor running..."}},
+            }})
+            steer_frame = json.loads(sys.stdin.readline())
+            assert steer_frame["method"] == "session/prompt"
+            steer_text = steer_frame["params"]["prompt"][0]["text"]
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": steer_text}},
+            }})
+            send({"jsonrpc": "2.0", "id": steer_frame["id"], "result": {"stopReason": "completed"}})
+            gate = store / "finish-main-orchestrator"
+            while not gate.exists():
+                time.sleep(0.01)
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_enter_plan_1",
+                    "name": "enter_plan_mode",
+                    "title": "enter_plan_mode",
+                    "rawInput": {"reason": "User steered execution toward approach B"},
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "Plan mode is on."}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Replanned with approach B"}},
+            }})
+            send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
         else:
             state = json.loads((store / f"{sid}.json").read_text())
             turn = {"user": prompt_text, "thought": "thinking:" + prompt_text, "reply": "reply:" + prompt_text}
@@ -556,9 +630,9 @@ class AntigravityAgyAcpTests(unittest.TestCase):
                     "q2_other": "Mango",
                 },
             })
-            self.assertIn({"label": "上下文", "value": "1500 / 1048576 · 0.1%"}, s.data["metrics"])
-            self.assertIn({"label": "本回合 · 输入缓存命中", "value": "300 / 1500 · 20.0%"}, s.data["metrics"])
-            self.assertIn({"label": "CLI 累计估算 · USD", "value": "0.00399"}, s.data["metrics"])
+            self.assertEqual([m for m in s.data["metrics"] if m["label"] == tr("上下文", "Context")], [{"label": tr("上下文", "Context"), "value": "1500 / 256000 · 0.6%"}])
+            self.assertIn({"label": tr("本回合 · 输入缓存命中", "This turn · input cache hit"), "value": "300 / 1500 · 20.0%"}, s.data["metrics"])
+            self.assertIn({"label": tr("CLI 累计估算 · USD", "CLI estimated cost · USD"), "value": "0.00363"}, s.data["metrics"])
 
     def test_session_load_replays_multi_turn_history_and_settles_chunks(self):
         with patch.dict(os.environ, self.env()):
@@ -603,7 +677,7 @@ class AntigravityAgyAcpTests(unittest.TestCase):
 
             c1 = "11111111-2222-3333-4444-555555555551"
             c2 = "11111111-2222-3333-4444-555555555552"
-            self.wait(lambda: c1 in s.subagents and c2 in s.subagents and bool(s.subagents[c1].get("messages")))
+            self.wait(lambda: c1 in s.subagents and c2 in s.subagents and bool(s.subagents[c1].get("messages")) and bool(s.subagents[c2].get("messages")))
             self.assertEqual(s.subagents[c1]["name"], "Agent 1 (OS)")
             self.assertEqual(s.subagents[c1]["role"], "research")
             self.assertEqual(s.subagents[c1]["model"], "inherit")
@@ -669,7 +743,7 @@ class AntigravityAgyAcpTests(unittest.TestCase):
             snap1 = s.snapshot()
             self.assertFalse(snap1["running"])
             self.assertFalse(snap1["releasable"])
-            with self.assertRaisesRegex(Conflict, "后台任务尚未确认结束"):
+            with self.assertRaisesRegex(Conflict, tr("后台任务尚未确认结束", "Background task has not been confirmed finished")):
                 manager.release("bg", {"nativeId": native_id, "nativeProtocol": AGY_ACP_PROTOCOL})
 
             parent_dir = self.root / ".gemini" / "antigravity-cli" / "brain" / native_id / ".system_generated" / "logs"
@@ -814,7 +888,7 @@ class AntigravityAgyAcpTests(unittest.TestCase):
 
             s.background_tasks.add("manual-task-9")
             self.assertFalse(s.snapshot()["releasable"])
-            with self.assertRaisesRegex(Conflict, "后台任务尚未确认结束"):
+            with self.assertRaisesRegex(Conflict, tr("后台任务尚未确认结束", "Background task has not been confirmed finished")):
                 manager.release("stop", {"nativeId": native_id, "nativeProtocol": AGY_ACP_PROTOCOL})
             s._note_manage_task({"Action": "kill", "TaskId": "manual-task-9"}, "DONE", "Killed task manual-task-9")
             self.assertTrue(s.snapshot()["releasable"])
@@ -873,6 +947,687 @@ class AntigravityAgyAcpTests(unittest.TestCase):
         self.assertFalse(m({"Path": "/a"}, None))
         self.assertFalse(m({"Path": "/a"}, {"Other": "1"}))
         self.assertTrue(m({"Path": "/a"}, {"Path": "/a"}))
+
+    def test_orchestrator_steer_plan_handoff_projection_and_configure_effort_switch(self):
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(self.root / "state-orch")
+            s = manager.connect({"id": "orch", "cli": "Antigravity", "cwd": str(self.root), "model": "gemini-pro-orchestrator"})
+            self.sessions.append(s)
+            self.assertTrue(s.data["capabilities"]["steer"])
+            self.assertEqual(s.data["model"], "gemini-pro-orchestrator")
+            self.assertEqual(s.data["effort"], "")
+            self.assertNotIn("selectedEffort", s.config)
+            self.assertFalse(s.can_steer({"text": "idle"}))
+
+            s.configure({"model": "gemini-4-argon", "effort": "high"})
+            self.assertEqual(s.data["model"], "gemini-4-argon")
+            self.assertEqual(s.data["effort"], "high")
+            self.assertEqual(s.config.get("selectedEffort"), "high")
+
+            s.configure({"model": "gemini-pro-orchestrator"})
+            self.assertEqual(s.data["model"], "gemini-pro-orchestrator")
+            self.assertEqual(s.data["effort"], "")
+            self.assertNotIn("selectedEffort", s.config)
+
+            s.submit({"submissionId": "ask-check", "text": "ask"})
+            self.wait(lambda: bool(s.data["requests"]))
+            self.assertFalse(s.can_steer({"text": "blocked by question"}))
+            req = s.data["requests"][0]
+            s.answer({"id": req["id"], "choice": "accept", "answers": {"q1": ["Red"], "q2": ["Apple"]}})
+            self.wait(lambda: not s.data["running"])
+
+            s.submit({"submissionId": "main-orch", "text": "orchestrator_steer_flow"})
+            self.wait(lambda: any(r.get("text") == "Executor running..." for r in s.rows.values()))
+            self.assertTrue(s.data["running"])
+            self.assertTrue(s.can_steer({"text": "steer: use approach B"}))
+            self.assertFalse(s.can_steer({"text": "/compact"}))
+
+            exit_row = s.rows["tool-call_exit_plan_1"]
+            self.assertEqual(exit_row["text"], tr("退出规划 · 交由执行模型", "Exit plan · Hand off to executor"))
+            self.assertEqual(exit_row["outcome"], "## Execution Plan\n1. Refactor parser\n2. Run verification")
+
+            s.submit({"submissionId": "steer-1", "text": "steer: use approach B", "steer": True})
+            self.wait(lambda: s.config.get("receipts", {}).get("steer-1") == "accepted" and s.steer_submission is None)
+            self.assertTrue(s.data["running"])
+            self.assertEqual(s.current_submission, "main-orch")
+            self.assertTrue(s.config.get("consumedSubmissions", {}).get("steer-1"))
+            steer_rows = [r for r in s.rows.values() if r["role"] == "user" and r["text"] == "steer: use approach B"]
+            self.assertEqual(len(steer_rows), 1)
+            self.assertEqual(steer_rows[0]["id"], "steer-1")
+            self.assertEqual(steer_rows[0]["origin"], "native")
+
+            (self.store / "finish-main-orchestrator").write_text("ok", encoding="utf-8")
+            self.wait(lambda: not s.data["running"])
+            enter_row = s.rows["tool-call_enter_plan_1"]
+            self.assertEqual(enter_row["text"], tr("回交规划模型复盘", "Hand back to planner"))
+            self.assertEqual(enter_row["outcome"], "User steered execution toward approach B")
+            self.assertEqual(s.config.get("receipts", {}).get("main-orch"), "accepted")
+
+class SwarmProjectionAcpTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="luma-agy-swarm-")
+        self.root = pathlib.Path(self.tmp.name)
+        self.gemini_home = self.root / ".gemini"
+        self.bin_dir = self.root / "bin"
+        self.bin_dir.mkdir()
+        self.agy = self.bin_dir / "agy"
+        self.agy.write_text(FIXTURE_AGY, encoding="utf-8")
+        self.agy.chmod(0o700)
+        self.store = self.root / "native-store"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _transcript_file(self, conv_id, full=False):
+        name = "transcript_full.jsonl" if full else "transcript.jsonl"
+        path = self.gemini_home / "antigravity-cli" / "brain" / conv_id / ".system_generated" / "logs" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _write_steps(self, conv_id, steps, full_steps=None):
+        if full_steps is not None:
+            full_path = self._transcript_file(conv_id, full=True)
+            with full_path.open("w", encoding="utf-8") as handle:
+                for step in full_steps:
+                    handle.write(json.dumps(step, ensure_ascii=False) + "\n")
+        path = self._transcript_file(conv_id)
+        with path.open("w", encoding="utf-8") as handle:
+            for step in steps:
+                handle.write(json.dumps(step, ensure_ascii=False) + "\n")
+        return path
+
+    def _make_session(self, native_id, current_submission="sub-1"):
+        s = AntigravityAgyAcpSession({"cli": "Antigravity", "cwd": str(self.root), "nativeId": native_id}, lambda: None)
+        self.addCleanup(s.finish_observer_close)
+        s.history_loaded = True
+        s.current_submission = current_submission
+        s.chunk_id = None
+        s.chunk_kind = None
+        s.chunk_seq = 0
+        s.peer = None
+        s.echoed_user_submission = False
+        return s
+
+    def test_swarm_single_and_batch_add_status_model_kill_and_revive(self):
+        parent_id = "11111111-1111-4111-8111-111111111111"
+        w_rev = "22222222-2222-4222-8222-222222222222"
+        w_b1 = "33333333-3333-4333-8333-333333333333"
+        w_b2 = "44444444-4444-4444-8444-444444444444"
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session(parent_id, current_submission="sub-1")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "c-add-1", "name": "swarm",
+                "title": "Run swarm", "kind": "other", "status": "in_progress",
+                "rawInput": {"action": "add", "name": "reviewer", "brief": "Audit parser.py", "model": "gemini-3.1-pro-low", "workspace": "share"},
+            }}})
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "c-add-1", "status": "completed",
+            }}})
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "c-add-2", "name": "swarm",
+                "title": "Run swarm", "kind": "other", "status": "completed",
+                "rawInput": {"action": "add", "name": "batch", "brief": "Check modules", "tasks": ["alpha.py", "beta.py"]},
+            }}})
+
+            compact_steps = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Go"},
+                {
+                    "step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE",
+                    "truncated_fields": ["tool_calls"],
+                    "tool_calls": [
+                        {"name": "swarm", "args": {"action": "add", "name": "reviewer", "brief": "TRUNCATED"}},
+                        {"name": "swarm", "args": {"action": "add", "name": "batch", "brief": "TRUNCATED"}},
+                    ],
+                },
+                {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "reviewer", "model": "gemini-3.1-pro-low", "conversation_id": w_rev})},
+                {"step_index": 3, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "names": ["batch-1", "batch-2"], "model": "gemini-3.1-pro-low", "conversation_ids": [w_b1, w_b2]})},
+            ]
+            full_steps = json.loads(json.dumps(compact_steps))
+            full_steps[1] = {
+                "step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE",
+                "tool_calls": [
+                    {"name": "swarm", "args": {"action": "add", "name": "reviewer", "brief": "Audit parser.py", "model": "gemini-3.1-pro-low", "workspace": "share"}},
+                    {"name": "swarm", "args": {"action": "add", "name": "batch", "brief": "Check modules", "tasks": json.dumps(["alpha.py", "beta.py"])}},
+                ],
+            }
+            self._write_steps(parent_id, compact_steps, full_steps=full_steps)
+
+            rev_steps = [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "<SYSTEM_MESSAGE>[swarm] new board message #1</SYSTEM_MESSAGE>"},
+                {"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "<SYSTEM_MESSAGE>[Message] sender=coordinator content=You have just started.\nAudit parser.py</SYSTEM_MESSAGE>"},
+                {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "post_message", "args": {"text": "@coordinator LGTM on parser.py"}},
+                    {"name": "swarm_wait", "args": {"since": "1"}},
+                ]},
+                {"step_index": 3, "type": "GENERIC", "status": "DONE", "content": '{"status":"posted","seq":2}'},
+                {"step_index": 4, "type": "GENERIC", "status": "DONE", "content": "Waiting for a message that calls on you by name, or on @all posted after #1."},
+            ]
+            self._write_steps(w_rev, rev_steps)
+            b1_steps = [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "<SYSTEM_MESSAGE>[Message] sender=coordinator content=Assigned slice: alpha.py</SYSTEM_MESSAGE>"},
+                {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "RUNNING", "thinking": "Inspecting alpha.py"},
+            ]
+            self._write_steps(w_b1, b1_steps)
+            self._write_steps(w_b2, [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "<SYSTEM_MESSAGE>[Message] sender=coordinator content=Assigned slice: beta.py</SYSTEM_MESSAGE>"},
+            ])
+
+            s.sync_transcripts_once()
+            self.assertEqual(set(s.subagents), {w_rev, w_b1, w_b2})
+            self.assertEqual(s.subagents[w_rev]["name"], "reviewer")
+            self.assertEqual(s.subagents[w_rev]["role"], "swarm · share")
+            self.assertEqual(s.subagents[w_rev]["itemId"], "tool-c-add-1")
+            self.assertEqual(s.subagents[w_rev]["status"], "succeeded")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "transcript:idle")
+            self.assertEqual(s.subagents[w_rev]["detail"], "@coordinator LGTM on parser.py")
+            rev_msgs = s.subagents[w_rev]["messages"]
+            self.assertFalse(any("[swarm] new board message #1" in (m.get("text") or "") for m in rev_msgs))
+            self.assertTrue(any("Audit parser.py" in (m.get("text") or "") for m in rev_msgs))
+
+            self.assertEqual(s.subagents[w_b1]["name"], "batch-1")
+            self.assertEqual(s.subagents[w_b1]["task"], "alpha.py\n\nCheck modules")
+            self.assertEqual(s.subagents[w_b1]["itemId"], "tool-c-add-2")
+            self.assertEqual(s.subagents[w_b2]["name"], "batch-2")
+            self.assertEqual(s.subagents[w_b2]["task"], "beta.py\n\nCheck modules")
+            self.assertEqual(s.subagents[w_b2]["itemId"], "tool-c-add-2")
+
+            self._write_steps(parent_id, compact_steps + [
+                {"step_index": 4, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": f"<SYSTEM_MESSAGE>[Message] sender={w_rev} content=[swarm] new board message #2</SYSTEM_MESSAGE>"},
+                {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "swarm", "args": {"action": "status"}},
+                    {"name": "swarm", "args": {"action": "model", "name": "reviewer", "model": "gemini-3.8-flash-low"}},
+                ]},
+                {"step_index": 6, "type": "GENERIC", "status": "DONE", "content": json.dumps({
+                    "title": "Demo Swarm",
+                    "members": [
+                        {"name": "coordinator", "role": "coordinator", "model": "gemini-3.1-pro-low", "state": "working", "killed": False},
+                        {"name": "reviewer", "role": "worker", "model": "gemini-3.1-pro-low", "state": "waiting", "killed": False},
+                        {"name": "batch-1", "role": "worker", "model": "gemini-3.1-pro-low", "state": "stopped", "killed": False},
+                        {"name": "batch-2", "role": "worker", "model": "gemini-3.1-pro-low", "state": "working", "killed": False},
+                    ],
+                })},
+                {"step_index": 7, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "switched", "name": "reviewer", "model": "gemini-3.8-flash-low"})},
+            ], full_steps=full_steps + [
+                {"step_index": 4, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": f"<SYSTEM_MESSAGE>[Message] sender={w_rev} content=[swarm] new board message #2</SYSTEM_MESSAGE>"},
+                {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "swarm", "args": {"action": "status"}},
+                    {"name": "swarm", "args": {"action": "model", "name": "reviewer", "model": "gemini-3.8-flash-low"}},
+                ]},
+                {"step_index": 6, "type": "GENERIC", "status": "DONE", "content": json.dumps({
+                    "title": "Demo Swarm",
+                    "members": [
+                        {"name": "coordinator", "role": "coordinator", "model": "gemini-3.1-pro-low", "state": "working", "killed": False},
+                        {"name": "reviewer", "role": "worker", "model": "gemini-3.1-pro-low", "state": "waiting", "killed": False},
+                        {"name": "batch-1", "role": "worker", "model": "gemini-3.1-pro-low", "state": "stopped", "killed": False},
+                        {"name": "batch-2", "role": "worker", "model": "gemini-3.1-pro-low", "state": "working", "killed": False},
+                    ],
+                })},
+                {"step_index": 7, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "switched", "name": "reviewer", "model": "gemini-3.8-flash-low"})},
+            ])
+            s.sync_transcripts_once()
+            self.assertNotIn(w_rev, s.child_replies)
+            self.assertEqual(s.subagents[w_rev]["detail"], "@coordinator LGTM on parser.py")
+            self.assertEqual(set(s.subagents), {w_rev, w_b1, w_b2})
+            self.assertEqual(s.subagents[w_rev]["model"], "gemini-3.8-flash-low")
+            self.assertEqual(s.subagents[w_rev]["status"], "succeeded")
+            self.assertEqual(s.subagents[w_b1]["status"], "succeeded")
+            self.assertEqual(s.subagents[w_b1]["nativeStatus"], "swarm:stopped")
+            self.assertEqual(s.subagents[w_b2]["status"], "running")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "c-post-1", "name": "post_message",
+                "title": "Run post_message", "kind": "other", "status": "completed",
+                "rawInput": {"text": "@reviewer recheck edge case\n@batch sync up"},
+                "rawOutput": [{"type": "content", "content": {"type": "text", "text": '{"status":"posted","seq":3}'}}],
+            }}})
+            self.assertEqual(s.subagents[w_rev]["status"], "running")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "revived")
+            self.assertEqual(s.subagents[w_b1]["status"], "running")
+            self.assertEqual(s.subagents[w_b1]["nativeStatus"], "revived")
+            self.assertEqual(s.subagents[w_b2]["status"], "running")
+            self.assertEqual(s.subagents[w_b2]["nativeStatus"], "revived")
+
+            self._write_steps(w_rev, rev_steps)
+            s.sync_transcripts_once()
+            self.assertEqual(s.subagents[w_rev]["status"], "running")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "revived")
+
+            self._write_steps(w_rev, rev_steps + [
+                {"step_index": 5, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "<SYSTEM_MESSAGE>[Message] sender=coordinator content=@reviewer recheck edge case</SYSTEM_MESSAGE>"},
+                {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "post_message", "args": {"text": "@coordinator verified edge case"}},
+                    {"name": "swarm_wait", "args": {"since": "3"}},
+                ]},
+                {"step_index": 7, "type": "GENERIC", "status": "DONE", "content": '{"status":"posted","seq":4}'},
+                {"step_index": 8, "type": "GENERIC", "status": "DONE", "content": "Waiting for a message that calls on you by name, or on @all posted after #3."},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.subagents[w_rev]["status"], "succeeded")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "transcript:idle")
+            self.assertEqual(s.subagents[w_rev]["detail"], "@coordinator verified edge case")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "c-kill-1", "name": "swarm",
+                "title": "Run swarm", "kind": "other", "status": "completed",
+                "rawInput": {"action": "kill", "name": "reviewer"},
+            }}})
+            self.assertEqual(s.subagents[w_rev]["status"], "closed")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "swarm:killed")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "c-post-all", "name": "post_message",
+                "title": "Run post_message", "kind": "other", "status": "completed",
+                "rawInput": {"text": "@all wrap up"},
+            }}})
+            self.assertEqual(s.subagents[w_rev]["status"], "closed")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "swarm:killed")
+            self.assertEqual(s.subagents[w_b1]["status"], "running")
+            self.assertEqual(s.subagents[w_b1]["nativeStatus"], "revived")
+
+            self._write_steps(w_rev, rev_steps + [
+                {"step_index": 9, "type": "ERROR_MESSAGE", "status": "DONE", "content": "late write"},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.subagents[w_rev]["status"], "closed")
+            self.assertEqual(s.subagents[w_rev]["nativeStatus"], "swarm:killed")
+
+    def test_swarm_reanchor_when_transcript_arrives_before_acp_row(self):
+        parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        w1 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session(parent_id, current_submission=None)
+            self._write_steps(parent_id, [
+                {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "swarm", "args": {"action": "add", "name": "scout", "brief": "Scan logs"}},
+                ]},
+                {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "scout", "conversation_id": w1})},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.subagents[w1]["itemId"], "")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "late-add-1", "name": "swarm",
+                "title": "Run swarm", "kind": "other", "status": "in_progress",
+                "rawInput": {"action": "add", "name": "scout", "brief": "Scan logs"},
+            }}})
+            self.assertEqual(s.subagents[w1]["itemId"], "tool-late-add-1")
+
+    def test_acp_session_load_replay_keeps_settled_swarm_workers_settled(self):
+        sid = "agy-acp-session-1"
+        w_done = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        w_killed = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        self.store.mkdir(parents=True, exist_ok=True)
+        (self.store / f"{sid}.json").write_text(json.dumps({
+            "turns": [{
+                "user": "coordinate swarm",
+                "thought": "spawning helpers",
+                "tool_calls": [
+                    {"id": "load-add-1", "name": "swarm", "args": {"action": "add", "name": "worker-1", "brief": "Check A"}},
+                    {"id": "load-add-2", "name": "swarm", "args": {"action": "add", "name": "worker-2", "brief": "Check B"}},
+                    {"id": "load-post-1", "name": "post_message", "args": {"text": "@worker-1 start A"}},
+                    {"id": "load-kill-2", "name": "swarm", "args": {"action": "kill", "name": "worker-2"}},
+                ],
+                "reply": "Coordinator done.",
+            }],
+        }), encoding="utf-8")
+        self._write_steps(sid, [
+            {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "coordinate swarm"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                {"name": "swarm", "args": {"action": "add", "name": "worker-1", "brief": "Check A"}},
+                {"name": "swarm", "args": {"action": "add", "name": "worker-2", "brief": "Check B"}},
+                {"name": "post_message", "args": {"text": "@worker-1 start A"}},
+                {"name": "swarm", "args": {"action": "kill", "name": "worker-2"}},
+            ]},
+            {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "worker-1", "conversation_id": w_done})},
+            {"step_index": 3, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "worker-2", "conversation_id": w_killed})},
+            {"step_index": 4, "type": "GENERIC", "status": "DONE", "content": '{"status":"posted","seq":2}'},
+            {"step_index": 5, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "killed", "name": "worker-2"})},
+        ])
+        self._write_steps(w_done, [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                {"name": "post_message", "args": {"text": "@coordinator A is green"}},
+                {"name": "swarm_wait", "args": {"since": "1"}},
+            ]},
+            {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": '{"status":"posted","seq":3}'},
+            {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": "Waiting for a message"},
+        ])
+        self._write_steps(w_killed, [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "RUNNING", "thinking": "Checking B"},
+        ])
+        env = {
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "GEMINI_HOME": str(self.gemini_home),
+            "LUMA_FIXTURE_STORE": str(self.store),
+            "LUMA_FIXTURE_OPTIONS": json.dumps(AGY_ACP_OPTIONS),
+        }
+        state_dir = self.root / "state"
+        state_dir.mkdir()
+        (state_dir / "replay.json").write_text(json.dumps({
+            "cli": "Antigravity", "cwd": str(self.root), "nativeId": sid, "nativeProtocol": AGY_ACP_PROTOCOL,
+        }), encoding="utf-8")
+        session = None
+        try:
+            with patch.dict(os.environ, env):
+                manager = Manager(state_dir)
+                session = manager.connect({"id": "replay", "cli": "Antigravity", "cwd": str(self.root)})
+                self.assertEqual(session.subagents[w_done]["status"], "succeeded")
+                self.assertEqual(session.subagents[w_done]["itemId"], "tool-load-add-1")
+                self.assertEqual(session.subagents[w_done]["detail"], "@coordinator A is green")
+                self.assertEqual(session.subagents[w_killed]["status"], "closed")
+                self.assertEqual(session.subagents[w_killed]["nativeStatus"], "swarm:killed")
+                self.assertEqual(session.subagents[w_killed]["itemId"], "tool-load-add-2")
+        finally:
+            if session is not None:
+                session._close_current_peer()
+
+    def test_acp_session_load_settles_incomplete_replay_tools_to_unknown(self):
+        sid = "agy-acp-session-1"
+        self.store.mkdir(parents=True, exist_ok=True)
+        (self.store / f"{sid}.json").write_text(json.dumps({
+            "turns": [{
+                "user": "crashed turn",
+                "thought": "running",
+                "tool_calls": [
+                    {"id": "crashed-1", "name": "read_file", "args": {"Path": "/x"}, "status": "in_progress"},
+                ],
+                "reply": "",
+            }],
+        }), encoding="utf-8")
+        env = {
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "GEMINI_HOME": str(self.gemini_home),
+            "LUMA_FIXTURE_STORE": str(self.store),
+            "LUMA_FIXTURE_OPTIONS": json.dumps(AGY_ACP_OPTIONS),
+        }
+        state_dir = self.root / "state-inc"
+        state_dir.mkdir()
+        (state_dir / "inc.json").write_text(json.dumps({
+            "cli": "Antigravity", "cwd": str(self.root), "nativeId": sid, "nativeProtocol": AGY_ACP_PROTOCOL,
+        }), encoding="utf-8")
+        session = None
+        try:
+            with patch.dict(os.environ, env):
+                manager = Manager(state_dir)
+                session = manager.connect({"id": "inc", "cli": "Antigravity", "cwd": str(self.root)})
+                self.assertEqual(session.rows["tool-crashed-1"]["status"], "unknown")
+        finally:
+            if session is not None:
+                session._close_current_peer()
+
+    def test_steer_rejected_reverts_optimistic_user_row_and_pending_echo(self):
+        s = self._make_session("parent-steer-reject", current_submission="main-1")
+        s.update(connected=True, running=True, capabilities={"steer": True})
+        s.call = lambda *args, **kwargs: (_ for _ in ()).throw(Rejected("Steer rejected by ACP"))
+        s.prompt({"submissionId": "steer-rej", "text": "abort path", "steer": True})
+        deadline = time.monotonic() + 2.0
+        while s.steer_submission is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(s.steer_submission)
+        self.assertNotIn("steer-rej", s.rows)
+        self.assertEqual(s.pending_echo_submissions, [])
+        self.assertEqual(s.config.get("receipts", {}).get("steer-rej"), "rejected")
+        self.assertIn("Steer rejected by ACP", s.data.get("error") or "")
+
+    def test_finish_observer_close_joins_tail_and_blocks_post_close_sync(self):
+        parent_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        w1 = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session(parent_id, current_submission="sub-close")
+            self._write_steps(parent_id, [
+                {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "swarm", "args": {"action": "add", "name": "worker", "brief": "Scan"}},
+                ]},
+                {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "worker", "conversation_id": w1})},
+            ])
+            self._write_steps(w1, [{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "RUNNING", "thinking": "work"}])
+            entered = threading.Event()
+            release = threading.Event()
+            orig_refresh = s.refresh_parent_log
+
+            def slow_refresh():
+                entered.set()
+                release.wait(2.0)
+                orig_refresh()
+
+            with patch.object(s, "refresh_parent_log", side_effect=slow_refresh):
+                s.restart_child_tail()
+                s.tail_wake.set()
+                self.assertTrue(entered.wait(2.0))
+                s.close_pending = True
+                closer = threading.Thread(target=s.finish_observer_close)
+                closer.start()
+                time.sleep(0.05)
+                self.assertTrue(closer.is_alive())
+                release.set()
+                closer.join(2.0)
+                self.assertFalse(closer.is_alive())
+                self.assertFalse(s.tail_thread.is_alive())
+            self.assertTrue(s.released)
+            self.assertEqual(s.rows, {})
+            self.assertEqual(s.subagents, {})
+            s.sync_transcripts_once()
+            self.assertEqual(s.rows, {})
+            self.assertEqual(s.subagents, {})
+
+    def test_acp_post_message_mention_boundaries_and_early_event_before_worker_registration(self):
+        parent_id = "12121212-1212-4121-8121-121212121212"
+        w1 = "34343434-3434-4343-8343-343434343434"
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session(parent_id, current_submission="sub-mention")
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "early-post-1", "name": "post_message",
+                "title": "Run post_message", "kind": "other", "status": "completed",
+                "rawInput": {"text": "notify @worker. Check email user@worker.com."},
+                "rawOutput": [{"type": "content", "content": {"type": "text", "text": '{"status":"posted","seq":1}'}}],
+            }}})
+            self.assertNotIn("tool-early-post-1", s.handled_swarm_rows)
+            self._write_steps(parent_id, [
+                {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "swarm", "args": {"action": "add", "name": "worker", "brief": "Audit"}},
+                    {"name": "post_message", "args": {"text": "notify @worker. Check email user@worker.com."}},
+                ]},
+                {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": json.dumps({"status": "added", "name": "worker", "conversation_id": w1})},
+                {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": '{"status":"posted","seq":1}'},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.subagents[w1]["status"], "running")
+            self.assertEqual(s.subagents[w1]["nativeStatus"], "revived")
+            self.assertIn("tool-early-post-1", s.handled_swarm_rows)
+            s.note_swarm_tool("x", "sub-mention", {"action": "status"}, json.dumps({"members": [{"name": "worker", "role": "worker", "state": "waiting", "killed": False}]}))
+            self.assertEqual(s.subagents[w1]["status"], "succeeded")
+            self.assertFalse(s.note_post_message({"text": "mail user@all.example"}, '{"status":"posted"}', allow_revive=True))
+            self.assertEqual(s.subagents[w1]["status"], "succeeded")
+            self.assertTrue(s.note_post_message({"text": "done, @all."}, '{"status":"posted"}', allow_revive=True))
+            self.assertEqual(s.subagents[w1]["status"], "running")
+
+    def test_sync_output_mentioning_background_banner_stays_completed_live_and_across_replay(self):
+        sid = "agy-sync-banner-1"
+        false_banner = "397: text\n40:_BG_TASK_RE = Tool is running as a background task with task id: fake/999\n"
+        self.store.mkdir(parents=True, exist_ok=True)
+        (self.store / f"{sid}.json").write_text(json.dumps({
+            "turns": [{
+                "user": "grep source",
+                "tool_calls": [
+                    {
+                        "id": "sync-grep-1",
+                        "name": "run_command",
+                        "args": {"CommandLine": "rg -n background_task file.py"},
+                        "rawOutput": {"output": "The tool's output was truncated...\n" + false_banner, "exit_code": 0},
+                    },
+                ],
+                "reply": "Done grepping.",
+            }],
+        }), encoding="utf-8")
+        self._write_steps(sid, [
+            {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "grep source"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": '"rg -n background_task file.py"'}},
+            ]},
+            {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": "Created At: x\nCompleted At: y\n" + false_banner},
+            {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Done grepping."},
+        ])
+        env = {
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "GEMINI_HOME": str(self.gemini_home),
+            "LUMA_FIXTURE_STORE": str(self.store),
+            "LUMA_FIXTURE_OPTIONS": json.dumps(AGY_ACP_OPTIONS),
+        }
+        state_dir = self.root / "state-sync-banner"
+        state_dir.mkdir()
+        (state_dir / "syncb.json").write_text(json.dumps({
+            "cli": "Antigravity", "cwd": str(self.root), "nativeId": sid, "nativeProtocol": AGY_ACP_PROTOCOL,
+        }), encoding="utf-8")
+        session = None
+        try:
+            with patch.dict(os.environ, env):
+                manager = Manager(state_dir)
+                session = manager.connect({"id": "syncb", "cli": "Antigravity", "cwd": str(self.root)})
+                self.assertEqual(session.rows["tool-sync-grep-1"]["status"], "completed")
+                self.assertFalse(session.background_tasks)
+                self.assertTrue(session.snapshot()["releasable"])
+                session.event({"method": "session/update", "params": {"update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "live-grep-2",
+                    "name": "run_command",
+                    "status": "completed",
+                    "rawOutput": {"output": false_banner, "exit_code": 0},
+                }}})
+                self.assertEqual(session.rows["tool-live-grep-2"]["status"], "completed")
+                self.assertFalse(session.background_tasks)
+                self.assertTrue(session.snapshot()["releasable"])
+        finally:
+            if session is not None:
+                session._close_current_peer()
+
+    def test_acp_session_load_replay_settles_historical_background_task_before_unknown_sweep(self):
+        sid = "agy-replay-bg-1"
+        tid = f"{sid}/task-121"
+        self.store.mkdir(parents=True, exist_ok=True)
+        (self.store / f"{sid}.json").write_text(json.dumps({
+            "turns": [{
+                "user": "run long check",
+                "tool_calls": [
+                    {
+                        "id": "hist-bg-1",
+                        "name": "run_command",
+                        "args": {"CommandLine": "sleep 2"},
+                        "content": [{"type": "content", "content": {"type": "text", "text": f"Created At: x\nTool is running as a background task with task id: {tid}"}}],
+                    },
+                ],
+                "reply": "Finished historical bg check.",
+            }],
+        }), encoding="utf-8")
+        sys_msg = (
+            '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T00:00:02Z '
+            f'sender={tid} priority=MESSAGE_PRIORITY_HIGH content=Task id "{tid}" finished with result:\n'
+            'Command exited with code 0.\nhistorical output\n</SYSTEM_MESSAGE>'
+        )
+        self._write_steps(sid, [
+            {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "run long check"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": '"sleep 2"'}},
+            ]},
+            {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "content": f"Created At: x\nTool is running as a background task with task id: {tid}"},
+            {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": sys_msg},
+            {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Finished historical bg check."},
+        ])
+        env = {
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "GEMINI_HOME": str(self.gemini_home),
+            "LUMA_FIXTURE_STORE": str(self.store),
+            "LUMA_FIXTURE_OPTIONS": json.dumps(AGY_ACP_OPTIONS),
+        }
+        state_dir = self.root / "state-hist-bg"
+        state_dir.mkdir()
+        (state_dir / "histbg.json").write_text(json.dumps({
+            "cli": "Antigravity", "cwd": str(self.root), "nativeId": sid, "nativeProtocol": AGY_ACP_PROTOCOL,
+        }), encoding="utf-8")
+        session = None
+        try:
+            with patch.dict(os.environ, env):
+                manager = Manager(state_dir)
+                session = manager.connect({"id": "histbg", "cli": "Antigravity", "cwd": str(self.root)})
+                self.assertEqual(session.rows["tool-hist-bg-1"]["status"], "completed")
+                self.assertIn("historical output", session.rows["tool-hist-bg-1"]["outcome"])
+                self.assertFalse(session.background_tasks)
+                self.assertTrue(session.snapshot()["releasable"])
+        finally:
+            if session is not None:
+                session._close_current_peer()
+
+    def test_autonomous_streamed_race_and_conditional_timer_early_wakeup_settle_cleanly(self):
+        sid = "56565656-5656-4565-8565-565656565656"
+        timer_id = f"{sid}/task-55"
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session(sid, current_submission=None)
+            s.parent_turn_settled = True
+            self._write_steps(sid, [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": '<SYSTEM_MESSAGE>\n[Message] sender=sub-1 priority=MESSAGE_PRIORITY_HIGH content=ready\n</SYSTEM_MESSAGE>'},
+                {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "read_file", "args": {"Path": '"/tmp/notes.md"'}},
+                    {"name": "schedule", "args": {"DurationSeconds": "30", "Prompt": '"fallback"', "TimerCondition": '"any"'}},
+                ]},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.rows["agy-auto:1:tool:0"]["status"], "running")
+            self.assertEqual(s.rows["agy-auto:1:tool:1"]["status"], "running")
+
+            s.event({"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": "auto-race-1", "name": "read_file",
+                "rawInput": {"Path": "/tmp/notes.md"}, "status": "in_progress", "kind": "read", "title": "/tmp/notes.md",
+            }}})
+            s.autonomous_streamed = True
+            self.assertNotIn("tool-auto-race-1", s.rows)
+
+            self._write_steps(sid, [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": '<SYSTEM_MESSAGE>\n[Message] sender=sub-1 priority=MESSAGE_PRIORITY_HIGH content=ready\n</SYSTEM_MESSAGE>'},
+                {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "read_file", "args": {"Path": '"/tmp/notes.md"'}},
+                    {"name": "schedule", "args": {"DurationSeconds": "30", "Prompt": '"fallback"', "TimerCondition": '"any"'}},
+                ]},
+                {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": "notes body"},
+                {"step_index": 3, "type": "GENERIC", "status": "RUNNING", "content": f"Created At: x\nTool is running as a background task with task id: {timer_id}\nTask Description: Timer: 30s"},
+                {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting for worker."},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.rows["agy-auto:1:tool:0"]["status"], "completed")
+            self.assertEqual(s.rows["agy-auto:1:tool:0"]["outcome"], "notes body")
+            self.assertEqual(s.rows["agy-auto:1:tool:1"]["status"], "running")
+            self.assertIn(timer_id, s.conditional_timers)
+
+            self._write_steps(sid, [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": '<SYSTEM_MESSAGE>\n[Message] sender=sub-1 priority=MESSAGE_PRIORITY_HIGH content=ready\n</SYSTEM_MESSAGE>'},
+                {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [
+                    {"name": "read_file", "args": {"Path": '"/tmp/notes.md"'}},
+                    {"name": "schedule", "args": {"DurationSeconds": "30", "Prompt": '"fallback"', "TimerCondition": '"any"'}},
+                ]},
+                {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": "notes body"},
+                {"step_index": 3, "type": "GENERIC", "status": "RUNNING", "content": f"Created At: x\nTool is running as a background task with task id: {timer_id}\nTask Description: Timer: 30s"},
+                {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting for worker."},
+                {"step_index": 5, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": '<SYSTEM_MESSAGE>\n[Message] sender=sub-2 priority=MESSAGE_PRIORITY_HIGH content=done early\n</SYSTEM_MESSAGE>'},
+                {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "All done."},
+            ])
+            s.sync_transcripts_once()
+            self.assertEqual(s.rows["agy-auto:1:tool:1"]["status"], "completed")
+            self.assertFalse(s.background_tasks)
+            self.assertFalse(s.conditional_timers)
+            self.assertFalse(s.autonomous_open_tools)
+            self.assertFalse(s.autonomous_running)
+            self.assertFalse(s.in_autonomous_turn)
+            s.config["nativeProtocol"] = AGY_ACP_PROTOCOL
+            s.native_caps = {"loadSession": True}
+            s.data["connected"] = True
+            s.data["historyReady"] = True
+            s.peer = type("Peer", (), {"closed": False, "pending": {}})()
+            try:
+                self.assertIsNone(s.fast_release_blocker())
+            finally:
+                s.peer = None
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

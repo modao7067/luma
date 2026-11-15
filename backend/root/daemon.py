@@ -26,6 +26,10 @@ MODE_STATE_CAPS = 3
 MAX_WINDOWS = 16
 MAX_REQUEST = 128 * 1024
 MAX_CLIENT_BUFFER = 1024 * 1024
+_LANG = os.environ.get('LUMA_LANG', 'zh')
+
+def _tr(zh, en):
+    return zh if str(_LANG or 'zh').lower().startswith('zh') else en
 
 def frame(value):
     return (json.dumps(value, separators=(',', ':')) + '\n').encode()
@@ -148,13 +152,13 @@ class Server:
                 os.closerange(3, 65536)
                 cols, rows, cw, ch = size
                 fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, cols*cw, rows*ch))
-                env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', LUMA_ROOT_WINDOW=ident)
+                env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', LUMA_ROOT_WINDOW=ident, LUMA_LANG=str(_LANG or 'zh'))
                 env.pop('TMUX', None)
                 os.execve('/bin/bash', ['bash', '-c', script], env)
             except BaseException:
                 os._exit(127)
         os.set_blocking(fd, False)
-        window = Window(ident, str(request.get('name', '窗口'))[:128], pid, fd, size)
+        window = Window(ident, str(request.get('name', _tr('窗口', 'Window')))[:128], pid, fd, size)
         self.windows[ident] = window
         return window
 
@@ -175,6 +179,9 @@ class Server:
                 self.disconnect(client)
                 return
             client.auth = True
+            if request.get('lang'):
+                global _LANG
+                _LANG = str(request.get('lang'))
             client.role = 'lease' if request.get('role') == 'lease' else 'control'
             self.send(client, dict(event='list', windows=[w.info() for w in self.windows.values()], version=VERSION,
                                    serverPid=os.getpid(),modeMetadataFd=True,modeStateCaps=MODE_STATE_CAPS))
@@ -225,7 +232,7 @@ class Server:
                 raise ValueError('Window is already closing')
             owned = self.owned(window)
             if self.signal_owned(owned, signal.SIGTERM):
-                raise PermissionError('无法终止窗口中的进程，窗口已保留')
+                raise PermissionError(_tr('无法终止窗口中的进程，窗口已保留', 'Unable to terminate processes in window; window kept'))
             window.closing = (time.monotonic() + .5, owned, client, serial, False, 0)
         else:
             raise ValueError('Unknown operation; terminal bytes must use the PTY FD')
@@ -294,7 +301,7 @@ class Server:
                 if self.signal_owned(known, signal.SIGKILL):
                     window.closing = None
                     self.send(client, dict(event='error', id=ident, request=serial,
-                                           message='无法终止窗口中的进程，窗口已保留'))
+                                           message=_tr('无法终止窗口中的进程，窗口已保留', 'Unable to terminate processes in window; window kept')))
                 else:
                     window.closing = (time.monotonic()+.05, known, client, serial, True, time.monotonic()+2)
                 continue
@@ -304,7 +311,7 @@ class Server:
                 else:
                     window.closing = None
                     self.send(client, dict(event='error', id=ident, request=serial,
-                                           message='进程尚未退出，窗口保留，请稍后重试'))
+                                           message=_tr('进程尚未退出，窗口保留，请稍后重试', 'Processes still exiting; window kept, retry shortly')))
                 continue
             if window.fd >= 0:
                 self.stop_drain(window)

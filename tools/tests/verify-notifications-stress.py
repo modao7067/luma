@@ -224,6 +224,7 @@ with open(p, 'a', encoding='utf-8') as f:
 
         state_lock = threading.Lock()
         bridged_state = {f'br-{i}': {'running': True, 'requests': []} for i in range(8)}
+        watch_headers = []
         oc_active = {f'ses_oc_{i}': True for i in range(6)}
         oc_perms = {f'ses_oc_{i}': [] for i in range(6)}
         oc_forms = {f'ses_oc_{i}': [] for i in range(6)}
@@ -235,6 +236,7 @@ with open(p, 'a', encoding='utf-8') as f:
             def do_GET(self):
                 with state_lock:
                     if self.path.startswith('/sessions/'):
+                        watch_headers.append(self.headers.get('X-Luma-Watch'))
                         sid = self.path.split('/sessions/', 1)[1]
                         payload = bridged_state.get(sid, {'running': False, 'requests': []})
                     elif self.path == '/api/session/active':
@@ -396,11 +398,56 @@ with open(p, 'a', encoding='utf-8') as f:
                 os.close(fd)
                 time.sleep(0.05)
         assert released, 'Daemon did not exit promptly after disarm!'
+        with state_lock:
+            assert watch_headers and all(h == '1' for h in watch_headers), f'Missing X-Luma-Watch header: {watch_headers[:5]}'
+            bridged_state['bg-hold'] = {'running': False, 'releasable': False, 'capabilities': {'release': True}, 'requests': []}
+        wakes_log.unlink(missing_ok=True)
+        (base / 'bg-watch-spec.json').write_text(json.dumps({
+            'active': True, 'packageName': 'io.github.modao7067.luma', 'updatedAt': int(time.time() * 1000),
+            'sessions': [{
+                'id': 'bg-hold', 'epoch': 1, 'protocol': 'bridged', 'task': 'luma-native-cli-gui-v3',
+                'endpointUrl': f'http://127.0.0.1:{http_port}', 'running': True, 'userStopped': False, 'requestIds': [],
+            }],
+        }), encoding='utf-8')
+        env2 = {**env, 'LUMA_BG_TICK_SEC': '0.1', 'LUMA_BG_IDLE_EXIT_SEC': '0.5'}
+        assert subprocess.run([sys.executable, '-I', '-B', str(script_path), str(base)], env=env2, check=False).returncode == 0
+        time.sleep(0.8)
+        hold_fd = os.open(str(base / 'bg-watch.lock'), os.O_RDWR)
+        hold_locked = False
+        try:
+            fcntl.flock(hold_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            hold_locked = True
+        finally:
+            os.close(hold_fd)
+        assert hold_locked, 'Watcher exited early while releasable was False!'
+        with state_lock:
+            bridged_state['bg-hold']['running'] = True
+        time.sleep(0.25)
+        with state_lock:
+            bridged_state['bg-hold'] = {'running': False, 'releasable': True, 'capabilities': {'release': True}, 'requests': []}
+        deadline2 = time.monotonic() + 2.5
+        released2 = False
+        while time.monotonic() < deadline2:
+            fd2 = os.open(str(base / 'bg-watch.lock'), os.O_RDWR)
+            try:
+                fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd2, fcntl.LOCK_UN)
+                released2 = True
+                os.close(fd2)
+                break
+            except BlockingIOError:
+                os.close(fd2)
+                time.sleep(0.05)
+        assert released2, 'Watcher did not exit after becoming idle and releasable!'
+        wakes2 = [json.loads(line) for line in wakes_log.read_text(encoding='utf-8').splitlines() if line.strip()]
+        events2 = [ev for argv in wakes2 for ev in json.loads(argv[argv.index('events') + 1])]
+        assert any(ev.get('sessionId') == 'bg-hold' and ev.get('kind') == 'completed' for ev in events2), f'Missing hold completed wake: {events2}'
 
         ws_tcp.close()
         ws_unix.close()
         http_srv.shutdown()
-        print(f'PASS notifications stress: 8x flock spawn, 24 sessions / 4 protocols, {len(lines)} batched broadcast(s), 0 duplicates, instant disarm')
+        print(f'PASS notifications stress: 8x flock spawn, 24 sessions / 4 protocols, {len(lines)} batched broadcast(s), 0 duplicates, instant disarm, X-Luma-Watch + releasable hold')
 
 if __name__ == '__main__':
     main()

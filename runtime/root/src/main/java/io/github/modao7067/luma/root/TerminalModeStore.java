@@ -34,7 +34,7 @@ final class TerminalModeStore implements AutoCloseable {
 
     TerminalModeStore(File directory,String id)throws IOException{
         File folder=new File(directory,"terminal-modes");
-        if(!folder.isDirectory()&&!folder.mkdirs())throw new IOException("无法创建终端模式目录");
+        if(!folder.isDirectory()&&!folder.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建终端模式目录","Failed to create terminal modes directory"));
         file=new File(folder,id+".modes");channel=new RandomAccessFile(file,"rw");
         try{
             Os.chmod(folder.getAbsolutePath(),0700);Os.chmod(file.getAbsolutePath(),0600);

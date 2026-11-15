@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {hostServer,receiptBook} from './host-server.mjs';
 import {observeMessages,submissionScope} from './message-identity.mjs';
+const isZh=()=>(String(process.env.LUMA_LANG||'').trim()||'zh').toLowerCase().startsWith('zh');
+const tr=(zh,en)=>(isZh()?zh:en);
 const options=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 function failContract(message){
  try{fs.writeFileSync(options.socket+'.error',message,{mode:0o600});}catch{}
@@ -14,7 +16,7 @@ try{
  ({resolveProjectTrusted}=await import(new URL('./core/project-trust.js',sdkUrl)));
  ({createProjectTrustContext}=await import(new URL('./cli/project-trust.js',sdkUrl)));
 }catch{
- failContract('当前 Pi SDK 模块结构不兼容；原有 RPC 会话入口保持可用');
+ failContract(tr('当前 Pi SDK 模块结构不兼容；原有 RPC 会话入口保持可用','Current Pi SDK module layout is incompatible; legacy RPC session entry remains available'));
 }
 try{
  ({applyHttpProxySettings}=await import(new URL('./utils/http-proxy.js',sdkUrl)));
@@ -22,7 +24,7 @@ try{
 }catch{}
 const {createAgentSessionRuntime,createAgentSessionServices,createAgentSessionFromServices,SessionManager,InteractiveMode,ExtensionEditorComponent,SettingsManager,ProjectTrustStore,hasTrustRequiringProjectResources,initTheme,resolveModelScopeWithDiagnostics,parseSkillBlock}=sdk;
 if([createAgentSessionRuntime,createAgentSessionServices,createAgentSessionFromServices,SessionManager,InteractiveMode,ExtensionEditorComponent,SettingsManager,ProjectTrustStore,hasTrustRequiringProjectResources,resolveProjectTrusted,createProjectTrustContext].some(fn=>typeof fn!=='function')){
- failContract('当前 Pi SDK 导出契约不兼容；原有 RPC 会话入口保持可用');
+ failContract(tr('当前 Pi SDK 导出契约不兼容；原有 RPC 会话入口保持可用','Current Pi SDK export contract is incompatible; legacy RPC session entry remains available'));
 }
 let runtime;const identity=()=>runtime?.session.sessionId??options.nativeId;
 let transport;const emit=e=>transport?.emit(e);
@@ -87,13 +89,13 @@ initTheme?.(runtime.services.settingsManager.getTheme(),true);
 transport=hostServer(options,identity,async p=>{
  const s=runtime.session;
  switch(p.type){
-  case 'get_state':return {sessionId:s.sessionId,sessionFile:s.sessionFile,sessionName:s.sessionName,model:s.model,thinkingLevel:s.thinkingLevel,isStreaming:s.isStreaming,isCompacting:s.isCompacting,isSettled:s.isIdle,pendingMessageCount:s.pendingMessageCount,queuedMessages:messageObservers.get(s).queue(),contextUsage:s.getContextUsage(),receipts:book.entries,requests:[...dialogs.values()].map(d=>d.request)};
+  case 'get_state':return {sessionId:s.sessionId,sessionFile:s.sessionFile,sessionName:s.sessionName,model:s.model,thinkingLevel:s.thinkingLevel,isStreaming:s.isStreaming,isCompacting:s.isCompacting,isSettled:s.isIdle,pendingMessageCount:s.pendingMessageCount,queuedMessages:messageObservers.get(s).queue(),contextUsage:s.getContextUsage(),receipts:book.entries,requests:[...dialogs.values()].map(d=>d.request),observerCount:transport?.clients.size??0};
   case 'get_messages':return {messages:messageObservers.get(s).messages()};
   case 'get_available_models':return {models:s.modelRuntime.getAvailableSnapshot()};
   case 'get_available_thinking_levels':return {levels:s.getAvailableThinkingLevels()};
   case 'get_session_stats':return {...s.getSessionStats(),contextUsage:s.getContextUsage()};
   case 'get_commands':return {commands:s.resourceLoader.getSkills().skills.map(v=>({name:'skill:'+v.name,description:v.description,source:'skill',sourceInfo:{path:v.filePath}}))};
-  case 'set_model':{const model=s.modelRuntime.getAvailableSnapshot().find(m=>m.provider===p.provider&&m.id===p.modelId);if(!model)throw Error('原生模型不可用');await s.setModel(model);return {};}
+  case 'set_model':{const model=s.modelRuntime.getAvailableSnapshot().find(m=>m.provider===p.provider&&m.id===p.modelId);if(!model)throw Error(tr('原生模型不可用','Native model is unavailable'));await s.setModel(model);return {};}
   case 'set_thinking_level':s.setThinkingLevel(p.level);return {level:s.thinkingLevel};
   case 'set_session_name':s.setSessionName(p.name);return {};
   case 'abort':await s.abort();return {};
@@ -111,11 +113,11 @@ transport=hostServer(options,identity,async p=>{
    const dialog=dialogs.get(p.requestId);if(!dialog)return {answered:false};const r=dialog.request;let value;
    if(p.cancelled)value=r.method==='confirm'?false:undefined;
    else if(r.method==='confirm')value=p.confirmed===true;
-   else if(r.method==='select'){if(!r.options.includes(p.value))throw Error('无效原生选项');value=p.value;}
+   else if(r.method==='select'){if(!r.options.includes(p.value))throw Error(tr('无效原生选项','Invalid native option'));value=p.value;}
    else value=p.value;
    dialog.finish(value);return {answered:true};
   }
-  default:throw Error('不支持的原生操作');
+  default:throw Error(tr('不支持的原生操作','Unsupported native operation'));
  }
 });
 const tui=new InteractiveMode(runtime,{});

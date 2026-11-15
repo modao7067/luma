@@ -29,7 +29,7 @@ shared=repo/'shared/ui/java/io/github/modao7067/luma/shared';generated=work/'src
 sources=[]
 for name in ['TerminalDocuments.java','TerminalSystemLinks.java','TerminalFileTransfer.java','TerminalFileProvider.java','WallpaperImages.java']:
  f=generated/name;f.write_text((shared/name).read_text().replace('io.github.modao7067.luma.shared','io.github.modao7067.luma.root'));sources.append(f)
-sources += [repo/'runtime/root/src/main/java/io/github/modao7067/luma/root/TerminalLinkReader.java',repo/'tools/tests/terminal-files/PreviewFileCheck.java']
+sources += [repo/'runtime/root/src/main/java/io/github/modao7067/luma/root/RootEntry.java',repo/'runtime/root/src/main/java/io/github/modao7067/luma/root/TerminalLinkReader.java',repo/'shared/terminal-emulator/java/com/termux/terminal/LumaLang.java',repo/'tools/tests/terminal-files/PreviewFileCheck.java']
 subprocess.run(['javac','--release','17','-cp',sdk,'-d',str(classes),*map(str,sources)],check=True)
 jar=work/'checks.jar';subprocess.run(['jar','cf',str(jar),'-C',str(classes),'.'],check=True)
 subprocess.run([toolenv.JAVA,'-Xmx256m','-cp',toolenv.D8_JAR,'com.android.tools.r8.D8','--lib',sdk,'--min-api','31','--output',str(dex),str(jar)],check=True)

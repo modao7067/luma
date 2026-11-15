@@ -1,5 +1,5 @@
 <resources>
-    <string name="background_accessibility_label">Luma 后台保活</string>
-    <string name="background_accessibility_summary">帮助后台终端与 Web 服务保持可响应</string>
-    <string name="background_accessibility_description">用于帮助 Luma 后台终端与 Web 服务保持可响应，效果取决于系统后台策略。仅接收 Luma 自身的窗口状态事件，不读取窗口内容，不执行手势或按键，不自动启动终端，不持有唤醒锁，也不进行定时轮询。此服务需由你手动开启，可随时在系统无障碍设置中关闭。</string>
+    <string name="background_accessibility_label">Luma Background Keep-Alive</string>
+    <string name="background_accessibility_summary">Helps background terminals and web services stay responsive</string>
+    <string name="background_accessibility_description">Helps Luma background terminals and web services stay responsive depending on system background policies. Only receives Luma\'s own window state events; does not read screen content, perform gestures or keystrokes, auto-start terminals, hold wake locks, or poll periodically. Enabled manually by you and can be turned off anytime in system Accessibility settings.</string>
 </resources>

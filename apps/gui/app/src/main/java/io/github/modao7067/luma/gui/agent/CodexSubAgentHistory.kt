@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.agent
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import io.github.modao7067.luma.gui.session.ConversationItem
 import org.json.JSONObject
 
@@ -113,10 +115,10 @@ internal class CodexSubAgentHistory(
     }
 
     private fun checkIdentity(thread: JSONObject) {
-        check(thread.optString("id") == childThreadId) { "Codex 返回了不同子代理" }
+        check(thread.optString("id") == childThreadId) { tr("Codex 返回了不同子代理", "Codex returned a different sub-agent") }
         val sourceParent = thread.optJSONObject("source")?.optJSONObject("subAgent")?.optJSONObject("thread_spawn")?.stringOrNull("parent_thread_id")
         val parents = listOfNotNull(thread.stringOrNull("parentThreadId"), sourceParent)
-        check(parents.isNotEmpty() && parents.all { it == parentThreadId }) { "Codex 子代理父会话不匹配" }
+        check(parents.isNotEmpty() && parents.all { it == parentThreadId }) { tr("Codex 子代理父会话不匹配", "Codex sub-agent parent session mismatch") }
     }
 
     fun event(message: JSONObject): Boolean {
@@ -188,7 +190,7 @@ internal class CodexSubAgentHistory(
             "item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta" -> {
                 val id = p.optString("itemId")
                 val assistant = method in setOf("item/agentMessage/delta", "item/plan/delta")
-                val old = items[id] ?: ConversationItem(id, if (assistant) "assistant" else "tool", text = if (method.contains("reasoning")) "推理摘要" else "", turnId = p.optString("turnId"), outcome = "running")
+                val old = items[id] ?: ConversationItem(id, if (assistant) "assistant" else "tool", text = if (method.contains("reasoning")) tr("推理摘要", "Reasoning summary") else "", turnId = p.optString("turnId"), outcome = "running")
                 val delta = p.optString("delta")
                 items[id] = if (assistant) old.copy(text = old.text + delta) else old.copy(detail = old.detail + delta)
                 liveItems[id] = ++streamRevision

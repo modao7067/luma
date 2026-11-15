@@ -2,6 +2,7 @@ import base64
 import json
 import mimetypes
 from pathlib import Path
+from .i18n import tr
 
 MAX_BYTES = 64 * 1024 * 1024
 
@@ -48,7 +49,7 @@ def media_blocks(value):
 
 def inline(data, mime):
     if not isinstance(data, str): return None
-    if len(data) > MAX_BYTES * 4 // 3 + 4096: return "luma-error:附件超过64MiB"
+    if len(data) > MAX_BYTES * 4 // 3 + 4096: return "luma-error:" + tr("附件超过64MiB", "Attachment exceeds 64 MiB")
     return data if data.startswith("data:") else "data:" + (mime or "application/octet-stream") + ";base64," + data
 
 def display_content(value):
@@ -64,4 +65,4 @@ def display_content(value):
 def display_object(value):
     if isinstance(value, list): return [display_object(v) for v in value]
     if not isinstance(value, dict): return value
-    return {k: "[附件数据]" if isinstance(v, str) and len(v) > 256 and (k in ("data", "blob", "image_url", "imageUrl", "audioUrl") or v.startswith("data:")) else display_object(v) for k, v in value.items()}
+    return {k: tr("[附件数据]", "[attachment data]") if isinstance(v, str) and len(v) > 256 and (k in ("data", "blob", "image_url", "imageUrl", "audioUrl") or v.startswith("data:")) else display_object(v) for k, v in value.items()}

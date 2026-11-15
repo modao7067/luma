@@ -1,8 +1,10 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 data class SessionSummary(
     val id: String, val title: String, val environment: String, val cwd: String,
-    val model: String = "", val status: String = "未连接", val threadId: String? = null, val cli: String = "Codex", val modelLabel: String = "",
+    val model: String = "", val status: String = tr("未连接", "Disconnected"), val threadId: String? = null, val cli: String = "Codex", val modelLabel: String = "",
     val lastActiveAt: Long = 0L, val hasUnreadDot: Boolean = false,
 )
 data class ModelOption(val id: String, val label: String, val efforts: List<String> = emptyList(), val supportsImages: Boolean = true, val speeds: List<RequestChoice> = emptyList(), val defaultEffort: String = "")
@@ -57,7 +59,7 @@ data class Inventory(val title: String, val entries: List<ReadOnlyEntry> = empty
 data class QueueRecovery(val text: String, val phase: String)
 data class SessionView(
     val summary: SessionSummary,
-    val connection: String = "未连接", val connected: Boolean = false, val loading: Boolean = false,
+    val connection: String = tr("未连接", "Disconnected"), val connected: Boolean = false, val loading: Boolean = false,
     val activeTurnId: String? = null, val stopping: Boolean = false,
     val messages: List<ConversationItem> = emptyList(), val subAgents: List<SubAgentState> = emptyList(), val queue: List<QueueEntry> = emptyList(),
     val requests: List<UserRequest> = emptyList(), val draft: String = "", val attachments: List<Attachment> = emptyList(),
@@ -125,11 +127,11 @@ interface CockpitActions {
     fun previewResource(resource: MediaResource) = previewFile(resource.source)
     fun previewFile(path: String)
     suspend fun inspectMedia(resource: MediaResource): MediaResource = resource
-    suspend fun resolveMedia(resource: MediaResource): ResolvedMedia = throw java.io.IOException("无法读取")
+    suspend fun resolveMedia(resource: MediaResource): ResolvedMedia = throw java.io.IOException(tr("无法读取", "Unable to read"))
     suspend fun resolveMedia(resource: MediaResource, forceRefresh: Boolean): ResolvedMedia = resolveMedia(resource)
-    suspend fun openMediaExternally(resource: MediaResource): Unit = throw java.io.IOException("无法打开")
+    suspend fun openMediaExternally(resource: MediaResource): Unit = throw java.io.IOException(tr("无法打开", "Unable to open"))
     suspend fun openMediaWithChooser(resource: MediaResource): Unit = openMediaExternally(resource)
-    suspend fun saveMedia(resource: MediaResource): String = throw java.io.IOException("无法保存")
+    suspend fun saveMedia(resource: MediaResource): String = throw java.io.IOException(tr("无法保存", "Failed to save"))
     fun closePreview()
     fun refreshDashboard() {}
     fun configurePermission(id: String) {}

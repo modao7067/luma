@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / 'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.antigravity import AntigravitySession
 from luma_cli.base import Session
 from luma_cli.external_browser import BrowserRelay, valid_google_auth_url
+from luma_cli.i18n import tr
 from luma_cli.server import ADAPTERS, Manager
 from luma_cli.transport import Rejected
 
@@ -53,6 +54,16 @@ def connected(s):
     return calls
 
 class AntigravityTests(unittest.TestCase):
+    def setUp(self):
+        self._saved_auth_env = {k: os.environ.pop(k, None) for k in ('LUMA_AUTH_BROWSER_SOCKET', 'LUMA_AUTH_BROWSER_NONCE')}
+
+    def tearDown(self):
+        for k, v in self._saved_auth_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     def test_official_executable_and_no_consumer_headless_fallback(self):
         s = session(); calls = connected(s)
         self.assertEqual(calls[0], ('start', ['agy_acp_server.par', '--uid=']))
@@ -64,7 +75,7 @@ class AntigravityTests(unittest.TestCase):
     def test_missing_acp_is_actionable_without_creating_identity_or_fake_catalog(self):
         s = session()
         with patch('luma_cli.antigravity.shutil.which', return_value=None):
-            with self.assertRaisesRegex(Rejected, '安装 agy CLI 不等于安装 ACP'): s.connect()
+            with self.assertRaisesRegex(Rejected, tr('安装 agy CLI 不等于安装 ACP', 'Installing agy CLI alone does not include ACP')): s.connect()
         self.assertFalse(s.config.get('creationUnknown')); self.assertEqual(s.data['models'], [])
         self.assertEqual(s.data['permissions'], []); self.assertEqual(s.data['nativeId'], '')
 
@@ -75,7 +86,7 @@ class AntigravityTests(unittest.TestCase):
             raise ConnectionError('native EOF')
         s.start = start
         with patch('luma_cli.antigravity.shutil.which', return_value='/native/agy_acp_server.par'):
-            with self.assertRaisesRegex(Rejected, 'TCMalloc 地址空间不兼容') as error: s.connect()
+            with self.assertRaisesRegex(Rejected, tr('TCMalloc 地址空间不兼容', 'TCMalloc address space incompatibility')) as error: s.connect()
         self.assertNotIn('not-for-ui', str(error.exception)); self.assertEqual(s.data['models'], [])
 
     def test_other_startup_failures_are_not_misclassified_as_arm64(self):
@@ -96,7 +107,7 @@ class AntigravityTests(unittest.TestCase):
 
     def test_protocol_identity_cannot_silently_change(self):
         s = session('native'); s.config['nativeProtocol'] = 'antigravity-cli-api'
-        with self.assertRaisesRegex(Rejected, '不能切换协议'): s.connect()
+        with self.assertRaisesRegex(Rejected, tr('不能切换协议', 'without switching protocol')): s.connect()
 
     def test_config_options_are_native_and_keep_permission_warning(self):
         s = session(); calls = connected(s)
@@ -125,7 +136,7 @@ class AntigravityTests(unittest.TestCase):
         s = session(); connected(s); sent = []
         s.peer = type('P', (), {'send': lambda _, frame: sent.append(frame)})()
         s.event({'method': 'session/update', 'params': {'sessionId': 'native', 'update': {'sessionUpdate': 'usage_update', 'used': 13, 'size': 4096}}})
-        self.assertEqual(s.data['metrics'][0]['label'], '上下文')
+        self.assertEqual(s.data['metrics'][0]['label'], tr('上下文', 'Context'))
         s.event({'id': 0, 'method': 'session/request_permission', 'params': {'sessionId': 'native', 'options': [{'optionId': 'allow-once/opaque', 'name': 'Native choice'}]}})
         s.answer({'id': '0', 'choice': 'allow-once/opaque'})
         self.assertEqual(sent[-1], {'jsonrpc': '2.0', 'id': 0, 'result': {'outcome': {'outcome': 'selected', 'optionId': 'allow-once/opaque'}}})
@@ -137,7 +148,7 @@ class AntigravityTests(unittest.TestCase):
         s.start = lambda argv: None
         s.call = lambda *args, **kwargs: {'protocolVersion': 1, 'agentCapabilities': {}, 'authMethods': [{'id': 'oauth-personal'}]}
         with patch('luma_cli.antigravity.shutil.which', return_value='/native/agy_acp_server.par'):
-            with self.assertRaisesRegex(Rejected, '创建结果未知'): s.connect()
+            with self.assertRaisesRegex(Rejected, tr('创建结果未知', 'creation result is unknown')): s.connect()
 
     def test_personal_auth_uses_only_official_method_before_new_and_load(self):
         for native in (None, 'native'):
@@ -164,14 +175,14 @@ class AntigravityTests(unittest.TestCase):
         s = session(); s.start = lambda argv: None
         s.call = lambda *args, **kwargs: {'protocolVersion': 1, 'agentCapabilities': {}, 'authMethods': [{'id': 'gemini-api-key'}]}
         with patch('luma_cli.antigravity.shutil.which', return_value='/native/agy_acp_server.par'):
-            with self.assertRaisesRegex(Rejected, '未提供 oauth-personal'): s.connect()
+            with self.assertRaisesRegex(Rejected, tr('未提供 oauth-personal', 'does not offer oauth-personal')): s.connect()
         self.assertFalse(s.config.get('creationUnknown')); self.assertFalse(s.data['connected'])
 
     def test_refused_opener_cannot_be_overridden_by_a_racing_auth_success(self):
         s = session(); s.auth_url_rejected = False
         def call(*args, **kwargs): s.auth_url_rejected = True; return {}
         s.call = call
-        with self.assertRaisesRegex(Rejected, '已拒绝打开'): s.authenticate({'authMethods': [{'id': 'oauth-personal'}]})
+        with self.assertRaisesRegex(Rejected, tr('已拒绝打开', 'was blocked')): s.authenticate({'authMethods': [{'id': 'oauth-personal'}]})
         self.assertFalse(s.data['requests']); self.assertFalse(s.config.get('creationUnknown'))
 
     def test_google_opener_is_ephemeral_and_cancel_never_creates_session(self):
@@ -195,7 +206,7 @@ class AntigravityTests(unittest.TestCase):
         self.assertRaises(Rejected, s.answer, {'id': 'antigravity-auth-browser', 'choice': 'open'})
         s.answer({'id': 'antigravity-auth-browser', 'choice': 'cancel'}); thread.join(2)
         self.assertEqual([c[0] for c in calls], ['authenticate'])
-        self.assertEqual(s.data['requests'], []); self.assertEqual(str(errors[0]), '已取消 Antigravity 登录')
+        self.assertEqual(s.data['requests'], []); self.assertEqual(str(errors[0]), tr('已取消 Antigravity 登录', 'Antigravity sign-in cancelled'))
 
     def test_browser_helper_uses_real_python_webbrowser_without_launching_a_browser(self):
         opened = []; rejected = []
@@ -265,7 +276,7 @@ for line in sys.stdin:
                     wait(lambda: bool(second.data['requests']))
                     second.answer({'id': 'antigravity-auth-browser', 'choice': 'cancel'})
                     wait(lambda: not second.data.get('connecting'))
-                    self.assertIn('已取消 Antigravity 登录', second.data['error'])
+                    self.assertIn(tr('已取消 Antigravity 登录', 'Antigravity sign-in cancelled'), second.data['error'])
                     self.assertEqual(second.data['nativeId'], ''); self.assertFalse(second.config.get('creationUnknown'))
                     self.assertTrue(first.data['connected']); self.assertEqual(first.data['nativeId'], first_id)
                     self.assertIsNone(first.peer.proc.poll())
@@ -288,7 +299,7 @@ for line in sys.stdin:
 '''
         with tempfile.TemporaryDirectory(prefix='luma-acp-auth-deadline-') as directory:
             binary = pathlib.Path(directory)/'agy_acp_server.par'; binary.write_text(fixture); binary.chmod(0o700)
-            for outcome, expected in [('timeout', '5 分钟窗口内确认'), ('rejected', 'native auth denied')]:
+            for outcome, expected in [('timeout', tr('5 分钟窗口内确认', 'within the 5-minute window')), ('rejected', 'native auth denied')]:
                 s = session(); s.config['cwd'] = directory; s.argv = [str(binary), '--uid=']; s.auth_timeout = .15
                 with patch.dict(os.environ, {'PATH': '/usr/bin:/bin', 'LUMA_FIXTURE_AUTH_OUTCOME': outcome}):
                     with self.assertRaisesRegex(Rejected, expected): s.connect()

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -30,10 +32,10 @@ internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitSta
             ) {
                 Text(
                     when {
-                        view.sending -> "等待送达确认后可修改"
-                        view.uncertainSubmission -> "核对送达状态后可修改"
-                        view.configuring -> "正在同步 CLI 设置…"
-                        else -> "任务与队列结束后可修改"
+                        view.sending -> tr("等待送达确认后可修改", "Editable after delivery is confirmed")
+                        view.uncertainSubmission -> tr("核对送达状态后可修改", "Editable after verifying delivery status")
+                        view.configuring -> tr("正在同步 CLI 设置…", "Syncing CLI settings…")
+                        else -> tr("任务与队列结束后可修改", "Editable after active turn and queue finish")
                     },
                     Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.labelMedium,
@@ -60,7 +62,11 @@ internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitSta
             }
             val currentProvider = if (name == "模型" && '/' in view.summary.model) view.summary.model.substringBefore('/') else ""
             ActionMenuItem(
-                label = if (name == "思考强度" && view.summary.cli == "OpenCode") "思考强度 / 变体" else name,
+                label = when (name) {
+                    "模型" -> tr("模型", "Model")
+                    "思考强度" -> if (view.summary.cli == "OpenCode") tr("思考强度 / 变体", "Reasoning / Variant") else tr("思考强度", "Reasoning effort")
+                    else -> tr("速度", "Speed")
+                },
                 icon = icon,
                 description = value,
                 badge = currentProvider,
@@ -83,7 +89,7 @@ internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitSta
                 }
                 if (options.isEmpty()) {
                     Text(
-                        "CLI 未提供可选项",
+                        tr("CLI 未提供可选项", "No options provided by CLI"),
                         Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

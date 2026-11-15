@@ -10,7 +10,7 @@ final class WallpaperImages {
     static final long MAX_PIXELS = 4L * 1024 * 1024;
 
     static int sampleSize(int width, int height, int targetWidth, int targetHeight) throws IOException {
-        if (width <= 0 || height <= 0) throw new IOException("无法识别图片尺寸");
+        if (width <= 0 || height <= 0) throw new IOException(com.termux.terminal.LumaLang.tr("无法识别图片尺寸", "Unable to read image dimensions"));
         int sample = 1;
         int limitWidth = Math.max(1, Math.min(4096, targetWidth));
         int limitHeight = Math.max(1, Math.min(4096, targetHeight));
@@ -18,7 +18,7 @@ final class WallpaperImages {
             long scaledWidth = ((long) width + sample - 1) / sample;
             long scaledHeight = ((long) height + sample - 1) / sample;
             if (scaledWidth * scaledHeight <= MAX_PIXELS && scaledWidth <= limitWidth && scaledHeight <= limitHeight) break;
-            if (sample >= 1 << 29) throw new IOException("图片尺寸过大");
+            if (sample >= 1 << 29) throw new IOException(com.termux.terminal.LumaLang.tr("图片尺寸过大", "Image dimensions are too large"));
             sample *= 2;
         }
         return sample;
@@ -32,7 +32,7 @@ final class WallpaperImages {
         options.inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, width, height);
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
         Bitmap bitmap = BitmapFactory.decodeFile(file.getPath(), options);
-        if (bitmap == null) throw new IOException("无法解码图片");
+        if (bitmap == null) throw new IOException(com.termux.terminal.LumaLang.tr("无法解码图片", "Unable to decode image"));
         return bitmap;
     }
 }

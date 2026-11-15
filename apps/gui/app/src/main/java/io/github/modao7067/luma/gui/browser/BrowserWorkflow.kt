@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.browser
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -23,7 +25,7 @@ object BrowserProtocol {
         if (!request.has("timeoutMs")) return default
         val value = request.get("timeoutMs")
         require(value is Number && value.toDouble() == value.toLong().toDouble() && value.toLong() in 1..maximum) {
-            "timeoutMs 必须是 1..$maximum 的整数毫秒"
+            tr("timeoutMs 必须是 1..$maximum 的整数毫秒", "timeoutMs must be an integer in 1..$maximum ms")
         }
         return value.toLong()
     }
@@ -40,7 +42,7 @@ object BrowserProtocol {
 
     private fun requireFiniteNumber(request: JSONObject, key: String): Double {
         val raw = request.opt(key)
-        require(raw is Number && raw.toDouble().isFinite()) { "$key 必须是有效数值" }
+        require(raw is Number && raw.toDouble().isFinite()) { tr("$key 必须是有效数值", "$key must be a finite number") }
         return raw.toDouble()
     }
 
@@ -49,26 +51,26 @@ object BrowserProtocol {
         val domTargetCount = listOf("selector", "index", "ref").count(request::has)
         if (hasCoords) {
             require(allowCoordinates && request.has("x") && request.has("y") && domTargetCount == 0) {
-                "坐标点击/输入需同时提供数值 x 与 y，且不可混用 selector/index/ref"
+                tr("坐标点击/输入需同时提供数值 x 与 y，且不可混用 selector/index/ref", "Coordinate actions require numeric x and y and cannot be mixed with selector/index/ref")
             }
             requireFiniteNumber(request, "x")
             requireFiniteNumber(request, "y")
             return
         }
         if (optional && domTargetCount == 0) return
-        require(domTargetCount == 1) { "动作必须提供 selector、index 或 ref 其中之一" }
+        require(domTargetCount == 1) { tr("动作必须提供 selector、index 或 ref 其中之一", "Action must specify exactly one of selector, index, or ref") }
         if (request.has("selector")) {
-            require(request.opt("selector") is String && request.getString("selector").isNotBlank()) { "selector 必须是非空 CSS" }
+            require(request.opt("selector") is String && request.getString("selector").isNotBlank()) { tr("selector 必须是非空 CSS", "selector must be a non-empty CSS selector") }
         }
         if (request.has("ref")) {
-            require(request.opt("ref") is String && request.getString("ref").matches(Regex("@[1-9][0-9]*"))) { "ref 必须是 @N" }
+            require(request.opt("ref") is String && request.getString("ref").matches(Regex("@[1-9][0-9]*"))) { tr("ref 必须是 @N", "ref must be @N") }
         }
         if (request.has("index")) {
             val index = request.get("index")
             require(
                 (index is Number && index.toDouble() == index.toInt().toDouble() && index.toInt() >= 0) ||
                     (index is String && index.matches(Regex("0|[1-9][0-9]*")) && index.toIntOrNull() != null),
-            ) { "index 必须是非负整数" }
+            ) { tr("index 必须是非负整数", "index must be a non-negative integer") }
         }
     }
 
@@ -77,77 +79,77 @@ object BrowserProtocol {
         if (action == "batch") {
             budget(request)
             val steps = request.getJSONArray("steps")
-            require(steps.length() in 1..MAX_STEPS) { "batch 需要 1..$MAX_STEPS 个步骤" }
+            require(steps.length() in 1..MAX_STEPS) { tr("batch 需要 1..$MAX_STEPS 个步骤", "batch requires 1..$MAX_STEPS steps") }
             for (i in 0 until steps.length()) {
                 val step = steps.getJSONObject(i)
-                require(!step.has("tab") && !step.has("token")) { "批内步骤使用外层 tab 与授权，不可覆盖" }
-                require(step.getString("action") in stepActions) { "不支持的批内操作" }
+                require(!step.has("tab") && !step.has("token")) { tr("批内步骤使用外层 tab 与授权，不可覆盖", "Batch steps inherit outer tab and auth and cannot override them") }
+                require(step.getString("action") in stepActions) { tr("不支持的批内操作", "Unsupported batch step action") }
                 validateStep(step, true)
             }
         } else {
-            require(action in stepActions + setOf("open", "tabs", "close")) { "未知操作" }
+            require(action in stepActions + setOf("open", "tabs", "close")) { tr("未知操作", "Unknown action") }
             validateStep(request, false)
         }
     }
 
     private fun validateStep(request: JSONObject, batch: Boolean) {
         if (request.has("snapshot")) {
-            require(request.opt("snapshot") is String && request.getString("snapshot").isNotEmpty()) { "snapshot 必须是非空字符串" }
-            require(batch || request.getString("snapshot") != "\$last") { "\$last 只能在 batch 内使用" }
+            require(request.opt("snapshot") is String && request.getString("snapshot").isNotEmpty()) { tr("snapshot 必须是非空字符串", "snapshot must be a non-empty string") }
+            require(batch || request.getString("snapshot") != "\$last") { tr("\$last 只能在 batch 内使用", "\$last can only be used inside batch") }
         }
         when (request.getString("action")) {
             "open" -> {
-                require(BrowserPolicy.allowedUrl(request.getString("url"))) { "仅支持 HTTPS 或本机 HTTP 页面" }
-                if (request.has("background")) require(request.opt("background") is Boolean) { "background 必须是布尔值" }
+                require(BrowserPolicy.allowedUrl(request.getString("url"))) { tr("仅支持 HTTPS 或本机 HTTP 页面", "Only HTTPS or localhost HTTP pages are supported") }
+                if (request.has("background")) require(request.opt("background") is Boolean) { tr("background 必须是布尔值", "background must be a boolean") }
             }
-            "navigate" -> require(BrowserPolicy.allowedUrl(request.getString("url"))) { "仅支持 HTTPS 或本机 HTTP 页面" }
+            "navigate" -> require(BrowserPolicy.allowedUrl(request.getString("url"))) { tr("仅支持 HTTPS 或本机 HTTP 页面", "Only HTTPS or localhost HTTP pages are supported") }
             "read" -> {
-                if (request.has("interactiveOnly")) require(request.opt("interactiveOnly") is Boolean) { "interactiveOnly 必须是布尔值" }
-                if (request.has("includeUrls")) require(request.opt("includeUrls") is Boolean) { "includeUrls 必须是布尔值" }
+                if (request.has("interactiveOnly")) require(request.opt("interactiveOnly") is Boolean) { tr("interactiveOnly 必须是布尔值", "interactiveOnly must be a boolean") }
+                if (request.has("includeUrls")) require(request.opt("includeUrls") is Boolean) { tr("includeUrls 必须是布尔值", "includeUrls must be a boolean") }
                 if (request.has("scopeSelector")) {
-                    require(request.opt("scopeSelector") is String && request.getString("scopeSelector").isNotBlank()) { "scopeSelector 必须是非空选择器" }
+                    require(request.opt("scopeSelector") is String && request.getString("scopeSelector").isNotBlank()) { tr("scopeSelector 必须是非空选择器", "scopeSelector must be a non-empty selector") }
                 }
             }
             "diff" -> {
-                if (request.has("includeUrls")) require(request.opt("includeUrls") is Boolean) { "includeUrls 必须是布尔值" }
+                if (request.has("includeUrls")) require(request.opt("includeUrls") is Boolean) { tr("includeUrls 必须是布尔值", "includeUrls must be a boolean") }
                 if (request.has("scopeSelector")) {
-                    require(request.opt("scopeSelector") is String && request.getString("scopeSelector").isNotBlank()) { "scopeSelector 必须是非空选择器" }
+                    require(request.opt("scopeSelector") is String && request.getString("scopeSelector").isNotBlank()) { tr("scopeSelector 必须是非空选择器", "scopeSelector must be a non-empty selector") }
                 }
             }
             "screenshot" -> {
-                if (request.has("annotate")) require(request.opt("annotate") is Boolean) { "annotate 必须是布尔值" }
+                if (request.has("annotate")) require(request.opt("annotate") is Boolean) { tr("annotate 必须是布尔值", "annotate must be a boolean") }
             }
             "click", "fill", "type", "hover" -> validateSingleTarget(request, allowCoordinates = true)
             "press" -> {
                 val key = request.opt("key")
-                require(key is String && key.isNotBlank() && key.length <= 32) { "press 需要提供 1..32 字符的按键名 key" }
+                require(key is String && key.isNotBlank() && key.length <= 32) { tr("press 需要提供 1..32 字符的按键名 key", "press requires a key name of 1..32 chars") }
                 validateSingleTarget(request, allowCoordinates = false, optional = true)
             }
             "console", "errors" -> {
-                if (request.has("clear")) require(request.opt("clear") is Boolean) { "clear 必须是布尔值" }
+                if (request.has("clear")) require(request.opt("clear") is Boolean) { tr("clear 必须是布尔值", "clear must be a boolean") }
                 if (request.has("limit")) {
                     val limit = request.get("limit")
-                    require(limit is Number && limit.toDouble() == limit.toInt().toDouble() && limit.toInt() in 1..200) { "limit 必须是 1..200 的整数" }
+                    require(limit is Number && limit.toDouble() == limit.toInt().toDouble() && limit.toInt() in 1..200) { tr("limit 必须是 1..200 的整数", "limit must be an integer in 1..200") }
                 }
             }
             "dialog" -> {
                 val decision = request.optString("decision", "status")
-                require(decision in setOf("status", "accept", "dismiss")) { "dialog decision 仅支持 status/accept/dismiss" }
-                if (request.has("promptText")) require(request.opt("promptText") is String) { "promptText 必须是字符串" }
+                require(decision in setOf("status", "accept", "dismiss")) { tr("dialog decision 仅支持 status/accept/dismiss", "dialog decision must be status, accept, or dismiss") }
+                if (request.has("promptText")) require(request.opt("promptText") is String) { tr("promptText 必须是字符串", "promptText must be a string") }
             }
             "select" -> {
                 validateSingleTarget(request, allowCoordinates = false)
                 require((request.opt("text") is String && request.getString("text").isNotEmpty()) ||
-                    (request.opt("value") is String && request.getString("value").isNotEmpty())) { "select 需要提供选项 text 或 value" }
+                    (request.opt("value") is String && request.getString("value").isNotEmpty())) { tr("select 需要提供选项 text 或 value", "select requires option text or value") }
             }
             "check", "uncheck" -> validateSingleTarget(request, allowCoordinates = true)
             "scroll" -> {
                 validateSingleTarget(request, allowCoordinates = false, optional = true)
                 val dir = request.optString("direction", "down").lowercase()
-                require(dir in scrollDirections) { "direction 仅支持 up/down/left/right/top/bottom" }
+                require(dir in scrollDirections) { tr("direction 仅支持 up/down/left/right/top/bottom", "direction must be up, down, left, right, top, or bottom") }
                 if (request.has("amount")) {
                     val amount = requireFiniteNumber(request, "amount")
-                    require(amount > 0 && amount <= 20000) { "amount 必须在 1..20000 像素之间" }
+                    require(amount > 0 && amount <= 20000) { tr("amount 必须在 1..20000 像素之间", "amount must be between 1 and 20000 px") }
                 }
             }
             "swipe" -> {
@@ -157,16 +159,16 @@ object BrowserProtocol {
                 requireFiniteNumber(request, "toY")
                 if (request.has("durationMs")) {
                     val d = request.get("durationMs")
-                    require(d is Number && d.toLong() in 50..3000) { "durationMs 必须在 50..3000 之间" }
+                    require(d is Number && d.toLong() in 50..3000) { tr("durationMs 必须在 50..3000 之间", "durationMs must be between 50 and 3000") }
                 }
             }
             "wait" -> {
                 milliseconds(request, 3000, MAX_WAIT_MS)
                 val state = waitState(request)
                 when (state) {
-                    "ready" -> require(!request.has("selector") && !request.has("url")) { "ready 不接受 selector/url" }
-                    "url" -> require(!request.has("selector") && BrowserPolicy.allowedUrl(request.getString("url"))) { "url 等待需要合法的完整 URL" }
-                    else -> require(state in states && !request.has("url") && request.opt("selector") is String && request.getString("selector").isNotBlank()) { "selector 等待状态无效" }
+                    "ready" -> require(!request.has("selector") && !request.has("url")) { tr("ready 不接受 selector/url", "ready does not accept selector or url") }
+                    "url" -> require(!request.has("selector") && BrowserPolicy.allowedUrl(request.getString("url"))) { tr("url 等待需要合法的完整 URL", "url wait requires a valid full URL") }
+                    else -> require(state in states && !request.has("url") && request.opt("selector") is String && request.getString("selector").isNotBlank()) { tr("selector 等待状态无效", "Invalid selector wait state") }
                 }
             }
         }
@@ -198,7 +200,7 @@ class BrowserWorkflow(
                 if (now() >= deadline) break
                 val stepReuse = reuseBatchSnapshot || step.optBoolean("reuseSnapshot", false)
                 val result = if (step.optString("snapshot") == "\$last" && lastSnapshot == null) {
-                    failure("SNAPSHOT_REQUIRED", "\$last 需要前一步尚未消费的 read 快照")
+                    failure("SNAPSHOT_REQUIRED", tr("\$last 需要前一步尚未消费的 read 快照", "\$last requires an unconsumed read snapshot from a prior step"))
                 } else {
                     if (step.optString("snapshot") == "\$last") step.put("snapshot", lastSnapshot)
                     if (stepReuse && !step.has("reuseSnapshot")) step.put("reuseSnapshot", true)
@@ -224,7 +226,7 @@ class BrowserWorkflow(
             } else false
         }
         if (finished != true) {
-            val timeout = failure("DEADLINE_EXCEEDED", "操作总预算已到；检查已完成结果，勿重放批次或已派发动作").put("dispatched", currentDispatched)
+            val timeout = failure("DEADLINE_EXCEEDED", tr("操作总预算已到；检查已完成结果，勿重放批次或已派发动作", "Deadline exceeded; inspect completed steps instead of replaying")).put("dispatched", currentDispatched)
             return if (batch) batchFailure(results, completed, timeout, currentDispatched) else timeout
         }
         return requireNotNull(final)
@@ -244,7 +246,7 @@ class BrowserWorkflow(
             if (now() >= deadline) break
             pause(minOf(100, deadline - now()))
         } while (true)
-        return failure("WAIT_TIMEOUT", "等待条件未在 ${duration}ms 内满足")
+        return failure("WAIT_TIMEOUT", tr("等待条件未在 ${duration}ms 内满足", "Wait condition not met within ${duration}ms"))
             .put("state", probe.getString("state")).put("reason", last?.optString("reason") ?: "PROBE_TIMEOUT").put("dispatched", false)
     }
 
@@ -252,12 +254,12 @@ class BrowserWorkflow(
         dispatch(step)
     } catch (error: CancellationException) { throw error }
     catch (error: Exception) {
-        failure("STEP_FAILED", error.message ?: "浏览器操作失败")
+        failure("STEP_FAILED", error.message ?: tr("浏览器操作失败", "Browser action failed"))
             .put("dispatched", step.getString("action") in BrowserProtocol.mutatingActions)
     }
 
     private fun batchFailure(results: JSONArray, index: Int, result: JSONObject, dispatched: Boolean): JSONObject =
-        failure(result.optString("code", "STEP_FAILED"), result.optString("error", "批内操作失败"))
+        failure(result.optString("code", "STEP_FAILED"), result.optString("error", tr("批内操作失败", "Batch step failed")))
             .put("completed", results.length()).put("results", results).put("failedStep", index)
             .put("failedAction", result).put("dispatched", dispatched)
 
@@ -277,7 +279,7 @@ suspend fun runLockedBrowserWorkflow(
     try {
         val locked = withTimeoutOrNull(budget) { lock.lock(lease); acquired = true; true }
         if (locked != true) return JSONObject().put("ok", false).put("code", "TAB_BUSY")
-            .put("error", "等待同标签操作超时，未派发本次请求").put("dispatched", false)
+            .put("error", tr("等待同标签操作超时，未派发本次请求", "Timed out waiting for active tab operation; request not dispatched")).put("dispatched", false)
             .put("completed", 0).put("results", JSONArray())
         coroutineContext.ensureActive()
         return BrowserWorkflow(dispatch, now).run(request, budget - (now() - started))

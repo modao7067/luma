@@ -1,5 +1,8 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.LumaI18n
+import io.github.modao7067.luma.gui.i18n.tr
+
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import kotlinx.coroutines.CancellationException
@@ -29,8 +32,9 @@ import androidx.compose.ui.unit.dp
 import io.github.modao7067.luma.gui.session.CockpitActions
 import io.github.modao7067.luma.gui.session.FileBrowser
 import io.github.modao7067.luma.gui.session.FileEntry
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 internal fun fileBreadcrumbs(path: String): List<Pair<String, String>> {
@@ -101,18 +105,18 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
             topBar = {
                 DetailPageHeader(
                     title = when {
-                        browser.picking -> "引用文件"
-                        selecting -> "选择要引用的项目"
-                        else -> "文件"
+                        browser.picking -> tr("引用文件", "Reference files")
+                        selecting -> tr("选择要引用的项目", "Select items to reference")
+                        else -> tr("文件", "Files")
                     },
                     onBack = ::back,
                     subtitle = browser.path,
-                    backLabel = if (history.isEmpty() && !selecting) "关闭文件" else "返回上一个位置",
+                    backLabel = if (history.isEmpty() && !selecting) tr("关闭文件", "Close files") else tr("返回上一个位置", "Back"),
                 ) {
                     LiquidGlass(
                         Modifier.size(FloatingChromeSize)
                             .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = actions::closeFiles)
-                            .semantics { contentDescription = "关闭" },
+                            .semantics { contentDescription = tr("关闭", "Close") },
                         cornerRadius = FloatingChromeRadius,
                     ) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { ComposerGlyph("close") } }
                 }
@@ -155,7 +159,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                     }
                     Spacer(Modifier.width(6.dp))
                     TextButton(onClick = { editingPath = !editingPath }, contentPadding = PaddingValues(horizontal = 10.dp)) {
-                        Text(if (editingPath) "取消" else "输入路径", style = MaterialTheme.typography.labelLarge)
+                        Text(if (editingPath) tr("取消", "Cancel") else tr("输入路径", "Enter path"), style = MaterialTheme.typography.labelLarge)
                     }
                 }
                 if (editingPath) {
@@ -164,27 +168,27 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                         OutlinedTextField(
                             value = typedPath,
                             onValueChange = { typedPath = it },
-                            label = { Text("环境内路径") },
+                            label = { Text(tr("环境内路径", "Path inside environment")) },
                             shape = LumaCardShape(16.dp),
                             modifier = Modifier.weight(1f),
                             singleLine = true,
                         )
-                        FilledTonalButton(onClick = { navigate(typedPath.trim()) }, enabled = typedPath.trim().startsWith('/')) { Text("前往") }
+                        FilledTonalButton(onClick = { navigate(typedPath.trim()) }, enabled = typedPath.trim().startsWith('/')) { Text(tr("前往", "Go")) }
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (browser.loading) "正在读取…" else "${shown.size} 项" + if (hiddenCount > 0 && !showHidden) "（另有 $hiddenCount 个隐藏项）" else "",
+                        if (browser.loading) tr("正在读取…", "Loading…") else tr("${shown.size} 项", "${shown.size} items") + if (hiddenCount > 0 && !showHidden) tr("（另有 $hiddenCount 个隐藏项）", " ($hiddenCount hidden)") else "",
                         Modifier.weight(1f),
                         style = MaterialTheme.typography.labelMedium,
                         color = colors.onSurfaceVariant,
                     )
                     TextButton(onClick = { showHidden = !showHidden }, contentPadding = PaddingValues(horizontal = 10.dp)) {
-                        Text(if (showHidden) "隐藏 . 开头的项" else "显示隐藏项", style = MaterialTheme.typography.labelMedium)
+                        Text(if (showHidden) tr("隐藏 . 开头的项", "Hide dotfiles") else tr("显示隐藏项", "Show hidden"), style = MaterialTheme.typography.labelMedium)
                     }
                     if (!browser.picking && !selecting) {
                         TextButton(onClick = { selecting = true }, contentPadding = PaddingValues(horizontal = 10.dp)) {
-                            Text("选择", style = MaterialTheme.typography.labelMedium)
+                            Text(tr("选择", "Select"), style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
@@ -202,7 +206,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                 ) {
                     if (browser.path != "/") item(key = "..") {
                         FileRow(
-                            name = "上一级",
+                            name = tr("上一级", "Parent folder"),
                             detail = fileParent(browser.path),
                             directory = true,
                             selecting = false,
@@ -233,7 +237,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                         )
                     }
                     if (!browser.loading && browser.error == null && shown.isEmpty()) item(key = "empty") {
-                        Text(if (hiddenCount > 0) "只有隐藏项" else "目录为空", Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        Text(if (hiddenCount > 0) tr("只有隐藏项", "Only hidden items") else tr("目录为空", "Empty folder"), Modifier.fillMaxWidth().padding(vertical = 32.dp),
                             style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                     }
@@ -245,14 +249,14 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(if (selected.isEmpty()) "点选文件，或勾选文件夹" else "已选 ${selected.size} 项",
+                            Text(if (selected.isEmpty()) tr("点选文件，或勾选文件夹", "Tap files or check folders") else tr("已选 ${selected.size} 项", "${selected.size} selected"),
                                 Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (selected.isNotEmpty()) TextButton(onClick = { selected.clear() }) { Text("清空") }
+                            if (selected.isNotEmpty()) TextButton(onClick = { selected.clear() }) { Text(tr("清空", "Clear")) }
                             Button(
                                 onClick = { actions.referenceFiles(selected.toList()) },
                                 enabled = selected.isNotEmpty(),
                                 modifier = Modifier.testTag("file-browser-reference"),
-                            ) { Text(if (selected.isEmpty()) "引用" else "引用 ${selected.size} 项") }
+                            ) { Text(if (selected.isEmpty()) tr("引用", "Reference") else tr("引用 ${selected.size} 项", "Reference ${selected.size}")) }
                         }
                     }
                 }
@@ -261,11 +265,15 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
     }
 }
 
-private val fileTimeFormat = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
+private val fileTimeZhFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.SIMPLIFIED_CHINESE)
+private val fileTimeEnFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
 
 internal fun fileEntryDetail(file: FileEntry): String = listOfNotNull(
-    if (file.directory) "文件夹" else file.size?.let(::formatMediaSize),
-    file.modified?.let { fileTimeFormat.get()!!.format(Date(it * 1000)) },
+    if (file.directory) tr("文件夹", "Folder") else file.size?.let(::formatMediaSize),
+    file.modified?.let {
+        val formatter = if (LumaI18n.isZh()) fileTimeZhFormatter else fileTimeEnFormatter
+        formatter.withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(it))
+    },
 ).joinToString(" · ")
 
 @OptIn(ExperimentalFoundationApi::class)

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.content.Context
 import android.util.AtomicFile
 import io.github.modao7067.luma.gui.agent.obj
@@ -32,8 +34,8 @@ data class SessionRecord(
     var submissionImageData: List<StoredImage> = emptyList(),
     var submissionSkillData: List<DraftSkill> = emptyList(),
     val deliveryResults: MutableMap<String, String> = linkedMapOf(),
-    var manualTitle: String? = title.trim().takeIf { !useNativeTitle && it.isNotEmpty() && it != SessionTitlePolicy.unnamed },
-    var nativeTitle: String? = title.takeIf { useNativeTitle && it != SessionTitlePolicy.unnamed }?.let { SessionTitlePolicy.validNativeTitle(cli, it) },
+    var manualTitle: String? = title.trim().takeIf { !useNativeTitle && it.isNotEmpty() && !SessionTitlePolicy.isUnnamed(it) },
+    var nativeTitle: String? = title.takeIf { useNativeTitle && !SessionTitlePolicy.isUnnamed(it) }?.let { SessionTitlePolicy.validNativeTitle(cli, it) },
     var messageTitle: String? = null,
     val initialNativeTitle: String? = title.trim().takeIf { needsName && !useNativeTitle && it.isNotEmpty() },
     var submissionExternal: Boolean = false,
@@ -93,7 +95,7 @@ internal fun SessionNavigation.snapshot(): SessionNavigation = SessionNavigation
     ),
 )
 internal fun decodeSessionIndex(root: JSONObject): List<SessionRecord> {
-    require(root.optInt("version") == 1) { "会话索引版本不兼容，原文件已保留" }
+    require(root.optInt("version") == 1) { tr("会话索引版本不兼容，原文件已保留", "Incompatible session index version; original file preserved") }
     return root.getJSONArray("sessions").objects().mapIndexed { index, value ->
         SessionRecord(value.getString("id"), value.getString("title"), value.getString("environment"), value.getString("cwd"),
             value.optString("model"), value.optString("effort"), value.stringOrNull("threadId"), value.optString("draft"),
@@ -194,7 +196,7 @@ class SessionStore internal constructor(
     private fun verifyWritableTarget() {
         val parent = baseFile.parentFile
         if (baseFile.isDirectory || (parent != null && (parent.isFile || (!parent.exists() && !parent.mkdirs()) || !parent.canWrite()))) {
-            throw IOException("会话存储路径不可写: ${baseFile.path}")
+            throw IOException(tr("会话存储路径不可写: ${baseFile.path}", "Session store path is not writable: ${baseFile.path}"))
         }
     }
     fun save(records: Collection<SessionRecord>) {
@@ -235,7 +237,7 @@ class SessionStore internal constructor(
             }
         }
         private fun asIoException(failure: Throwable): IOException =
-            failure as? IOException ?: IOException(failure.message ?: "无法写入会话存储", failure)
+            failure as? IOException ?: IOException(failure.message ?: tr("无法写入会话存储", "Failed to write session store"), failure)
         private fun ensureWorkerLocked() {
             if (workerStarted) return
             workerStarted = true

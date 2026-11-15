@@ -46,7 +46,7 @@ class SessionObservationLifecycleIntegrationTest {
         val paused = CoroutineScope(SupervisorJob() + Paused())
         val running = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         val rpcs = mutableListOf<CodexRpc>(); val carriers = mutableListOf<Carrier>()
-        init { (field(controller, "scope") as CoroutineScope).cancel(); set(controller, "scope", paused) }
+        init { (field(controller, "scope") as CoroutineScope).cancel(); set(controller, "scope", paused); set(controller, "ioDispatcher", Dispatchers.Main.immediate) }
         fun parent(name: String): Pair<String, Any> {
             val id = runBlocking { controller.manage(obj("action" to "create", "cli" to "Codex", "cwd" to "/workspace", "requestId" to "$name-${java.util.UUID.randomUUID()}")) }.getString("id")
             val live = (field(controller, "sessions") as Map<*, *>)[id]!!
@@ -187,7 +187,7 @@ class SessionObservationLifecycleIntegrationTest {
             assertFalse(h.carriers.first().calls.any { it in setOf("thread/start", "thread/queue/add", "turn/steer") })
         }
     }
-    @Test fun idleExternalSessionDropsOnlyLumaObservationAndNeverUnsubscribesOrStopsItsOwner() {
+    @Test fun idleExternalSessionDoesNotAutoReleaseOrStopItsOwner() {
         Harness().use { h ->
             val (_, live) = h.parent("external-idle")
             val record = field(live, "record") as SessionRecord
@@ -196,9 +196,11 @@ class SessionObservationLifecycleIntegrationTest {
             items["history"] = ConversationItem("history", "assistant", "Retained natively")
             set(live, "idleConfirmed", true); set(live, "historyResumable", true)
             set(h.controller, "idleGraceMillis", 10L); h.activate(); h.publish(); h.pump(20)
-            assertTrue(field(live, "dormant") as Boolean)
-            assertTrue(h.carriers.single().closed)
-            assertTrue(h.carriers.single().calls.all { it in setOf("initialize", "initialized") })
+            assertNull(field(live, "idleJob"))
+            assertFalse(field(live, "dormant") as Boolean)
+            assertFalse(h.carriers.single().closed)
+            assertEquals("Retained natively", items["history"]?.text)
+            assertTrue(h.carriers.single().calls.none { it.startsWith("thread/") })
             assertEquals("/tmp/fixture-external.sock", record.externalSocket)
         }
     }
@@ -219,8 +221,6 @@ class SessionObservationLifecycleIntegrationTest {
             repeat(2) { batch ->
                 val lives = (0 until 12).map { index ->
                     val (_, live) = h.parent("payload-$batch-$index")
-                    val record = field(live, "record") as SessionRecord
-                    record.externalSocket = "/tmp/fixture-$batch-$index.sock"
                     @Suppress("UNCHECKED_CAST") val items = field(live, "items") as MutableMap<String, ConversationItem>
                     items["payload"] = ConversationItem("payload", "assistant", "x".repeat(256 * 1024) + index)
                     set(live, "idleConfirmed", true); set(live, "historyResumable", true)
@@ -287,6 +287,25 @@ class SessionObservationLifecycleIntegrationTest {
             assertFalse((field(h.controller, "sessions") as Map<*, *>).containsKey(old))
             assertTrue(h.carriers.first().closed)
             assertEquals(listOf(next), decodeSessionIndex(JSONObject(String(original.readFully()))).map { it.id })
+        }
+    }
+    @Test fun appBackgroundingReleasesSelectedIdleSessionAndForegroundWakesIt() {
+        Harness().use { h ->
+            val (id, live) = h.parent("selected-bg")
+            @Suppress("UNCHECKED_CAST") val items = field(live, "items") as MutableMap<String, ConversationItem>
+            items["history"] = ConversationItem("history", "assistant", "Retained in foreground")
+            set(live, "idleConfirmed", true); set(live, "historyResumable", true)
+            h.controller.openSession(id)
+            set(h.controller, "idleGraceMillis", 50L); h.activate(); h.controller.setForeground(true); h.pump(80)
+            assertFalse(field(live, "dormant") as Boolean)
+            h.controller.setForeground(false); h.pump(80)
+            assertTrue(field(live, "dormant") as Boolean)
+            assertNull(field(live, "rpc"))
+            assertTrue(h.carriers.single().closed)
+            set(h.controller, "scope", h.paused)
+            h.controller.setForeground(true)
+            assertFalse(field(live, "dormant") as Boolean)
+            assertTrue((field(live, "connectJob") as Job).isActive)
         }
     }
     companion object {

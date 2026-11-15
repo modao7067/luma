@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import android.graphics.Bitmap
 import android.view.View
 import android.widget.FrameLayout
@@ -267,7 +269,7 @@ internal fun AttachedBrowserPane(
     val navigateAddress = {
         runCatching {
             val url = BrowserPolicy.addressUrl(address)
-            val b = requireNotNull(browser) { "浏览器服务未初始化" }
+            val b = requireNotNull(browser) { tr("浏览器服务未初始化", "Browser service is not initialized") }
             if (tab == null) {
                 val created = b.newTab(sessionId, url)
                 selectedId = created.id
@@ -354,7 +356,7 @@ internal fun AttachedBrowserPane(
                                     keyboard?.hide()
                                     onBack()
                                 })
-                                .semantics { contentDescription = "返回会话" }
+                                .semantics { contentDescription = tr("返回会话", "Back to session") }
                                 .testTag("browser-back-button"),
                             cornerRadius = FloatingChromeRadius,
                         ) {
@@ -396,13 +398,13 @@ internal fun AttachedBrowserPane(
                                     modifier = Modifier
                                         .weight(1f)
                                         .focusRequester(addressFocusRequester)
-                                        .semantics { contentDescription = "网址输入" }
+                                        .semantics { contentDescription = tr("网址输入", "URL input") }
                                         .testTag("browser-address-field"),
                                     decorationBox = { inner ->
                                         Box(contentAlignment = Alignment.CenterStart) {
                                             if (address.isEmpty()) {
                                                 Text(
-                                                    "输入网址并按回车…",
+                                                    tr("输入网址并按回车…", "Enter URL and press Enter…"),
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = colors.onSurfaceVariant,
                                                     maxLines = 1,
@@ -421,7 +423,7 @@ internal fun AttachedBrowserPane(
                                 modifier = Modifier
                                     .size(FloatingChromeSize)
                                     .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = { moreOpen = true })
-                                    .semantics { contentDescription = "更多" }
+                                    .semantics { contentDescription = tr("更多", "More") }
                                     .testTag("browser-more-button"),
                                 cornerRadius = FloatingChromeRadius,
                             ) {
@@ -433,7 +435,7 @@ internal fun AttachedBrowserPane(
                             val isLoading = tab?.loading?.value == true
                             OriginMenu(moreOpen, { moreOpen = false }) {
                                 BrowserVectorMenuItem(
-                                    label = "后退",
+                                    label = tr("后退", "Back"),
                                     enabled = tab != null && tab.canGoBack.value && !tab.crashed.value,
                                     icon = { BrowserChevronGlyph(forward = false) },
                                     onClick = {
@@ -442,7 +444,7 @@ internal fun AttachedBrowserPane(
                                     },
                                 )
                                 BrowserVectorMenuItem(
-                                    label = "前进",
+                                    label = tr("前进", "Forward"),
                                     enabled = tab != null && tab.canGoForward.value && !tab.crashed.value,
                                     icon = { BrowserChevronGlyph(forward = true) },
                                     onClick = {
@@ -451,7 +453,7 @@ internal fun AttachedBrowserPane(
                                     },
                                 )
                                 ActionMenuItem(
-                                    label = if (isLoading) "停止" else "刷新",
+                                    label = if (isLoading) tr("停止", "Stop") else tr("刷新", "Reload"),
                                     icon = if (isLoading) MenuSymbol.STOP else MenuSymbol.REFRESH,
                                     iconContainer = true,
                                     enabled = tab != null && !tab.crashed.value,
@@ -473,7 +475,7 @@ internal fun AttachedBrowserPane(
                                     color = colors.outlineVariant.copy(alpha = 0.4f),
                                 )
                                 BrowserVectorMenuItem(
-                                    label = "新建标签页",
+                                    label = tr("新建标签页", "New tab"),
                                     enabled = browser != null,
                                     icon = { ComposerGlyph("plus") },
                                     onClick = {
@@ -488,7 +490,7 @@ internal fun AttachedBrowserPane(
                                 )
                                 if (onQuoteSelection != null) {
                                     ActionMenuItem(
-                                        label = "引用选中内容",
+                                        label = tr("引用选中内容", "Quote selection"),
                                         icon = MenuSymbol.NEW_CHAT,
                                         iconContainer = true,
                                         enabled = browser != null && tab != null && !tab.loading.value && !tab.crashed.value,
@@ -501,7 +503,7 @@ internal fun AttachedBrowserPane(
                                                     if (quote != null) {
                                                         onQuoteSelection(quote)
                                                     } else {
-                                                        currentTab.notice.value = "请先在网页中选中要引用的文字"
+                                                        currentTab.notice.value = tr("请先在网页中选中要引用的文字", "Select text on the page first to quote it")
                                                     }
                                                 }
                                             }
@@ -509,7 +511,7 @@ internal fun AttachedBrowserPane(
                                     )
                                 }
                                 ActionMenuItem(
-                                    label = "桌面版网站",
+                                    label = tr("桌面版网站", "Desktop site"),
                                     icon = MenuSymbol.BROWSER,
                                     iconContainer = true,
                                     selected = tab?.desktopMode?.value == true,
@@ -522,7 +524,7 @@ internal fun AttachedBrowserPane(
                                     },
                                 )
                                 ActionMenuItem(
-                                    label = "允许 AI 现场操作",
+                                    label = tr("允许 AI 现场操作", "Allow live AI control"),
                                     icon = MenuSymbol.MODEL,
                                     iconContainer = true,
                                     selected = browser?.allowLiveAgent?.value == true,
@@ -578,7 +580,7 @@ internal fun AttachedBrowserPane(
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
                                         Text(
-                                            t.title.value.ifBlank { "新标签页" }.take(22),
+                                            t.title.value.let { if (it.isBlank() || it == "新标签页" || it == "New tab") tr("新标签页", "New tab") else it }.take(22),
                                             style = MaterialTheme.typography.labelMedium.copy(
                                                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                             ),
@@ -591,7 +593,7 @@ internal fun AttachedBrowserPane(
                                                 .size(28.dp)
                                                 .clip(CircleShape)
                                                 .clickable { browser?.close(t) }
-                                                .semantics { contentDescription = "关闭标签页" },
+                                                .semantics { contentDescription = tr("关闭标签页", "Close tab") },
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             ComposerGlyph("close")
@@ -682,12 +684,12 @@ internal fun AttachedBrowserPane(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            if (tab?.crashed?.value == true) "网页渲染进程已退出" else "输入网址开始浏览",
+                            if (tab?.crashed?.value == true) tr("网页渲染进程已退出", "WebView renderer exited") else tr("输入网址开始浏览", "Enter a URL to start browsing"),
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            if (tab?.crashed?.value == true) "请关闭该标签页后从菜单新建标签页重试。"
-                            else "在上方地址栏输入 HTTPS 或 localhost 地址并按回车跳转；同一应用内所有会话自动共用已登录的网站状态。",
+                            if (tab?.crashed?.value == true) tr("请关闭该标签页后从菜单新建标签页重试。", "Close this tab and open a new one from the menu.")
+                            else tr("在上方地址栏输入 HTTPS 或 localhost 地址并按回车跳转；同一应用内所有会话自动共用已登录的网站状态。", "Enter an HTTPS or localhost URL above and press Enter. Signed-in sessions are shared across Luma."),
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant,
                         )
@@ -744,17 +746,17 @@ internal fun AttachedBrowserPane(
         var promptText by remember(dialog) { mutableStateOf(dialog.defaultPrompt) }
         LiquidModalDialog(
             title = when (dialog.kind) {
-                AgentBrowser.JsDialogKind.ALERT -> "网页提示"
-                AgentBrowser.JsDialogKind.CONFIRM -> "网页确认"
-                AgentBrowser.JsDialogKind.PROMPT -> "网页输入"
+                AgentBrowser.JsDialogKind.ALERT -> tr("网页提示", "Page alert")
+                AgentBrowser.JsDialogKind.CONFIRM -> tr("网页确认", "Page confirm")
+                AgentBrowser.JsDialogKind.PROMPT -> tr("网页输入", "Page prompt")
             },
             subtitle = dialog.url.take(64),
             onDismiss = { dialog.cancel() },
             confirmButton = {
-                TextButton(onClick = { dialog.confirm(promptText) }) { Text("确定") }
+                TextButton(onClick = { dialog.confirm(promptText) }) { Text(tr("确定", "OK")) }
             },
             dismissButton = if (dialog.kind != AgentBrowser.JsDialogKind.ALERT) {
-                { TextButton(onClick = { dialog.cancel() }) { Text("取消") } }
+                { TextButton(onClick = { dialog.cancel() }) { Text(tr("取消", "Cancel")) } }
             } else null,
         ) {
             if (dialog.message.isNotBlank()) {
@@ -991,7 +993,7 @@ internal fun BoxScope.BrowserFloatingPreview(
                             )
                         }
                         .semantics {
-                            contentDescription = "网页预览悬浮窗"
+                            contentDescription = tr("网页预览悬浮窗", "Floating browser preview")
                             role = Role.Button
                         }
                         .testTag("browser-floating-preview"),

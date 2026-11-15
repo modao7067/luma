@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.session
 
+import io.github.modao7067.luma.gui.i18n.tr
+
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -65,7 +67,7 @@ internal class OpenCodeSession(
     private val subAgentToolMessageIds = HashSet<String>()
     private val projectedCache = linkedMapOf<String, CachedProjection>()
     private var deltaPublishJob: Job? = null
-    private val path get() = "/api/session/${record.threadId ?: error("会话尚未建立")}"
+    private val path get() = "/api/session/${record.threadId ?: error(tr("会话尚未建立", "Session is not created yet"))}"
     private fun publish() { changed(view, models) }
     private fun clearLiveDeltas() {
         deltaPublishJob?.cancel()
@@ -236,7 +238,7 @@ internal class OpenCodeSession(
             catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 if (e is IOException && e !is OpenCodeRejected) synchronizer?.invalidate(all = true)
-                view = view.copy(error = e.message ?: "OpenCode 操作失败")
+                view = view.copy(error = e.message ?: tr("OpenCode 操作失败", "OpenCode operation failed"))
             }
             finally { publish() }
         }
@@ -245,9 +247,9 @@ internal class OpenCodeSession(
         val previous = job
         close(); val attempt = lifecycle
         previous.join()
-        if (attempt != lifecycle) throw CancellationException("界面连接已取消")
+        if (attempt != lifecycle) throw CancellationException(tr("界面连接已取消", "UI connection cancelled"))
         job = SupervisorJob(); scope = CoroutineScope(job + Dispatchers.Main.immediate)
-        view = view.copy(loading = true, connected = false, canOpenTui = false, error = null, connection = "连接 OpenCode…")
+        view = view.copy(loading = true, connected = false, canOpenTui = false, error = null, connection = tr("连接 OpenCode…", "Connecting to OpenCode…"))
         publish()
         withContext(scope.coroutineContext) {
             try {
@@ -280,7 +282,7 @@ internal class OpenCodeSession(
                         if (reachable) return active
                     }
                     val target = runtime.connectOpenCode(record.environment)
-                    if (lifecycle != attempt) throw CancellationException("界面连接已取消")
+                    if (lifecycle != attempt) throw CancellationException(tr("界面连接已取消", "UI connection cancelled"))
                     client?.close()
                     return OpenCodeClient(target.url, target.authToken!!).also { endpoint = target; client = it }
                 }
@@ -313,13 +315,13 @@ internal class OpenCodeSession(
                         val error = if (view.error == null || view.error == connectionNotice) state.notice else view.error
                         connectionNotice = state.notice
                         view = view.copy(connected = state.connected, canOpenTui = state.connected, loading = false,
-                            connection = if (state.connected) "已连接" else if (state.recovering) "连接中断 · 正在自动同步" else "连接中断 · 请检查配置后重连",
+                            connection = if (state.connected) tr("已连接", "Connected") else if (state.recovering) tr("连接中断 · 正在自动同步", "Disconnected · Auto-resyncing") else tr("连接中断 · 请检查配置后重连", "Disconnected · Check config & reconnect"),
                             error = error)
                         if (state.connected && !state.recovering) reconcileUnconfirmedIdle()
                         publish()
                     }).also { it.start() }
             } catch (e: Exception) {
-                view = view.copy(connected = false, loading = false, canOpenTui = false, error = e.message, connection = "未连接")
+                view = view.copy(connected = false, loading = false, canOpenTui = false, error = e.message, connection = tr("未连接", "Disconnected"))
                 client?.close(); job.cancel(); publish(); throw e
             }
         }
@@ -450,7 +452,7 @@ internal class OpenCodeSession(
         syncHistoryIndexLocked()
         if (all) {
             val native = api.call(path).getJSONObject("data")
-            check(native.getString("id") == record.threadId) { "OpenCode 返回了不同会话" }
+            check(native.getString("id") == record.threadId) { tr("OpenCode 返回了不同会话", "OpenCode returned a different session") }
             nativeSession = native
             record.creationUnknown = false; record.requireLoaded = false; record.needsName = false
             val nativeUpdated = native.optJSONObject("time")?.optLong("updated", 0L) ?: 0L
@@ -472,7 +474,7 @@ internal class OpenCodeSession(
                 queue = OpenCodeProjection.queue(queue),
                 requests = requests.map { it.copy(answering = it.id in answering) },
                 permission = "opencode-native", permissions = emptyList(),
-                capabilityNotice = "Agent：${native.optString("agent", "默认")}\n" + if (rules != null && rules.length() > 0) rules.objects().joinToString("\n") { "${it.optString("action")} · ${it.optString("resource")} → ${it.optString("effect")}" } else "使用 OpenCode 原生权限配置；请求授权时在会话中确认。")
+                capabilityNotice = tr("Agent：${native.optString("agent", "默认")}\n", "Agent: ${native.optString("agent", "default")}\n") + if (rules != null && rules.length() > 0) rules.objects().joinToString("\n") { "${it.optString("action")} · ${it.optString("resource")} → ${it.optString("effect")}" } else tr("使用 OpenCode 原生权限配置；请求授权时在会话中确认。", "Uses native OpenCode permission rules; prompts appear in session when approval is needed."))
             if (requests.any { it.id !in previous }) approval()
             persist()
         }
@@ -588,13 +590,13 @@ internal class OpenCodeSession(
     }
 
     suspend fun readSubAgent(id: String): SubAgentDetailView {
-        val api = client ?: error("OpenCode 会话尚未连接")
+        val api = client ?: error(tr("OpenCode 会话尚未连接", "OpenCode session is not connected"))
         val attempt = lifecycle
-        val parent = record.threadId ?: error("OpenCode 父会话尚未建立")
-        val agent = view.subAgents.firstOrNull { it.id == id } ?: error("子代理不属于当前父会话")
+        val parent = record.threadId ?: error(tr("OpenCode 父会话尚未建立", "OpenCode parent session is not created yet"))
+        val agent = view.subAgents.firstOrNull { it.id == id } ?: error(tr("子代理不属于当前父会话", "Sub-agent does not belong to current parent session"))
         val childPath = "/api/session/" + encode(id)
         val native = api.call(childPath).getJSONObject("data")
-        check(native.optString("id") == id && native.optString("parentID") == parent) { "OpenCode 子代理父会话不匹配" }
+        check(native.optString("id") == id && native.optString("parentID") == parent) { tr("OpenCode 子代理父会话不匹配", "OpenCode sub-agent parent session mismatch") }
         val read = childReads.getOrPut(id) { ChildRead() }
         val updated = native.optJSONObject("time")?.let { if (it.has("updated")) it.optLong("updated") else null }
         val full = read.full || (updated != read.updated && read.dirty.isEmpty())
@@ -614,7 +616,7 @@ internal class OpenCodeSession(
                 read.messages[messageId] = api.call(childPath + "/message/" + encode(messageId)).getJSONObject("data")
             }
         } catch (failure: Exception) { read.full = true; throw failure }
-        if (lifecycle != attempt || client !== api) throw CancellationException("子代理观察连接已更新")
+        if (lifecycle != attempt || client !== api) throw CancellationException(tr("子代理观察连接已更新", "Sub-agent observer superseded"))
         read.updated = updated
         val ref = native.optJSONObject("model")
         read.model = ref?.let(OpenCodeProjection::modelKey).orEmpty()
@@ -640,13 +642,13 @@ internal class OpenCodeSession(
     suspend fun submitManaged(input: ManagedSubmission) = submitInput(false, input)
     suspend fun submitFirstDraft() = submitInput(false)
     private suspend fun submitInput(steer: Boolean, external: ManagedSubmission? = null) {
-        check(view.connected && !view.configuring) { "会话尚未连接或正在更新设置" }
+        check(view.connected && !view.configuring) { tr("会话尚未连接或正在更新设置", "Session is disconnected or updating settings") }
         val text = external?.text ?: record.draft
         val images = external?.images ?: record.images.toList()
         val skills = external?.skills ?: record.skills.toList()
-        check(text.isNotBlank() || images.isNotEmpty() || skills.isNotEmpty()) { "请输入消息" }
-        if (steer) check(view.activeTurnId != null) { "当前没有运行任务" }
-        if (images.isNotEmpty()) check(models.find { it.id == record.model }?.supportsImages == true) { "当前模型未声明图片能力" }
+        check(text.isNotBlank() || images.isNotEmpty() || skills.isNotEmpty()) { tr("请输入消息", "Enter a message") }
+        if (steer) check(view.activeTurnId != null) { tr("当前没有运行任务", "No active turn running") }
+        if (images.isNotEmpty()) check(models.find { it.id == record.model }?.supportsImages == true) { tr("当前模型未声明图片能力", "Current model does not support images") }
         val id = external?.id ?: ("msg_" + UUID.randomUUID().toString().replace("-", ""))
         val files = OpenCodeProjection.promptFiles(text, images, record.cwd)
         val body = obj("id" to id, "text" to text, "files" to files, "skills" to JSONArray(skills.map { obj("id" to it.id) }), "delivery" to if (view.activeTurnId != null && view.capabilities.steer) "steer" else "queue")
@@ -673,14 +675,14 @@ internal class OpenCodeSession(
                 onUnknown = { e ->
                     val detail = if (e is OpenCodeRejected) "HTTP ${e.status}" else e.javaClass.simpleName
                     val cause = if (e is OpenCodeRejected) "HTTP_${e.status}" else e.javaClass.simpleName.replace(Regex("[^A-Za-z0-9_]"), "").take(80)
-                    val notice = "OpenCode 发送结果待同步（$detail）"
+                    val notice = tr("OpenCode 发送结果待同步（$detail）", "OpenCode send result awaiting sync ($detail)")
                     deliveryNotice = id to notice; view = view.copy(error = notice)
                     runtime.recordOpenCodeDelivery(record.environment, "event=admission-unknown cause=$cause")
                 },
             ) {
                 val response = api.call(path + "/prompt", "POST", body)
                 val result = response.getJSONObject("data")
-                check(result.getString("id") == id) { "提交标识不匹配" }
+                check(result.getString("id") == id) { tr("提交标识不匹配", "Submission ID mismatch") }
                 SubmissionLedger.accepted(record, id = id); persist()
             }
         } finally {
@@ -698,8 +700,8 @@ internal class OpenCodeSession(
     fun configure(model: String, effort: String) {
         if (view.configuring) return
         run {
-            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { "请在任务与队列结束后修改模型" }
-            val option = models.find { it.id == model } ?: error("模型不在原生列表中")
+            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { tr("请在任务与队列结束后修改模型", "Wait for active turn and queue to finish before changing model") }
+            val option = models.find { it.id == model } ?: error(tr("模型不在原生列表中", "Model is not in native catalog"))
             check(effort.isEmpty() || effort in option.efforts)
             view = view.copy(configuring = true); publish()
             try { client!!.call(path + "/model", "POST", obj("model" to OpenCodeProjection.modelRef(model, effort))); synchronizer?.invalidate(all = true) }
@@ -708,7 +710,7 @@ internal class OpenCodeSession(
     }
     internal val nativeQueue: List<QueueEntry> get() = view.queue
     internal suspend fun removePending(id: String) {
-        check(view.connected && view.queue.any { it.id == id && it.canRemove }) { "原生消息已离开可撤回队列" }
+        check(view.connected && view.queue.any { it.id == id && it.canRemove }) { tr("原生消息已离开可撤回队列", "Message is no longer in the removable native queue") }
         try { client!!.call(path + "/inbox/" + encode(id), "DELETE") }
         finally { synchronizer?.invalidate(all = true) }
     }
@@ -716,7 +718,7 @@ internal class OpenCodeSession(
     fun queueChange(id: String, steer: Boolean) {
         if (!view.connected || view.queueBusy) return
         run {
-            check(queue.objects().any { it.getString("id") == id && it.optString("type") == "user" }) { "该消息已离开队列" }
+            check(queue.objects().any { it.getString("id") == id && it.optString("type") == "user" }) { tr("该消息已离开队列", "Message is no longer in queue") }
             view = view.copy(queueBusy = true); publish()
             try { client!!.call(path + "/inbox/" + encode(id), if (steer) "PATCH" else "DELETE", if (steer) obj("delivery" to "steer") else null); synchronizer?.invalidate(all = true) }
             finally { view = view.copy(queueBusy = false) }
@@ -728,7 +730,7 @@ internal class OpenCodeSession(
             val nativeId = id.substringAfter(':')
             val isForm = id.startsWith("form:")
             val skip = isForm && choice == "skip"
-            val body = if (skip) null else if (isForm) OpenCodeProjection.formReply(forms[nativeId] ?: error("提问已结束"), answers)
+            val body = if (skip) null else if (isForm) OpenCodeProjection.formReply(forms[nativeId] ?: error(tr("提问已结束", "Prompt has already ended")), answers)
                 else { check(choice in listOf("once", "always", "reject")); obj("decision" to choice) }
             answering.add(id); view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) }); publish()
             val currentSync = synchronizer
@@ -737,7 +739,7 @@ internal class OpenCodeSession(
             finally { if (currentCoroutineContext().isActive && synchronizer === currentSync) currentSync?.invalidate(all = true) }
         }
     }
-    fun rename(title: String) = run { check(view.connected) { "请先连接会话" }; require(title.isNotBlank()); client!!.call(path, "PATCH", obj("title" to title.trim())); synchronizer?.invalidate(all = true) }
+    fun rename(title: String) = run { check(view.connected) { tr("请先连接会话", "Connect the session first") }; require(title.isNotBlank()); client!!.call(path, "PATCH", obj("title" to title.trim())); synchronizer?.invalidate(all = true) }
     fun compact() = run { check(view.connected && view.activeTurnId == null && view.queue.isEmpty()); client!!.call(path + "/compact", "POST", obj("delivery" to "queue")); synchronizer?.invalidate(all = true) }
     fun refreshDashboard() { synchronizer?.invalidate(all = true) }
     suspend fun plugins(): PluginCatalog {
@@ -745,7 +747,7 @@ internal class OpenCodeSession(
         val skills = rows.map { DraftSkill(it.getString("id"), it.getString("name"), it.getString("path")) }
         return try { PluginCatalog(skills, inventory("mcp")) }
         catch (e: CancellationException) { throw e }
-        catch (e: Exception) { PluginCatalog(skills = skills, error = "MCP 读取失败：${e.message}") }
+        catch (e: Exception) { PluginCatalog(skills = skills, error = tr("MCP 读取失败：${e.message}", "Failed to load MCP: ${e.message}")) }
     }
     suspend fun inventory(kind: String): List<ReadOnlyEntry> {
         val rows = client!!.call((if (kind == "skill") "/api/skill" else "/api/mcp") + "?location[directory]=" + encode(record.cwd)).getJSONArray("data").objects()
@@ -754,6 +756,22 @@ internal class OpenCodeSession(
     }
     suspend fun diff(): String = client!!.call(path + "/diff").getJSONArray("data").objects().joinToString("\n\n") { CodexCapabilities.redact(it.toString(2)) }.take(524288)
     fun dismissError() { synchronizer?.dismissNotice(); connectionNotice = null; view = view.copy(error = null); publish() }
+    internal fun onLocaleChanged() {
+        val updated = when (view.connection) {
+            "已连接", "Connected" -> tr("已连接", "Connected")
+            "连接 OpenCode…", "Connecting to OpenCode…" -> tr("连接 OpenCode…", "Connecting to OpenCode…")
+            "连接中断 · 正在自动同步", "Disconnected · Auto-resyncing" -> tr("连接中断 · 正在自动同步", "Disconnected · Auto-resyncing")
+            "连接中断 · 请检查配置后重连", "Disconnected · Check config & reconnect" -> tr("连接中断 · 请检查配置后重连", "Disconnected · Check config & reconnect")
+            "未连接", "Disconnected" -> tr("未连接", "Disconnected")
+            "界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected" -> tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected")
+            else -> null
+        }
+        if (updated != null && updated != view.connection) {
+            view = view.copy(connection = updated)
+            publish()
+        }
+        if (view.connected) synchronizer?.invalidate(all = true)
+    }
     fun close() {
         lifecycle++
         clearLiveDeltas()
@@ -764,7 +782,7 @@ internal class OpenCodeSession(
         }
         synchronizer?.close(); synchronizer = null; connectionNotice = null
         client?.close(); job.cancel(); childReads.clear(); childSnapshots.clear(); dirtyChildren.clear(); childHistoryLoaded = false; activeIds = emptySet(); answering.clear(); admitting.clear()
-        view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = "界面已断开 · 后端任务不受影响")
+        view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"))
     }
     private fun encode(text: String) = URLEncoder.encode(text, "UTF-8")
 }
