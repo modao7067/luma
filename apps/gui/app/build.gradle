@@ -6,7 +6,7 @@ apply from: rootProject.file('gradle/gui-app.gradle')
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 android {
     namespace 'io.github.modao7067.luma.gui'
-    defaultConfig { applicationId 'io.github.modao7067.luma'; targetSdk 35; versionCode 81; versionName '1.1.0'; resValue 'bool', 'root_gui_managed', 'true'; ndk { abiFilters 'arm64-v8a' } }
+    defaultConfig { applicationId 'io.github.modao7067.luma'; targetSdk 35; versionCode 82; versionName '1.1.1'; resValue 'bool', 'root_gui_managed', 'true'; ndk { abiFilters 'arm64-v8a' } }
     sourceSets.main.java.srcDir('src/noroot/java')
     sourceSets.main.kotlin.srcDir('src/noroot/java')
 }
