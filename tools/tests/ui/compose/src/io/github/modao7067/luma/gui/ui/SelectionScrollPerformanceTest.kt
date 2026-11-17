@@ -64,15 +64,16 @@ class SelectionScrollPerformanceTest {
     @Test fun changedActionAvailabilityRebuildsButNewSelectionRefreshesServices() {
         val counts = Counts(); val service = service(counts)
         lateinit var mode: RecordingMode
-        var all = 0; var autofill = 0
+        var all = 0; var cut = 0; var autofill = 0
         val toolbar = NativeSelectionToolbar(View(context), false, {}, { _, _ -> },
             queryProcessText = { counts.queries++; listOf(service) },
             start = { _, callback -> RecordingMode(context, callback).also { mode = it; callback.onCreateActionMode(it, it.menu) } })
         toolbar.showMenu(anchor, {}, null, null, {})
         toolbar.showMenu(anchor, {}, null, null, null)
         assertNull(mode.menu.findItem(android.R.id.selectAll)); assertEquals(1, mode.prepares)
-        toolbar.showMenu(anchor, {}, {}, {}, { all++ }, { autofill++ })
-        mode.choose(android.R.id.autofill); assertEquals(1, autofill)
+        toolbar.showMenu(anchor, {}, {}, { cut++ }, { all++ }, { autofill++ })
+        assertNull(mode.menu.findItem(android.R.id.autofill))
+        mode.choose(android.R.id.cut); assertEquals(1, cut); assertEquals(0, autofill)
         toolbar.showMenu(anchor, {}, null, null, { all++ })
         assertEquals(2, counts.queries)
         mode.choose(android.R.id.selectAll); assertEquals(1, all)

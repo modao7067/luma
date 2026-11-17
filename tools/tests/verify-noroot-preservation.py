@@ -5,10 +5,8 @@ import subprocess
 import tempfile
 
 repo = Path(__file__).resolve().parents[2]
-default_json = repo/'verification/json.jar'
-if not default_json.is_file():
-    default_json = repo/'artifacts/maven/org/json/json/20250517/json-20250517.jar'
-parser = argparse.ArgumentParser(description=__doc__)
+default_json = repo/'artifacts/maven/org/json/json/20250517/json-20250517.jar'
+parser = argparse.ArgumentParser()
 parser.add_argument('--check', choices=['all', 'environment', 'tasks'], default='all')
 parser.add_argument('--json-jar', type=Path, default=default_json)
 parser.add_argument('--before', type=Path, help='Use saved pre-fix production sources for a negative control')

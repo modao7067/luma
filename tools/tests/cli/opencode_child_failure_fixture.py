@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import base64,http.server,json,os,pathlib,secrets,signal,socket,subprocess,tempfile,threading,time,urllib.request
+import base64,http.server,json,os,pathlib,secrets,shutil,signal,socket,subprocess,tempfile,threading,time,urllib.request
 ROOT=pathlib.Path(__file__).resolve().parents[3]
-OUT=ROOT/'verification/gui-reliability-20261103'
+OUT=ROOT/'artifacts/test-runs/opencode-child-failure'
 class Model(http.server.BaseHTTPRequestHandler):
     agent='explore'
     calls=[]
@@ -37,8 +37,9 @@ def main():
         def call(path,body=None):
             req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json','Authorization':authorization})
             with opener.open(req,timeout=10) as r:return json.load(r)
+        opencode_bin=os.environ.get('LUMA_TEST_OPENCODE') or shutil.which('opencode') or 'opencode'
         with (OUT/'opencode-native-failure-server.log').open('w') as log:
-            proc=subprocess.Popen(['/usr/bin/opencode','serve','--hostname','127.0.0.1','--port',str(port)],env=env,cwd=work,stdout=log,stderr=log,start_new_session=True)
+            proc=subprocess.Popen([opencode_bin,'serve','--hostname','127.0.0.1','--port',str(port)],env=env,cwd=work,stdout=log,stderr=log,start_new_session=True)
             try:
                 deadline=time.monotonic()+35
                 while True:

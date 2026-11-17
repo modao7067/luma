@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the pnpm tree that Luma bundles into the Debian runtime.
+COMMAND_DESCRIPTION = """Download the pnpm tree that Luma bundles into the Debian runtime.
 
 The tree in runtime/noroot/src/main/assets/pnpm is exactly two packages from the public npm
 registry, unpacked as npm would install them:
@@ -47,7 +47,6 @@ def integrity(path):
     return 'sha512-' + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
 
 def unpack(tarball, dest):
-    """Extract the regular files under package/ only, refusing anything that escapes dest."""
     with tarfile.open(tarball, 'r:gz') as archive:
         for member in archive.getmembers():
             if not member.isfile():
@@ -62,7 +61,7 @@ def unpack(tarball, dest):
             out.chmod(0o755 if member.mode & 0o111 else 0o644)
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=COMMAND_DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--cache', type=Path, default=ROOT / 'artifacts' / 'download-cache')
     args = parser.parse_args()
     TARGET.parent.mkdir(parents=True, exist_ok=True)

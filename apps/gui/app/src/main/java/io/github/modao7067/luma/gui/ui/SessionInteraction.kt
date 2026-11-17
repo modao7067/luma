@@ -69,6 +69,8 @@ internal class CurrentSessionActions(
     override fun closePreview() = dispatch { closePreview() }
     override fun refreshDashboard() = dispatch { refreshDashboard() }
     override fun configurePermission(id: String) = dispatch { configurePermission(id) }
+    override fun configurePermissionGroup(configId: String, id: String) = dispatch { configurePermissionGroup(configId, id) }
+    override fun configurePlanMode(enabled: Boolean) = dispatch { configurePlanMode(enabled) }
     override fun configureSpeed(id: String) = dispatch { configureSpeed(id) }
     override fun showInventory(kind: String) = dispatch { showInventory(kind) }
     override fun loadPlugins() = dispatch { loadPlugins() }

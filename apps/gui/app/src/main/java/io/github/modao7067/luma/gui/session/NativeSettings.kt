@@ -10,6 +10,10 @@ internal object NativeSettings {
                 "threadId" -> true
                 "permissions" -> actual.optJSONObject("activePermissionProfile")?.optString("id") == expected.getString(key)
                 "serviceTier" -> actual.optString(key) == if (expected.isNull(key)) "default" else expected.getString(key)
+                "collaborationMode" -> {
+                    val expectedMode = expected.optJSONObject("collaborationMode")?.optString("mode").orEmpty()
+                    expectedMode.isNotEmpty() && actual.optJSONObject("collaborationMode")?.optString("mode") == expectedMode
+                }
                 else -> actual.opt(key) == expected.opt(key)
             }
         }

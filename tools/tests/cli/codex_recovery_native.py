@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -30,10 +31,10 @@ def stamp(pid):
     return Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()[19]
 
 async def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--codex', default='/root/.codex/packages/app-server-daemon/releases/0.166.0-aarch64-unknown-linux-musl/bin/codex')
-    parser.add_argument('--output', type=Path, default=ROOT/'verification/gui-session-recovery-20261104/native-production-recovery.json')
-    args = parser.parse_args(); folder = Path(tempfile.mkdtemp(prefix='luma-recovery-native-'))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--codex', default=os.environ.get('LUMA_TEST_CODEX') or shutil.which('codex') or 'codex')
+    parser.add_argument('--output', type=Path, default=ROOT/'artifacts/test-runs/session-recovery/native-production-recovery.json')
+    args = parser.parse_args(); args.output.parent.mkdir(parents=True, exist_ok=True); folder = Path(tempfile.mkdtemp(prefix='luma-recovery-native-'))
     home = folder/'home'; home.mkdir(mode=0o700); bindir = folder/'bin'; bindir.mkdir(); (bindir/'codex').symlink_to(args.codex)
     (home/'config.toml').write_text('model="fixture"\nmodel_provider="fixture"\n[model_providers.fixture]\nname="Offline fixture"\nbase_url="http://127.0.0.1:1/v1"\nwire_api="responses"\nrequires_openai_auth=false\n')
     env = {'HOME':str(home),'CODEX_HOME':str(home),'PATH':str(bindir)+':/usr/bin:/bin','LANG':'C.UTF-8','TERM':'dumb'}

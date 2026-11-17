@@ -13,6 +13,7 @@ sys.dont_write_bytecode = True
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.claude import ClaudeSession, permission_options
+from luma_cli.i18n import tr
 from luma_cli.server import Manager
 from luma_cli.transport import Rejected
 
@@ -73,7 +74,7 @@ class ClaudePermissions(unittest.TestCase):
     def test_root_refusal_does_not_dispatch_or_change_selection(self):
         s, saves = session(); s.call = lambda *a: self.fail('Must not dispatch a root bypass')
         with patch('luma_cli.claude.os.geteuid', return_value=0):
-            self.assertRaisesRegex(Rejected, 'Root/sudo', s.configure, {'permission': 'bypassPermissions'})
+            self.assertRaisesRegex(Rejected, '(?i)root/sudo', s.configure, {'permission': 'bypassPermissions'})
         self.assertEqual(s.data['permission'], 'default'); self.assertEqual(saves, [])
 
     def test_busy_or_unsupported_mode_does_not_dispatch(self):
@@ -106,7 +107,7 @@ class ClaudePermissions(unittest.TestCase):
             s, _ = session(previous); s.call = lambda *a: {'mode': 'auto'}
             def failed_save(): raise OSError('fixture disk failure')
             s.save = failed_save
-            self.assertRaisesRegex(RuntimeError, '已在当前 Claude 进程生效', s.configure, {'permission': 'auto'})
+            self.assertRaisesRegex(RuntimeError, tr('已在当前 Claude 进程生效', 'Permission took effect in the current Claude process'), s.configure, {'permission': 'auto'})
             self.assertEqual(s.data['permission'], 'auto'); self.assertEqual(s.config.get('selectedPermission'), previous)
 
     def test_auto_never_answers_native_requests_on_users_behalf(self):
@@ -171,7 +172,7 @@ class ClaudePermissions(unittest.TestCase):
 
     def test_root_cannot_relaunch_cached_bypass_or_silently_downgrade(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertRaisesRegex(Rejected, 'Root/sudo', self.connect_fixture, tmp, selected='bypassPermissions')
+            self.assertRaisesRegex(Rejected, '(?i)root/sudo', self.connect_fixture, tmp, selected='bypassPermissions')
 
     def test_manager_roundtrip_uses_exact_control_ids_and_session_local_persistence(self):
         with tempfile.TemporaryDirectory() as tmp:

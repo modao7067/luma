@@ -31,8 +31,8 @@ internal fun mediaFixtureBitmap(): Bitmap = Bitmap.createBitmap(600, 1200, Bitma
         paint.textSize = 24f; canvas.drawText(listOf("Review the small details", "Keep the useful parts", "Make room for the image", "A clear way back", "Ready for the next step")[i], 112f, 640f+i*110, paint)
     }
 }
-private val screenshotResource = MediaResource("fixture.png", "9ee768c2-37dd-4ce6-a7ed-57cb28f18319.png", "image/png")
-private val packageResource = MediaResource("/workspace/jatsy-glass-0.4.2-m4-debug.apk", "jatsy-glass-0.4.2-m4-debug.apk", "application/vnd.android.package-archive", sizeBytes = 24_956_928)
+private val screenshotResource = MediaResource("fixture.png", "preview-image.png", "image/png")
+private val packageResource = MediaResource("/workspace/example-app-0.4.2-debug.apk", "example-app-0.4.2-debug.apk", "application/vnd.android.package-archive", sizeBytes = 24_956_928)
 
 @Composable
 private fun MediaPreviewTheme(dark: Boolean, content: @Composable () -> Unit) = LumaTheme(seedArgb = 0xFF6750A4.toInt(), darkTheme = dark) {
@@ -155,9 +155,9 @@ internal val historyFixtureAgents = listOf(
 @Composable internal fun MediaLongNamesPreview() = MediaPreviewTheme(false) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            DetailPageHeader("2026-11-04-9ee768c2-37dd-4ce6-a7ed-57cb28f18319.png", {})
-            MediaFileCard(packageResource.copy(name = "jatsy-glass-0.4.2-m4-debug-arm64-v8a-media-preview-verification.apk"))
-            MediaFileCard(MediaResource("very-long.pdf", "界面与交互动效验收报告-第四轮-子代理状态与图片预览-2026-11-04.pdf", "application/pdf", sizeBytes = 458752))
+            DetailPageHeader("portrait-preview-with-a-long-example-filename.png", {})
+            MediaFileCard(packageResource.copy(name = "example-app-0.4.2-debug-arm64-v8a-media-preview-verification.apk"))
+            MediaFileCard(MediaResource("very-long.pdf", "项目设计与交互验收报告-文件管理与图片预览示例.pdf", "application/pdf", sizeBytes = 458752))
         }
     }
 }

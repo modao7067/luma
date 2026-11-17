@@ -6,8 +6,17 @@ import io.github.modao7067.luma.gui.session.RequestChoice
 
 internal enum class MenuSymbol { TERMINAL, BROWSER, SEARCH, FOLDER, SKILL, EXTENSION, PLUGINS, MCP, NEW_CHAT, IMAGE, CAMERA, PASTE, FILE, CODE, DATA, TABLE, ARTICLE, TEXT, DOWNLOAD, OPEN_EXTERNAL, PDF, AUDIO, VIDEO, APK, ARCHIVE, COMPRESS, DIFF, SEND, STOP, REFRESH, EDIT, DELETE, MODEL, THINKING, SPEED, LOCK, WARNING, SETTINGS, BATTERY, NOTIFICATIONS, ACCESSIBILITY, CHECK, DOWN, UP, HAND, SHIELD, PLAN, BLOCK, RULES, UNKNOWN, AUTO_ALLOW }
 internal data class PermissionPresentation(val title: String, val description: String, val icon: MenuSymbol, val warning: Boolean = false)
+internal data class ComposerPermissionButtonState(
+    val symbol: MenuSymbol,
+    val warning: Boolean,
+    val planHighlight: Boolean,
+    val description: String,
+)
 
 private enum class PermissionMeaning(val icon: MenuSymbol, val warning: Boolean = false) {
+    READ_ONLY(MenuSymbol.LOCK),
+    WORKSPACE(MenuSymbol.FOLDER),
+    RULES(MenuSymbol.RULES),
     REVIEW(MenuSymbol.HAND),
     EDIT(MenuSymbol.EDIT),
     AUTO_REVIEW(MenuSymbol.AUTO_ALLOW, true),
@@ -19,8 +28,8 @@ private enum class PermissionMeaning(val icon: MenuSymbol, val warning: Boolean 
 
 private fun nativePermissionMeaning(cli: String, id: String): PermissionMeaning = when (cli) {
     "Codex", "" -> when (id) {
-        ":read-only" -> PermissionMeaning.REVIEW
-        ":workspace" -> PermissionMeaning.EDIT
+        ":read-only" -> PermissionMeaning.READ_ONLY
+        ":workspace" -> PermissionMeaning.WORKSPACE
         ":danger-full-access" -> PermissionMeaning.BYPASS
         else -> PermissionMeaning.UNKNOWN
     }
@@ -43,7 +52,7 @@ private fun nativePermissionMeaning(cli: String, id: String): PermissionMeaning 
         else -> PermissionMeaning.UNKNOWN
     }
     "Kimi Code" -> when (id) {
-        "default" -> PermissionMeaning.REVIEW
+        "default", "manual" -> PermissionMeaning.REVIEW
         "auto" -> PermissionMeaning.AUTO_REVIEW
         "plan" -> PermissionMeaning.PLAN
         "yolo" -> PermissionMeaning.BYPASS
@@ -65,10 +74,15 @@ private fun nativePermissionMeaning(cli: String, id: String): PermissionMeaning 
         "always-approve", "bypassPermissions" -> PermissionMeaning.BYPASS
         else -> PermissionMeaning.UNKNOWN
     }
-    "OpenCode" -> if (id == "opencode-native") PermissionMeaning.AUTO_REVIEW else PermissionMeaning.UNKNOWN
+    "OpenCode" -> when (id) {
+        "plan" -> PermissionMeaning.PLAN
+        "build" -> PermissionMeaning.AUTO_REVIEW
+        else -> PermissionMeaning.UNKNOWN
+    }
     "Antigravity" -> when (id) {
         "default" -> PermissionMeaning.REVIEW
         "accept-edits" -> PermissionMeaning.EDIT
+        "auto" -> PermissionMeaning.AUTO_REVIEW
         "plan" -> PermissionMeaning.PLAN
         "always-proceed" -> PermissionMeaning.BYPASS
         else -> PermissionMeaning.UNKNOWN
@@ -76,27 +90,70 @@ private fun nativePermissionMeaning(cli: String, id: String): PermissionMeaning 
     else -> PermissionMeaning.UNKNOWN
 }
 
-private val genericEnglishPermissionLabels = setOf(
-    "default", "manual", "accept edits", "acceptedits", "accept_edits", "accept-edits",
-    "auto edit", "auto-edit", "auto", "auto review", "plan", "plan mode",
-    "don't ask", "dont ask", "dontask", "dont_ask",
-    "bypass permissions", "bypasspermissions", "bypass_permissions", "full access", "fullaccess",
-    "yolo", "always-proceed", "always-approve", "allow-all", "on", "off",
-    "read-only", "workspace-write", "danger-full-access",
-)
+internal fun isPlanPermissionOption(cli: String, option: RequestChoice): Boolean =
+    nativePermissionMeaning(cli, option.id) == PermissionMeaning.PLAN
 
-private fun canonicalMeaningTitle(meaning: PermissionMeaning): String? = when (meaning) {
-    PermissionMeaning.REVIEW -> tr("逐次审批", "Ask each time")
-    PermissionMeaning.EDIT -> tr("自动接受编辑", "Auto-accept edits")
-    PermissionMeaning.AUTO_REVIEW -> tr("自动审批", "Auto-approve")
-    PermissionMeaning.PLAN -> tr("规划模式", "Plan mode")
-    PermissionMeaning.DENY_UNAPPROVED -> tr("不询问（自动拒绝）", "Don't ask (auto-deny)")
-    PermissionMeaning.BYPASS -> tr("跳过审批", "Bypass approvals")
-    PermissionMeaning.UNKNOWN -> null
+internal fun isPermissionSelected(option: RequestChoice, permission: String): Boolean =
+    option.selected ?: (option.id == permission)
+
+internal fun permissionMenuGroups(cli: String, options: List<RequestChoice>, independentPlan: Boolean): List<List<RequestChoice>> {
+    val groups = options.groupBy { it.configId }.values.toList()
+    if (independentPlan) return groups
+    return groups.map { group -> group.sortedBy { !isPlanPermissionOption(cli, it) } }
+        .sortedBy { group -> group.none { isPlanPermissionOption(cli, it) } }
+}
+
+internal fun composerPermissionButtonState(
+    cli: String,
+    permission: String,
+    permissions: List<RequestChoice>,
+    planModeSupported: Boolean,
+    planMode: Boolean,
+    skipPermissionsActive: Boolean = false,
+): ComposerPermissionButtonState {
+    val selectedOptions = permissions.filter { isPermissionSelected(it, permission) }
+    val optionPlanSelected = !planModeSupported && selectedOptions.any { isPlanPermissionOption(cli, it) }
+    val isPlanActive = planMode || optionPlanSelected
+    val nonPlanSelected = selectedOptions.filterNot { isPlanPermissionOption(cli, it) }
+    val primaryOption = nonPlanSelected.maxByOrNull { option ->
+        val pres = permissionPresentation(option.id, option.label, cli, option)
+        val knownMeaning = nativePermissionMeaning(cli, option.id) != PermissionMeaning.UNKNOWN ||
+            (cli == "DeepSeek Harness" && option.sandbox.isNotBlank())
+        when {
+            pres.warning -> 3
+            knownMeaning -> 2
+            option.id == permission -> 1
+            else -> 0
+        }
+    } ?: selectedOptions.firstOrNull { it.id == permission } ?: selectedOptions.firstOrNull()
+    val primaryPresentation = permissionPresentation(
+        primaryOption?.id ?: permission,
+        primaryOption?.label.orEmpty(),
+        cli,
+        primaryOption,
+    )
+    val anyWarning = if (selectedOptions.isNotEmpty()) {
+        selectedOptions.any { permissionPresentation(it.id, it.label, cli, it).warning } || skipPermissionsActive
+    } else {
+        primaryPresentation.warning || skipPermissionsActive
+    }
+    val planHighlight = isPlanActive && !anyWarning
+    val symbol = if (isPlanActive) MenuSymbol.PLAN else primaryPresentation.icon
+    val description = if (planMode || (optionPlanSelected && nonPlanSelected.isNotEmpty())) {
+        tr("权限：Plan · ${primaryPresentation.title}", "Permissions: Plan · ${primaryPresentation.title}")
+    } else {
+        tr("权限：${primaryPresentation.title}", "Permissions: ${primaryPresentation.title}")
+    }
+    return ComposerPermissionButtonState(
+        symbol = symbol,
+        warning = anyWarning,
+        planHighlight = planHighlight,
+        description = description,
+    )
 }
 
 internal fun permissionPresentation(id: String, nativeLabel: String = "", cli: String = "", option: RequestChoice? = null): PermissionPresentation {
-    if (id.isEmpty()) return if (cli in setOf("Codex", "Claude Code", "CodeBuddy Code", "DeepSeek Harness", "Kimi Code", "Qoder CLI", "Grok Build", "Antigravity")) {
+    if (id.isEmpty()) return if (cli in setOf("Codex", "Claude Code", "CodeBuddy Code", "DeepSeek Harness", "Kimi Code", "Qoder CLI", "Grok Build", "Antigravity", "OpenCode")) {
         PermissionPresentation(tr("权限待同步", "Syncing permissions"), "", MenuSymbol.REFRESH)
     } else PermissionPresentation(tr("CLI 默认", "CLI default"), tr("使用 CLI 当前配置", "Use current CLI configuration"), MenuSymbol.UNKNOWN)
 
@@ -122,18 +179,12 @@ internal fun permissionPresentation(id: String, nativeLabel: String = "", cli: S
             sandbox == "plan" -> PermissionMeaning.PLAN
             isAutoReview -> PermissionMeaning.AUTO_REVIEW
             sandbox == "read-only" && approval == "never" -> PermissionMeaning.DENY_UNAPPROVED
-            sandbox == "read-only" -> PermissionMeaning.REVIEW
-            sandbox == "workspace-write" -> PermissionMeaning.EDIT
+            sandbox == "read-only" -> PermissionMeaning.READ_ONLY
+            sandbox == "workspace-write" -> PermissionMeaning.WORKSPACE
             sandbox == "danger-full-access" -> PermissionMeaning.BYPASS
             else -> PermissionMeaning.UNKNOWN
         }
-        val rawLabel = option?.label?.takeIf(String::isNotBlank) ?: nativeLabel.takeIf(String::isNotBlank)
-        val standardDshPreset = id in setOf("read-only", "workspace-write", "auto", "plan", "danger-full-access")
-        val title = if (standardDshPreset || rawLabel == null || rawLabel == id || rawLabel.lowercase() in genericEnglishPermissionLabels) {
-            canonicalMeaningTitle(meaning) ?: rawLabel ?: id
-        } else {
-            rawLabel
-        }
+        val title = option?.label?.takeIf(String::isNotBlank) ?: nativeLabel.takeIf(String::isNotBlank) ?: id
         return PermissionPresentation(
             title,
             listOf(boundary, review, option?.description.orEmpty()).filter { it.isNotBlank() }.joinToString(tr("；", "; ")),
@@ -142,14 +193,17 @@ internal fun permissionPresentation(id: String, nativeLabel: String = "", cli: S
         )
     }
 
-    val meaning = nativePermissionMeaning(cli, id)
-    val rawLabel = option?.label?.takeIf { it.isNotBlank() && it != id } ?: nativeLabel.takeIf(String::isNotBlank)
-    val title = canonicalMeaningTitle(meaning) ?: rawLabel ?: id
+    val meaning = when {
+        cli == "Kimi Code" && option?.approval == "always" -> PermissionMeaning.REVIEW
+        cli == "Kimi Code" && option?.approval == "when_needed" -> PermissionMeaning.AUTO_REVIEW
+        cli == "Kimi Code" && option?.approval == "never" -> PermissionMeaning.BYPASS
+        else -> nativePermissionMeaning(cli, id)
+    }
+    val title = option?.label?.takeIf(String::isNotBlank) ?: nativeLabel.takeIf(String::isNotBlank) ?: id
     val description = option?.description?.takeIf(String::isNotBlank) ?: when {
         (cli == "Codex" || cli.isEmpty()) && id == ":read-only" -> tr("仅允许读取；写入与命令受 CLI 权限限制", "Read-only; writes and commands restricted by CLI permissions")
         (cli == "Codex" || cli.isEmpty()) && id == ":workspace" -> tr("允许工作区内读写；外部访问受 CLI 配置限制", "Read/write inside workspace; external access governed by CLI config")
         (cli == "Codex" || cli.isEmpty()) && id == ":danger-full-access" -> tr("不受沙箱限制，风险较高", "Unrestricted access without sandbox; use with caution")
-        cli == "OpenCode" && id == "opencode-native" -> tr("由当前 Agent 与会话规则共同决定", "Governed by active agent and session rules")
         cli == "Grok Build" && id == "always-approve" -> tr("自动批准普通工具请求；原生拒绝规则、钩子与独立沙箱配置仍适用", "Auto-approves standard tool calls; native deny rules, hooks, and sandbox still apply")
         else -> ""
     }

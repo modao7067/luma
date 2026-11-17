@@ -20,6 +20,9 @@ object OpenCodeProjection {
             m.optJSONArray("variants")?.objects().orEmpty().map { it.getString("id") },
             "image" in m.optJSONObject("capabilities")?.optJSONArray("input")?.strings().orEmpty())
     }
+    fun agents(rows: JSONArray): List<RequestChoice> = rows.objects()
+        .filter { !it.optBoolean("hidden", false) && it.optString("mode") in setOf("primary", "all") }
+        .map { RequestChoice(it.getString("id"), it.optString("name", it.getString("id")), it.optString("description")) }
     private fun fileResource(file: JSONObject): MediaResource? {
         val mime = file.optString("mime", file.optString("mimeType"))
         val source = file.stringOrNull("uri")

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// Luma ContentProvider endpoint implementing the public Shizuku Binder handoff protocol.
 package rikka.shizuku;
 
 import android.content.ContentProvider;

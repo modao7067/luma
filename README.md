@@ -2,88 +2,96 @@
 
 Use Codex, Claude Code, OpenCode and other coding agents on an Android phone.
 
-English | [简体中文](README.zh-CN.md)
-
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 ![Android 12+](https://img.shields.io/badge/Android-12%2B%20(API%2031)-3ddc84)
 ![ABI](https://img.shields.io/badge/ABI-arm64--v8a-lightgrey)
 
-## Why
+Luma runs unmodified coding-agent CLIs in a Debian environment on the phone and presents their output as conversations, approval dialogs and notifications. It does not include agents or accounts: install each CLI and sign in with your own account; the CLI keeps using its normal configuration.
 
-These agents were written for a desktop terminal. Run one directly on a phone and the keyboard covers half the screen, the output scrolls faster than you can read it, and when the agent stops to ask `y/N` you probably won't notice.
+## Features
 
-Luma doesn't change the agents. They're still ordinary command-line programs, running in a Debian system on the phone. Luma is the interface in front of them: it turns the output into a conversation, shows approval requests as dialogs, and sends a notification when an agent is waiting for you.
+Luma supports Codex, OpenCode, Claude Code, pi, DeepSeek Harness, Kimi Code, Antigravity, Qoder CLI, Grok Build and CodeBuddy Code in one session UI.
 
-Luma doesn't include any agent or account. You install the CLIs and sign in yourself, and they keep using their own config.
-
-## What it does
-
-It supports 10 CLIs today: Codex, OpenCode, Claude Code, pi, DeepSeek Harness, Kimi Code, Antigravity, Qoder CLI, Grok Build and CodeBuddy Code, all in the same session UI.
-
-- Tables, code, math, images and video render properly in the conversation.
-- If Luma can't confirm a message was delivered, it keeps showing "sending" instead of quietly sending it again.
-- There's a built-in browser that agents can drive too. Agents can also open new Luma sessions and look at other sessions.
-- Usage stats and a file browser.
-
-**Linux environment**
-
-- Ships with Debian (ARM64) with Python, Git, Node.js and pnpm installed. It runs under PRoot by default, so no root is needed.
-- On a rooted phone you can switch to Root Chroot in Environment settings. Terminals then no longer depend on a foreground service or Shizuku, and if Android kills the app, the terminals keep running and you can reconnect. The switch is one-way: going back to PRoot means clearing the app's data.
-
-**Terminal**
-
-- Terminal parsing is done by Ghostty's libghostty-vt, with support for Kitty graphics and iTerm2 inline images.
-- Fonts are bundled with the app, so CJK text, Nerd Font icons, math symbols and emoji all display regardless of the phone's system fonts.
+- Tables, code, math, images and video are rendered in conversations.
+- Uncertain submissions remain visibly pending instead of being silently resent.
+- Agents can drive the built-in browser, create sessions and inspect other sessions.
+- Usage statistics and a file browser are included.
+- The default ARM64 Debian environment includes Python, Git, Node.js and pnpm and runs under PRoot without Root.
+- Rooted devices can switch to Root Chroot in Environment settings. Terminals survive app process death and can be reconnected without Shizuku or a foreground service. Returning to PRoot requires clearing app data.
+- Ghostty's libghostty-vt provides terminal parsing, Kitty graphics and iTerm2 inline images. Bundled fonts cover CJK, Nerd Font icons, math symbols and emoji.
 
 ## Install
 
-Download the APK from [Releases](../../releases/latest) and install it. You need an ARM64 phone on Android 12 or later.
+Download the APK from [Releases](../../releases/latest). Luma requires an ARM64 device running Android 12 or later.
 
-## Building it yourself
+## Build and test
 
-You need JDK 21, the Android SDK (platform 37.2, build-tools 37.0.0) and Python 3.11+. Rebuilding the native libraries also needs NDK r27c and Zig 0.16.0.
+Prerequisites: JDK 21, Android SDK platform 37.2, build-tools 37.0.0 and Python 3.11+. Rebuilding native libraries also requires NDK r27c and Zig 0.16.0.
 
-A fresh clone compiles and runs the tests. Building the APK also needs a few large files that aren't in Git (fonts, pnpm, PRoot sources, and the Debian rootfs); `python3 tools/bootstrap.py` downloads or rebuilds everything except the Debian image, which you can grab (`debian-arm64.zip.xz` and `rootfs-manifest.json`) from the [`rootfs-v1`](../../releases/tag/rootfs-v1) release and place under `runtime/noroot/src/main/assets/`. Release builds are signed only when `apps/gui/signing/luma-release.properties` exists (git-ignored).
+A fresh clone can compile and run JVM tests. APK builds additionally need large inputs that are not stored in Git. `tools/bootstrap.py` restores fonts, pnpm and native sources. Download `debian-arm64.zip.xz` and `rootfs-manifest.json` from the [`rootfs-v1`](../../releases/tag/rootfs-v1) release and place them under `runtime/noroot/src/main/assets/` before bootstrapping and building the APK.
 
 ```sh
-echo "sdk.dir=$HOME/Android/Sdk" > local.properties   # or set ANDROID_HOME
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
 export JAVA_HOME=/path/to/jdk-21
 
-# Works on a fresh clone
-./gradlew :apps:gui:testDebugUnitTest :apps:gui:lintDebug
+./tools/luma verify --static
+./gradlew :apps:gui:compileDebugKotlin :apps:gui:testDebugUnitTest
+./tools/luma lint gui
 
-# To build the APK, place the Debian rootfs files above first, then fetch the rest and build
 python3 tools/bootstrap.py
-LUMA_ONLINE=1 ./luma build    # produces an unsigned release APK if no signing config is set up
+LUMA_ONLINE=1 ./luma build gui
 ```
 
-## Code layout
+To rebuild only the PRoot executables with NDK r27c, run `python3 tools/build-native-proot.py`; `--ndk`, `--out-dir` and `--build-dir` override its defaults. Use `--package-sources-only` to regenerate the corresponding source archive without compiling.
 
-```
-Compose UI ──► SessionController ──┬─► Codex / OpenCode clients ─────► the CLI's own server
-                                   └─► NativeCliSession ─► cli_bridge (Python) ─► other CLIs
-Terminal view ─► libghostty-vt (JNI)        PTY ◄─ Debian under PRoot, or Debian in Root Chroot + keeper daemon
-```
+The static gate checks tracked and untracked, non-ignored sources without requiring the Android SDK or downloaded artifacts. For UI interaction changes, also run `./tools/luma test-ui 'TEST_PATTERN'` and compare the relevant screens.
 
-```
-apps/gui         The app: UI, sessions, cli_bridge, browser
-runtime/noroot   Debian/PRoot environment, installer, Shizuku bridge
-runtime/root     Terminal runtime for Root Chroot mode
-backend/root     Keeper daemon that keeps terminals alive in Root Chroot mode
-shared/          Terminal emulator, terminal view, libghostty JNI, shared UI
-tools/           Build scripts, asset checks, tests
+Before a release, run the full verification and delivery checks:
+
+```sh
+./tools/luma verify
+./tools/luma build gui
+python3 tools/delivery.py --target gui
 ```
 
-## Contributing
+Release APKs are signed only when the ignored `apps/gui/signing/luma-release.properties` file exists; otherwise the release build is unsigned. Do not commit signing material, credentials, APKs, build outputs or large binaries. External inputs belong in `artifacts/` and must be pinned in `tools/artifacts.lock.json`.
 
-Issues and PRs are welcome; please read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. Report security problems privately as described in [`SECURITY.md`](SECURITY.md), not in a public issue.
+## Project map
+
+```text
+Compose UI ──► SessionController ──┬─► Codex / OpenCode clients ─────► CLI server
+                                   └─► NativeCliSession ─► cli_bridge ─► other CLIs
+Terminal view ─► libghostty-vt (JNI)       PTY ◄─ Debian under PRoot or Root Chroot
+```
+
+| Path | Responsibility |
+| --- | --- |
+| `apps/gui` | Android app, Compose UI, sessions, CLI bridge, browser and JVM tests |
+| `runtime/noroot` | Debian/PRoot installer and runtime, managed services and Shizuku integration |
+| `runtime/root` | Root Chroot terminal runtime |
+| `backend/root` | Root terminal keeper daemon |
+| `shared` | Terminal emulator, terminal view, Ghostty JNI and shared UI |
+| `gradle` | Version catalog and shared build conventions |
+| `tools` | Bootstrap, native builds, verification, tests and release validation |
+
+The main session entry point is `apps/gui/app/src/main/java/io/github/modao7067/luma/gui/session/SessionController.kt`. CLI adapters live under `apps/gui/app/src/main/assets/cli_bridge/luma_cli/`; their focused tests are in `tools/tests/cli/`. Compose interaction tests are in `tools/tests/ui/compose/`.
+
+## Contribute
+
+Issues and focused pull requests are welcome in English or Chinese. Discuss large changes in an issue first, avoid unrelated reformatting and use [Conventional Commits](https://www.conventionalcommits.org/). Run the checks above before submitting.
+
+New third-party code, fonts and icons must have a GPL-3.0-compatible license and be recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Preserve upstream copyright and license notices. Contributions are licensed under GPL-3.0-only; no CLA or sign-off is required.
+
+## Security
+
+Do not open a public issue for a vulnerability. Email **modao7067@gmail.com** with the affected component and version, device and Android version, Root-mode status, reproduction steps and expected impact. Security reports should receive an acknowledgement within seven days; allow reasonable time for a fix before public disclosure.
+
+Only the latest release and the latest `main` commit receive security fixes. Vulnerabilities in third-party CLIs, Debian packages, Android or the Root solution should be reported to their respective maintainers.
 
 ## License
 
-GNU GPL v3.0 only — see [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-Luma is an independent project, not affiliated with or endorsed by any CLI vendor; all product names and icons belong to their respective owners.
+GNU GPL v3.0 only — see [`LICENSE`](LICENSE), [`NOTICE`](NOTICE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Luma is independent and is not affiliated with or endorsed by any CLI vendor; product names and icons belong to their respective owners.
 
 ## Thanks
 
-Built on the shoulders of [Termux](https://github.com/termux/termux-app) (via [Termix](https://github.com/jeffusion/Termix)), [Ghostty](https://github.com/ghostty-org/ghostty), [PRoot](https://proot-me.github.io/), [Debian](https://www.debian.org/), [Maple Mono](https://github.com/subframe7536/maple-font), and [compose-miuix-ui](https://github.com/compose-miuix-ui/miuix), along with the Android and Kotlin communities. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full list of third-party components.
+Built on [Termux](https://github.com/termux/termux-app) (via [Termix](https://github.com/jeffusion/Termix)), [Ghostty](https://github.com/ghostty-org/ghostty), [PRoot](https://proot-me.github.io/), [Debian](https://www.debian.org/), [Maple Mono](https://github.com/subframe7536/maple-font) and [compose-miuix-ui](https://github.com/compose-miuix-ui/miuix), along with the Android and Kotlin communities. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for component versions, provenance and maintenance notes.

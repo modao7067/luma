@@ -13,4 +13,10 @@ class NativeSettingsTest {
         assertFalse(NativeSettings.matches(obj("serviceTier" to org.json.JSONObject.NULL), obj()))
         assertTrue(NativeSettings.matches(obj("serviceTier" to org.json.JSONObject.NULL), obj("serviceTier" to "default")))
     }
+    @Test fun collaborationModeMustMatchToConfirm() {
+        val expected = obj("collaborationMode" to obj("mode" to "plan"))
+        assertFalse(NativeSettings.matches(expected, obj()))
+        assertFalse(NativeSettings.matches(expected, obj("collaborationMode" to obj("mode" to "default"))))
+        assertTrue(NativeSettings.matches(expected, obj("collaborationMode" to obj("mode" to "plan"))))
+    }
 }

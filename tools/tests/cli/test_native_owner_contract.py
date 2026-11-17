@@ -9,6 +9,7 @@ from luma_cli.pi_native import PiNativeSession,probe_pi_native,REQUIRED_SDK_EXPO
 from luma_cli.acp import AcpSession
 from luma_cli.native_owner import NativeOwner
 from luma_cli.server import Manager
+from luma_cli.i18n import tr
 from luma_cli.transport import Rejected
 class Contracts(unittest.TestCase):
  def test_new_carrier_declares_consumption_per_adapter_not_globally(self):
@@ -62,15 +63,15 @@ class Contracts(unittest.TestCase):
    (pkg/'package.json').write_text(json.dumps({'version':'1.6.0'}))
    (dist/'core/agent-session.js').write_text('// preflight removed')
    found,ok,reason,_=probe_pi_native(str(cli_bin))
-   self.assertEqual((found,ok),(True,False));self.assertIn('契约',reason)
+   self.assertEqual((found,ok),(True,False));self.assertIn(tr('契约','contract'),reason)
  def test_new_session_falls_back_to_standard_protocol_without_migrating_existing_or_explicit_sessions(self):
   with tempfile.TemporaryDirectory(prefix='luma-protocol-fallback-') as tmp:
    work=pathlib.Path(tmp)/'work';work.mkdir();state=pathlib.Path(tmp)/'state'
    with patch('luma_cli.server.probe_pi_native',return_value=(True,False,'contract','/usr/bin/pi')), \
-        patch.object(PiSession,'connect',lambda s:s.update(connected=True,notice=s.capability_notice())):
+        patch.object(PiSession,'connect',lambda s:s.update(connected=True,permissionNotice=s.capability_notice())):
     m=Manager(state)
     pi_s=m.connect({'id':'new-pi','cli':'pi','cwd':str(work)})
-    self.assertIs(type(pi_s),PiSession);self.assertEqual(pi_s.config['nativeProtocol'],'pi-rpc');self.assertIn('契约',pi_s.data['notice'])
+    self.assertIs(type(pi_s),PiSession);self.assertEqual(pi_s.config['nativeProtocol'],'pi-rpc');self.assertIn(tr('契约','contract'),pi_s.data['permissionNotice']);self.assertEqual(pi_s.data['notice'],'')
    with patch('luma_cli.server.probe_pi_native',return_value=(False,False,'missing',None)), \
         patch.object(PiNativeSession,'connect',lambda s:None):
     missing_s=Manager(state).connect({'id':'missing-pi','cli':'pi','cwd':str(work)})

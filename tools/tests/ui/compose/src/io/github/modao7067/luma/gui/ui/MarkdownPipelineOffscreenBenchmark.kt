@@ -180,13 +180,13 @@ class MarkdownPipelineOffscreenBenchmark {
     }
     @Test fun markdownDocumentCardCollapsesByDefaultAndExpandsSmoothlyWithoutMovingViewport() {
         val handover = buildString {
-            appendLine("下面是一份交接说明：")
+            appendLine("下面是一份示例说明：")
             appendLine()
             appendLine("```markdown")
-            appendLine("# 任务交接：优化 Luma GUI 模型选择器")
+            appendLine("# 示例文档：配置模型菜单")
             appendLine()
             appendLine("## 1. 背景与现状")
-            appendLine("工作目录：`/workspace/luma`")
+            appendLine("工作目录：`/workspace/project`")
             appendLine("- UI 入口：`ModelMenu.kt`")
             appendLine("  ```kotlin")
             appendLine("  val speed = view.speed")
@@ -219,7 +219,7 @@ class MarkdownPipelineOffscreenBenchmark {
                                 NativeMarkdown(handover, presentation = MarkdownPresentation(parsed, Int.MAX_VALUE))
                             }
                         }
-                        items(4, key = { "tail-$it" }) { idx ->
+                        items(20, key = { "tail-$it" }) { idx ->
                             Box(Modifier.fillMaxWidth().height(44.dp)) { Text("后续消息 $idx") }
                         }
                     }
@@ -228,14 +228,15 @@ class MarkdownPipelineOffscreenBenchmark {
         }
         rule.waitForIdle()
         val initialAnchor = rule.runOnIdle { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-        rule.onNodeWithText("任务交接：优化 Luma GUI 模型选择器").assertExists()
+        rule.runOnIdle { assertTrue("Fixture must leave scrollable content below the document", listState.canScrollForward) }
+        rule.onNodeWithText("示例文档：配置模型菜单").assertExists()
         rule.onNodeWithText("Markdown 文档 · 12 行 · 含 2 个代码块").assertExists()
-        rule.onNodeWithText("展开").assertExists()
-        rule.onNodeWithText("复制").assertExists()
+        rule.onNodeWithContentDescription("展开").assertExists()
+        rule.onNodeWithContentDescription("复制").assertExists()
         fun cardHeight() = rule.onNodeWithTag("markdown-document-card").fetchSemanticsNode().size.height.toFloat()
         val collapsedHeight = cardHeight()
         rule.mainClock.autoAdvance = false
-        rule.onNodeWithText("展开").performClick()
+        rule.onNodeWithContentDescription("展开").performClick()
         val expandHeights = mutableListOf(collapsedHeight)
         repeat(35) {
             rule.mainClock.advanceTimeByFrame()
@@ -256,7 +257,7 @@ class MarkdownPipelineOffscreenBenchmark {
         assertEquals(2, manualToggles)
         assertEquals("Switching to source mode must not shift LazyColumn viewport anchor", initialAnchor, rule.runOnIdle { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset })
         rule.mainClock.autoAdvance = false
-        rule.onNodeWithText("收起").performClick()
+        rule.onNodeWithContentDescription("收起").performClick()
         val collapseHeights = mutableListOf<Float>()
         repeat(35) {
             rule.mainClock.advanceTimeByFrame()

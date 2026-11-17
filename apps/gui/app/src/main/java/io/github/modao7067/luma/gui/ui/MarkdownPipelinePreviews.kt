@@ -34,16 +34,16 @@ private val pipelineFixture = """
     $$
 """.trimIndent()
 
-private val handoverConversationMarkdown = buildString {
-    appendLine("下面是一份可以直接复制发给另一个模型的交接说明：")
+private val nestedDocumentFixture = buildString {
+    appendLine("下面是一份包含嵌套代码块的示例文档：")
     appendLine()
     appendLine("---")
     appendLine()
     appendLine("```markdown")
-    appendLine("# 任务交接：优化 Luma GUI 模型选择器")
+    appendLine("# 示例文档：配置模型菜单")
     appendLine()
     appendLine("## 1. 背景与现状")
-    appendLine("工作目录：`/workspace/luma`")
+    appendLine("工作目录：`/workspace/project`")
     appendLine()
     appendLine("当前模型弹出菜单 `ModelMenu` 无条件固定渲染三行：`模型`、`思考强度`、`速度`：")
     appendLine("- UI 入口：`apps/gui/app/src/main/java/io/github/modao7067/luma/gui/ui/ModelMenu.kt`（第 44–111 行）")
@@ -56,12 +56,12 @@ private val handoverConversationMarkdown = buildString {
     appendLine("  - 第 80 行：`SessionView(..., val speed: String = \"\")`")
     appendLine("- 构建与覆盖安装流程：")
     appendLine("  ```bash")
-    appendLine("  cd /workspace/luma && ./luma assets check")
+    appendLine("  cd /workspace/project && ./luma assets check")
     appendLine("  ./luma test-ui io.github.modao7067.luma.gui.ui.MenuDropdownOffscreenBenchmark")
     appendLine("  ```")
     appendLine("```")
     appendLine()
-    appendLine("复制上面整段即可在新会话中直接开干。")
+    appendLine("示例文档到此结束。")
 }.trimEnd()
 
 @Preview(name = "Markdown snapshot · full", widthDp = 393, heightDp = 900)
@@ -89,9 +89,9 @@ private fun MarkdownCardSample(darkTheme: Boolean, initiallyExpanded: Boolean) =
     SessionTypography { ConversationTypography {
         CompositionLocalProvider(LocalMarkdownCardInitiallyExpanded provides initiallyExpanded) {
             Surface(color = MaterialTheme.colorScheme.background) {
-                val document = remember { MarkdownDocumentParser().parse(handoverConversationMarkdown, true) }
+                val document = remember { MarkdownDocumentParser().parse(nestedDocumentFixture, true) }
                 Column(Modifier.fillMaxSize().padding(18.dp)) {
-                    NativeMarkdown(handoverConversationMarkdown, presentation = MarkdownPresentation(document, Int.MAX_VALUE))
+                    NativeMarkdown(nestedDocumentFixture, presentation = MarkdownPresentation(document, Int.MAX_VALUE))
                 }
             }
         }

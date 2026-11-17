@@ -10,13 +10,13 @@
 			<key>settings</key>
 			<dict>
 				<key>background</key>
-				<string>#171819</string>
+				<string>#151515</string>
 				<key>caret</key>
-				<string>#c5c3be</string>
+				<string>#F0EFEC</string>
 				<key>foreground</key>
-				<string>#c5c3be</string>
+				<string>#F0EFEC</string>
 				<key>selection</key>
-				<string>#34383b</string>
+				<string>#383835</string>
 			</dict>
 		</dict>
 		<dict>
@@ -25,7 +25,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#858888</string>
+				<string>#97958D</string>
 			</dict>
 		</dict>
 		<dict>
@@ -34,7 +34,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#aaa0b5</string>
+				<string>#D496DC</string>
 			</dict>
 		</dict>
 		<dict>
@@ -43,7 +43,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#9aabbc</string>
+				<string>#7DB2E8</string>
 			</dict>
 		</dict>
 		<dict>
@@ -52,7 +52,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#a3b2a0</string>
+				<string>#8ED198</string>
 			</dict>
 		</dict>
 		<dict>
@@ -61,7 +61,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#b9ad96</string>
+				<string>#E6A575</string>
 			</dict>
 		</dict>
 		<dict>
@@ -70,7 +70,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#9eafad</string>
+				<string>#76C7D0</string>
 			</dict>
 		</dict>
 		<dict>
@@ -79,7 +79,16 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#bb9b9b</string>
+				<string>#E88E88</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>keyword.operator, punctuation.separator</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#B4B3A8</string>
 			</dict>
 		</dict>
 		<dict>
@@ -88,7 +97,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#c5c3be</string>
+				<string>#F0EFEC</string>
 			</dict>
 		</dict>
 		<dict>
@@ -97,7 +106,25 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#9aabbc</string>
+				<string>#7DB2E8</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.inserted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#8ED198</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.deleted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#E88E88</string>
 			</dict>
 		</dict>
 		<dict>
@@ -106,7 +133,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#c5c3be</string>
+				<string>#F0EFEC</string>
 			</dict>
 		</dict>
 		<dict>
@@ -115,7 +142,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#c5c3be</string>
+				<string>#F0EFEC</string>
 			</dict>
 		</dict>
 	</array>

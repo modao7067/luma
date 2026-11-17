@@ -10,32 +10,18 @@ import java.util.Date
 import java.util.Locale
 
 object CodexCapabilities {
-    fun permissions(page: JSONObject) = page.optJSONArray("data")?.objects().orEmpty()
-        .filter { it.optBoolean("allowed") }.map { RequestChoice(it.getString("id"), it.stringOrNull("description") ?: it.getString("id")) }
-    private val codexRatesPerM = listOf(
-        "gpt-6" to Triple(2.50, 0.25, 15.00),
-        "gpt-5.4-mini" to Triple(0.40, 0.04, 1.60),
-        "gpt-5.4" to Triple(2.50, 0.25, 15.00),
-        "gpt-5.3-codex-spark" to Triple(0.40, 0.04, 1.60),
-        "gpt-5.3-codex" to Triple(1.75, 0.175, 14.00),
-        "gpt-5.2" to Triple(1.75, 0.175, 14.00),
-        "gpt-5.1-codex-max" to Triple(2.50, 0.25, 15.00),
-        "gpt-5.1-codex-mini" to Triple(0.30, 0.03, 1.20),
-        "gpt-5.1" to Triple(1.50, 0.15, 12.00),
-        "gpt-5-mini" to Triple(0.25, 0.025, 2.00),
-        "gpt-5-nano" to Triple(0.05, 0.005, 0.40),
-        "gpt-5" to Triple(1.25, 0.125, 10.00),
-        "codex-mini" to Triple(1.50, 0.375, 6.00),
-        "codex-" to Triple(0.40, 0.04, 1.60),
-        "o3" to Triple(2.00, 0.50, 8.00),
-        "o4-mini" to Triple(1.10, 0.275, 4.40),
-    )
-
-    private fun lookupCodexRate(model: String?): Triple<Double, Double, Double>? {
-        val m = model?.trim()?.lowercase(Locale.ROOT)?.substringAfterLast('/')?.removeSuffix(":fast") ?: return null
-        if (m.isEmpty()) return null
-        return codexRatesPerM.firstOrNull { (prefix, _) -> m == prefix || m.startsWith(prefix) }?.second
+    private fun codexPermissionLabel(entry: JSONObject): String {
+        entry.stringOrNull("name")?.takeIf(String::isNotBlank)?.let { return it }
+        return when (val id = entry.getString("id")) {
+            ":read-only" -> "Read-only"
+            ":workspace" -> "Workspace"
+            ":danger-full-access" -> "Full access"
+            else -> id
+        }
     }
+    fun permissions(page: JSONObject) = page.optJSONArray("data")?.objects().orEmpty()
+        .filter { it.optBoolean("allowed") }
+        .map { RequestChoice(it.getString("id"), codexPermissionLabel(it), it.stringOrNull("description").orEmpty()) }
 
     private fun defaultContextWindow(model: String?): Long? {
         val m = model?.trim()?.lowercase(Locale.ROOT)?.substringAfterLast('/')?.removeSuffix(":fast") ?: return null
@@ -46,31 +32,35 @@ object CodexCapabilities {
         }
     }
 
-    fun tokenMetrics(usage: JSONObject, model: String? = null, speed: String? = null): List<Metric> = buildList {
-        val last = usage.optJSONObject("last") ?: usage.optJSONObject("last_token_usage")
+    fun tokenMetrics(
+        usage: JSONObject,
+        model: String? = null,
+        speed: String? = null,
+        catalog: CodexPricingCatalog = CodexPricingCatalog.default(),
+    ): List<Metric> {
+        val state = CodexSessionPricer(catalog).onTokenUsage(usage, model, speed)
+        return formatTokenMetrics(state, model)
+    }
+
+    fun tokenMetrics(state: CodexSessionUsageState, model: String? = null): List<Metric> =
+        formatTokenMetrics(state, model)
+
+    private fun formatTokenMetrics(state: CodexSessionUsageState, model: String?): List<Metric> = buildList {
+        val last = state.last
         val used = last?.count("totalTokens") ?: last?.count("total_tokens")
-        val window = (usage.count("modelContextWindow") ?: usage.count("model_context_window"))?.takeIf { it > 0 }
-            ?: defaultContextWindow(model)
+        val window = state.modelContextWindow?.takeIf { it > 0L } ?: defaultContextWindow(model)
         if (used != null) {
             add(Metric(tr("最近请求 / 上下文窗口", "Last request / Context window"), if (window == null) used.toString() else
                 "$used / $window · ${String.format(Locale.ROOT, "%.1f", used * 100.0 / window)}%"))
         }
-        (usage.optJSONObject("total") ?: usage.optJSONObject("total_token_usage"))?.let { total ->
+        state.total?.let { total ->
             val read = total.count("cachedInputTokens") ?: total.count("cached_input_tokens")
             val input = total.count("inputTokens") ?: total.count("input_tokens")
             if (read != null && input != null && input > 0 && read <= input) {
                 add(Metric(tr("累计输入缓存命中", "Total input cache hit"), "$read / $input · ${String.format(Locale.ROOT, "%.1f", read * 100.0 / input)}%"))
             }
-            val rate = lookupCodexRate(model)
-            if (rate != null && input != null) {
-                val cached = (read ?: 0L).coerceAtMost(input)
-                val uncached = (input - cached).coerceAtLeast(0L)
-                val out = total.count("outputTokens") ?: total.count("output_tokens") ?: 0L
-                if (uncached + cached + out > 0L) {
-                    val mult = if (speed == "fast" || speed == "priority" || model?.lowercase(Locale.ROOT)?.endsWith(":fast") == true) 2.0 else 1.0
-                    val costUsd = ((uncached * rate.first + cached * rate.second + out * rate.third) / 1_000_000.0) * mult
-                    add(Metric(tr("CLI 累计估算 · USD", "CLI estimated cost · USD"), String.format(Locale.US, "$%.6f", costUsd)))
-                }
+            if (state.priced && state.hasBillableTokens) {
+                add(Metric(tr("CLI 累计估算 · USD", "CLI estimated cost · USD"), String.format(Locale.US, "$%.6f", state.costUsd)))
             }
         }
     }

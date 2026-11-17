@@ -20,7 +20,10 @@ data class ConversationItem(
     val asyncQuestions: List<RequestQuestion> = emptyList(),
     val media: List<MediaResource> = emptyList(),
     val canRecover: Boolean = false,
+    val commandActions: List<CommandAction> = emptyList(),
+    val commandCwd: String = "",
 )
+data class CommandAction(val type: String, val command: String, val path: String = "", val name: String = "")
 data class UserMessageContent(val text: String = "", val attachments: List<String> = emptyList())
 data class SubAgentState(
     val id: String, val name: String = "", val role: String = "", val turnId: String = "", val itemId: String = "",
@@ -38,7 +41,8 @@ data class QueueEntry(val id: String, val text: String, val status: String, val 
     val clientUserMessageId: String? = null, val hostOwned: Boolean = false, val localSubmission: Boolean = false,
     val canDismiss: Boolean = false,
     val localRecovery: Boolean = false)
-data class RequestChoice(val id: String, val label: String, val description: String = "", val sandbox: String = "", val approval: String = "")
+data class RequestChoice(val id: String, val label: String, val description: String = "", val sandbox: String = "", val approval: String = "",
+    val configId: String = "", val configName: String = "", val selected: Boolean? = null)
 data class RequestQuestion(val id: String, val header: String, val prompt: String, val options: List<String> = emptyList(), val multiple: Boolean = false, val secret: Boolean = false, val allowOther: Boolean = true, val required: Boolean = true, val defaultSelection: List<String> = emptyList(), val optionValues: List<String> = emptyList())
 data class UserRequest(
     val id: String, val title: String, val body: String, val choices: List<RequestChoice> = emptyList(),
@@ -66,6 +70,9 @@ data class SessionView(
     val effort: String = "", val error: String? = null, val sending: Boolean = false,
     val uncertainSubmission: Boolean = false, val canOpenTui: Boolean = false,
     val permissions: List<RequestChoice> = emptyList(), val permission: String = "", val speed: String = "",
+    val planModeSupported: Boolean = false,
+    val planMode: Boolean = false,
+    val skipPermissionsActive: Boolean = false,
     val configuring: Boolean = false,
     val queueRecovery: QueueRecovery? = null, val queueBusy: Boolean = false,
     val skills: List<DraftSkill> = emptyList(),
@@ -135,6 +142,8 @@ interface CockpitActions {
     fun closePreview()
     fun refreshDashboard() {}
     fun configurePermission(id: String) {}
+    fun configurePermissionGroup(configId: String, id: String) {}
+    fun configurePlanMode(enabled: Boolean) {}
     fun configureSpeed(id: String) {}
     fun showInventory(kind: String) {}
     fun loadPlugins() {}

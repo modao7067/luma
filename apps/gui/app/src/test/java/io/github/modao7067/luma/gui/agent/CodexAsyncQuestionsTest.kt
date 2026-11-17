@@ -25,7 +25,7 @@ class CodexAsyncQuestionsTest {
         val raw = CodexAsyncQuestions.replies(text).single()
         assertEquals(request.questions[0].id, raw.questionId); assertEquals("Question 0?", raw.question)
         assertEquals(listOf(request.questions[1]), CodexAsyncQuestions.pending(listOf(item, user(text))).single().questions)
-        assertEquals(request.questions, CodexAsyncQuestions.pending(listOf(item, user("Unrelated message"))).single().questions)
+        assertTrue(CodexAsyncQuestions.pending(listOf(item, user("Unrelated message"))).isEmpty())
         assertEquals(request.questions, CodexAsyncQuestions.pending(listOf(item, user(text).copy(nativeInputEvidence = false))).single().questions)
         assertEquals(1, CodexAsyncQuestions.pending(listOf(item), listOf(text)).single().questions.size)
         val second = CodexAsyncQuestions.pending(listOf(item, user(text))).single()
@@ -62,5 +62,18 @@ class CodexAsyncQuestionsTest {
         assertFalse(view.messages.single().text.contains("send_user_message_question_reply"))
         SessionTitlePolicy.firstMessage(record, UserMessageContent(text))
         assertTrue(record.title.contains("Answer"));assertFalse(record.title.contains("send_user_message_question_reply"))
+    }
+    @Test fun ordinaryEvidencedUserMessageRetiresEarlierAsyncQuestionsWhilePreservingUnconfirmedAndLaterOnes() {
+        val first = item("call-1", count = 2)
+        val second = item("call-2", count = 1)
+        assertTrue(CodexAsyncQuestions.pending(listOf(first, user("Switch topic"))).isEmpty())
+        assertEquals(2, CodexAsyncQuestions.pending(listOf(first, user("Pending").copy(nativeInputEvidence = false))).single().questions.size)
+        assertEquals(2, CodexAsyncQuestions.pending(listOf(first, user("Pending").copy(delivery = "pending"))).single().questions.size)
+        assertEquals(2, CodexAsyncQuestions.pending(listOf(first, user("Rejected").copy(delivery = "rejected"))).single().questions.size)
+        assertEquals(2, CodexAsyncQuestions.pending(listOf(first, ConversationItem("tool-1", "tool", "ls"))).single().questions.size)
+        val persistedDismissal = CodexAsyncQuestions.pending(listOf(first, second), dismissedItemIds = setOf(first.id))
+        assertEquals(listOf("codex-async:call-2"), persistedDismissal.map { it.id })
+        val laterQuestion = CodexAsyncQuestions.pending(listOf(first, user("Switch topic"), second))
+        assertEquals(listOf("codex-async:call-2"), laterQuestion.map { it.id })
     }
 }

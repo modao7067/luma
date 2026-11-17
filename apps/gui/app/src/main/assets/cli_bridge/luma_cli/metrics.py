@@ -9,11 +9,27 @@ from pathlib import Path
 from typing import Any
 
 from .global_usage import (
+    _concrete_kimi_code_model,
     _extract_agy_db_session,
+    _get_pricing_catalog,
     _lookup_model_rate,
     _price_record,
+    _sync_pricing_catalog,
 )
 from .i18n import tr
+
+_BG_PRICING_SYNCED = False
+
+def ensure_pricing_catalog_async():
+    global _BG_PRICING_SYNCED
+    if _BG_PRICING_SYNCED:
+        return
+    if _get_pricing_catalog().get('mode') == 'cached':
+        _BG_PRICING_SYNCED = True
+        return
+    _BG_PRICING_SYNCED = True
+    import threading
+    threading.Thread(target=_sync_pricing_catalog, daemon=True, name='LumaPricingSync').start()
 
 _SAFE_NATIVE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
 
@@ -35,6 +51,7 @@ MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("grok-code", 256_000),
     ("grok-3", 131_072),
     ("grok-2", 131_072),
+    ("kimi-k3", 1_024_000),
     ("kimi-k2", 256_000),
     ("kimi-", 128_000),
     ("moonshot-", 128_000),
@@ -45,6 +62,7 @@ MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("qwen", 131_072),
     ("glm-", 128_000),
     ("minimax-", 200_000),
+    ("mimo-v2.6", 1_048_576),
     ("mimo-", 128_000),
 )
 
@@ -506,4 +524,186 @@ def grok_usage(usage, scope=None, model=None):
             output=max(0, out_tok - reason),
             reasoning=reason,
         )
+    return rows + cost_rows
+
+def _kimi_wire_cost(native_id, fallback_model=None, home=None):
+    if not isinstance(native_id, str) or not _SAFE_NATIVE_ID_RE.fullmatch(native_id):
+        return None
+    dir_name = native_id if native_id.startswith('session_') else f'session_{native_id}'
+    base_home = home or Path(os.environ.get('HOME') or str(Path.home()))
+    roots = []
+    for raw in (os.environ.get('KIMI_CODE_HOME'), os.environ.get('KIMI_SHARE_DIR'), str(base_home / '.kimi-code'), str(base_home / '.kimi')):
+        if raw:
+            p = Path(raw).expanduser()
+            if p not in roots and (p / 'sessions').is_dir():
+                roots.append(p)
+    session_dir = None
+    for root in roots:
+        for wd in (root / 'sessions').iterdir():
+            cand = wd / dir_name
+            if wd.is_dir() and not wd.is_symlink() and cand.is_dir() and not cand.is_symlink():
+                session_dir = cand
+                break
+        if session_dir is not None:
+            break
+    if session_dir is None or not (session_dir / 'agents').is_dir():
+        return None
+    import json as _json
+    tot_cost = 0.0
+    priced_any = False
+    seen_records = 0
+    for agent_dir in sorted((session_dir / 'agents').iterdir()):
+        wire = agent_dir / 'wire.jsonl'
+        if not agent_dir.is_dir() or agent_dir.is_symlink() or not wire.is_file() or wire.is_symlink():
+            continue
+        latest_model = None
+        try:
+            with wire.open('r', encoding='utf-8', errors='replace') as fh:
+                for raw_ln in fh:
+                    ln = raw_ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        obj = _json.loads(ln)
+                    except ValueError:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    ltype = obj.get('type')
+                    if ltype == 'llm.request':
+                        cm = _concrete_kimi_code_model(obj.get('model'))
+                        if cm:
+                            latest_model = cm
+                        continue
+                    if ltype != 'usage.record' or obj.get('usageScope') != 'turn':
+                        continue
+                    u = obj.get('usage')
+                    if not isinstance(u, dict):
+                        continue
+                    inp = int(number(u.get('inputOther') if 'inputOther' in u else u.get('input_other')) or 0)
+                    out_tok = int(number(u.get('output')) or 0)
+                    c_read = int(number(u.get('inputCacheRead') if 'inputCacheRead' in u else u.get('input_cache_read')) or 0)
+                    c_write = int(number(u.get('inputCacheCreation') if 'inputCacheCreation' in u else u.get('input_cache_creation')) or 0)
+                    if inp + out_tok + c_read + c_write <= 0:
+                        continue
+                    seen_records += 1
+                    eff_model = _concrete_kimi_code_model(obj.get('model')) or latest_model or _clean_model_name(fallback_model)
+                    if eff_model and _lookup_model_rate(eff_model) is not None:
+                        priced = _price_record({
+                            'model': eff_model,
+                            'uncachedInputTokens': inp,
+                            'cachedInputTokens': c_read,
+                            'cacheCreationTokens': c_write,
+                            'outputTokens': out_tok,
+                            'reasoningTokens': 0,
+                        })
+                        c_val = number(priced.get('costUsd'))
+                        if c_val is not None:
+                            tot_cost += float(c_val)
+                            priced_any = True
+        except OSError:
+            continue
+    if seen_records == 0 or not priced_any:
+        return None
+    return _estimated_cost_rows(tot_cost)
+
+def kimi_web_metrics(record, main_snapshot, child_snapshots=None, models=None, ws_usage=None, active_model=None):
+    tot_uncached = 0
+    tot_read = 0
+    tot_write = 0
+    tot_out = 0
+    turn_cost = 0.0
+    last_main_ctx = 0
+
+    def scan_items(items, is_main):
+        nonlocal tot_uncached, tot_read, tot_write, tot_out, turn_cost, last_main_ctx
+        for entry in items or []:
+            if not isinstance(entry, dict) or entry.get('kind') != 'turn':
+                continue
+            tu = entry.get('usage') if isinstance(entry.get('usage'), dict) else {}
+            tc = number(tu.get('cost'))
+            if tc is not None and tc > 0:
+                turn_cost += float(tc)
+            had_step = False
+            for step in entry.get('steps') or []:
+                su = step.get('usage') if isinstance(step, dict) and isinstance(step.get('usage'), dict) else None
+                if not su:
+                    continue
+                inp = int(number(su.get('inputOther')) or 0)
+                c_read = int(number(su.get('inputCacheRead')) or 0)
+                c_write = int(number(su.get('inputCacheCreation')) or 0)
+                out = int(number(su.get('output')) or 0)
+                if inp + c_read + c_write + out <= 0:
+                    continue
+                had_step = True
+                if is_main:
+                    last_main_ctx = inp + c_read + c_write + out
+                tot_uncached += inp
+                tot_read += c_read
+                tot_write += c_write
+                tot_out += out
+            if not had_step and tu:
+                t_in = int(number(tu.get('inputTokens')) or 0)
+                t_cached = int(number(tu.get('cachedTokens')) or 0)
+                t_out = int(number(tu.get('outputTokens')) or 0)
+                if t_in + t_cached + t_out > 0:
+                    unc = max(0, t_in - t_cached) if t_in >= t_cached else t_in
+                    if is_main:
+                        last_main_ctx = unc + t_cached + t_out
+                    tot_uncached += unc
+                    tot_read += t_cached
+                    tot_out += t_out
+
+    scan_items((main_snapshot or {}).get('items'), True)
+    for child in child_snapshots or []:
+        if isinstance(child, dict):
+            scan_items(child.get('items'), False)
+
+    rec_usage = (record or {}).get('usage') if isinstance((record or {}).get('usage'), dict) else {}
+    if tot_uncached + tot_read + tot_write + tot_out == 0:
+        tot_uncached = int(number(rec_usage.get('input_tokens')) or 0)
+        tot_read = int(number(rec_usage.get('cache_read_tokens')) or 0)
+        tot_write = int(number(rec_usage.get('cache_creation_tokens')) or 0)
+        tot_out = int(number(rec_usage.get('output_tokens')) or 0)
+
+    ws = ws_usage if isinstance(ws_usage, dict) else {}
+    ws_used = number(ws.get('context_tokens'))
+    rec_used = number(rec_usage.get('context_tokens'))
+    ctx_used = ws_used if (ws_used and ws_used > 0) else (last_main_ctx if last_main_ctx > 0 else (rec_used if (rec_used and rec_used > 0) else None))
+
+    catalog_limit = None
+    target_clean = _clean_model_name(active_model).lower()
+    for m in models or []:
+        if not isinstance(m, dict):
+            continue
+        cand = m.get('alias') or m.get('id') or m.get('model') or ''
+        if (active_model and cand == active_model) or (target_clean and _clean_model_name(cand).lower() == target_clean):
+            lim = number(m.get('max_context_size'))
+            if lim and lim > 0:
+                catalog_limit = lim
+                break
+
+    ws_limit = number(ws.get('max_context_tokens'))
+    rec_limit = number(rec_usage.get('context_limit'))
+    ctx_limit = ws_limit if (ws_limit and ws_limit > 0) else (catalog_limit if catalog_limit else (rec_limit if (rec_limit and rec_limit > 0) else model_context_window(active_model)))
+
+    rows = context(ctx_used, ctx_limit, model=active_model) if ctx_used else []
+    prompt_total = tot_uncached + tot_read + tot_write
+    if prompt_total > 0:
+        rows += cache_ratio(tot_read, prompt_total, tr('缓存命中', 'Cache hit'))
+    cost_rows = []
+    rec_cost = number(rec_usage.get('total_cost_usd'))
+    if prompt_total > 0 or tot_out > 0 or turn_cost > 0 or (rec_cost and rec_cost > 0):
+        native_id = (record or {}).get('id')
+        cost_rows = _kimi_wire_cost(native_id, active_model) or estimate_cost(
+            active_model,
+            uncached_input=tot_uncached,
+            cache_read=tot_read,
+            cache_write=tot_write,
+            output=tot_out,
+        )
+        if not cost_rows:
+            reported = rec_cost if (rec_cost and rec_cost > 0) else (turn_cost if turn_cost > 0 else None)
+            if reported:
+                cost_rows = cost(reported, 'USD')
     return rows + cost_rows

@@ -60,22 +60,53 @@ class Contract(unittest.TestCase):
   for ident in list(self.s.turns):self.s.complete_turn(ident,{'stopReason':'cancelled'})
  def test_official_registry_launch_and_no_synthetic_modes(self):
   self.assertIs(ADAPTERS['Grok Build'],GrokSession);self.assertIn('--no-leader',self.s.argv);self.assertIn('--no-auto-update',self.s.argv)
-  self.assertEqual(['default','auto','plan','always-approve'],[x['id'] for x in self.s.data['permissions']]);self.assertEqual([],self.s.data['metrics']);self.assertFalse(self.s.data['capabilities']['queue'])
+  self.assertEqual(['default','auto','always-approve'],[x['id'] for x in self.s.data['permissions']])
+  self.assertEqual(['Default','Auto','Always approve'],[x['label'] for x in self.s.data['permissions']])
+  self.assertTrue(self.s.data['planModeSupported']);self.assertFalse(self.s.data['planMode'])
+  self.assertEqual([],self.s.data['metrics']);self.assertFalse(self.s.data['capabilities']['queue'])
  def test_settings_ack_and_no_global_config(self):
   self.s.configure({'effort':'low','permission':'always-approve'});self.assertEqual('low',self.s.data['effort']);self.assertEqual('always-approve',self.s.data['permission'])
   self.s.configure({'permission':'auto'});self.assertEqual('auto',self.s.data['permission'])
-  self.s.configure({'permission':'plan'});self.assertEqual('plan',self.s.data['permission'])
+  self.s.configure({'planMode':True});self.assertTrue(self.s.data['planMode']);self.assertEqual('auto',self.s.data['permission'])
+  self.s.configure({'permission':'always-approve'});self.assertEqual('always-approve',self.s.data['permission']);self.assertTrue(self.s.data['planMode'])
+  self.s.event({'method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'current_mode_update','currentModeId':'build'}}})
+  self.assertFalse(self.s.data['planMode']);self.assertEqual('always-approve',self.s.data['permission'])
   self.s.configure({'permission':'default'});self.assertEqual('default',self.s.data['permission'])
+  with self.assertRaises(Rejected):self.s.configure({'permission':'plan'})
   with self.assertRaises(Rejected):self.s.configure({'permission':'invented'})
+  with self.assertRaises(Rejected):self.s.configure({'planMode':'yes'})
  def test_new_session_does_not_enable_or_remember_permission(self):
   self.assertNotIn('selectedPermission',self.config)
   self.assertFalse(any(f.get('method')=='_x.ai/yolo_mode_changed' for f in self.s.peer.frames))
  def test_only_confirmed_explicit_selection_restores_same_session(self):
-  self.s.configure({'permission':'always-approve'});self.assertEqual('always-approve',self.config['selectedPermission'])
+  self.s.configure({'permission':'always-approve','planMode':True});self.assertEqual('always-approve',self.config['selectedPermission']);self.assertTrue(self.config['selectedPlanMode'])
   resumed=Harness(copy.deepcopy(self.config),lambda:None);resumed.connect()
-  self.assertEqual('always-approve',resumed.data['permission']);self.assertTrue(resumed.peer.yolo)
-  resumed.configure({'permission':'default'});again=Harness(copy.deepcopy(resumed.config),lambda:None);again.connect()
-  self.assertEqual('default',again.data['permission']);self.assertFalse(again.peer.yolo)
+  self.assertEqual('always-approve',resumed.data['permission']);self.assertTrue(resumed.data['planMode']);self.assertTrue(resumed.peer.yolo)
+  resumed.configure({'permission':'auto','planMode':False});again=Harness(copy.deepcopy(resumed.config),lambda:None);again.connect()
+  self.assertEqual('auto',again.data['permission']);self.assertFalse(again.data['planMode']);self.assertFalse(again.peer.yolo)
+  legacy_cfg={'cli':'Grok Build','cwd':'/tmp','id':'local','nativeId':'native','selectedPermission':'plan'}
+  migrated=Harness(legacy_cfg,lambda:None);migrated.connect()
+  self.assertEqual('default',migrated.data['permission']);self.assertTrue(migrated.data['planMode'])
+  self.assertNotIn('selectedPermission',legacy_cfg);self.assertTrue(legacy_cfg.get('selectedPlanMode'))
+ def test_saved_plan_off_is_applied_to_a_resident_plan_without_mode_replay(self):
+  class ResidentPlanPeer(FakePeer):
+   def __init__(self,session):super().__init__(session);self.native_plan=True
+   def call(self,method,params,*args,**kwargs):
+    if method=='session/set_mode':self.native_plan=params['modeId']=='plan'
+    return super().call(method,params,*args,**kwargs)
+  with patch.object(sys.modules[__name__],'FakePeer',ResidentPlanPeer):
+   resumed=Harness({'cli':'Grok Build','cwd':'/tmp','id':'local','nativeId':'native','selectedPlanMode':False},lambda:None)
+   resumed.connect()
+  self.assertFalse(resumed.peer.native_plan);self.assertFalse(resumed.data['planMode'])
+  self.assertTrue(any(f.get('method')=='session/set_mode' and f['params']['modeId']=='build' for f in resumed.peer.frames))
+ def test_rejected_plan_off_is_not_saved_or_displayed_as_success(self):
+  self.s.configure({'planMode':True});original=self.s.peer.call
+  def reject(method,*args,**kwargs):
+   if method=='session/set_mode':raise RpcRejected({'code':-32602,'message':'Plan switch refused'})
+   return original(method,*args,**kwargs)
+  self.s.peer.call=reject
+  with self.assertRaises(Rejected):self.s.configure({'planMode':False})
+  self.assertTrue(self.s.data['planMode']);self.assertTrue(self.config['selectedPlanMode'])
  def test_permission_native_refusal_never_saves_requested_value(self):
   self.s.peer.send=lambda f:self.s.peer.frames.append(f)
   with self.assertRaises(Rejected):self.s.configure({'permission':'always-approve'})
@@ -368,7 +399,7 @@ class Contract(unittest.TestCase):
     (sock_dir/'control.sock').write_text('');(sock_dir/'control.lock').write_text(str(os.getpid()))
     cfg={'cli':'Grok Build','cwd':tmp,'nativeId':'native-1','nativeProtocol':'grok-private-leader-v1',
          'nativeOwner':{'instanceId':instance,'kind':'grok-leader','pid':999999,'processStart':'dead'}}
-    with patch('luma_cli.native_owner.Path.read_bytes',return_value=b'/root/.grok/bin/grok\x00agent\x00leader\x00--no-exit-on-disconnect'):
+    with patch('luma_cli.native_owner.Path.read_bytes',return_value=b'/usr/local/bin/grok\x00agent\x00leader\x00--no-exit-on-disconnect'):
      self.assertTrue(recorded_owner_alive(cfg))
      session=Harness(cfg,lambda:None);owner=NativeOwner(session)
      self.assertEqual(instance,owner.handle['instanceId']);self.assertEqual(os.getpid(),owner.handle['pid'])

@@ -1,17 +1,3 @@
-"""Host/device path discovery shared by the scripts under tools/.
-
-Nothing in the repository should hard-code where the JDK, the Android SDK, aapt2 or the
-on-device development checkout live. Every value below can be overridden with an
-environment variable; the fallbacks reproduce the locations the scripts used before
-(so an existing device-side setup keeps working) and then fall back to whatever is
-installed on the current machine.
-
-    ANDROID_HOME / ANDROID_SDK_ROOT   Android SDK (else local.properties sdk.dir)
-    JAVA_HOME                         JDK 21
-    AAPT2, APKSIGNER                  explicit tool overrides
-    LUMA_DEVICE_ROOT                  on-device work directory (default /data/local/tmp/eta)
-    LUMA_DEVICE_REPO                  on-device checkout of this repository
-"""
 from pathlib import Path
 import os
 import shutil
@@ -25,6 +11,19 @@ def _sdk_from_local_properties():
         for line in props.read_text().splitlines():
             if line.startswith('sdk.dir='):
                 return line.split('=', 1)[1].strip()
+    return None
+
+
+def _gradle_property(key):
+    gradle_home = Path(os.environ.get('GRADLE_USER_HOME') or (Path.home() / '.gradle'))
+    for props in (REPO / 'gradle.properties', gradle_home / 'gradle.properties'):
+        if props.is_file():
+            for line in props.read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith(key + '='):
+                    value = stripped.split('=', 1)[1].strip()
+                    if value:
+                        return value
     return None
 
 
@@ -58,19 +57,47 @@ D8_JAR = _build_tools_file('lib/d8.jar')
 D8 = _build_tools_file('d8')
 APKSIGNER = os.environ.get('APKSIGNER') or _build_tools_file('apksigner')
 
-_legacy_java_home = Path('/usr/lib/jvm/java-21-openjdk-arm64')
+_default_arm64_java = Path('/usr/lib/jvm/java-21-openjdk-arm64')
 if os.environ.get('JAVA_HOME'):
     JAVA_HOME = os.environ['JAVA_HOME']
-elif _legacy_java_home.is_dir():
-    JAVA_HOME = str(_legacy_java_home)
+elif _default_arm64_java.is_dir():
+    JAVA_HOME = str(_default_arm64_java)
 else:
     _java = shutil.which('java')
-    JAVA_HOME = str(Path(_java).resolve().parents[1]) if _java else str(_legacy_java_home)
+    JAVA_HOME = str(Path(_java).resolve().parents[1]) if _java else str(_default_arm64_java)
 JAVA = str(Path(JAVA_HOME) / 'bin' / 'java')
 
-_legacy_aapt2 = Path('/opt/eta-aapt2/aapt2')
-AAPT2 = os.environ.get('AAPT2') or (str(_legacy_aapt2) if _legacy_aapt2.exists()
+_override_aapt2 = _gradle_property('android.aapt2FromMavenOverride')
+AAPT2 = os.environ.get('AAPT2') or (_override_aapt2 if _override_aapt2 and Path(_override_aapt2).exists()
                                     else _build_tools_file('aapt2', '37.0.0'))
 
-DEVICE_ROOT = os.environ.get('LUMA_DEVICE_ROOT', '/data/local/tmp/eta')
-DEVICE_REPO = os.environ.get('LUMA_DEVICE_REPO', DEVICE_ROOT + '/luma')
+
+def _discover_device_root():
+    explicit = os.environ.get('LUMA_DEVICE_ROOT')
+    if explicit:
+        return explicit
+    mountinfo = Path('/proc/self/mountinfo')
+    workspace = Path('/workspace')
+    host_data = Path('/proc/1/root/data')
+    if mountinfo.is_file() and workspace.is_dir() and host_data.is_dir():
+        try:
+            ws_ino = workspace.stat().st_ino
+            for line in mountinfo.read_text().splitlines():
+                fields = line.split()
+                if len(fields) >= 5 and fields[4] == '/workspace' and fields[3].startswith('/'):
+                    candidate = '/data' + fields[3]
+                    probe = Path('/proc/1/root' + candidate)
+                    if probe.is_dir() and probe.stat().st_ino == ws_ino:
+                        return candidate
+        except OSError:
+            pass
+    return '/data/local/tmp/luma'
+
+
+DEVICE_ROOT = _discover_device_root()
+if os.environ.get('LUMA_DEVICE_REPO'):
+    DEVICE_REPO = os.environ['LUMA_DEVICE_REPO']
+elif REPO.resolve().is_relative_to('/workspace'):
+    DEVICE_REPO = DEVICE_ROOT + '/' + REPO.resolve().relative_to('/workspace').as_posix()
+else:
+    DEVICE_REPO = DEVICE_ROOT + '/luma'

@@ -351,6 +351,103 @@ class GlobalUsageTest(unittest.TestCase):
             self.assertIn(gu._tr("超时", "timed out"), providers[1]["message"])
             self.assertFalse((cache_dir / "usage-limits-cache-v4.json").exists())
 
+    def _probe_codex_rpc_server(self, mode, with_history=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            server = home / "codex"
+            server.write_text(f'''#!{sys.executable}
+import json
+import os
+import select
+import sys
+import time
+
+mode = {mode!r}
+initialize = json.loads(sys.stdin.readline())
+assert initialize["method"] == "initialize"
+assert initialize["params"]["clientInfo"]["name"] == "luma-gui"
+assert not select.select([sys.stdin], [], [], 0.05)[0]
+if mode == "initialize_error":
+    print(json.dumps({{"id": initialize["id"], "error": {{"code": -32603}}}}), flush=True)
+else:
+    print(json.dumps({{"id": initialize["id"], "result": {{}}}}), flush=True)
+    assert json.loads(sys.stdin.readline())["method"] == "initialized"
+    request = json.loads(sys.stdin.readline())
+    assert request["method"] == "account/rateLimits/read"
+    assert not select.select([sys.stdin], [], [], 0.05)[0]
+    if mode == "eof":
+        sys.exit(0)
+    if mode == "read_error":
+        print(json.dumps({{"id": request["id"], "error": {{"code": -32603}}}}), flush=True)
+    elif mode == "partial_timeout":
+        os.write(sys.stdout.fileno(), b'{{"id":2,"result":')
+    else:
+        print("not json", flush=True)
+        print(json.dumps({{"method": "account/rateLimits/updated", "params": {{}}}}), flush=True)
+        print(json.dumps({{"id": 99, "result": {{}}}}), flush=True)
+        response = json.dumps({{"id": request["id"], "result": {{"rateLimits": {{
+            "planType": "测试",
+            "primary": {{"usedPercent": 12.5, "windowDurationMins": 300, "resetsAt": 1800000000}},
+            "secondary": {{"usedPercent": 42, "windowDurationMins": 10080, "resetsAt": 1800000001}}
+        }}}}}}, ensure_ascii=False).encode() + b"\\n"
+        split = response.index("测".encode()) + 1
+        os.write(sys.stdout.fileno(), response[:split])
+        time.sleep(0.02)
+        os.write(sys.stdout.fileno(), response[split:])
+sys.stdin.read()
+''', "utf-8")
+            server.chmod(0o755)
+            if with_history:
+                sessions = home / ".codex" / "sessions" / "2026" / "11" / "01"
+                sessions.mkdir(parents=True)
+                (sessions / "rollout-test.jsonl").write_text(json.dumps({
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": {"rate_limits": {"primary": {"used_percent": 77, "window_minutes": 300}}},
+                }) + "\n", "utf-8")
+            processes = []
+            popen = subprocess.Popen
+
+            def spawn(*args, **kwargs):
+                process = popen(*args, **kwargs)
+                processes.append(process)
+                return process
+
+            started = time.monotonic()
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}),
+                patch.object(gu, "_has_codex_oauth", return_value=True),
+                patch.object(gu, "_resolve_codex_binary", return_value=str(server)),
+                patch.object(gu.subprocess, "Popen", side_effect=spawn),
+            ):
+                result = gu._probe_codex_limits(home)
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll())
+            self.assertTrue(processes[0].stdin.closed)
+            self.assertTrue(processes[0].stdout.closed)
+            self.assertLess(time.monotonic() - started, 4.5)
+            return result
+
+    def test_codex_rpc_waits_for_handshake_and_reply_without_closing_stdin(self):
+        result = self._probe_codex_rpc_server("live")
+        self.assertEqual(result["source"], "live")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["planType"], "测试")
+        self.assertEqual([w["usedPercent"] for w in result["windows"]], [12.5, 42.0])
+
+    def test_codex_rpc_errors_and_eof_preserve_session_fallback(self):
+        for mode in ("initialize_error", "read_error", "eof", "partial_timeout"):
+            with self.subTest(mode=mode):
+                result = self._probe_codex_rpc_server(mode)
+                self.assertEqual(result["source"], "session_fallback")
+                self.assertEqual(result["updatedAt"], "2026-11-01T00:00:00Z")
+                self.assertEqual(result["windows"][0]["usedPercent"], 77.0)
+
+    def test_codex_rpc_failure_without_history_remains_unavailable(self):
+        result = self._probe_codex_rpc_server("eof", with_history=False)
+        self.assertEqual(result["source"], "unavailable")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["windows"], [])
+
     def test_recent_codex_session_files_newest_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             sessions = Path(tmp) / "sessions"
@@ -656,7 +753,13 @@ class GlobalUsageTest(unittest.TestCase):
                 self.assertEqual(s_week["totals"]["totalTokens"], 1500)
 
     def test_online_pricing_catalog_sync_ttl_zero_plan_filter_and_archive_repricing(self):
-        now_utc = dt.datetime.now(dt.timezone.utc)
+        class _FrozenDt(dt.datetime):
+            fixed_utc = dt.datetime(2026, 11, 18, 12, 0, tzinfo=dt.timezone.utc)
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fixed_utc.astimezone(tz) if tz is not None else cls.fixed_utc.replace(tzinfo=None)
+
+        now_utc = _FrozenDt.fixed_utc
         yesterday_utc = now_utc - dt.timedelta(days=1)
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -676,6 +779,7 @@ class GlobalUsageTest(unittest.TestCase):
             with (
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.object(gu.dt, "datetime", _FrozenDt),
                 patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}, clear=False),
             ):
                 offline_summary = gu.collect_summary(period="week", tz_name="UTC", refresh=True)
@@ -1801,6 +1905,104 @@ class GlobalUsageTest(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_codex_session_pricing_cliff_and_speed_reset(self):
+        self.assertEqual(
+            gu.MODEL_RATES_PER_M["gpt-6.1-sol"],
+            (2.0, 10.0, 0.1, 2.5, (272_000, 4.0, 15.0, 0.2, 5.0)),
+        )
+        now = dt.datetime.now(dt.timezone.utc)
+        now_iso = now.isoformat().replace("+00:00", "Z")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            sess_dir = home / ".codex" / "sessions" / "2026" / "11" / "16"
+            sess_dir.mkdir(parents=True)
+            rollout = sess_dir / "rollout-pricing-test.jsonl"
+            lines = [
+                json.dumps({
+                    "type": "session_meta",
+                    "timestamp": now_iso,
+                    "payload": {"model": "gpt-6.1-sol"},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "timestamp": now_iso,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 150_000, "output_tokens": 0},
+                            "last_token_usage": {"input_tokens": 150_000, "output_tokens": 0},
+                        },
+                    },
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "timestamp": now_iso,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 300_000, "output_tokens": 0},
+                            "last_token_usage": {"input_tokens": 150_000, "output_tokens": 0},
+                        },
+                    },
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "timestamp": now_iso,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 600_000, "output_tokens": 0},
+                            "last_token_usage": {"input_tokens": 300_000, "output_tokens": 0},
+                        },
+                    },
+                }),
+                json.dumps({
+                    "type": "turn_context",
+                    "timestamp": now_iso,
+                    "payload": {"model": "gpt-6-luna", "service_tier": "priority"},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "timestamp": now_iso,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 700_000, "output_tokens": 0},
+                            "last_token_usage": {"input_tokens": 100_000, "output_tokens": 0},
+                        },
+                    },
+                }),
+                json.dumps({
+                    "type": "turn_context",
+                    "timestamp": now_iso,
+                    "payload": {"model": "gpt-6-luna", "service_tier": None},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "timestamp": now_iso,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 800_000, "output_tokens": 0},
+                            "last_token_usage": {"input_tokens": 100_000, "output_tokens": 0},
+                        },
+                    },
+                }),
+            ]
+            rollout.write_text("\n".join(lines) + "\n", "utf-8")
+            cat = gu._build_runtime_catalog({}, "builtin", "", [])
+            summary = gu.summarize_codex_rollout(rollout, catalog=cat)
+            self.assertEqual(summary["eventCount"], 5)
+            self.assertAlmostEqual(summary["costUsd"], 1.83, places=9)
+            self.assertIsNone(summary["speed"])
+            with patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}, clear=False):
+                recs = gu._scan_codex(home, {}, 0)
+            scan_cost = sum(gu._price_record(r, catalog=cat, event_count=1)["costUsd"] for r in recs)
+            self.assertAlmostEqual(summary["costUsd"], scan_cost, places=9)
+            session_payload = gu.collect_codex_session_pricing(str(rollout))
+            self.assertIn("catalog", session_payload)
+            self.assertTrue(session_payload["rollout"]["hasUsage"])
 
 
 if __name__ == "__main__":

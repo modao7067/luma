@@ -11,7 +11,7 @@ import java.util.UUID
 class OpenCodeUsageNativeTest {
     @Test fun nativeCountersCatalogAndReconnectMatchDashboard(): Unit = runBlocking {
         val url = System.getenv("LUMA_TEST_OPENCODE_USAGE_URL")
-        assumeTrue("Run verification/gui-opencode-dashboard-20261104/native_probe.py", url != null)
+        assumeTrue("Set LUMA_TEST_OPENCODE_USAGE_URL to run against an isolated OpenCode fixture", url != null)
         val api = OpenCodeClient(url!!, System.getenv("LUMA_TEST_OPENCODE_USAGE_PASSWORD")!!)
         val work = System.getenv("LUMA_TEST_OPENCODE_USAGE_WORK")!!
         val id = "ses_luma" + UUID.randomUUID().toString().replace("-", "")

@@ -7,8 +7,10 @@ from luma_cli.server import Manager
 
 def run(cli):
     with tempfile.TemporaryDirectory(prefix='luma-cli-native-') as home:
+        tooling = os.environ.get('LUMA_CLI_TOOLING_DIR', '')
+        path_value = (tooling + ':' if tooling else '') + '/usr/local/bin:/usr/bin:/bin'
         os.environ.clear()
-        os.environ.update(HOME=home, PATH=str(ROOT/'verification/gui-cli-adapters-20261102/tooling')+':/usr/local/bin:/usr/bin:/bin', LANG='C.UTF-8',
+        os.environ.update(HOME=home, PATH=path_value, LANG='C.UTF-8',
                           XDG_CONFIG_HOME=home+'/config', XDG_DATA_HOME=home+'/data', XDG_CACHE_HOME=home+'/cache',
                           DSH_HOME=home+'/dsh', PI_CODING_AGENT_DIR=home+'/pi', PI_NO_TITLE='1',
                           DO_NOT_TRACK='1', NO_COLOR='1', OPENAI_API_KEY='luma-fixture-not-a-real-key')

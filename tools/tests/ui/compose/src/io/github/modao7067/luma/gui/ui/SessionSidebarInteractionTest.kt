@@ -165,7 +165,7 @@ class SessionSidebarInteractionTest {
         val weekTs = java.time.ZonedDateTime.of(2026, 11, 8, 14, 0, 0, 0, zone).toInstant().toEpochMilli()
         val dateTs = java.time.ZonedDateTime.of(2026, 11, 3, 9, 0, 0, 0, zone).toInstant().toEpochMilli()
         val rows = listOf(
-            SessionSummary("s-today", "今天会话", "noroot", "/workspace/luma", model = "gpt-6", modelLabel = "GPT-6-Astra", cli = "Codex", lastActiveAt = todayTs),
+            SessionSummary("s-today", "今天会话", "noroot", "/workspace/project", model = "gpt-6", modelLabel = "GPT-6-Astra", cli = "Codex", lastActiveAt = todayTs),
             SessionSummary("s-yest", "昨天会话", "noroot", "/workspace/other", model = "claude", modelLabel = "Claude Sonnet", cli = "Codex", lastActiveAt = yesterdayTs),
             SessionSummary("s-week", "周日会话", "noroot", "/workspace/sub", modelLabel = "Gemini 4 Carbon", cli = "Codex", lastActiveAt = weekTs),
             SessionSummary("s-date", "上周会话", "noroot", "/workspace/old", modelLabel = "DeepSeek", cli = "Codex", lastActiveAt = dateTs),
@@ -194,7 +194,7 @@ class SessionSidebarInteractionTest {
         rule.onNodeWithText("Claude Sonnet").assertDoesNotExist()
         rule.onNodeWithText("Gemini 4 Carbon").assertDoesNotExist()
         rule.onNodeWithText("LegacyModel").assertDoesNotExist()
-        rule.onNodeWithText("/workspace/luma").assertDoesNotExist()
+        rule.onNodeWithText("/workspace/project").assertDoesNotExist()
         rule.onNodeWithText("1970", substring = true).assertDoesNotExist()
     }
 

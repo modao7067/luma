@@ -8,6 +8,7 @@ import os
 import pathlib
 import pty
 import select
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -19,10 +20,10 @@ import websockets
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--codex', default='/root/.codex/packages/app-server-daemon/releases/0.166.0-aarch64-unknown-linux-musl/bin/codex')
-    parser.add_argument('--tui-codex', default='/usr/bin/codex')
-    parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'verification/gui-external-codex-20261104')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--codex', default=os.environ.get('LUMA_TEST_CODEX') or shutil.which('codex') or 'codex')
+    parser.add_argument('--tui-codex', default=shutil.which('codex') or 'codex')
+    parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'artifacts/test-runs/external-codex')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     run = pathlib.Path(tempfile.mkdtemp(prefix='tui-', dir=args.output)); home = run / 'home'; home.mkdir(mode=0o700)

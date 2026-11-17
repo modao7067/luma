@@ -1,39 +1,11 @@
 #!/usr/bin/env python3
-"""Check, restore and fetch the build artifacts that are deliberately NOT in Git.
-
-Large or non-redistributable inputs (bundled fonts, the Debian rootfs archive, prebuilt native
-libraries, the pnpm tree, ...) live in the ignored source-tree locations Gradle expects, and
-tools/artifacts.lock.json pins every one of them by SHA-256. This script is the single entry point:
-
-    python3 tools/bootstrap.py              restore from the local store, fetch what is fetchable, then check
-    python3 tools/bootstrap.py status       verify every pinned artifact (exit 1 if one is missing/changed)
-    python3 tools/bootstrap.py restore      re-create missing files from the content-addressed store
-    python3 tools/bootstrap.py stash        copy (hard-link) the present, verified files into the store
-    python3 tools/bootstrap.py fetch        download/build what has a reproducible recipe (fonts, pnpm, PRoot sources and recipes, ghostty/termux JNI)
-    python3 tools/bootstrap.py import SRC   copy matching artifacts from an older checkout (pre-refactor layout is understood)
-    python3 tools/bootstrap.py record       (maintainers) rewrite the lock from the files currently in the tree
-
-The store is artifacts/store/blobs/<sha256> (hard links where possible, so it costs no extra space).
-Each lock entry carries an `origin` telling you how to regenerate it:
-
-    fetch:fonts         tools/fetch-fonts.py (public download, hash pinned)
-    fetch:pnpm          tools/fetch-pnpm.py (npm registry tarballs, integrity pinned)
-    fetch:native-src    tools/fetch-native-sources.py (upstream PRoot/talloc/shmem sources, hash pinned)
-    build:ghostty       shared/terminal-ghostty/build-native.py (pinned Ghostty/Zig/NDK; verified reproducible)
-    build:termux        shared/terminal-emulator/build-native.sh (in-tree termux.c + NDK)
-    build:proot         tools/native/proot-r6 recipe
-    build:compute       runtime/noroot/scripts/build-compute-check.sh
-    build:rootfs        tools/build-basic-rootfs.py / runtime/noroot/scripts/package-rootfs.py
-    build:fonts-derived tools/build-terminal-fonts.py, tools/build-gui-font.py
-    build:native-src    tools/native/proot-r6/package-sources.py
-    manual              taken from a device / upstream release, see the entry's note
-"""
 import argparse
 import fnmatch
 import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import urllib.request
@@ -62,16 +34,17 @@ ORIGIN_RULES = [
     ('apps/gui/app/src/main/assets/LumaGuiHan-Regular.ttf', 'build:fonts-derived', 'tools/build-gui-font.py'),
     ('runtime/noroot/src/main/assets/debian-arm64.zip.xz', 'build:rootfs', 'tools/build-basic-rootfs.py --xz <builder> <base> <assets>'),
     ('runtime/noroot/src/main/assets/rootfs-manifest.json', 'build:rootfs', 'written together with debian-arm64.zip.xz'),
-    ('runtime/noroot/src/main/assets/native-sources/proot-recipes.tgz', 'build:native-src', 'tools/native/proot-r6/package-sources.py'),
-    ('runtime/noroot/src/main/assets/native-sources/*.tgz', 'fetch:native-src', 'tools/fetch-native-sources.py (unmodified upstream PRoot / talloc / libandroid-shmem sources)'),
+    ('runtime/noroot/src/main/assets/native-sources/proot-sources.tgz', 'build:native-src', 'tools/build-native-proot.py --package-sources-only'),
+    ('runtime/noroot/src/main/assets/native-sources/*.tgz', 'fetch:native-src', 'tools/fetch-native-sources.py (unmodified upstream talloc-2.4.3 source)'),
     ('runtime/noroot/src/main/assets/pnpm/*', 'fetch:pnpm', 'tools/fetch-pnpm.py (pnpm + @pnpm/exe.linux-arm64 from the npm registry)'),
     ('*/libluma_vt_jni.so', 'build:ghostty', 'shared/terminal-ghostty/build-native.py'),
-    ('*/libproot_exec.so', 'build:proot', 'tools/native/proot-r6'),
-    ('*/libproot_loader.so', 'build:proot', 'tools/native/proot-r6'),
+    ('*/libproot_exec.so', 'build:proot', 'tools/build-native-proot.py'),
+    ('*/libproot_loader.so', 'build:proot', 'tools/build-native-proot.py'),
     ('*/libluma_compute.so', 'build:compute', 'runtime/noroot/scripts/build-compute-check.sh'),
     ('*/libluma_exec.so', 'build:compute', 'runtime/noroot/scripts/build-compute-check.sh'),
     ('*/libtermux.so', 'build:termux', 'shared/terminal-emulator/build-native.sh'),
 ]
+
 
 def sha256_file(path):
     digest = hashlib.sha256()
@@ -80,10 +53,8 @@ def sha256_file(path):
             digest.update(block)
     return digest.hexdigest()
 
+
 def elf_digest(path):
-    """SHA-256 over the loadable ELF sections only. A rebuilt shared library differs in .symtab and
-    DWARF (they embed the build directory), so build:ghostty entries are pinned by this digest instead."""
-    import struct
     data = Path(path).read_bytes()
     shoff = struct.unpack_from('<Q', data, 0x28)[0]
     shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 0x3A)
@@ -97,8 +68,10 @@ def elf_digest(path):
         digest.update(name.encode() + b'\0' + data[header[4]:header[4] + header[5]])
     return digest.hexdigest()
 
+
 def load_lock():
     return json.loads(LOCK.read_text())
+
 
 def status_of(rel, entry):
     path = REPO / rel
@@ -110,6 +83,7 @@ def status_of(rel, entry):
         return 'changed'
     return 'ok'
 
+
 def link_or_copy(src, dst):
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
@@ -118,6 +92,7 @@ def link_or_copy(src, dst):
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
+
 
 def cmd_status(args, quiet=False):
     lock = load_lock()
@@ -140,6 +115,7 @@ def cmd_status(args, quiet=False):
     print(f'{total - len(bad)}/{total} artifacts verified')
     return 1 if bad else 0
 
+
 def cmd_restore(args):
     lock = load_lock()
     restored = 0
@@ -152,6 +128,7 @@ def cmd_restore(args):
             restored += 1
     print(f'restored {restored} file(s) from {STORE.relative_to(REPO)}')
     return 0
+
 
 def cmd_stash(args):
     lock = load_lock()
@@ -166,6 +143,7 @@ def cmd_stash(args):
     print(f'stored {stored} new blob(s) in {STORE.relative_to(REPO)}')
     return 0
 
+
 def download(url, target, sha256):
     target.parent.mkdir(parents=True, exist_ok=True)
     if not (target.is_file() and sha256_file(target) == sha256):
@@ -174,6 +152,7 @@ def download(url, target, sha256):
             shutil.copyfileobj(response, out)
     if sha256_file(target) != sha256:
         raise SystemExit(f'sha256 mismatch for {url}')
+
 
 def ensure_toolchain(name):
     spec = load_lock()['toolchains'][name]
@@ -194,10 +173,12 @@ def ensure_toolchain(name):
                 (target.parent / spec['unzippedAs']).rename(target)
     return target
 
+
 def missing(origin_prefix):
     lock = load_lock()
     return [rel for rel, e in lock['artifacts'].items()
             if e['origin'].startswith(origin_prefix) and status_of(rel, e) != 'ok']
+
 
 def cmd_fetch(args):
     if missing('fetch:fonts'):
@@ -207,7 +188,10 @@ def cmd_fetch(args):
     if missing('fetch:native-src'):
         subprocess.run([sys.executable, str(REPO / 'tools/fetch-native-sources.py')], check=False)
     if missing('build:native-src'):
-        subprocess.run([sys.executable, str(REPO / 'tools/native/proot-r6/package-sources.py')], check=True)
+        subprocess.run([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--package-sources-only'], check=True)
+    if missing('build:proot') and not args.no_native:
+        ndk = Path(os.environ['ANDROID_NDK_HOME']) if os.environ.get('ANDROID_NDK_HOME') else ensure_toolchain('ndk-r27c')
+        subprocess.run([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--ndk', str(ndk), '--no-package-sources'], check=True)
     if missing('build:termux') and not args.no_native:
         ndk = Path(os.environ['ANDROID_NDK_HOME']) if os.environ.get('ANDROID_NDK_HOME') else ensure_toolchain('ndk-r27c')
         env = dict(os.environ, ANDROID_NDK_HOME=str(ndk))
@@ -221,10 +205,8 @@ def cmd_fetch(args):
                         '--build-dir', str(REPO / 'artifacts/native-build/ghostty')], check=True)
     return 0
 
+
 def cmd_import(args):
-    """Populate this tree from another checkout that already has the artifacts (e.g. the pre-refactor repo).
-    Files are taken only if their SHA-256 matches the lock; the old top-level build-tools/ and rootfs/
-    directories are mapped onto artifacts/ (maven, compute-check, toolchain, rootfs)."""
     src = Path(args.source).resolve()
     lock = load_lock()
     copied = skipped = 0
@@ -233,7 +215,8 @@ def cmd_import(args):
             continue
         candidate = src / rel
         if candidate.is_file() and entry.get('hash') != 'elf-sections' and sha256_file(candidate) == entry['sha256']:
-            (REPO / rel).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(candidate, REPO / rel)
+            (REPO / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, REPO / rel)
             copied += 1
         else:
             skipped += 1
@@ -255,9 +238,9 @@ def cmd_import(args):
     print(f'imported {copied} artifact(s) from {src}; {skipped} not available there (run `bootstrap.py fetch` / build them)')
     return 0
 
+
 def cmd_record(args):
     old = load_lock() if LOCK.is_file() else {'schema': 1, 'toolchains': {}, 'artifacts': {}}
-    tracked = set(subprocess.check_output(['git', '-C', str(REPO), 'ls-files'], text=True).split('\n'))
     ignored = subprocess.check_output(['git', '-C', str(REPO), 'ls-files', '-o', '-i', '--exclude-standard'],
                                       text=True).split('\n')
     artifacts = {}
@@ -285,12 +268,13 @@ def cmd_record(args):
     print(f'recorded {len(artifacts)} artifacts in {LOCK.relative_to(REPO)}')
     return 0
 
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser()
     parser.add_argument('command', nargs='?', default='all',
                         choices=['all', 'status', 'restore', 'stash', 'fetch', 'record', 'import'])
     parser.add_argument('source', nargs='?', help='import: path of the older checkout')
-    parser.add_argument('--no-native', action='store_true', help='fetch: skip the Zig/NDK Ghostty build')
+    parser.add_argument('--no-native', action='store_true', help='fetch: skip native builds')
     args = parser.parse_args()
     if args.command == 'status':
         return cmd_status(args)
@@ -309,6 +293,7 @@ def main():
     cmd_restore(args)
     cmd_fetch(args)
     return cmd_status(args)
+
 
 if __name__ == '__main__':
     sys.exit(main())

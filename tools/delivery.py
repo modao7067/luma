@@ -13,8 +13,8 @@ BASE = REPO / 'tools'
 AAPT2 = toolenv.AAPT2
 APKSIGNER = toolenv.APKSIGNER
 PRIVATE_PARTS = {'signing', '.git', '.gradle', '__pycache__'}
-PRIVATE_NAMES = {'local.properties', 'eta.db', '.env', '.bash_history', 'root-backend.token'}
-PRIVATE_SUFFIXES = {'.jks', '.keystore', '.key', '.pem'}
+PRIVATE_NAMES = {'local.properties', '.env', '.bash_history', 'root-backend.token'}
+PRIVATE_SUFFIXES = {'.jks', '.keystore', '.key', '.pem', '.db'}
 
 def require(condition, message):
     if not condition:
@@ -84,7 +84,8 @@ def validate(name, policy, assets):
                 require(archive.read(member) == dependency.read(source['member']), f'{name}: dependency asset differs: {member}')
             current_assets.pop(member)
     require(current_assets == expected, f'{name}: packaged assets/native libraries differ from reviewed assets.json')
-    return {'app': name, 'apk': str(apk), **info,
+    rel_apk = apk.resolve().relative_to(REPO.resolve()).as_posix() if apk.resolve().is_relative_to(REPO.resolve()) else apk.name
+    return {'app': name, 'apk': rel_apk, **info,
             'sha256': hashlib.file_digest(apk.open('rb'), 'sha256').hexdigest(),
             'signerSha256': signers, 'permissions': sorted(permissions),
             'reviewedAssetNativeEntries': len(current_assets), 'invariantsPassed': True}
@@ -93,7 +94,8 @@ def compare(old, new):
     before, after = packaged_assets(old), packaged_assets(new)
     with zipfile.ZipFile(old) as a, zipfile.ZipFile(new) as b:
         same_manifest = a.read('AndroidManifest.xml') == b.read('AndroidManifest.xml')
-    return {'oldApk': str(old), 'oldVersion': package_info(old), 'manifestUnchanged': same_manifest,
+    rel_old = old.resolve().relative_to(REPO.resolve()).as_posix() if old.resolve().is_relative_to(REPO.resolve()) else old.name
+    return {'oldApk': rel_old, 'oldVersion': package_info(old), 'manifestUnchanged': same_manifest,
             'addedAssets': sorted(after.keys() - before.keys()),
             'removedAssets': sorted(before.keys() - after.keys()),
             'changedAssets': sorted(k for k in before.keys() & after.keys() if before[k] != after[k])}

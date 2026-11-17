@@ -14,29 +14,38 @@ import io.github.modao7067.luma.gui.LumaTheme
 import io.github.modao7067.luma.gui.session.CockpitState
 import io.github.modao7067.luma.gui.session.RequestChoice
 
-internal data class PermissionIconPreviewCase(val cli: String, val selected: String, val options: List<RequestChoice>)
+internal data class PermissionIconPreviewCase(
+    val cli: String,
+    val selected: String,
+    val options: List<RequestChoice>,
+    val planModeSupported: Boolean = false,
+    val planMode: Boolean = false,
+    val skipPermissionsActive: Boolean = false,
+)
 internal val permissionIconPreviewCases = listOf(
-    PermissionIconPreviewCase("Codex", ":workspace", listOf(RequestChoice(":read-only", "只读"), RequestChoice(":workspace", "工作区"), RequestChoice(":danger-full-access", "完整访问"))),
-    PermissionIconPreviewCase("OpenCode", "opencode-native", emptyList()),
+    PermissionIconPreviewCase("Codex", ":workspace", listOf(RequestChoice(":read-only", "Read-only"), RequestChoice(":workspace", "Workspace"), RequestChoice(":danger-full-access", "Full access")), planModeSupported = true),
+    PermissionIconPreviewCase("OpenCode", "build", listOf(RequestChoice("build", "Build"), RequestChoice("plan", "Plan"))),
     PermissionIconPreviewCase("pi", "", emptyList()),
     PermissionIconPreviewCase("DeepSeek Harness", "workspace-write", listOf(
-        RequestChoice("read-only", "read-only", sandbox = "read-only", approval = "ask"),
-        RequestChoice("workspace-write", "workspace-write", sandbox = "workspace-write", approval = "ask"),
-        RequestChoice("auto", "Auto review", sandbox = "danger-full-access", approval = "ask"),
-        RequestChoice("plan", "Plan mode", sandbox = "plan", approval = "ask"),
-        RequestChoice("danger-full-access", "danger-full-access", sandbox = "danger-full-access", approval = "never"))),
+        RequestChoice("read-only", "Read-only", sandbox = "read-only", approval = "ask"),
+        RequestChoice("workspace-write", "Workspace write", sandbox = "workspace-write", approval = "ask"),
+        RequestChoice("auto", "Auto", sandbox = "danger-full-access", approval = "ask"),
+        RequestChoice("danger-full-access", "Full access", sandbox = "danger-full-access", approval = "never")), planModeSupported = true),
     PermissionIconPreviewCase("Kimi Code", "auto", listOf(RequestChoice("default", "Default"), RequestChoice("plan", "Plan"), RequestChoice("auto", "Auto"), RequestChoice("yolo", "YOLO"))),
-    PermissionIconPreviewCase("Claude Code", "plan", listOf(RequestChoice("default", "逐次审批"), RequestChoice("acceptEdits", "自动接受编辑"), RequestChoice("auto", "自动审批"), RequestChoice("plan", "规划模式"), RequestChoice("dontAsk", "不询问（自动拒绝）"), RequestChoice("bypassPermissions", "跳过审批"))),
-    PermissionIconPreviewCase("Antigravity", "always-proceed", listOf(RequestChoice("always-proceed", "全权限（跳过审批）"))),
+    PermissionIconPreviewCase("Claude Code", "plan", listOf(RequestChoice("default", "Default"), RequestChoice("acceptEdits", "Accept edits"), RequestChoice("auto", "Auto"), RequestChoice("plan", "Plan"), RequestChoice("dontAsk", "Don't ask"), RequestChoice("bypassPermissions", "Bypass permissions"))),
+    PermissionIconPreviewCase("Antigravity", "always-proceed", listOf(
+        RequestChoice("default", "Default"),
+        RequestChoice("accept-edits", "Accept edits"),
+        RequestChoice("always-proceed", "Always proceed")), planModeSupported = true, skipPermissionsActive = true),
     PermissionIconPreviewCase("Qoder CLI", "dontAsk", listOf(RequestChoice("default", "Default"), RequestChoice("acceptEdits", "Accept edits"), RequestChoice("auto", "Auto"), RequestChoice("dontAsk", "Don't ask"), RequestChoice("yolo", "YOLO"))),
-    PermissionIconPreviewCase("Grok Build", "always-approve", listOf(RequestChoice("default", "逐次审批"), RequestChoice("auto", "自动审批"), RequestChoice("plan", "规划模式"), RequestChoice("always-approve", "跳过审批"))),
-    PermissionIconPreviewCase("Future CLI", "opaque-policy", listOf(RequestChoice("opaque-policy", "原生自定义策略"))),
+    PermissionIconPreviewCase("Grok Build", "always-approve", listOf(RequestChoice("default", "Default"), RequestChoice("auto", "Auto"), RequestChoice("always-approve", "Always approve")), planModeSupported = true),
+    PermissionIconPreviewCase("Future CLI", "opaque-policy", listOf(RequestChoice("opaque-policy", "Native policy"))),
 )
 
 internal class PermissionIconCaseProvider : PreviewParameterProvider<PermissionIconPreviewCase> {
     override val values = permissionIconPreviewCases.asSequence() + sequenceOf(
         permissionIconPreviewCases.first { it.cli == "Claude Code" }.copy(selected = "dontAsk"),
-        permissionIconPreviewCases.first { it.cli == "Grok Build" }.copy(selected = "default"),
+        permissionIconPreviewCases.first { it.cli == "Grok Build" }.copy(selected = "default", planMode = true),
     )
 }
 
@@ -45,7 +54,8 @@ internal class PermissionIconCaseProvider : PreviewParameterProvider<PermissionI
 internal fun AllCliPermissionComposerPreview(@PreviewParameter(PermissionIconCaseProvider::class) case: PermissionIconPreviewCase) =
     LumaTheme(seedArgb = 0xFF6750A4.toInt(), darkTheme = false) { SessionTypography { ConversationTypography {
         val view = sampleView().let { it.copy(summary = it.summary.copy(cli = case.cli), activeTurnId = null,
-            queue = emptyList(), draft = "", permission = case.selected, permissions = case.options) }
+            queue = emptyList(), draft = "", permission = case.selected, permissions = case.options,
+            planModeSupported = case.planModeSupported, planMode = case.planMode, skipPermissionsActive = case.skipPermissionsActive) }
         LiquidScaffold(topBar = {}, wrapTop = false, wrapBottom = false, bottomBar = {
             ComposerGlass(Modifier.fillMaxWidth()) {
                 CompactComposer(CockpitState(selected = view), view, previewActions, {}, {}, previewExpanded = true,
@@ -78,9 +88,10 @@ internal fun PermissionCurrentButtonsPreview() = LumaTheme(seedArgb = 0xFF6750A4
             Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 val claude = permissionIconPreviewCases.first { it.cli == "Claude Code" }
                 val grok = permissionIconPreviewCases.first { it.cli == "Grok Build" }
-                listOf(claude, claude.copy(selected = "dontAsk"), grok, grok.copy(selected = "default")).forEach { case ->
+                listOf(claude, claude.copy(selected = "dontAsk"), grok.copy(planMode = true), grok.copy(selected = "default", planMode = true)).forEach { case ->
                     val view = sampleView().let { it.copy(summary = it.summary.copy(cli = case.cli), activeTurnId = null,
-                        queue = emptyList(), draft = "", permission = case.selected, permissions = case.options) }
+                        queue = emptyList(), draft = "", permission = case.selected, permissions = case.options,
+                        planModeSupported = case.planModeSupported, planMode = case.planMode, skipPermissionsActive = case.skipPermissionsActive) }
                     Text("${case.cli} · ${permissionPresentation(case.selected, cli = case.cli, option = case.options.find { it.id == case.selected }).title}",
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelLarge)
                     CompactComposer(CockpitState(selected = view), view, previewActions, {}, {},

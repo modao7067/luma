@@ -66,27 +66,15 @@
    "origin": "build:rootfs",
    "sha256": "6d3d64ff78226bc8f5de92caae49d2963e0f33111d9ae3fc3d417c9c87ae79ff"
   },
-  "runtime/noroot/src/main/assets/native-sources/proot-recipes.tgz": {
-   "bytes": 18380,
-   "note": "tools/native/proot-r6/package-sources.py",
+  "runtime/noroot/src/main/assets/native-sources/proot-sources.tgz": {
+   "bytes": 331990,
+   "note": "tools/build-native-proot.py --package-sources-only",
    "origin": "build:native-src",
-   "sha256": "3b8585e0855d11e1a4b677b44a3e2d5fb79f889dca640a41b9243f3702df5f70"
-  },
-  "runtime/noroot/src/main/assets/native-sources/proot.tgz": {
-   "bytes": 322321,
-   "note": "tools/fetch-native-sources.py (unmodified upstream PRoot / talloc / libandroid-shmem sources)",
-   "origin": "fetch:native-src",
-   "sha256": "a1b070f55ec32b78e5033621476533d7230eb110275fe0cc3ee79c4fb334cfaa"
-  },
-  "runtime/noroot/src/main/assets/native-sources/shmem.tgz": {
-   "bytes": 8891,
-   "note": "tools/fetch-native-sources.py (unmodified upstream PRoot / talloc / libandroid-shmem sources)",
-   "origin": "fetch:native-src",
-   "sha256": "1e5ff8459bc0a8c229dd8a94b27d119987e09ef3414331c2b5ebfff20b98e867"
+   "sha256": "7e9ac03d3d3bd5ddf38469a4780d4f5c91f838811f25f490e4956850c1c4cfe3"
   },
   "runtime/noroot/src/main/assets/native-sources/talloc.tgz": {
    "bytes": 684092,
-   "note": "tools/fetch-native-sources.py (unmodified upstream PRoot / talloc / libandroid-shmem sources)",
+   "note": "tools/fetch-native-sources.py (unmodified upstream talloc-2.4.3 source)",
    "origin": "fetch:native-src",
    "sha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
   },
@@ -2828,13 +2816,13 @@
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_exec.so": {
    "bytes": 258216,
-   "note": "tools/native/proot-r6",
+   "note": "tools/build-native-proot.py",
    "origin": "build:proot",
    "sha256": "8635267d8e8de14b8b61d6fb0c183d1ff2af0d87a755d64970b46ad7950bee02"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_loader.so": {
    "bytes": 17800,
-   "note": "tools/native/proot-r6",
+   "note": "tools/build-native-proot.py",
    "origin": "build:proot",
    "sha256": "5abbee45cc8eb70d7a89b69a680af5dec775d2b945cb2296d6e5bd6de087e2e0"
   },

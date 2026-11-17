@@ -7,6 +7,16 @@ import org.junit.Test
 
 class NativeCliProjectionTest {
     private val initial = SessionView(SessionSummary("local", "title", "noroot", "/workspace", cli = "pi"))
+    @Test fun modeGroupsKeepNativeIdsNamesAndIndependentSelections() {
+        val state = JSONObject("""{"permission":"off","permissions":[{"id":"off","label":"First off","configId":"first","configName":"First","selected":true},{"id":"off","label":"Second off","configId":"second","configName":"Second","selected":false},{"id":"on","label":"Second on","configId":"second","configName":"Second","selected":true}]}""")
+        val choices = NativeCliProjection.view(state, initial).permissions
+        assertEquals(listOf("off", "off", "on"), choices.map { it.id })
+        assertEquals(listOf("first", "second", "second"), choices.map { it.configId })
+        assertEquals(listOf("First", "Second", "Second"), choices.map { it.configName })
+        assertEquals(listOf(true, false, true), choices.map { it.selected })
+        val legacy = NativeCliProjection.view(JSONObject("""{"permissions":[{"id":"off","label":"Off"}]}"""), initial).permissions.single()
+        assertEquals("", legacy.configId); assertNull(legacy.selected)
+    }
     @Test fun nativePermissionsHaveNoSyntheticProfilesOrSpeed() {
         val s = JSONObject("""{"connected":true,"nativeId":"native","permissions":[],"models":[{"id":"provider/model","label":"Native","efforts":["off","high"],"supportsImages":false}],"capabilities":{"steer":true}}""")
         val view = NativeCliProjection.view(s, initial)
@@ -173,6 +183,32 @@ class NativeCliProjectionTest {
 
         val claudeSnapshot = JSONObject(snapshot.toString()).put("cli", "Claude Code")
         assertEquals("看一下这张图\n\n$converted\n\n$note", NativeCliProjection.view(claudeSnapshot, initial).messages[0].text)
+    }
+
+    @Test fun planAxisSkipPermissionsAndPermissionNoticeProjectCleanlyWithoutStaticNotice() {
+        val defaults = NativeCliProjection.view(JSONObject("""{"notice":"Static bridge intro"}"""), initial)
+        assertNull(defaults.capabilityNotice)
+        assertFalse(defaults.planModeSupported)
+        assertFalse(defaults.planMode)
+        assertFalse(defaults.skipPermissionsActive)
+
+        val dual = NativeCliProjection.view(
+            JSONObject("""{"planModeSupported":true,"planMode":true,"skipPermissionsActive":true,"notice":"Non-permission notice","permissionNotice":"Permissions unavailable"}"""),
+            initial,
+        )
+        assertEquals("Permissions unavailable", dual.capabilityNotice)
+        assertTrue(dual.planModeSupported)
+        assertTrue(dual.planMode)
+        assertTrue(dual.skipPermissionsActive)
+
+        val questionSnapshot = JSONObject("""{"cli":"Kimi Code","messages":[{"id":"th1","role":"tool","kind":"reasoning","text":"Deep reasoning body","status":"completed"}],"requests":[{"id":"ask","title":"Answer","body":"","choices":[{"id":"submit","label":"提交"},{"id":"cancel","label":"终止提问"}],"submitChoice":"submit","skipChoice":"cancel","questions":[{"id":"q_0","header":"Ask测试","prompt":"你看到这个问题了吗？","options":["看到了","没看到"],"optionValues":["opt_0_0","opt_0_1"],"multiple":false,"allowOther":true,"required":true}]}]}""")
+        val projectedView = NativeCliProjection.view(questionSnapshot, initial)
+        assertEquals("思考", projectedView.messages.single().text)
+        assertEquals("Deep reasoning body", projectedView.messages.single().detail)
+        val req = projectedView.requests.single()
+        assertEquals("Answer", req.title)
+        assertEquals(listOf("看到了", "没看到"), req.questions.single().options)
+        assertEquals(listOf("opt_0_0", "opt_0_1"), req.questions.single().optionValues)
     }
 
 }

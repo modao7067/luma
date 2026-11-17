@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import {mkdtemp, mkdir, writeFile, link, rm, stat, lstat, readFile, readdir} from 'node:fs/promises';
-const root = await mkdtemp('/root/native/dsh-atomic-link-');
+import os from 'node:os';
+import path from 'node:path';
+const baseDir = process.argv[2] || process.env.LUMA_PROBE_DIR || os.tmpdir();
+await mkdir(baseDir, {recursive: true});
+const root = await mkdtemp(path.join(baseDir, 'dsh-atomic-link-'));
 const staging = `${root}/staging`, temporary = `${staging}/output.tmp`, published = `${root}/output.txt`;
 await mkdir(staging); await writeFile(temporary, 'owned-payload\n');
 const result = {fixture: root, operations: []};

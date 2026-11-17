@@ -298,7 +298,7 @@ class CodeBuddySession(CodeBuddyProjection):
         try: AcpSession.connect(self)
         finally: self.replaying_history = False
         self.finish_chunk(); self.chunk_kind = self.chunk_id = None
-        self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False, notice=tr("CodeBuddy 使用安全 GUI 接入，不提供同会话原生终端。", "CodeBuddy uses secure GUI attachment without a shared native terminal."),
+        self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False,
             capabilities={**self.data["capabilities"],"steer":True})
         controls=self.config.get("codebuddyControls",{})
         if any(self.data.get(k)!=v for k,v in controls.items()):raise Rejected(tr("CodeBuddy 尚未恢复已确认的会话设置", "CodeBuddy has not restored confirmed session settings"))

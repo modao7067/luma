@@ -1,12 +1,6 @@
 # CLI and plugin icons
 
-Both GUI variants consume these shared Android VectorDrawables. Brand marks identify CLI groups in the session drawer and the existing Profile settings list only. All marks use Material 3 theme tint, not fixed brand colors. A newly added CLI without a mapped asset falls back to the existing terminal symbol.
-
-## Paseo source trace
-
-Inspected Paseo snapshot `fc710be1af0a30be241cc44d8ae81709452aa206` at `packages/app/src/screens/settings/providers-section.tsx`: its provider row calls `useProviderIcon(def.id, serverId)`. `components/provider-icons.ts` resolves built-in React Native SVG components, catalog SVG strings, or runtime provider snapshot SVGs. It does **not** import a runtime brand-icon package. Built-ins live in `components/icons/{codex,claude,opencode,copilot,antigravity,pi,omp}-icon.tsx`; other brands come from `assets/acp-provider-icons.ts` / `data/acp-provider-catalog`.
-
-Paseo's top-level Apache-2.0 license explicitly excludes third-party components. It was therefore not used as blanket permission for brand art. Luma takes the matching monochrome mark family from the independently MIT-licensed Lobe Icons distribution, and pi from its own MIT repository. Paseo's cropped OpenCode viewport and pi pixel mark differ from the current original assets; Luma preserves original proportions rather than copying these crops or assuming provenance.
+These Android VectorDrawables identify CLI groups in the session drawer and Profile settings. All marks use the Material 3 theme tint rather than fixed brand colors. A CLI without a mapped asset uses the terminal symbol. Preserve the original asset proportions and use only the independently licensed sources below when adding or updating artwork.
 
 ## Brand assets
 

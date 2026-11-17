@@ -43,8 +43,8 @@ class ProcessDetailLabelsTest {
         val entity = item("subAgent")
 
         withLocale(Locale.CHINA) {
-            assertEquals("Reasoning", processEntryLabel(reasoning, "Codex"))
-            assertEquals("Thinking", processEntryLabel(reasoning.copy(outcome = "running"), "Codex"))
+            assertEquals("thought", processEntryLabel(reasoning, "Codex"))
+            assertEquals("thought", processEntryLabel(reasoning.copy(outcome = "running"), "Codex"))
             assertEquals("Subagent activity", processEntryLabel(item("subAgentActivity"), "Codex"))
             assertEquals("Compaction", processEntryLabel(item("compaction"), "OpenCode"))
             assertEquals("Tool call", processEntryLabel(item("tool"), "unknown"))
@@ -58,7 +58,7 @@ class ProcessDetailLabelsTest {
             assertEquals("diff", processOutputLanguage(diff))
             assertEquals("shell", processInputLanguage(item("commandExecution"), "Codex"))
             assertEquals("shell", processEntryLabel(item("commandExecution"), "Codex"))
-            assertEquals("Parameters", processInputCaption(item("commandExecution"), "Codex"))
+            assertEquals("shell", processInputCaption(item("commandExecution"), "Codex"))
             assertEquals("", processEntryContext(item("subAgentActivity").copy(text = "子代理活动"), "Codex"))
             assertEquals("", processEntryContext(item("compaction").copy(text = "上下文压缩"), "OpenCode"))
             assertEquals("Spawn subagent", processEntryContext(item("collabAgentToolCall").copy(toolName = "spawnAgent", text = "分派子代理"), "Codex"))
@@ -114,6 +114,8 @@ class ProcessDetailLabelsTest {
         withLocale(Locale.US) {
             assertEquals("2× sub-agent", processGroupCaption(activities))
             assertEquals("2× wait · 1× thought · 2× sub-agent", processGroupCaption(merged))
+            assertEquals("1× thought", processGroupCaption(listOf(reasoning.copy(outcome = "running"))))
+            assertEquals("thought", processEntryLabel(reasoning.copy(outcome = "running"), "Codex"))
             assertEquals(listOf("shell, read, glob, websearch", "thought", "failed"), processGroupSummary(toolLabelsFixture(), "OpenCode").map { it.label })
         }
     }

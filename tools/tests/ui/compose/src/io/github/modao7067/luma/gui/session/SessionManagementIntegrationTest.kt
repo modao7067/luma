@@ -124,6 +124,23 @@ class SessionManagementIntegrationTest {
         assertEquals("antigravity-agy-acp", f.call("""{"action":"list"}""").getJSONObject("nativeProtocols").getJSONArray("Antigravity").getString(0))
     }
 
+    @Test fun explicitKimiProtocolAttachmentSeparatesAcpFallbackFromDefaultWeb() = Fixture().use { f ->
+        val defaultWeb = f.create("kimi-default", "Kimi Code").getString("id")
+        f.record(defaultWeb).threadId = "same-kimi-id"
+        val reusedWeb = f.call("""{"action":"attach","cli":"Kimi Code","cwd":"/work","nativeId":"same-kimi-id","nativeProtocol":"kimi-web-v1"}""")
+        assertTrue(reusedWeb.getBoolean("reused"))
+        assertEquals(defaultWeb, reusedWeb.getJSONObject("session").getString("id"))
+        val attachedAcp = f.call("""{"action":"attach","cli":"Kimi Code","cwd":"/work","nativeId":"same-kimi-id","nativeProtocol":"kimi-acp"}""")
+        assertFalse(attachedAcp.getBoolean("reused"))
+        val acp = attachedAcp.getJSONObject("session").getString("id")
+        assertNotEquals(defaultWeb, acp)
+        assertEquals("same-kimi-id", f.record(acp).threadId)
+        assertEquals("kimi-acp", f.record(acp).nativeProtocol)
+        val reusedAcp = f.call("""{"action":"attach","cli":"Kimi Code","cwd":"/work","nativeId":"same-kimi-id","nativeProtocol":"kimi-acp"}""")
+        assertTrue(reusedAcp.getBoolean("reused"))
+        assertEquals(acp, reusedAcp.getJSONObject("session").getString("id"))
+    }
+
     @Test fun rootExternalAttachRepairsOnlyExplicitFailedReferenceAndPreservesNavigationAndDraft() {
         org.junit.Assume.assumeTrue(io.github.modao7067.luma.gui.GuiProduct.isRoot)
         Fixture().use { f ->

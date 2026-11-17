@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _pl.Path(__file__).resolve().parents if (_p/'toolenv.py').is_file()))); import toolenv
-import argparse,http.server,json,os,pathlib,socket,subprocess,tempfile,threading,time
+import argparse,http.server,json,os,pathlib,shutil,socket,subprocess,tempfile,threading,time
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 class Model(http.server.BaseHTTPRequestHandler):
  requests=[];release=threading.Event();finish_release=threading.Event()
@@ -34,7 +34,7 @@ class Model(http.server.BaseHTTPRequestHandler):
   except (BrokenPipeError,ConnectionResetError):pass
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--codex',default='/root/.codex/packages/app-server-daemon/releases/0.166.0-aarch64-unknown-linux-musl/bin/codex');p.add_argument('--output',type=pathlib.Path,default=ROOT/'verification/gui-subagent-observer-20261104');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
+ p=argparse.ArgumentParser();p.add_argument('--codex',default=os.environ.get('LUMA_TEST_CODEX') or shutil.which('codex') or 'codex');p.add_argument('--output',type=pathlib.Path,default=ROOT/'artifacts/test-runs/subagent-observer');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
  run=pathlib.Path(tempfile.mkdtemp(prefix='production-native-',dir=a.output));home=run/'home';home.mkdir(mode=0o700);work=run/'work';work.mkdir()
  provider=http.server.ThreadingHTTPServer(('127.0.0.1',0),Model);threading.Thread(target=provider.serve_forever,daemon=True).start()
  (home/'config.toml').write_text(f'''model="fixture"

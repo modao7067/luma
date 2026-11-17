@@ -41,6 +41,17 @@ internal class SessionActivityState(record: SessionRecord) {
     var lastTurnCompleted: Boolean = false
         private set
 
+    fun forgetHistory() {
+        everSettled = false
+        wasTurnActive = false
+        knownRequestIds = emptySet()
+        knownAssistantIds = emptySet()
+        lastRequestsRef = null
+        lastMessagesRef = null
+        pendingPostSubmitCompletion = false
+        lastTurnCompleted = false
+    }
+
     fun reconcile(
         record: SessionRecord,
         connected: Boolean,

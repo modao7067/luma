@@ -12,14 +12,14 @@ class ProcessCaptionTest {
         assertEquals("1 次 shell · 1 次 思考", processGroupCaption(listOf(tool, reasoning("succeeded"))))
     }
     @Test fun runningReasoningDoesNotClaimCompletion() {
-        assertEquals("1 次 shell · 思考中", processGroupCaption(listOf(tool, reasoning("running"))))
+        assertEquals("1 次 shell · 1 次 思考", processGroupCaption(listOf(tool, reasoning("running"))))
     }
     @Test fun mixedOutcomesCountOnlySucceededReasoning() {
         val entries = listOf("succeeded", "running", "failed", "cancelled", "").map(::reasoning)
-        assertEquals("1 次 思考 · 思考中", processGroupCaption(entries))
+        assertEquals("5 次 思考", processGroupCaption(entries))
     }
     @Test fun failedCancelledAndUnknownStatesDoNotClaimCompletion() {
-        assertEquals("思考", processGroupCaption(listOf("failed", "cancelled", "").map(::reasoning)))
+        assertEquals("3 次 思考", processGroupCaption(listOf("failed", "cancelled", "").map(::reasoning)))
     }
     @Test fun aSingleReasoningEntryUsesTheRequestedLabels() {
         assertEquals("思考中", reasoningCaption("running"))

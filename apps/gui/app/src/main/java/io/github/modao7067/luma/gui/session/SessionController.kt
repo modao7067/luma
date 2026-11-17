@@ -27,6 +27,7 @@ class SessionController(private val context: Context) : CockpitActions {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val runtime = AgentRuntime(context)
     private val store = SessionStore(context)
+    private val basePricingCatalog by lazy { CodexPricingCatalog.fromAssets(context) }
     private val diagnostics = DeliveryDiagnostics(java.io.File(context.filesDir, "${io.github.modao7067.luma.gui.GuiProduct.agentRuntimePath(environment)}/delivery-events.jsonl"))
     private val commands = SessionCommandStore(java.io.File(context.filesDir, "session-commands.json"))
     private val preferences = context.getSharedPreferences("cockpit-navigation", Context.MODE_PRIVATE)
@@ -170,6 +171,7 @@ class SessionController(private val context: Context) : CockpitActions {
         var hydrating = false
         val buffered = mutableListOf<JSONObject>()
         val hydrationBoundary = HydrationBoundary()
+        val endedTurns = LinkedHashMap<String, String>()
         var models = emptyList<ModelOption>()
         var queueRaw = emptyList<JSONObject>()
         var queueNeedsExplicitStart = false
@@ -201,6 +203,8 @@ class SessionController(private val context: Context) : CockpitActions {
         var tokens = emptyList<Metric>()
         var limits = emptyList<Metric>()
         var rolloutPath: String? = null
+        val tokenPricer = CodexSessionPricer(CodexPricingCatalog.default())
+        val observedQueueIds = hashSetOf<String>()
         var rawScopedSource: List<ConversationItem>? = null
         var rawScopedSessionId: String? = null
         var rawScopedCwd: String? = null
@@ -720,8 +724,11 @@ class SessionController(private val context: Context) : CockpitActions {
         s.nativeCli?.close(); s.nativeCli = null
         s.endpoint = null
         s.hydrating = false
+        s.activity.forgetHistory()
         s.items.clear(); s.nativeToClientId.clear(); s.admitting.clear(); s.deliveryItems.clear(); s.requests.clear(); s.buffered.clear()
-        s.subAgents.clear(); s.subAgentMetadataReads.clear(); s.hydrationBoundary.clear()
+        s.subAgents.clear(); s.subAgentMetadataReads.clear(); s.hydrationBoundary.clear(); s.endedTurns.clear()
+        s.observedQueueIds.clear()
+        s.tokenPricer.reset(); s.tokenPricer.updateCatalog(basePricingCatalog)
         s.models = emptyList(); s.queueRaw = emptyList(); s.tokens = emptyList(); s.limits = emptyList(); s.rolloutPath = null
         s.settingsWaiter?.cancel(); s.settingsWaiter = null; s.settingsExpected = null
         s.idleJob = null
@@ -735,9 +742,12 @@ class SessionController(private val context: Context) : CockpitActions {
         catch (failure: Exception) { s.view = s.view.copy(error = tr("无法保存发送状态，输入已保留：${failure.message}", "Failed to save send state (input preserved): ${failure.message}")) }
     }
     private fun current() = sessions[selected]
-    private fun asyncQuestions(s: Live) = CodexAsyncQuestions.pending(s.items.values,
+    private fun asyncQuestions(s: Live) = CodexAsyncQuestions.pending(
+        s.items.values,
         s.queueRaw.map { CodexProjection.inputText(it.optJSONArray("input") ?: JSONArray()) },
-        s.record.submissions.map { CodexAsyncQuestions.Submission(it.text, it.state) })
+        s.record.submissions.map { CodexAsyncQuestions.Submission(it.text, it.state) },
+        s.record.dismissedAsyncQuestionItems,
+    )
     private fun codexRequests(s: Live) = s.requests.values.map { it.view() } + asyncQuestions(s)
     private fun launch(s: Live? = current(), block: suspend () -> Unit): Job {
         val epoch = s?.generation
@@ -820,7 +830,8 @@ class SessionController(private val context: Context) : CockpitActions {
                     target
                 }
                 val existing = sessions.values.firstOrNull { it.record.environment == environment && it.record.cli == cli && it.record.threadId == nativeId && it.record.externalSocket == externalSocket &&
-                    (cli != "Antigravity" || (it.record.nativeProtocol ?: "antigravity-acp") == request.getString("nativeProtocol")) }
+                    (cli != "Antigravity" || (it.record.nativeProtocol ?: "antigravity-acp") == request.getString("nativeProtocol")) &&
+                    (cli != "Kimi Code" || !request.has("nativeProtocol") || (it.record.nativeProtocol ?: "kimi-web-v1") == request.getString("nativeProtocol")) }
                 val s = existing ?: repair?.also { target ->
                     val previousSocket = target.record.externalSocket; val previousNeedsName = target.record.needsName
                     target.record.externalSocket = externalSocket; target.record.needsName = false
@@ -1048,7 +1059,7 @@ class SessionController(private val context: Context) : CockpitActions {
         if (agent != null && agent != observation.detail.agent) observation.signals.trySend(Unit)
         val streamedChild = agent != null && ((parent.record.cli == "Antigravity" &&
             parent.record.nativeProtocol in setOf("antigravity-cli-stream-json", "antigravity-agy-acp")) ||
-            parent.record.cli == "DeepSeek Harness" || parent.record.cli == "Grok Build")
+            parent.record.cli == "DeepSeek Harness" || parent.record.cli == "Grok Build" || parent.record.cli == "Kimi Code")
         observation.detail = if (streamedChild) NativeCliProjection.streamedSubAgentDetail(agent, observation.detail, parent.models)
             else observation.detail.copy(agent = agent ?: observation.detail.agent,
                 loading = if (!parent.view.connected) parent.view.loading else observation.detail.loading)
@@ -1385,7 +1396,7 @@ class SessionController(private val context: Context) : CockpitActions {
         currentCoroutineContext().ensureActive()
         if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
         s.endpoint = endpoint
-        s.rpc?.close(); s.deltaPublishJob?.cancel(); s.deltaPublishJob = null; s.requests.clear(); s.buffered.clear(); s.hydrationBoundary.clear(); s.subAgentMetadataReads.clear()
+        s.rpc?.close(); s.deltaPublishJob?.cancel(); s.deltaPublishJob = null; s.requests.clear(); s.buffered.clear(); s.hydrationBoundary.clear(); s.endedTurns.clear(); s.subAgentMetadataReads.clear()
         val rpc = CodexRpc(endpoint.url, endpoint.authToken, transport = runtime.codexTransport(endpoint),
             onEvent = { message -> scope.launch { if (s.observing && s.generation == epoch) {
                 if (s.hydrating) { s.buffered.add(message); return@launch }
@@ -1442,7 +1453,8 @@ class SessionController(private val context: Context) : CockpitActions {
             s.record.effort = resumed.stringOrNull("reasoningEffort").orEmpty()
             persist()
             val tier = resumed.stringOrNull("serviceTier").orEmpty()
-            s.view = s.view.copy(permission = resumed.optJSONObject("activePermissionProfile")?.optString("id").orEmpty(), speed = tier)
+            val resumedPlan = resumed.optJSONObject("collaborationMode")?.optString("mode") == "plan"
+            s.view = s.view.copy(permission = resumed.optJSONObject("activePermissionProfile")?.optString("id").orEmpty(), speed = tier, planMode = resumedPlan)
             hydrate(s)
             val models = mutableListOf<ModelOption>(); var cursor: String? = null
             do {
@@ -1458,6 +1470,12 @@ class SessionController(private val context: Context) : CockpitActions {
                 } while (next != null)
                 s.view = s.view.copy(permissions = options, capabilityNotice = null)
             } catch (e: RpcRejected) { s.view = s.view.copy(permissions = emptyList(), capabilityNotice = tr("当前 CLI 未提供可选择的权限配置", "No selectable permission configurations provided by CLI")) }
+            val planSupported = try {
+                rpc.request("collaborationMode/list", JSONObject())
+                    .optJSONArray("data")?.objects().orEmpty()
+                    .any { it.optString("mode") == "plan" }
+            } catch (e: RpcRejected) { false }
+            s.view = s.view.copy(planModeSupported = planSupported, planMode = if (planSupported) s.view.planMode else false)
             refreshQueue(s)
             currentCoroutineContext().ensureActive()
             if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
@@ -1470,7 +1488,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     val snap = s.items[s.nativeToClientId[itemId] ?: itemId]
                     if (toolDetail) snap?.detail.orEmpty() else snap?.text.orEmpty()
                 }
-                replay.forEach { e -> event(s, e) }
+                replay.forEach { e -> event(s, e, replaying = true) }
                 s.hydrationBoundary.clear()
                 reconcileCodexUnconfirmedIdle(s)
             }
@@ -1526,13 +1544,33 @@ class SessionController(private val context: Context) : CockpitActions {
         if (SessionTitlePolicy.history(s.record, s.items.values, ready = true)) persist()
         val turnsBefore = s.buffered.size
         val turns = rpc.request("thread/turns/list", obj("threadId" to id, "limit" to 1, "sortDirection" to "desc", "itemsView" to "notLoaded"))
+        val turnsAfter = s.buffered.size
         s.hydrationBoundary.turns(turnsBefore, id)
-        val last = turns.optJSONArray("data")?.optJSONObject(0)
+        val turnRows = turns.optJSONArray("data")?.objects().orEmpty()
+        val last = turnRows.firstOrNull()
+        val activeTurnId = last?.takeIf { it.optString("status") == "inProgress" }?.optString("id")
         s.queueNeedsExplicitStart = last?.optString("status") in setOf("interrupted", "failed")
-        s.view = s.view.copy(activeTurnId = last?.takeIf { it.optString("status") == "inProgress" }?.optString("id"), stopping = false)
-        if (s.tokens.isEmpty() && !s.rolloutPath.isNullOrBlank()) {
+        recordHydratedEndedTurns(s, id, activeTurnId, turnRows, turnsBefore, turnsAfter)
+        s.view = s.view.copy(activeTurnId = activeTurnId, stopping = false)
+        for (item in s.items.values.filter { it.kind == "reasoning" && it.outcome == "unknown" }) {
+            if (activeTurnId != null && item.turnId == activeTurnId) s.items[item.id] = item.copy(outcome = "running")
+            else if (item.detail.isBlank()) s.items.remove(item.id)
+            else s.items[item.id] = item.copy(outcome = s.endedTurns[item.turnId] ?: "succeeded")
+        }
+        val activeModel = s.record.model.ifBlank { s.view.summary.model }
+        s.tokenPricer.updateCatalog(basePricingCatalog)
+        val pricingPayload = runtime.readCodexSessionPricing(s.record.environment, s.rolloutPath)
+        if (pricingPayload != null) {
+            val state = s.tokenPricer.reconcileSessionPricing(pricingPayload, activeModel, s.view.speed)
+            val hasUsage = pricingPayload.optJSONObject("rollout")?.optBoolean("hasUsage") == true || state.total != null || state.last != null
+            if (hasUsage) {
+                s.tokens = CodexCapabilities.tokenMetrics(state, activeModel)
+                s.view = s.view.copy(metrics = s.tokens)
+            }
+        } else if (s.tokens.isEmpty() && !s.rolloutPath.isNullOrBlank()) {
             runtime.readCodexRolloutTokenUsage(s.record.environment, s.rolloutPath!!)?.let { info ->
-                s.tokens = CodexCapabilities.tokenMetrics(info, s.record.model.ifBlank { s.view.summary.model }, s.view.speed)
+                val state = s.tokenPricer.applyRolloutBaseline(info, activeModel, s.view.speed)
+                s.tokens = CodexCapabilities.tokenMetrics(state, activeModel)
                 s.view = s.view.copy(metrics = s.tokens)
             }
         }
@@ -1591,6 +1629,21 @@ class SessionController(private val context: Context) : CockpitActions {
             cid != null && (s.items[cid]?.role == "user" || cid in idleDirectIds)
         }
         s.queueRaw = waiting
+        var dismissedByQueue = false
+        for (queued in linked) {
+            val qid = queued.stringOrNull("id")?.takeIf(String::isNotBlank) ?: continue
+            if (s.observedQueueIds.add(qid)) {
+                val cid = queued.stringOrNull("clientUserMessageId")
+                val localKnownAccepted = cid != null && SubmissionLedger.find(s.record, cid)?.state == "accepted"
+                val text = CodexProjection.inputText(queued.optJSONArray("input") ?: JSONArray())
+                if (!localKnownAccepted && CodexAsyncQuestions.replies(text).isEmpty()) {
+                    dismissedByQueue = true
+                }
+            }
+        }
+        if (dismissedByQueue && dismissOpenAsyncQuestions(s)) {
+            persist()
+        }
         s.view = s.view.copy(queue = waiting.map { QueueEntry(it.getString("id"), CodexAsyncQuestions.displayReply(CodexProjection.inputText(it.optJSONArray("input") ?: JSONArray())), tr("尚未执行", "Pending"), it.optJSONArray("input")?.objects().orEmpty().filter { input -> input.optString("type") == "text" }.joinToString("\n") { input -> input.optString("text") },
             clientUserMessageId = it.stringOrNull("clientUserMessageId")) })
         linked.mapNotNull { it.stringOrNull("clientUserMessageId") }.forEach { id ->
@@ -1619,7 +1672,17 @@ class SessionController(private val context: Context) : CockpitActions {
             clearSubmission(s, id)
         }
     }
+    private fun dismissOpenAsyncQuestions(s: Live): Boolean {
+        val openIds = asyncQuestions(s).map { it.id.removePrefix("codex-async:") }.filter { it.isNotBlank() }
+        if (openIds.isEmpty()) return false
+        return s.record.dismissedAsyncQuestionItems.addAll(openIds)
+    }
     private fun clearSubmission(s: Live, id: String) {
+        val prior = SubmissionLedger.find(s.record, id)
+        if (!s.hydrating && prior != null && prior.state !in setOf("accepted", "rejected", "cancelled") &&
+            CodexAsyncQuestions.replies(prior.text).isEmpty()) {
+            dismissOpenAsyncQuestions(s)
+        }
         SubmissionLedger.accepted(s.record, titleEligible = !s.hydrating, id = id); persist()
     }
     private fun publishCodexEvent(s: Live, message: JSONObject, forceImmediate: Boolean = false) {
@@ -1648,7 +1711,7 @@ class SessionController(private val context: Context) : CockpitActions {
             }
         }
     }
-    private fun event(s: Live, message: JSONObject) {
+    private fun event(s: Live, message: JSONObject, replaying: Boolean = false) {
         val method = message.optString("method"); val p = message.optJSONObject("params") ?: JSONObject()
         val thread = p.stringOrNull("threadId") ?: p.optJSONObject("thread")?.stringOrNull("id")
         s.subAgents.event(message)
@@ -1674,12 +1737,22 @@ class SessionController(private val context: Context) : CockpitActions {
         when (method) {
             "thread/settings/updated" -> p.optJSONObject("threadSettings")?.let { settings ->
                 s.record.model = settings.getString("model"); s.record.effort = settings.stringOrNull("effort").orEmpty()
-                s.view = s.view.copy(permission = settings.optJSONObject("activePermissionProfile")?.optString("id").orEmpty(), speed = settings.stringOrNull("serviceTier").orEmpty())
+                val nextPlan = if (settings.has("collaborationMode") && !settings.isNull("collaborationMode")) {
+                    settings.optJSONObject("collaborationMode")?.optString("mode") == "plan"
+                } else s.view.planMode
+                s.view = s.view.copy(
+                    permission = settings.optJSONObject("activePermissionProfile")?.optString("id").orEmpty(),
+                    speed = settings.stringOrNull("serviceTier").orEmpty(),
+                    planMode = if (s.view.planModeSupported) nextPlan else false,
+                )
                 persist()
                 if (NativeSettings.matches(s.settingsExpected, settings)) s.settingsWaiter?.complete(settings)
             }
             "thread/tokenUsage/updated" -> p.optJSONObject("tokenUsage")?.let {
-                s.tokens = CodexCapabilities.tokenMetrics(it, s.record.model.ifBlank { s.view.summary.model }, s.view.speed); s.view = s.view.copy(metrics = s.tokens)
+                val activeModel = s.record.model.ifBlank { s.view.summary.model }
+                val state = if (replaying) s.tokenPricer.onReplayedTokenUsage(it, activeModel, s.view.speed)
+                    else s.tokenPricer.onTokenUsage(it, activeModel, s.view.speed)
+                s.tokens = CodexCapabilities.tokenMetrics(state, activeModel); s.view = s.view.copy(metrics = s.tokens)
             }
             "account/rateLimits/updated" -> {
                 s.limits = CodexCapabilities.limitMetrics(p)
@@ -1692,15 +1765,21 @@ class SessionController(private val context: Context) : CockpitActions {
                 s.idleConfirmed = false
                 s.userStoppedTurn = false
                 s.queueNeedsExplicitStart = false
-                val turn = p.getJSONObject("turn"); s.view = s.view.copy(activeTurnId = turn.getString("id"), stopping = false)
-                turn.optJSONArray("items")?.objects()?.forEach { putItem(s, it, turnId = turn.getString("id")) }
+                val turn = p.getJSONObject("turn"); val turnId = turn.getString("id")
+                s.endedTurns.remove(turnId)
+                s.view = s.view.copy(activeTurnId = turnId, stopping = false)
+                turn.optJSONArray("items")?.objects()?.forEach { putItem(s, it, completed = false, turnId = turnId) }
             }
             "turn/completed" -> {
                 s.idleConfirmed = true
-                val turn = p.getJSONObject("turn")
-                turn.optJSONArray("items")?.objects()?.forEach { putItem(s, it, turnId = turn.getString("id")) }
-                if (s.view.activeTurnId == turn.optString("id")) s.view = s.view.copy(activeTurnId = null, stopping = false)
-                if (s.view.activeTurnId == null) s.queueNeedsExplicitStart = turn.optString("status") in setOf("interrupted", "failed")
+                val turn = p.getJSONObject("turn"); val turnId = turn.getString("id")
+                val failedOrInterrupted = turn.optString("status") in setOf("interrupted", "failed")
+                val terminal = if (failedOrInterrupted) "cancelled" else "succeeded"
+                if (turnId.isNotEmpty()) recordEndedTurn(s, turnId, terminal)
+                turn.optJSONArray("items")?.objects()?.forEach { putItem(s, it, turnId = turnId, endedOutcome = terminal) }
+                if (turnId.isNotEmpty()) settleTurnReasoning(s, turnId, terminal)
+                if (s.view.activeTurnId == turnId) s.view = s.view.copy(activeTurnId = null, stopping = false)
+                if (s.view.activeTurnId == null) s.queueNeedsExplicitStart = failedOrInterrupted
                 turn.optJSONObject("error")?.let { s.view = s.view.copy(error = CodexProjection.error(it)) }
             }
             "item/started", "item/completed" -> p.optJSONObject("item")?.let { putItem(s, it, method == "item/completed", p.optString("turnId")) }
@@ -1709,14 +1788,17 @@ class SessionController(private val context: Context) : CockpitActions {
                 val id = s.nativeToClientId[rawId] ?: rawId
                 val assistant = method.contains("agentMessage") || method.contains("plan")
                 val reasoning = method.contains("reasoning")
+                val turnId = p.optString("turnId")
+                val endedOutcome = if (reasoning) s.endedTurns[turnId] else null
                 val old = s.items[id]
                     ?: ConversationItem(id, if (assistant) "assistant" else "tool",
                         text = if (reasoning) tr("推理摘要", "Reasoning summary") else "",
                         kind = when { reasoning -> "reasoning"; method.contains("commandExecution") -> "commandExecution"; method.contains("plan") -> "plan"; else -> "agentMessage" },
-                        turnId = p.optString("turnId"), outcome = "running")
+                        turnId = turnId, outcome = endedOutcome ?: "running")
                 val delta = p.optString("delta")
                 if (delta.isNotEmpty()) {
-                    s.items[id] = if (old.role == "tool") old.copy(detail = old.detail + delta) else old.copy(text = old.text + delta)
+                    val next = if (old.role == "tool") old.copy(detail = old.detail + delta) else old.copy(text = old.text + delta)
+                    s.items[id] = if (endedOutcome != null && next.outcome !in terminalOutcomes) next.copy(outcome = endedOutcome) else next
                 }
             }
             "thread/name/updated" -> if (p.has("threadName")) {
@@ -1725,7 +1807,59 @@ class SessionController(private val context: Context) : CockpitActions {
             "error" -> s.view = s.view.copy(error = CodexProjection.error(p.optJSONObject("error") ?: p))
         }
     }
-    private fun putItem(s: Live, item: JSONObject, completed: Boolean? = null, turnId: String = "") {
+    private val terminalOutcomes = setOf("succeeded", "failed", "cancelled")
+    private fun recordEndedTurn(s: Live, turnId: String, terminal: String) {
+        if (turnId.isEmpty()) return
+        s.endedTurns.remove(turnId)
+        s.endedTurns[turnId] = terminal
+        while (s.endedTurns.size > 256) s.endedTurns.remove(s.endedTurns.keys.first())
+    }
+    private fun recordHydratedEndedTurns(
+        s: Live,
+        threadId: String,
+        activeTurnId: String?,
+        turnRows: List<JSONObject>,
+        turnsBefore: Int,
+        turnsAfter: Int,
+    ) {
+        for (item in s.items.values) {
+            if (item.turnId.isNotEmpty() && item.turnId != activeTurnId && item.turnId !in s.endedTurns) {
+                recordEndedTurn(s, item.turnId, "succeeded")
+            }
+        }
+        for (index in 0 until minOf(turnsAfter, s.buffered.size)) {
+            val msg = s.buffered[index]
+            if (msg.has("id")) continue
+            val p = msg.optJSONObject("params") ?: continue
+            val msgThread = p.stringOrNull("threadId") ?: p.optJSONObject("thread")?.stringOrNull("id")
+            if (msgThread != null && msgThread != threadId) continue
+            if (msg.optString("method") == "turn/completed") {
+                val turn = p.optJSONObject("turn") ?: continue
+                val tid = turn.optString("id")
+                if (tid.isNotEmpty() && tid != activeTurnId) {
+                    recordEndedTurn(s, tid, if (turn.optString("status") in setOf("interrupted", "failed")) "cancelled" else "succeeded")
+                }
+            } else if (index < turnsBefore) {
+                val tid = p.stringOrNull("turnId") ?: p.optJSONObject("turn")?.stringOrNull("id").orEmpty()
+                if (tid.isNotEmpty() && tid != activeTurnId && tid !in s.endedTurns) {
+                    recordEndedTurn(s, tid, "succeeded")
+                }
+            }
+        }
+        for (turn in turnRows) {
+            val tid = turn.optString("id")
+            val status = turn.optString("status")
+            if (tid.isNotEmpty() && status != "inProgress") {
+                recordEndedTurn(s, tid, if (status in setOf("interrupted", "failed")) "cancelled" else "succeeded")
+            }
+        }
+    }
+    private fun settleTurnReasoning(s: Live, turnId: String, terminal: String) {
+        for (item in s.items.values.filter { it.kind == "reasoning" && it.turnId == turnId && it.outcome !in terminalOutcomes }) {
+            if (item.detail.isBlank()) s.items.remove(item.id) else s.items[item.id] = item.copy(outcome = terminal)
+        }
+    }
+    private fun putItem(s: Live, item: JSONObject, completed: Boolean? = null, turnId: String = "", endedOutcome: String? = null) {
         val nativeId = item.stringOrNull("id")
         val isUser = item.optString("type") == "userMessage"
         val explicitClient = if (isUser) CodexProjection.clientMessageId(item)?.takeIf { it.isNotBlank() } else null
@@ -1736,19 +1870,26 @@ class SessionController(private val context: Context) : CockpitActions {
         val previous = canonicalHint?.let(s.items::get) ?: nativeId?.let(s.items::get)
         val raw = CodexProjection.item(item, previous)
         val canonicalId = canonicalHint ?: raw.id
-        val entry = raw.copy(
-            id = canonicalId,
-            outcome = if (raw.outcome != "unknown" || completed == null) raw.outcome else if (completed) "succeeded" else "running",
-        )
         val ownerTurn = turnId.ifEmpty { previous?.turnId.orEmpty() }
-        val finalEntry = entry.copy(turnId = ownerTurn)
+        val turnTerminal = endedOutcome ?: if (raw.kind == "reasoning") s.endedTurns[ownerTurn] else null
+        val itemCompleted = if (!item.isNull("completedAtMs")) true else completed
+        if (raw.kind == "reasoning" && turnTerminal != null && itemCompleted != true && previous == null && raw.detail.isBlank()) return
+        val resolvedOutcome = when {
+            raw.outcome != "unknown" -> raw.outcome
+            itemCompleted == true -> "succeeded"
+            previous?.outcome in terminalOutcomes -> previous!!.outcome
+            turnTerminal != null -> turnTerminal
+            itemCompleted == false -> "running"
+            else -> previous?.outcome ?: "unknown"
+        }
+        val finalEntry = raw.copy(id = canonicalId, outcome = resolvedOutcome, turnId = ownerTurn)
         if (!nativeId.isNullOrBlank() && nativeId != canonicalId && s.items.containsKey(nativeId)) {
             s.items.replaceKeyInPlace(nativeId, canonicalId, finalEntry)
         } else {
             s.items[canonicalId] = finalEntry
         }
         s.subAgents.item(item, ownerTurn); refreshSubAgentMetadata(s); confirmSubmission(s, item)
-        if (entry.role == "user") applyQueue(s, s.queueRaw)
+        if (finalEntry.role == "user") applyQueue(s, s.queueRaw)
         if (SessionTitlePolicy.history(s.record, s.items.values, ready = !s.hydrating)) persist()
     }
 
@@ -1918,6 +2059,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 onResponse = { response ->
                     reconcile = true
                     clearSubmission(s, id)
+                    publish()
                     val idleDirect = turn == null && !resumeStoppedQueue && !s.queueNeedsExplicitStart &&
                         SubmissionLedger.find(s.record, id)?.queuePresentation == false
                     response.optJSONObject("queuedSubmission")?.let { queued ->
@@ -2172,11 +2314,17 @@ class SessionController(private val context: Context) : CockpitActions {
             s.record.queueTransfer = null; persist(); if (s.view.connected) refreshQueue(s)
         }
     }
+    private fun codexCollaborationMode(mode: String, model: String, effort: String): JSONObject =
+        obj("mode" to mode, "settings" to obj("model" to model, "reasoning_effort" to if (effort.isBlank()) JSONObject.NULL else effort, "developer_instructions" to JSONObject.NULL))
     override fun configure(model: String, effort: String) {
         val s = current() ?: return
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.configure(obj("model" to model, "effort" to effort)); return }
         if (s.record.cli == "OpenCode") { s.openCode?.configure(model, effort); return }
-        configureNative(obj("model" to model).apply { if (effort.isNotEmpty()) put("effort", effort) }) { live ->
+        val params = obj("model" to model).apply {
+            if (effort.isNotEmpty()) put("effort", effort)
+            if (s.view.planModeSupported && s.view.planMode) put("collaborationMode", codexCollaborationMode("plan", model, effort))
+        }
+        configureNative(params) { live ->
             val option = live.models.firstOrNull { it.id == model } ?: error(tr("该模型不在服务提供的列表中", "Model is not in service catalog"))
             check(effort.isEmpty() || effort in option.efforts) { tr("该模型不支持此推理强度", "Reasoning effort not supported by this model") }
         }
@@ -2191,9 +2339,19 @@ class SessionController(private val context: Context) : CockpitActions {
         launch(s) {
             try { s.limits = CodexCapabilities.limitMetrics(s.rpc!!.request("account/rateLimits/read", JSONObject())) }
             catch (e: RpcRejected) { s.limits = emptyList() }
-            if (s.tokens.isEmpty() && !s.rolloutPath.isNullOrBlank()) {
+            val activeModel = s.record.model.ifBlank { s.view.summary.model }
+            s.tokenPricer.updateCatalog(basePricingCatalog)
+            val pricingPayload = runtime.readCodexSessionPricing(s.record.environment, s.rolloutPath)
+            if (pricingPayload != null) {
+                val state = s.tokenPricer.reconcileSessionPricing(pricingPayload, activeModel, s.view.speed)
+                val hasUsage = pricingPayload.optJSONObject("rollout")?.optBoolean("hasUsage") == true || state.total != null || state.last != null
+                if (hasUsage) {
+                    s.tokens = CodexCapabilities.tokenMetrics(state, activeModel)
+                }
+            } else if (s.tokens.isEmpty() && !s.rolloutPath.isNullOrBlank()) {
                 runtime.readCodexRolloutTokenUsage(s.record.environment, s.rolloutPath!!)?.let { info ->
-                    s.tokens = CodexCapabilities.tokenMetrics(info, s.record.model.ifBlank { s.view.summary.model }, s.view.speed)
+                    val state = s.tokenPricer.applyRolloutBaseline(info, activeModel, s.view.speed)
+                    s.tokens = CodexCapabilities.tokenMetrics(state, activeModel)
                 }
             }
             s.view = s.view.copy(metrics = s.tokens)
@@ -2204,7 +2362,9 @@ class SessionController(private val context: Context) : CockpitActions {
         if (s.record.cli in CliCatalog.bridged) {
             val body = JSONObject()
             if (params.has("permissions")) body.put("permission", params.getString("permissions"))
+            if (params.has("permissionConfigId")) body.put("permissionConfigId", params.getString("permissionConfigId"))
             if (params.has("serviceTier")) body.put("speed", params.optString("serviceTier", "default"))
+            if (params.has("planMode")) body.put("planMode", params.getBoolean("planMode"))
             s.nativeCli?.configure(body); return
         }
         if (s.record.cli == "OpenCode") { s.view = s.view.copy(error = tr("OpenCode 未提供此设置选项", "Setting not supported by OpenCode")); publish(); return }
@@ -2225,8 +2385,37 @@ class SessionController(private val context: Context) : CockpitActions {
             }
         }
     }
-    override fun configurePermission(id: String) = configureNative(obj("permissions" to id)) { s ->
-        check(s.view.permissions.any { it.id == id }) { tr("CLI 未允许此权限配置", "Permission mode not allowed by CLI") }
+    override fun configurePermission(id: String) {
+        val s = current() ?: return
+        if (s.record.cli == "OpenCode") {
+            if (SubmissionLedger.pending(s.record)) {
+                s.view = s.view.copy(error = tr("请在任务与队列结束后修改权限模式", "Wait for active turn and queue to finish before changing permission mode"))
+                publish()
+                return
+            }
+            s.openCode?.configurePermission(id)
+            return
+        }
+        configureNative(obj("permissions" to id)) { live ->
+            check(live.view.permissions.any { it.id == id }) { tr("CLI 未允许此权限配置", "Permission mode not allowed by CLI") }
+        }
+    }
+    override fun configurePermissionGroup(configId: String, id: String) = configureNative(obj("permissions" to id, "permissionConfigId" to configId)) { s ->
+        check(s.view.permissions.any { it.id == id && it.configId == configId && configId.isNotBlank() }) { tr("CLI 未提供此模式组", "Mode group not provided by CLI") }
+    }
+    override fun configurePlanMode(enabled: Boolean) {
+        val s = current() ?: return
+        if (s.record.cli in CliCatalog.bridged) {
+            configureNative(obj("planMode" to enabled)) {}
+            return
+        }
+        if (s.record.cli == "OpenCode") { s.view = s.view.copy(error = tr("OpenCode 未提供此设置选项", "Setting not supported by OpenCode")); publish(); return }
+        val model = s.record.model.ifBlank { s.view.summary.model }
+        val effort = s.record.effort.ifBlank { s.view.effort }
+        configureNative(obj("collaborationMode" to codexCollaborationMode(if (enabled) "plan" else "default", model, effort))) { live ->
+            check(live.view.planModeSupported) { tr("当前 CLI 未提供独立规划模式切换", "Independent Plan mode switching is not supported by CLI") }
+            check(model.isNotBlank()) { tr("请先选择模型后再切换规划模式", "Select a model before switching Plan mode") }
+        }
     }
     override fun configureSpeed(id: String) = configureNative(obj("serviceTier" to if (id == "default") JSONObject.NULL else id)) { s ->
         check(s.models.find { it.id == s.record.model }?.speeds?.any { it.id == id } == true) { tr("该模型未声明此速度选项", "Speed option not declared for this model") }

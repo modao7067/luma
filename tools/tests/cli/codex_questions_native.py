@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _pl.Path(__file__).resolve().parents if (_p/'toolenv.py').is_file()))); import toolenv
-import argparse, fcntl, http.server, json, os, pathlib, pty, re, socket, struct, subprocess, tempfile, termios, threading, time, urllib.parse
+import argparse, fcntl, http.server, json, os, pathlib, pty, re, shutil, socket, struct, subprocess, tempfile, termios, threading, time, urllib.parse
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 class Tui:
  def __init__(self,fixture,tid):
@@ -121,5 +121,5 @@ trust_level="trusted"
  summary={'transport':transport,'version':subprocess.check_output([args.codex,'--version'],text=True).strip(),'gradleExit':result.returncode,'modelRequests':len(Fixture.requests),'scope':'Official owner/TUI and production Kotlin controller; isolated HOME and local fake provider only'}
  (out/'result.json').write_text(json.dumps(summary,indent=2));print(out);print(json.dumps(summary));assert result.returncode==0,'See '+str(out/'gradle.log')
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--codex',default='/root/.codex/packages/app-server-daemon/releases/0.166.0-aarch64-unknown-linux-musl/bin/codex');p.add_argument('--transport',choices=['unix','ws'],default='unix');p.add_argument('--local-tests',action='store_true');p.add_argument('--output',type=pathlib.Path,default=ROOT/'verification/gui-codex-questions-20261104');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True);run(a,a.transport)
+ p=argparse.ArgumentParser();p.add_argument('--codex',default=os.environ.get('LUMA_TEST_CODEX') or shutil.which('codex') or 'codex');p.add_argument('--transport',choices=['unix','ws'],default='unix');p.add_argument('--local-tests',action='store_true');p.add_argument('--output',type=pathlib.Path,default=ROOT/'artifacts/test-runs/codex-questions');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True);run(a,a.transport)
 if __name__=='__main__':main()

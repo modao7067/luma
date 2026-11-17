@@ -186,7 +186,7 @@ class AgyTests(unittest.TestCase):
         s=self.connect();a=list(map(json.loads,self.log.read_text().splitlines()))[-1]
         self.assertEqual(a,['--input-format','stream-json','--output-format','stream-json','--add-dir',str(self.root),'--disable-slash-commands','--dangerously-skip-permissions'])
         self.assertEqual(s.data['permission'],FULL_ACCESS);self.assertEqual(s.data['notice'],'')
-        self.assertEqual(s.data['permissions'],[{'id':FULL_ACCESS,'label':tr('全权限（跳过审批）','Full access (skip approvals)')}])
+        self.assertEqual(s.data['permissions'],[{'id':FULL_ACCESS,'label':'Always proceed'}])
         self.assertFalse(any(s.data['capabilities'][k] for k in ('queue','steer','images','skills','compact','rename')))
         self.assertFalse(s.pending_requests)
 

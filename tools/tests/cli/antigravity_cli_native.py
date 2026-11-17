@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import resource
+import shutil
 import signal
 import threading
 import time
@@ -18,8 +19,8 @@ from luma_cli.antigravity_cli import AntigravityCliSession, PROTOCOL
 from luma_cli.server import Manager
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--agy',type=pathlib.Path,default=pathlib.Path('/root/.local/bin/agy'))
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--agy',type=pathlib.Path,default=pathlib.Path(os.environ.get('LUMA_TEST_AGY') or shutil.which('agy') or 'agy'))
     parser.add_argument('--output',type=pathlib.Path,required=True)
     args=parser.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     for n in ('home','workspace','tmp'):(out/n).mkdir(mode=0o700)

@@ -1033,7 +1033,7 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             peer.close(); raise Rejected(tr("agy 在初始化后退出，请在终端核对原生登录与配置", "agy exited after initialization; verify native sign-in and config in terminal"))
         self.config["model"] = model; self.save()
         self.update(connected=True, running=False, model=self.ready.get("model") or "", effort="", notice="",
-            permission=FULL_ACCESS, permissions=[{"id": FULL_ACCESS, "label": tr("全权限（跳过审批）", "Full access (skip approvals)")}],
+            permission=FULL_ACCESS, permissions=[{"id": FULL_ACCESS, "label": "Always proceed"}],
             historySource="luma-observed", historyReady=True,
             capabilities={"queue": False, "steer": False, "stop": True, "images": False,
                           "skills": False, "compact": False, "rename": False})

@@ -11,7 +11,7 @@ class AntigravityPresentationFixesTest {
 
     @Test fun tableCellResourceLinksStayInlineWhileParagraphsKeepCards() {
         val table = freezeMarkdownNode(parser.parse(
-            "| 产品 | 模块 |\n|---|---|\n| Luma GUI | [build.gradle](file:///workspace/luma/apps/gui/app/build.gradle) |\n"
+            "| 产品 | 模块 |\n|---|---|\n| Luma GUI | [build.gradle](file:///workspace/project/apps/gui/app/build.gradle) |\n"
         )).children.single()
         val cell = table.children.flatMap { it.children }.flatMap { it.children }
             .first { c -> c.children.any { it.kind == MarkdownKind.LINK } }
@@ -20,7 +20,7 @@ class AntigravityPresentationFixesTest {
         val image = freezeMarkdownNode(parser.parse("| a |\n|---|\n| ![x](file:///tmp/x.png) |\n")).children.single()
         val imageCell = image.children.flatMap { it.children }.flatMap { it.children }.last()
         assertEquals(1, markdownImages(imageCell, resourceLinks = false).size)
-        val paragraph = freezeMarkdownNode(parser.parse("[README.md](file:///workspace/luma/README.md)"))
+        val paragraph = freezeMarkdownNode(parser.parse("[README.md](file:///workspace/project/README.md)"))
         assertEquals(1, markdownImages(paragraph).size)
     }
 
@@ -87,7 +87,7 @@ class AntigravityPresentationFixesTest {
     @Test fun readableTextFilesClassifyAsText() {
         listOf("build.gradle", "settings.gradle", "gradle.properties", "Makefile", "Dockerfile", ".gitignore", "gradlew",
             "CMakeLists.txt", "LICENSE", "Cargo.lock", "app.vue", "main.swift", "x.ts", "index.html", "a.json", "README.md",
-            "/workspace/luma/apps/gui/app/build.gradle").forEach {
+            "/workspace/project/apps/gui/app/build.gradle").forEach {
             assertTrue(it, MediaSourcePolicy.isText(MediaSourcePolicy.mime(it)))
         }
         listOf("a.png", "a.pdf", "a.zip", "a.apk", "a.mp4", "a.bin", "noext", "a.svg").forEach {

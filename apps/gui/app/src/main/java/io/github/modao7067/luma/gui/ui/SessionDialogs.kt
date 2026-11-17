@@ -214,7 +214,7 @@ internal fun FilePreviewScreen(preview: FilePreview, actions: CockpitActions, pr
                             preview.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
                             preview.text.isEmpty() -> Text(if (preview.path.contains("diff", true)) tr("没有可显示的差异。", "No diff to display.") else tr("文件为空。", "File is empty."), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             filePreviewIsMarkdown(preview) -> ConversationTypography { NativeMarkdown(preview.text, actions::previewFile) }
-                            else -> CodeFileViewer(preview.text, if (preview.path.contains("diff", true)) "diff" else preview.path.substringAfterLast('.', ""))
+                            else -> CodeFileViewer(preview.text, if (preview.path.contains("diff", true)) "diff" else resolveFileCodeLanguage(preview.path, preview.text))
                         }
                     }
                     SnackbarHost(saveFeedback, Modifier.align(Alignment.BottomCenter).padding(padding).padding(16.dp))
@@ -235,6 +235,7 @@ internal fun CodeFileViewer(
     val lineCount = remember(code) { if (code.isEmpty()) 1 else code.count { it == '\n' } + 1 }
     val lineNumbers = remember(lineCount) { (1..lineCount).joinToString("\n") }
     val codeStyle = MaterialTheme.typography.bodyMedium.copy(
+        color = colors.onSurface,
         fontFamily = terminalFont(),
         fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
         lineHeight = 22.sp,
@@ -251,7 +252,7 @@ internal fun CodeFileViewer(
                 Text(
                     text = lineNumbers,
                     style = codeStyle.copy(
-                        color = colors.onSurfaceVariant.copy(alpha = 0.40f),
+                        color = colors.onSurfaceVariant.copy(alpha = 0.55f),
                         textAlign = TextAlign.End,
                     ),
                     modifier = Modifier.padding(end = 16.dp),

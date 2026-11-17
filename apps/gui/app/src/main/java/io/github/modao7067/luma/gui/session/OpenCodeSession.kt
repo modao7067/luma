@@ -36,6 +36,8 @@ internal class OpenCodeSession(
     private var view = SessionView(SessionSummary(record.id, record.title, record.environment, record.cwd, cli = "OpenCode"))
     private var models = emptyList<ModelOption>()
     private var nativeModels = JSONArray()
+    private var nativeAgents = JSONArray()
+    private var catalogInitialized = false
     private var nativeSession = JSONObject()
     private val history = linkedMapOf<String, JSONObject>()
     private var queue = JSONArray()
@@ -284,6 +286,7 @@ internal class OpenCodeSession(
                     val target = runtime.connectOpenCode(record.environment)
                     if (lifecycle != attempt) throw CancellationException(tr("界面连接已取消", "UI connection cancelled"))
                     client?.close()
+                    catalogInitialized = false
                     return OpenCodeClient(target.url, target.authToken!!).also { endpoint = target; client = it }
                 }
                 synchronizer = OpenCodeSync(scope, streamConnected = { client?.connected == true },
@@ -329,6 +332,11 @@ internal class OpenCodeSession(
     private suspend fun loadModels() {
         nativeModels = client!!.call("/api/model?location[directory]=" + encode(record.cwd)).getJSONArray("data")
         models = OpenCodeProjection.models(nativeModels)
+        loadAgents()
+        catalogInitialized = true
+    }
+    private suspend fun loadAgents() {
+        nativeAgents = client!!.call("/api/agent?location[directory]=" + encode(record.cwd)).getJSONArray("data")
     }
     private fun invalidate(event: JSONObject) {
         val type = event.optString("type")
@@ -451,6 +459,7 @@ internal class OpenCodeSession(
         }
         syncHistoryIndexLocked()
         if (all) {
+            if (!catalogInitialized) loadModels() else loadAgents()
             val native = api.call(path).getJSONObject("data")
             check(native.getString("id") == record.threadId) { tr("OpenCode 返回了不同会话", "OpenCode returned a different session") }
             nativeSession = native
@@ -470,11 +479,15 @@ internal class OpenCodeSession(
             forms.clear(); api.call(path + "/form").getJSONArray("data").objects().forEach { forms[it.getString("id")] = it; requests += OpenCodeProjection.form(it) }
             answering.retainAll(requests.map { it.id }.toSet())
             val rules = native.optJSONArray("permissions")
+            val permissions = OpenCodeProjection.agents(nativeAgents)
+            val activeAgent = native.stringOrNull("agent")?.takeIf { it.isNotBlank() }
+            val selectedPermission = activeAgent ?: if (permissions.any { it.id == "build" }) "build" else permissions.firstOrNull()?.id.orEmpty()
+            val rulesText = if (rules != null && rules.length() > 0) rules.objects().joinToString("\n") { "${it.optString("action")} · ${it.optString("resource")} → ${it.optString("effect")}" } else null
             view = view.copy(activeTurnId = if (running) record.threadId else null, stopping = if (running) view.stopping else false,
                 queue = OpenCodeProjection.queue(queue),
                 requests = requests.map { it.copy(answering = it.id in answering) },
-                permission = "opencode-native", permissions = emptyList(),
-                capabilityNotice = tr("Agent：${native.optString("agent", "默认")}\n", "Agent: ${native.optString("agent", "default")}\n") + if (rules != null && rules.length() > 0) rules.objects().joinToString("\n") { "${it.optString("action")} · ${it.optString("resource")} → ${it.optString("effect")}" } else tr("使用 OpenCode 原生权限配置；请求授权时在会话中确认。", "Uses native OpenCode permission rules; prompts appear in session when approval is needed."))
+                permission = selectedPermission, permissions = permissions,
+                capabilityNotice = if (permissions.isEmpty()) rulesText else null)
             if (requests.any { it.id !in previous }) approval()
             persist()
         }
@@ -708,6 +721,16 @@ internal class OpenCodeSession(
             finally { view = view.copy(configuring = false) }
         }
     }
+    fun configurePermission(agentId: String) {
+        if (view.configuring) return
+        run {
+            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { tr("请在任务与队列结束后修改权限模式", "Wait for active turn and queue to finish before changing permission mode") }
+            check(view.permissions.any { it.id == agentId }) { tr("CLI 未允许此权限配置", "Permission mode not allowed by CLI") }
+            view = view.copy(configuring = true); publish()
+            try { client!!.call(path + "/agent", "POST", obj("agent" to agentId)); synchronizer?.invalidate(all = true) }
+            finally { view = view.copy(configuring = false) }
+        }
+    }
     internal val nativeQueue: List<QueueEntry> get() = view.queue
     internal suspend fun removePending(id: String) {
         check(view.connected && view.queue.any { it.id == id && it.canRemove }) { tr("原生消息已离开可撤回队列", "Message is no longer in the removable native queue") }
@@ -781,6 +804,7 @@ internal class OpenCodeSession(
             subAgentToolMessageIds.clear()
         }
         synchronizer?.close(); synchronizer = null; connectionNotice = null
+        catalogInitialized = false; nativeAgents = JSONArray()
         client?.close(); job.cancel(); childReads.clear(); childSnapshots.clear(); dirtyChildren.clear(); childHistoryLoaded = false; activeIds = emptySet(); answering.clear(); admitting.clear()
         view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"))
     }

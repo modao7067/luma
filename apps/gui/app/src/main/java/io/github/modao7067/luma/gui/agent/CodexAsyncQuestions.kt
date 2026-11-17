@@ -39,14 +39,44 @@ object CodexAsyncQuestions {
     fun displayReply(text: String): String = replies(text).takeIf { it.isNotEmpty() }
         ?.joinToString("\n\n") { tr("回复：${it.question}\n${it.answer}", "Reply: ${it.question}\n${it.answer}") } ?: text
 
-    fun pending(items: Collection<ConversationItem>, nativeQueuedTexts: List<String> = emptyList(), submissions: List<Submission> = emptyList()): List<UserRequest> {
-        val answered = (items.filter { it.role == "user" && it.nativeInputEvidence }.flatMap { replies(it.userContent?.text ?: it.text) } +
-            nativeQueuedTexts.flatMap(::replies)).map { it.questionId }.toSet()
+    fun pending(
+        items: Collection<ConversationItem>,
+        nativeQueuedTexts: List<String> = emptyList(),
+        submissions: List<Submission> = emptyList(),
+        dismissedItemIds: Set<String> = emptySet(),
+    ): List<UserRequest> {
+        val openByItem = linkedMapOf<String, List<RequestQuestion>>()
+        for (item in items) {
+            if (item.asyncQuestions.isNotEmpty()) {
+                if (item.id !in dismissedItemIds) {
+                    openByItem[item.id] = item.asyncQuestions
+                }
+            } else if (item.role == "user" && item.nativeInputEvidence && item.delivery !in setOf("pending", "rejected")) {
+                val text = item.userContent?.text ?: item.text
+                val replyIds = replies(text).map { it.questionId }.toSet()
+                if (replyIds.isNotEmpty()) {
+                    val iterator = openByItem.entries.iterator()
+                    while (iterator.hasNext()) {
+                        val entry = iterator.next()
+                        val remaining = entry.value.filter { it.id !in replyIds }
+                        if (remaining.isEmpty()) iterator.remove() else entry.setValue(remaining)
+                    }
+                } else {
+                    openByItem.clear()
+                }
+            }
+        }
+        val queuedReplyIds = nativeQueuedTexts.flatMap(::replies).map { it.questionId }.toSet()
         val sending = submissions.filter { it.state !in setOf("rejected", "cancelled") }.flatMap { replies(it.text) }.map { it.questionId }.toSet()
-        return items.filter { it.asyncQuestions.isNotEmpty() }.mapNotNull { item ->
-            val remaining = item.asyncQuestions.filter { it.id !in answered }
-            if (remaining.isEmpty()) null else UserRequest("codex-async:${item.id}", "Answer", "",
-                questions = remaining, answering = remaining.any { it.id in sending })
+        return openByItem.entries.mapNotNull { (itemId, questions) ->
+            val remaining = questions.filter { it.id !in queuedReplyIds }
+            if (remaining.isEmpty()) null else UserRequest(
+                "codex-async:$itemId",
+                "Answer",
+                "",
+                questions = remaining,
+                answering = remaining.any { it.id in sending },
+            )
         }
     }
 

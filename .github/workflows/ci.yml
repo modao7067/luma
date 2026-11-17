@@ -18,16 +18,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Layout / build-entry / production gates
-        run: |
-          python3 tools/tests/verify-layout.py
-          python3 tools/tests/verify-build-entry.py
-          python3 tools/tests/verify-production-gates.py
-      - name: Artifact lock is well-formed
-        run: python3 -c "import json; json.load(open('tools/artifacts.lock.json')); json.load(open('tools/assets.json'))"
+      - name: Source and production gates
+        run: ./tools/luma verify --static
 
   android:
     name: Compile, unit tests, lint
+    needs: static-gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

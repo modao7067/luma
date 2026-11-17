@@ -635,6 +635,13 @@ internal fun formatCompactTokens(tokens: Long): String = when {
     else -> tokens.toString()
 }
 
+internal fun formatUsageLimitLabel(label: String): String = label
+    .replace("主窗口", "常规")
+    .replace("总窗口", "总计")
+    .replace("窗口", "")
+    .replace(Regex("\\s+windows?\\b", RegexOption.IGNORE_CASE), "")
+    .trim()
+
 internal fun formatUsdCost(usd: Double, approximate: Boolean = false): String {
     if (!usd.isFinite() || usd <= 0.0) return "$0.00"
     val prefix = if (approximate) "~$" else "$"
@@ -902,7 +909,7 @@ internal fun GlobalUsageScreen(
                         Modifier
                             .size(44.dp)
                             .testTag("usage-back")
-                            .semantics { contentDescription = tr("关闭全局用量", "Close global usage") }
+                            .semantics { contentDescription = tr("关闭用量", "Close usage") }
                             .liquidClickable(cornerRadius = 22.dp, onClick = onDismiss),
                         cornerRadius = 22.dp,
                     ) {
@@ -924,7 +931,7 @@ internal fun GlobalUsageScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                tr("全局用量", "Global Usage"),
+                                tr("用量", "Usage"),
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             )
                             Text(
@@ -938,7 +945,7 @@ internal fun GlobalUsageScreen(
                         Modifier
                             .size(44.dp)
                             .testTag("usage-refresh")
-                            .semantics { contentDescription = tr("刷新全局用量", "Refresh global usage") }
+                            .semantics { contentDescription = tr("刷新用量", "Refresh usage") }
                             .liquidClickable(cornerRadius = 22.dp) {
                                 if (!manualRefreshing) refreshData(forceRefresh = true)
                             },
@@ -985,8 +992,8 @@ internal fun GlobalUsageScreen(
                     errorState?.let { err ->
                         val msg = when (err) {
                             is UsageErrorState.Message -> err.text
-                            UsageErrorState.SummaryLoadFailed -> tr("读取全局用量统计失败", "Failed to load global usage stats")
-                            UsageErrorState.LimitsLoadFailed -> tr("读取实时限额失败", "Failed to load live quotas")
+                            UsageErrorState.SummaryLoadFailed -> tr("用量读取失败", "Failed to load usage")
+                            UsageErrorState.LimitsLoadFailed -> tr("限额读取失败", "Failed to load quotas")
                         }
                         ErrorNotice(msg) { errorState = null }
                     }
@@ -1202,9 +1209,9 @@ private fun UsageLimitsContent(
                 Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(tr("暂无已配置 OAuth 的限额数据", "No OAuth quota data available"), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                Text(tr("暂无限额数据", "No quota data"), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                 Text(
-                    tr("仅展示已登录 OAuth 订阅服务的 CLI（API Key 模式无订阅窗口限额）。登录后可点击右上角刷新探测实时配额。", "Only CLIs signed in with an OAuth subscription are shown here (API key mode has no subscription window quota). Tap refresh after signing in."),
+                    tr("登录订阅账号后刷新", "Sign in to a subscription, then refresh"),
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
@@ -1270,9 +1277,9 @@ private fun ProviderLimitCard(
                     }
                 }
                 val badgeText = when (provider.source) {
-                    "live" -> tr("实时配额", "Live quota")
-                    "session_fallback" -> tr("最近会话快照", "Recent session snapshot")
-                    else -> if (provider.status == "error") tr("探测异常", "Probe error") else tr("未配置", "Not configured")
+                    "live" -> tr("实时", "Live")
+                    "session_fallback" -> tr("历史", "History")
+                    else -> if (provider.status == "error") tr("读取失败", "Unavailable") else tr("未配置", "Not configured")
                 }
                 Surface(
                     shape = LumaCardShape(10.dp),
@@ -1301,7 +1308,7 @@ private fun ProviderLimitCard(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            tr("近 30 天 API 等价消耗", "30-day API-equivalent spend"),
+                            tr("近 30 天 API 估算", "30-day API estimate"),
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
                         )
@@ -1391,7 +1398,7 @@ private fun LimitWindowRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                window.label,
+                formatUsageLimitLabel(window.label),
                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1500,7 +1507,7 @@ private fun UsageStatsContent(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    tr("未读取到统计数据", "No usage statistics available"),
+                    tr("暂无用量数据", "No usage data"),
                     Modifier.padding(20.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = colors.onSurfaceVariant,
@@ -1532,7 +1539,7 @@ private fun UsageStatsContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    if (activeBucket != null) tr("${activeBucket.date} 区间明细", "${activeBucket.date} details") else tr("${selectedPeriod.label}总览", "${selectedPeriod.label} overview"),
+                    if (activeBucket != null) tr("${activeBucket.date} 明细", "${activeBucket.date} details") else tr("${selectedPeriod.label}总览", "${selectedPeriod.label} overview"),
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.onSurfaceVariant,
                 )
@@ -1550,7 +1557,7 @@ private fun UsageStatsContent(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                tr("返回总计", "Back to total"),
+                                tr("总览", "Overview"),
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                 color = colors.onSecondaryContainer,
                             )
@@ -1589,7 +1596,7 @@ private fun UsageStatsContent(
                         ),
                     )
                     Text(
-                        tr("Token 用量", "Token usage"),
+                        "Token",
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                     )
@@ -1607,7 +1614,7 @@ private fun UsageStatsContent(
                         color = colors.primary,
                     )
                     Text(
-                        tr("API 等价估算", "API-equiv. estimate"),
+                        tr("API 估算", "API estimate"),
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                     )
@@ -1619,7 +1626,7 @@ private fun UsageStatsContent(
                     .filter { it.value.totalTokens > 0L || it.value.costUsd > 0.0 }
                     .sortedByDescending { if (chartByCost) it.value.costUsd else it.value.totalTokens.toDouble() }
                 val breakdownText = if (cliItems.isEmpty()) {
-                    tr("该时段无调用记录", "No activity in this period")
+                    tr("暂无记录", "No activity")
                 } else {
                     cliItems.joinToString(" · ") { (cli, v) ->
                         "${cliDisplayLabel(cli)} ${formatCompactTokens(v.totalTokens)} (${formatUsdCost(v.costUsd, approximate = true)})"
@@ -1679,14 +1686,14 @@ private fun UsageStatsContent(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        tr("按 CLI 分布", "By CLI"),
+                        tr("CLI 用量", "By CLI"),
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
-                        tr("点击展开后端端点", "Tap to expand endpoints"),
+                        tr("展开明细", "Expand details"),
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                         maxLines = 1,
@@ -1894,14 +1901,14 @@ private fun UsageStatsContent(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        tr("按模型与后端端点排行", "Top models & endpoints"),
+                        tr("模型排行", "Top models"),
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
-                        tr("* 按公开费率估算", "* Estimated at public API rates"),
+                        tr("* API 费率估算", "* API estimate"),
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                         maxLines = 2,
@@ -2006,21 +2013,21 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
     ) {
         val headerText = if (isRemoteActive) {
             val detailParts = buildList {
-                if (syncTime != null) add(tr("同步于 $syncTime", "synced $syncTime"))
+                if (syncTime != null) add(tr("更新于 $syncTime", "updated $syncTime"))
                 if (pricingSource.modelCount > 0) add(tr("${pricingSource.modelCount} 个模型", "${pricingSource.modelCount} models"))
             }
             if (detailParts.isNotEmpty()) {
                 tr(
-                    "费用估算数据来源（${detailParts.joinToString(" · ")}）",
-                    "Pricing data sources (${detailParts.joinToString(" · ")})",
+                    "费率（${detailParts.joinToString(" · ")}）",
+                    "Rates (${detailParts.joinToString(" · ")})",
                 )
             } else {
-                tr("费用估算数据来源", "Pricing data sources")
+                tr("费率来源", "Rate sources")
             }
         } else {
             tr(
-                "费用估算数据来源：当前使用内置离线费率（点击右上角刷新同步在线库）",
-                "Pricing data sources: using built-in offline rates (tap refresh to sync online)",
+                "离线费率 · 刷新以更新",
+                "Offline rates · Refresh to update",
             )
         }
         Text(
@@ -2037,7 +2044,7 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             pricingSource.sources.forEach { src ->
-                val label = if (src.repo.isNotBlank()) "${src.name} (${src.repo}) ↗" else "${src.name} ↗"
+                val label = "${src.name} ↗"
                 Surface(
                     shape = CircleShape,
                     color = colors.surfaceContainerLow,
@@ -2077,8 +2084,8 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
 
         Text(
             tr(
-                "非官方账单接口的 CLI 按上游公开 API 费率估算，仅供参考，实际账单以服务商为准。",
-                "CLIs without official billing APIs are estimated from public upstream API rates for reference only.",
+                "按公开 API 费率估算",
+                "Estimated at public API rates",
             ),
             style = MaterialTheme.typography.labelSmall,
             color = colors.onSurfaceVariant.copy(alpha = 0.78f),
@@ -2115,14 +2122,14 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    tr("活跃热力图", "Activity heatmap"),
+                    tr("活跃记录", "Activity"),
                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(0.85f),
                 )
                 Text(
-                    tr("累计活跃 ${activity.activeDays} 天 · 连续 ${activity.currentStreak} 天 (最长 ${activity.longestStreak} 天)", "${activity.activeDays} active days · ${activity.currentStreak}d streak (best ${activity.longestStreak}d)"),
+                    tr("活跃 ${activity.activeDays} 天 · 连续 ${activity.currentStreak} 天 · 最长 ${activity.longestStreak} 天", "${activity.activeDays} active days · ${activity.currentStreak}d streak · best ${activity.longestStreak}d"),
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant,
                     maxLines = 2,
@@ -2190,9 +2197,9 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
             val footerText = if (inspectedDay != null) {
                 "${inspectedDay.date} · ${formatCompactTokens(inspectedDay.totalTokens)} · ${formatUsdCost(inspectedDay.costUsd, approximate = inspectedDay.costUsd > 0.0)}"
             } else if (activity.peakDayDate != null && activity.peakDayTokens > 0L) {
-                tr("单日峰值 ${activity.peakDayDate} · ${formatCompactTokens(activity.peakDayTokens)}（点击格子查看单日）", "Peak ${activity.peakDayDate} · ${formatCompactTokens(activity.peakDayTokens)} (tap cell for day)")
+                tr("峰值 ${activity.peakDayDate} · ${formatCompactTokens(activity.peakDayTokens)}", "Peak ${activity.peakDayDate} · ${formatCompactTokens(activity.peakDayTokens)}")
             } else {
-                tr("本地归档自动保留已清理日志的历史日度记录", "Local archive preserves daily history from pruned logs")
+                tr("保留历史日度记录", "Daily history retained")
             }
             Text(
                 footerText,
@@ -2408,11 +2415,11 @@ private fun TotalsMetricGrid(totals: UsageTotals) {
     val unpricedPct = if (totals.totalTokens > 0L) ((totals.unpricedTokens.toDouble() / totals.totalTokens.toDouble()) * 100.0).roundToInt() else 0
 
     val cells = listOf(
-        Triple(tr("处理总 Token", "Total tokens"), formatCompactTokens(totals.totalTokens), tr("${totals.events} 次请求", "${totals.events} requests")),
-        Triple(tr("缓存节省估算", "Est. cache savings"), formatUsdCost(totals.cacheSavingsUsd, approximate = totals.cacheSavingsUsd > 0.0), tr("相对未缓存输入费率", "vs. uncached input rate")),
-        Triple(tr("缓存命中输入", "Cached input"), formatCompactTokens(totals.cachedInputTokens), tr("命中率 $cacheHitPct%", "$cacheHitPct% hit rate")),
+        Triple(tr("总 Token", "Total tokens"), formatCompactTokens(totals.totalTokens), tr("${totals.events} 次请求", "${totals.events} requests")),
+        Triple(tr("缓存节省", "Cache savings"), formatUsdCost(totals.cacheSavingsUsd, approximate = totals.cacheSavingsUsd > 0.0), tr("相对未缓存输入费率", "vs. uncached input rate")),
+        Triple(tr("缓存输入", "Cached input"), formatCompactTokens(totals.cachedInputTokens), tr("命中率 $cacheHitPct%", "$cacheHitPct% hit rate")),
         Triple(tr("未缓存输入", "Uncached input"), formatCompactTokens(totals.uncachedInputTokens), if (totals.cacheCreationTokens > 0) tr("含写入 ${formatCompactTokens(totals.cacheCreationTokens)}", "incl. ${formatCompactTokens(totals.cacheCreationTokens)} write") else tr("直接输入", "direct input")),
-        Triple(tr("输出与思考", "Output & reasoning"), formatCompactTokens(totals.outputTokens + totals.reasoningTokens), if (totals.reasoningTokens > 0) tr("思考 ${formatCompactTokens(totals.reasoningTokens)}", "${formatCompactTokens(totals.reasoningTokens)} reasoning") else tr("模型生成输出", "model output")),
+        Triple(tr("输出与思考", "Output & reasoning"), formatCompactTokens(totals.outputTokens + totals.reasoningTokens), if (totals.reasoningTokens > 0) tr("思考 ${formatCompactTokens(totals.reasoningTokens)}", "${formatCompactTokens(totals.reasoningTokens)} reasoning") else tr("模型输出", "model output")),
         Triple(tr("未定价占比", "Unpriced share"), "$unpricedPct%", "${formatCompactTokens(totals.unpricedTokens)} tok"),
     )
 

@@ -9,30 +9,42 @@ from luma_cli.kimi import KimiSession
 from luma_cli.pi import PiSession
 from luma_cli.transport import Rejected
 
-def state(current='workspace-write',session='native'):
-    return {'sessionId':session,'currentValue':current,'options':[
+def state(current='workspace-write',session='native',plan_available=True,plan_active=False):
+    return {'sessionId':session,'currentValue':current,'planAvailable':plan_available,'planActive':plan_active,'options':[
         {'value':'read-only','name':'Read Only','description':'Read only','sandbox':'read-only','approval':'ask'},
         {'value':'workspace-write','name':'Native workspace','description':'Native description','sandbox':'workspace-write','approval':'ask'},
         {'value':'danger-full-access','name':'Native full','description':'No confinement','sandbox':'danger-full-access','approval':'never'},
-        {'value':'auto','name':'Auto (Model Review)','description':'Auto review','sandbox':'danger-full-access','approval':'ask'},
-        {'value':'plan','name':'Plan Mode','description':'Plan mode','sandbox':'plan','approval':'ask'}]}
+        {'value':'auto','name':'Auto (Model Review)','description':'Auto review','sandbox':'danger-full-access','approval':'ask'}]}
 def session():
     s=DshSession({'cli':'DeepSeek Harness','cwd':'/tmp','nativeId':'native'},lambda:None)
     s.permission_protocol=True;s.permission_revision=0;s.apply_permissions(state());return s
 class DshPermissions(unittest.TestCase):
     def test_same_native_ids_labels_and_risk_metadata_are_kept(self):
         s=session();self.assertEqual(s.data['permission'],'workspace-write')
+        self.assertTrue(s.data['planModeSupported']);self.assertFalse(s.data['planMode'])
         self.assertEqual(s.data['permissions'][2],{'id':'danger-full-access','label':'Native full','description':'No confinement','sandbox':'danger-full-access','approval':'never'})
         self.assertEqual(s.data['permissions'][3]['id'],'auto')
-        self.assertEqual(s.data['permissions'][4],{'id':'plan','label':'Plan Mode','description':'Plan mode','sandbox':'plan','approval':'ask'})
+        self.assertNotIn('plan',[o['id'] for o in s.data['permissions']])
     def test_explicit_set_needs_matching_native_confirmation(self):
         s=session();calls=[]
-        s.call=lambda method,params:calls.append((method,params)) or state(params['value'])
-        for target in ('danger-full-access','auto','plan'):
+        def call(method,params):
+            calls.append((method,params))
+            if method=='luma/permissions/plan':
+                return state(s.data['permission'],plan_active=params['enabled'])
+            return state(params['value'],plan_active=s.data['planMode'])
+        s.call=call
+        for target in ('danger-full-access','auto'):
             s.configure({'permission':target})
             self.assertEqual(s.data['permission'],target)
-        self.assertEqual(len(calls),3)
+        s.configure({'planMode':True})
+        self.assertTrue(s.data['planMode']);self.assertEqual(s.data['permission'],'auto')
+        s.configure({'planMode':False})
+        self.assertFalse(s.data['planMode']);self.assertEqual(s.data['permission'],'auto')
+        self.assertRaises(Rejected,s.configure,{'permission':'plan'})
+        self.assertRaises(Rejected,s.configure,{'planMode':'yes'})
         self.assertEqual(calls[0],('luma/permissions/set',{'sessionId':'native','value':'danger-full-access'}))
+        self.assertEqual(calls[2],('luma/permissions/plan',{'sessionId':'native','enabled':True}))
+        self.assertEqual(calls[3],('luma/permissions/plan',{'sessionId':'native','enabled':False}))
     def test_live_stream_frame_and_deduplication(self):
         s=session();s.chunk_kind=None;s.chunk_id=None;s.live_streamed=set()
         s.event({'method':'luma/stream/frame','params':{'sessionId':'native','frame':{'type':'start','attemptId':'a1'}}})

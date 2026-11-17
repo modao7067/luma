@@ -24,7 +24,7 @@ case "${1:-}" in
   if (( $# > 2 )); then echo 'Usage: luma test-ui [TEST_PATTERN]' >&2; exit 2; fi
   exec "$repo/gradlew" -p "$repo" -I "$base/tests/ui/compose/compose-tests.gradle" \
     :apps:gui:testDebugUnitTest --tests "${2:-io.github.modao7067.luma.gui.ui.*}" ${offline[@]+"${offline[@]}"} --console=plain ;;
- verify) exec python3 "$base/verify.py" ;;
+ verify) shift; exec python3 "$base/verify.py" "$@" ;;
  assets) exec python3 "$base/assets.py" "${2:-check}" ;;
  *) echo 'Usage: luma {build|lint} [gui|luma|all] | test-ui [TEST_PATTERN] | verify | assets {check|record} | git ARGS' >&2; exit 2 ;;
 esac

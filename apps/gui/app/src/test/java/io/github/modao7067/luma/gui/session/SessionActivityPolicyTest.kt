@@ -166,6 +166,71 @@ class SessionActivityPolicyTest {
         assertEquals(25_000L, record.lastActiveAt)
     }
 
+    @Test fun evictedHistoryRebasesRegeneratedMessageAndRequestIdsWithoutActivity() {
+        val clock = SessionActivityClock(nowMs = { 10_000L })
+        val record = SessionRecord("old", "History", "noroot", "/workspace", lastActiveAt = 100L)
+        val activity = SessionActivityState(record)
+        activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = listOf(ConversationItem("original", "assistant", "Old reply")),
+            requests = emptyList(), viewingInForeground = false, clock = clock,
+        )
+        record.submissions += StoredSubmission("already-finished", "Earlier input", state = "accepted")
+        activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = emptyList(), requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        )
+        val beforeReload = record.lastActiveAt
+        activity.forgetHistory()
+        assertFalse(activity.reconcile(
+            record, connected = false, loading = true, hydrating = true,
+            activeTurnId = null, messages = emptyList(), requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        ))
+        val replayed = listOf(ConversationItem("regenerated", "assistant", "Old reply"))
+        val requests = listOf(UserRequest("restored-request", "Approval", "Existing request"))
+        assertFalse(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = replayed, requests = requests,
+            viewingInForeground = false, clock = clock,
+        ))
+        assertEquals(beforeReload, record.lastActiveAt)
+        assertFalse(record.unread)
+        assertFalse(activity.lastTurnCompleted)
+        assertTrue(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = replayed,
+            requests = requests + UserRequest("new-request", "Approval", "New request"),
+            viewingInForeground = false, clock = clock,
+        ))
+        assertTrue(record.lastActiveAt > beforeReload)
+    }
+
+    @Test fun newSubmissionDuringHistoryReloadStillAdvancesActivityAndCompletion() {
+        var now = 10_000L
+        val clock = SessionActivityClock(nowMs = { now })
+        val record = SessionRecord("old", "History", "noroot", "/workspace", lastActiveAt = 100L)
+        val activity = SessionActivityState(record)
+        activity.forgetHistory()
+        record.submissions += StoredSubmission("fresh-input", "New input", state = "local")
+        assertTrue(activity.reconcile(
+            record, connected = false, loading = true, hydrating = true,
+            activeTurnId = null, messages = emptyList(), requests = emptyList(),
+            viewingInForeground = true, clock = clock,
+        ))
+        assertEquals(10_000L, record.lastActiveAt)
+        now = 11_000L
+        assertTrue(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = listOf(ConversationItem("fresh-reply", "assistant", "New reply")),
+            requests = emptyList(), viewingInForeground = false, clock = clock,
+        ))
+        assertEquals(11_000L, record.lastActiveAt)
+        assertTrue(record.unread)
+        assertTrue(activity.lastTurnCompleted)
+    }
+
     @Test fun formatSessionActivityTimeUses24HourYesterdayWeekdayAndCalendarDates() {
         val zone = ZoneId.of("Asia/Shanghai")
         val now = ZonedDateTime.of(2026, 11, 10, 19, 27, 0, 0, zone).toInstant().toEpochMilli()

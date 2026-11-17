@@ -3,13 +3,14 @@ import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _p
 import argparse,pathlib,re,subprocess
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 UI=ROOT/'apps/gui/app/src/main/java/io/github/modao7067/luma/gui/ui'
-parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--output',type=pathlib.Path,default=ROOT/'verification/gui-scroll-crash-20261102')
+parser=argparse.ArgumentParser()
+parser.add_argument('--output',type=pathlib.Path,default=ROOT/'artifacts/test-runs/scroll-glass')
+parser.add_argument('--baseline-dir',type=pathlib.Path)
 parser.add_argument('--centered',action='store_true')
-parser.add_argument('--highlight',action='store_true',help='Also exercise the current production highlight shader')
+parser.add_argument('--highlight',action='store_true')
 args=parser.parse_args()
 OUT=args.output.resolve();OUT.mkdir(parents=True,exist_ok=True)
-BASELINE=ROOT/'verification/gui-scroll-crash-20261102'
+BASELINE=args.baseline_dir.resolve() if args.baseline_dir else OUT
 
 def block(source, token):
     at=source.index(token)+len(token);start=source.index('{',at);depth=1;end=start+1

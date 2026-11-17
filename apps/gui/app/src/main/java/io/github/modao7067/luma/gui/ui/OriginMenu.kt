@@ -5,7 +5,7 @@
  * You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under
  * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
- * See apps/gui/third-party/androidx-material-menu/README.md for the pinned upstream and adaptations.
+ * See THIRD_PARTY_NOTICES.md for the pinned upstream and adaptations.
  */
 package io.github.modao7067.luma.gui.ui
 

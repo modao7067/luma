@@ -42,7 +42,6 @@ internal class NativeSelectionToolbar(
     private var paste: (() -> Unit)? = null
     private var cut: (() -> Unit)? = null
     private var selectAll: (() -> Unit)? = null
-    private var autofill: (() -> Unit)? = null
     private var imagePaste = false
     private var services = emptyList<ResolveInfo>()
     private var servicesQueried = false
@@ -63,7 +62,10 @@ internal class NativeSelectionToolbar(
         current.invalidateContentRect()
         current.hide(0)
     }
-    val keepsEditorFocus get() = !readOnly || cut != null || paste != null || autofill != null
+    val scopedToEditor get() = !readOnly
+    val hasSelection get() = copy != null || cut != null
+    val anchorRevision get() = anchorVersion
+    val keepsEditorFocus get() = !readOnly || cut != null || paste != null || imagePaste
     override val status get() = if (mode == null) TextToolbarStatus.Hidden else TextToolbarStatus.Shown
     fun allowNextGesture() { suppressed = false }
     fun dismissOutside() { suppressed = true; hide() }
@@ -82,16 +84,18 @@ internal class NativeSelectionToolbar(
         update()
         if (anchorVersion == before) hide()
     }
-    override fun showMenu(rect: Rect, onCopyRequested: (() -> Unit)?, onPasteRequested: (() -> Unit)?, onCutRequested: (() -> Unit)?, onSelectAllRequested: (() -> Unit)?) =
-        showMenu(rect, onCopyRequested, onPasteRequested, onCutRequested, onSelectAllRequested, null)
-    override fun showMenu(rect: Rect, onCopyRequested: (() -> Unit)?, onPasteRequested: (() -> Unit)?, onCutRequested: (() -> Unit)?, onSelectAllRequested: (() -> Unit)?, onAutofillRequested: (() -> Unit)?) {
+    override fun showMenu(rect: Rect, onCopyRequested: (() -> Unit)?, onPasteRequested: (() -> Unit)?, onCutRequested: (() -> Unit)?, onSelectAllRequested: (() -> Unit)?) {
         if (suppressed) return
-        anchorVersion++
         val previousRect = this.rect
         this.rect = rect; copy = onCopyRequested; paste = onPasteRequested; cut = onCutRequested
-        selectAll = onSelectAllRequested; autofill = onAutofillRequested
+        selectAll = onSelectAllRequested
         val opening = mode == null
         if (opening) imagePaste = imagePasteAvailable()
+        if (availableActions() == 0) {
+            hide()
+            return
+        }
+        anchorVersion++
         if (copy != null && !servicesQueried) {
             services = queryProcessText()
             servicesQueried = true
@@ -114,6 +118,8 @@ internal class NativeSelectionToolbar(
             }
         }
     }
+    override fun showMenu(rect: Rect, onCopyRequested: (() -> Unit)?, onPasteRequested: (() -> Unit)?, onCutRequested: (() -> Unit)?, onSelectAllRequested: (() -> Unit)?, onAutofillRequested: (() -> Unit)?) =
+        showMenu(rect, onCopyRequested, onPasteRequested, onCutRequested, onSelectAllRequested)
     override fun hide() {
         val previous = mode
         mode = null
@@ -131,11 +137,15 @@ internal class NativeSelectionToolbar(
     }
     private fun availableActions(): Int =
         (if (copy != null) 1 else 0) or (if (paste != null || imagePaste) 2 else 0) or
-            (if (cut != null) 4 else 0) or (if (selectAll != null) 8 else 0) or (if (autofill != null) 16 else 0)
+            (if (cut != null) 4 else 0) or (if (selectAll != null) 8 else 0)
     internal val callback = object : ActionMode.Callback2() {
         override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean { populate(menu); return true }
         override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
             imagePaste = imagePasteAvailable()
+            if (availableActions() == 0) {
+                hide()
+                return false
+            }
             if (populatedActions == availableActions()) return false
             populate(menu)
             return true
@@ -146,6 +156,7 @@ internal class NativeSelectionToolbar(
         override fun onDestroyActionMode(mode: ActionMode) {
             if (this@NativeSelectionToolbar.mode === mode) {
                 this@NativeSelectionToolbar.mode = null
+                suppressed = true
                 releaseMenu()
             }
         }
@@ -155,7 +166,6 @@ internal class NativeSelectionToolbar(
                 android.R.id.paste -> if (!pasteImage()) paste?.invoke()
                 android.R.id.cut -> cut?.invoke()
                 android.R.id.selectAll -> selectAll?.invoke()
-                android.R.id.autofill -> autofill?.invoke()
                 else -> {
                     val service = services.getOrNull(item.itemId - PROCESS_BASE) ?: return false
                     process(service, copy)
@@ -174,7 +184,6 @@ internal class NativeSelectionToolbar(
         action(android.R.id.paste, android.R.string.paste, paste != null || imagePaste, 1)
         action(android.R.id.cut, android.R.string.cut, cut != null, 2)
         action(android.R.id.selectAll, android.R.string.selectAll, selectAll != null, 3)
-        action(android.R.id.autofill, android.R.string.autofill, autofill != null, 4)
         (if (copy != null) services else emptyList()).forEachIndexed { index, service ->
             val component = ComponentName(service.activityInfo.packageName, service.activityInfo.name)
             if ((0 until menu.size()).any { menu.getItem(it).intent?.let { intent -> intent.action == Intent.ACTION_PROCESS_TEXT && intent.component == component } == true }) return@forEachIndexed

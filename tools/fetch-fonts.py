@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the freely redistributable terminal fonts that Luma bundles.
+COMMAND_DESCRIPTION = """Download the freely redistributable terminal fonts that Luma bundles.
 
 Fonts are not committed to the repository (they are build artifacts, see tools/bootstrap.py).
 This script fetches the ones that
@@ -28,7 +28,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DIRS = [ROOT / 'runtime/noroot/src/main/assets', ROOT / 'runtime/root/src/main/assets']
 MANIFEST = DIRS[0] / 'terminal-fonts-manifest.json'
 
-# Noto upstream, pinned to exact commits so the bytes match the manifest hashes.
 NOTO_FONTS = 'https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/'
 NOTO_EMOJI = 'https://raw.githubusercontent.com/googlefonts/noto-emoji/99701e07d3d1fe1bdbcdb14964547f0fd592966f/2D/fonts/'
 
@@ -61,7 +60,7 @@ def download(url, cache):
     return target.read_bytes()
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=COMMAND_DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--cache', type=Path, default=ROOT / 'artifacts' / 'download-cache')
     args = parser.parse_args()
     pinned = {row['file']: row['sha256'] for row in json.loads(MANIFEST.read_text())}

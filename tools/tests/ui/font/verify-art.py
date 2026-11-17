@@ -3,7 +3,7 @@ import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _p
 from pathlib import Path
 import subprocess
 root = Path(__file__).resolve().parents[4]
-work = root / 'verification/gui-snapshot-font-20261103/font-art'
+work = root / 'artifacts/test-runs/font-art'
 classes, dex = work / 'classes', work / 'dex'
 classes.mkdir(parents=True, exist_ok=True); dex.mkdir(exist_ok=True)
 sdk = toolenv.ANDROID_JAR

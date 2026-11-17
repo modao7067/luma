@@ -215,7 +215,6 @@ internal fun ConversationHeader(
                 val window = (LocalView.current.parent as? DialogWindowProvider)?.window
                 ActionWindowPolicy(window, enabled = true, filterImeInsets = true)
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (!view.cliServiceUpdateRequired) Text(tr("可选更新：当前运行中的 CLI 桥为旧版，更新后启用新版能力。", "Optional update: the running CLI bridge is an older revision; update to enable newer capabilities."))
                     Text(NativeCliRuntimePolicy.restartWarning)
                     if (view.cliServiceUpdateImpact.isNotBlank()) Text(view.cliServiceUpdateImpact)
                 }

@@ -16,12 +16,12 @@ from .claude_history import (_sanitize_path, _parse_transcript_entries, _build_c
 
 def _permission_modes():
     return [
-        {"id": "default", "label": tr("逐次审批", "Ask each time")},
-        {"id": "acceptEdits", "label": tr("自动接受编辑", "Auto-accept edits")},
-        {"id": "auto", "label": tr("自动审批", "Auto-approve")},
-        {"id": "plan", "label": tr("规划模式", "Plan mode")},
-        {"id": "dontAsk", "label": tr("不询问（自动拒绝）", "Don't ask (auto-deny)")},
-        {"id": "bypassPermissions", "label": tr("跳过审批", "Bypass permissions")},
+        {"id": "default", "label": "Default"},
+        {"id": "acceptEdits", "label": "Accept edits"},
+        {"id": "auto", "label": "Auto"},
+        {"id": "plan", "label": "Plan"},
+        {"id": "dontAsk", "label": "Don't ask"},
+        {"id": "bypassPermissions", "label": "Bypass permissions"},
     ]
 
 def permission_options(help_output, is_root):
@@ -198,9 +198,7 @@ class ClaudeSession(Session):
         self.update(connected=True, models=models, permission=current_permission,
                     permissions=self.permission_modes, capabilities={"queue": False, "steer": False, "stop": True,
                     "images": False, "skills": bool(self.data["skills"]), "maxSkills": 1,
-                    "compact": "compact" in self.commands},
-                    notice=tr("使用 Claude Code 原生 stream-json 审批与权限；历史读取原生会话链。无可管理待发队列、运行中引导或实时 TUI 接管。模型目录未声明图片能力；思考强度取原生模型目录并通过会话级设置读回；速度保留原生配置。Skill 在 CLI 初始化事件返回清单后可逐消息调用。",
-                              "Uses Claude Code native stream-json approvals and permissions; history reads native session transcripts. No managed queue, live steering, or live TUI takeover. Image capability is not advertised; effort comes from the native model catalog; speed keeps native config. Skills can be attached per message once reported by CLI init."))
+                    "compact": "compact" in self.commands})
         self.refresh_mcp()
 
     def _restore_unflushed_accepted_rows(self, prev_rows, transcript_uuids):

@@ -77,10 +77,16 @@ class SubmissionLedgerTest {
         assertEquals("new", newer.draft); assertEquals("first", newer.submissions.single().text)
     }
     @Test fun explicitRecoveryKeepsNewDraftAndRecoversOriginalAttachmentsWithoutSending() {
-        val r = record(); SubmissionLedger.begin(r, "one"); r.draft = "new"; r.draftRevision++
-        SubmissionLedger.rejected(r, "one"); SubmissionLedger.recover(r, "one")
+        val r = record(); val outbox = linkedMapOf<String, ConversationItem>()
+        SubmissionLedger.begin(r, "one"); r.draft = "new"; r.draftRevision++
+        SubmissionLedger.rejected(r, "one")
+        assertEquals(listOf("one"), SubmissionLedger.project(r, view(r), outbox).messages.map { it.id })
+        SubmissionLedger.recover(r, "one")
         assertEquals("new\nfirst", r.draft); assertEquals(listOf("old"), r.images.map { it.id })
         assertEquals(listOf("skill"), r.skills.map { it.id }); assertEquals("rejected", r.submissions.single().state)
+        assertTrue(SubmissionLedger.project(r, view(r), outbox).messages.isEmpty())
+        val reloaded = decodeSessionIndex(JSONObject(encodeSessionIndex(listOf(r)).toString())).single()
+        assertTrue(SubmissionLedger.project(reloaded, view(reloaded)).messages.isEmpty())
     }
     @Test fun sameTextTypedAgainIsIndependentAndLateAckDoesNotEraseIt() {
         val r = record(); SubmissionLedger.begin(r, "one"); r.draft = "first"; r.draftRevision++

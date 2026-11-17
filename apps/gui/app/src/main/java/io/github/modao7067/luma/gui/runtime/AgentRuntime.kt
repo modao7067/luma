@@ -467,6 +467,24 @@ class AgentRuntime(context: Context) {
         }.getOrNull()
     }
 
+    suspend fun readCodexSessionPricing(environment: String, rolloutPath: String? = null): JSONObject? = withContext(Dispatchers.IO) {
+        validateEnvironment(environment)
+        val cleanPath = rolloutPath?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanPath != null) validatePath(cleanPath)
+        runCatching {
+            val script = stageGlobalUsageScript(environment)
+            val cmd = buildList {
+                add("/usr/bin/python3")
+                add("-I")
+                add(script)
+                add("codex-session")
+                if (cleanPath != null) add(cleanPath)
+            }
+            val raw = execute(environment, cmd).trim()
+            if (raw.isEmpty()) null else JSONObject(raw).takeIf { it.length() > 0 }
+        }.getOrNull()
+    }
+
     suspend fun readAntigravitySessionMetrics(
         environment: String,
         nativeId: String,

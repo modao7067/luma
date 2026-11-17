@@ -33,7 +33,7 @@ class ProcessToolLabelsOffscreenBenchmark {
         ProcessToolLabelsTest().apply {
             bothLevelsShareLiteralFirstSeenNamesAndCountEachNativeCall()
             updatesAreOneCallAndNonCallsAreNotToolInvocations()
-            nativeFallbacksUseShellWithoutReplacingRealToolNames()
+            structuredCommandLabelsPreserveNativeToolSummaryNames()
             structuredSummaryBoldsLiteralLabelsButNeverCountPrefixesOrGroupSeparators()
             onlyKnownWebIdentityOverridesGenericSearch()
             duplicateLabelsDisappearButDistinctContextSurvives()

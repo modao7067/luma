@@ -24,7 +24,9 @@ class Model(http.server.BaseHTTPRequestHandler):
 def run(cli):
     with tempfile.TemporaryDirectory(prefix='luma-native-roundtrip-') as home:
         home=pathlib.Path(home);work=home/'work';work.mkdir();(work/'fixture.txt').write_text('owned fixture file\n')
-        os.environ.clear();os.environ.update(HOME=str(home),PATH=str(ROOT/'verification/gui-cli-adapters-20261102/tooling')+':/usr/local/bin:/usr/bin:/bin',LANG='C.UTF-8',
+        tooling=os.environ.get('LUMA_CLI_TOOLING_DIR','')
+        path_value=(tooling+':' if tooling else '')+'/usr/local/bin:/usr/bin:/bin'
+        os.environ.clear();os.environ.update(HOME=str(home),PATH=path_value,LANG='C.UTF-8',
             PI_CODING_AGENT_DIR=str(home/'agent'),XDG_CONFIG_HOME=str(home/'config'),XDG_DATA_HOME=str(home/'data'),XDG_CACHE_HOME=str(home/'cache'),PI_NO_TITLE='1',NO_COLOR='1',DO_NOT_TRACK='1')
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Model);threading.Thread(target=server.serve_forever,daemon=True).start()
         agent=home/'agent';agent.mkdir()

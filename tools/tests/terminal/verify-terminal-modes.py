@@ -6,8 +6,8 @@ import subprocess
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[3]
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--output', type=Path, default=ROOT/'verification/gui-process-polish-20261103/terminal-modes')
+parser = argparse.ArgumentParser()
+parser.add_argument('--output', type=Path, default=ROOT/'artifacts/test-runs/terminal-modes')
 parser.add_argument('--check', choices=['all','routing','header'], default='all')
 args = parser.parse_args()
 output = args.output.resolve()

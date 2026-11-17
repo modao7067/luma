@@ -50,7 +50,7 @@ class ModelSpeedMenuTest {
     }
 
     @Test fun speedRowShowsTheNativeLabelAndSelectsBlankAsDefault() {
-        val speeds = listOf(RequestChoice("default", "默认速度"), RequestChoice("priority", "Fast"))
+        val speeds = listOf(RequestChoice("default", "Default"), RequestChoice("priority", "Fast"))
         val model = ModelOption("gpt-6-astra", "GPT-6-Astra", listOf("medium", "high"), speeds = speeds)
         var view by mutableStateOf(idleView(""))
         val calls = mutableListOf<String>()
@@ -60,10 +60,10 @@ class ModelSpeedMenuTest {
         rule.setContent { MaterialTheme { Box(Modifier.size(360.dp, 700.dp)) {
             ModelMenu(true, {}, CockpitState(models = listOf(model)), view, actions)
         } } }
-        rule.onNode(hasText("速度") and hasText("默认速度")).performScrollTo().assertIsDisplayed()
+        rule.onNode(hasText("速度") and hasText("Default")).performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("priority").assertDoesNotExist()
         rule.onNodeWithText("速度").clickAction()
-        rule.onNode(hasText("默认速度") and !hasText("速度")).performScrollTo().assertIsSelected()
+        rule.onNode(hasText("Default") and !hasText("速度")).performScrollTo().assertIsSelected()
         rule.onNode(hasText("Fast") and !hasText("速度")).performScrollTo().assertIsDisplayed().clickAction()
         rule.runOnIdle { assertEquals(listOf("priority"), calls); view = view.copy(speed = "priority") }
         rule.onNode(hasText("速度") and hasText("Fast")).performScrollTo().assertIsDisplayed()

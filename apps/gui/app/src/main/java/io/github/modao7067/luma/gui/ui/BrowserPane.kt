@@ -687,12 +687,13 @@ internal fun AttachedBrowserPane(
                             if (tab?.crashed?.value == true) tr("网页渲染进程已退出", "WebView renderer exited") else tr("输入网址开始浏览", "Enter a URL to start browsing"),
                             style = MaterialTheme.typography.titleMedium,
                         )
-                        Text(
-                            if (tab?.crashed?.value == true) tr("请关闭该标签页后从菜单新建标签页重试。", "Close this tab and open a new one from the menu.")
-                            else tr("在上方地址栏输入 HTTPS 或 localhost 地址并按回车跳转；同一应用内所有会话自动共用已登录的网站状态。", "Enter an HTTPS or localhost URL above and press Enter. Signed-in sessions are shared across Luma."),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.onSurfaceVariant,
-                        )
+                        if (tab?.crashed?.value == true) {
+                            Text(
+                                tr("请关闭该标签页后从菜单新建标签页重试。", "Close this tab and open a new one from the menu."),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }

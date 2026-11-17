@@ -179,8 +179,14 @@ private val standardEnglishChoiceMap = mapOf(
     "allow always" to "始终允许",
     "always allow" to "始终允许",
     "allow_always" to "始终允许",
+    "approve always" to "始终允许",
+    "always approve" to "始终允许",
+    "approve_always" to "本会话允许",
     "allow for session" to "本会话允许",
     "allow for this session" to "本会话允许",
+    "approve for session" to "本会话允许",
+    "approve for this session" to "本会话允许",
+    "approve_for_session" to "本会话允许",
     "reject" to "拒绝",
     "reject once" to "拒绝本次",
     "deny" to "拒绝",
@@ -193,14 +199,14 @@ private val standardChoiceEnMap = mapOf(
     "allow once" to "Allow once", "allow_once" to "Allow once", "approve once" to "Allow once", "允许一次" to "Allow once", "仅允许一次" to "Allow once",
     "approve" to "Approve", "批准" to "Approve",
     "accept" to "Accept", "接受" to "Accept",
-    "allow always" to "Always allow", "always allow" to "Always allow", "allow_always" to "Always allow", "始终允许" to "Always allow",
-    "allow for session" to "Allow for session", "allow for this session" to "Allow for session", "本会话允许" to "Allow for session",
+    "allow always" to "Always allow", "always allow" to "Always allow", "allow_always" to "Always allow", "approve always" to "Always allow", "always approve" to "Always allow", "始终允许" to "Always allow",
+    "allow for session" to "Allow for session", "allow for this session" to "Allow for session", "approve for session" to "Allow for session", "approve for this session" to "Allow for session", "approve_for_session" to "Allow for session", "approve_always" to "Allow for session", "本会话允许" to "Allow for session",
     "reject" to "Reject", "deny" to "Deny", "decline" to "Decline", "拒绝" to "Reject",
     "reject once" to "Reject once", "拒绝本次" to "Reject once",
     "cancel" to "Cancel", "取消" to "Cancel",
 )
 
-private fun normalizeChoiceDisplayLabel(label: String): String {
+internal fun normalizeChoiceDisplayLabel(label: String): String {
     val trimmed = label.trim()
     return if (LumaI18n.isZh()) standardEnglishChoiceMap[trimmed.lowercase()] ?: trimmed
     else standardChoiceEnMap[trimmed.lowercase()] ?: standardChoiceEnMap[trimmed] ?: trimmed
@@ -222,12 +228,12 @@ private fun classifyApprovalChoices(choices: List<RequestChoice>): List<Classifi
                 display.startsWith("不允许") || labelLower.startsWith("deny") ||
                 labelLower.startsWith("reject") || labelLower.startsWith("decline") || labelLower.startsWith("cancel") ->
                 ApprovalChoiceRole.Negative
-            idLower in setOf("always", "session", "approve-for-session", "allowall", "allow_always") ||
+            idLower in setOf("always", "session", "approve-for-session", "approve_for_session", "approve_always", "allowall", "allow_always") ||
                 idLower.startsWith("grant:") || idLower.startsWith("always:") ||
                 "本会话" in display || "记住" in display || "始终" in display || "后续" in display ||
                 "保存" in display || "always" in labelLower || "session" in labelLower ->
                 ApprovalChoiceRole.ScopedAllow
-            idLower in setOf("allow", "once", "approve-once", "accept", "yes", "approved", "allow_once") ||
+            idLower in setOf("allow", "once", "approve-once", "approve_once", "accept", "yes", "approved", "allow_once") ||
                 "allow-once" in idLower || "once" in idLower ||
                 display.startsWith("允许") || display.startsWith("批准") || display.startsWith("仅允许") ||
                 display.startsWith("仅本轮允许") || display == "确认" || display == "执行" || display == "同意" ||
@@ -317,13 +323,15 @@ private fun titleRepeatsTarget(cleanTitle: String, target: String): Boolean {
 
 private fun parseJsonObjectWithTrailing(trimmed: String): Pair<JSONObject, String>? {
     if (!trimmed.startsWith("{")) return null
-    runCatching { JSONObject(trimmed) }.getOrNull()?.let { return it to "" }
     val nl = trimmed.indexOf('\n')
     if (nl > 1) {
         val firstLine = trimmed.substring(0, nl).trim()
         val tail = trimmed.substring(nl + 1).trim()
-        runCatching { JSONObject(firstLine) }.getOrNull()?.let { return it to tail }
+        if (firstLine.endsWith("}")) {
+            runCatching { JSONObject(firstLine) }.getOrNull()?.let { return it to tail }
+        }
     }
+    runCatching { JSONObject(trimmed) }.getOrNull()?.let { return it to "" }
     return null
 }
 

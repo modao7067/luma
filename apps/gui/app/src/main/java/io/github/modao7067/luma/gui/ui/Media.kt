@@ -209,10 +209,10 @@ internal fun MediaImageCard(
     val interactive = LocalSessionInteractive.current
     var origin by remember { mutableStateOf<Offset?>(null) }
     val aspect = state.frame?.bitmap?.let { it.width.toFloat() / it.height } ?: .8f
-    Surface(shape = LumaCardShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    Surface(shape = LumaCardShape(12.dp), color = contentBlockColors(MaterialTheme.colorScheme).surface,
         modifier = modifier.then(if (crop) Modifier else Modifier.widthIn(max = 280.dp).heightIn(max = 360.dp).aspectRatio(aspect.coerceIn(.4f, 2f)))
             .onGloballyPositioned { origin = it.positionInRoot() + Offset(it.size.width / 2f, it.size.height / 2f) }
-            .clip(LumaCardShape(18.dp)).clickable(enabled = open != null && interactive && !busy) { open?.invoke(bound, origin) }
+            .clip(LumaCardShape(12.dp)).clickable(enabled = open != null && interactive && !busy) { open?.invoke(bound, origin) }
             .semantics { contentDescription = tr("查看图片：${mediaTitle(bound)}", "View image: ${mediaTitle(bound)}") }.testTag(mediaCardTag(resource))) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             state.frame?.let { frame ->
@@ -343,9 +343,9 @@ internal fun MediaFileCard(
     if (mediaIsImage(metadata)) { MediaImageCard(metadata, collapseOnFailure = collapseOnFailure, onLoadFailed = onLoadFailed); return }
     var origin by remember { mutableStateOf<Offset?>(null) }
     val isDir = mediaIsDirectory(metadata)
-    Surface(shape = LumaCardShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    Surface(shape = LumaCardShape(12.dp), color = contentBlockColors(MaterialTheme.colorScheme).surface,
         modifier = Modifier.widthIn(max = 320.dp).fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }
-            .clip(LumaCardShape(18.dp)).clickable(enabled = (isDir || open != null) && interactive) {
+            .clip(LumaCardShape(12.dp)).clickable(enabled = (isDir || open != null) && interactive) {
                 if (isDir) {
                     val targetPath = try { io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.guestPath(metadata.source, metadata.cwd ?: "/workspace") } catch (_: Exception) { metadata.source }
                     actions?.browseFiles(targetPath)
@@ -353,7 +353,7 @@ internal fun MediaFileCard(
                 else actions?.previewResource(metadata)
             }
             .testTag(mediaCardTag(resource))) {
-        Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             MenuIcon(mediaFileSymbol(metadata), size = 24.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(mediaTitle(metadata), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)

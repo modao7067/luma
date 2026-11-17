@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -20,9 +21,9 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--codex', default='/root/.codex/packages/app-server-daemon/releases/0.166.0-aarch64-unknown-linux-musl/bin/codex')
-    parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'verification/gui-external-codex-20261104')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--codex', default=os.environ.get('LUMA_TEST_CODEX') or shutil.which('codex') or 'codex')
+    parser.add_argument('--output', type=pathlib.Path, default=ROOT / 'artifacts/test-runs/external-codex')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     run = pathlib.Path(tempfile.mkdtemp(prefix='native-', dir=args.output))

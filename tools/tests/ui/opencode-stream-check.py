@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _pl.Path(__file__).resolve().parents if (_p/'toolenv.py').is_file()))); import toolenv
-import base64, json, os, pathlib, secrets, socket, subprocess, threading, time, urllib.request
+import base64, json, os, pathlib, secrets, shutil, socket, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-ROOT=pathlib.Path(__file__).resolve().parents[3];BASE=ROOT/'verification/gui-opencode-20261102/stream'
+ROOT=pathlib.Path(__file__).resolve().parents[3];BASE=ROOT/'artifacts/test-runs/opencode-stream'
 BASE.mkdir(parents=True,exist_ok=True);home=BASE/'home';home.mkdir(exist_ok=True);work=BASE/'work';work.mkdir(exist_ok=True)
 skills=BASE/'skills'/'fixture-skill';skills.mkdir(parents=True,exist_ok=True)
 (skills/'SKILL.md').write_text('---\nname: fixture-skill\ndescription: Isolated native skill fixture.\n---\nOnly perform the explicitly requested fixture task.\n')
@@ -32,8 +32,9 @@ url=f'http://127.0.0.1:{port}'
 config={'model':'luma-fixture/fixture','skills':[str(skills.parent)],'providers':{'luma-fixture':{'package':'@opencode/ai/providers/openai-compatible','settings':{'baseURL':f'http://127.0.0.1:{model.server_port}/v1','apiKey':'local-fixture'},'models':{'fixture':{'name':'Luma Fixture','compatibility':{'reasoningField':'reasoning_content'},'capabilities':{'tools':True,'input':['text'],'output':['text'],'temperature':True},'limit':{'context':8192,'output':512},'variants':[{'id':'high','body':{'reasoning_effort':'high'}}]}}}}}
 env={'PATH':os.environ['PATH'],'HOME':str(home),'XDG_DATA_HOME':str(home/'data'),'XDG_CONFIG_HOME':str(home/'config'),'XDG_STATE_HOME':str(home/'state'),'XDG_CACHE_HOME':str(home/'cache'),'OPENCODE_PASSWORD':password,'OPENCODE_CONFIG_CONTENT':json.dumps(config)}
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+opencode_bin=os.environ.get('LUMA_TEST_OPENCODE') or shutil.which('opencode') or 'opencode'
 with (BASE/'server.log').open('w') as log:
- proc=subprocess.Popen(['/root/.opencode/bin/opencode','serve','--hostname','127.0.0.1','--port',str(port)],cwd=work,env=env,stdout=log,stderr=log)
+ proc=subprocess.Popen([opencode_bin,'serve','--hostname','127.0.0.1','--port',str(port)],cwd=work,env=env,stdout=log,stderr=log)
  try:
   for _ in range(120):
    try:

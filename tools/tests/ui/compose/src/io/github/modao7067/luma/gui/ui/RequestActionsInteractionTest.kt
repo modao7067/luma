@@ -95,7 +95,7 @@ class RequestActionsInteractionTest {
         rule.onNodeWithText("取消登录").assertIsNotEnabled();rule.onNodeWithText("打开 Google 登录").assertIsNotEnabled()
     }
     @Test fun threeChoiceRegularApprovalPlacesThreeCapsulesSideBySideAndPreservesIds() {
-        request=UserRequest("opencode-perm","OpenCode 权限请求","{\"command\":\"git status\",\"cwd\":\"/workspace/luma\"}",
+        request=UserRequest("opencode-perm","OpenCode 权限请求","{\"command\":\"git status\",\"cwd\":\"/workspace/project\"}",
             choices=listOf(RequestChoice("once","允许一次"),RequestChoice("always","记住并允许"),RequestChoice("reject","拒绝")))
         show()
         val left=rule.onNodeWithText("拒绝").fetchSemanticsNode().boundsInRoot
@@ -191,7 +191,7 @@ class RequestActionsInteractionTest {
         rule.onNodeWithText("追加到当前任务").assertDoesNotExist()
         rule.onNodeWithText("停止任务").assertExists()
         rule.runOnIdle {
-            state=state.copy(fileBrowser=FileBrowser("/workspace/luma",listOf(FileEntry("README.md","/workspace/luma/README.md",false,size=12))))
+            state=state.copy(fileBrowser=FileBrowser("/workspace/project",listOf(FileEntry("README.md","/workspace/project/README.md",false,size=12))))
         }
         rule.waitForIdle()
         rule.onNodeWithText("README.md").assertExists()

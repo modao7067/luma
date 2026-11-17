@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 sys.dont_write_bytecode = True
+import copy
 import json
 import os
 import pathlib
@@ -516,10 +517,13 @@ class AntigravityAgyAcpTests(unittest.TestCase):
             self.assertEqual(s.data["model"], "claude-opus-5-5")
             self.assertEqual(s.data["effort"], "medium")
             self.assertEqual(s.data["permission"], "default")
-            self.assertEqual([p["id"] for p in s.data["permissions"]], ["default", "accept-edits", "plan", "always-proceed"])
-            s.configure({"effort": "high", "permission": "accept-edits"})
+            self.assertTrue(s.data["planModeSupported"])
+            self.assertFalse(s.data["planMode"])
+            self.assertEqual([p["id"] for p in s.data["permissions"]], ["default", "accept-edits", "always-proceed"])
+            s.configure({"effort": "high", "permission": "accept-edits", "planMode": True})
             self.assertEqual(s.data["effort"], "high")
             self.assertEqual(s.data["permission"], "accept-edits")
+            self.assertTrue(s.data["planMode"])
             self.assertTrue(s.data["capabilities"]["images"])
 
     def test_full_permissions_relaunch_persistence_and_elicitation(self):
@@ -590,6 +594,97 @@ class AntigravityAgyAcpTests(unittest.TestCase):
 
             invocations = [json.loads(line)["skip"] for line in (self.store / "invocations.jsonl").read_text().splitlines()]
             self.assertEqual(invocations, [False, True, True, False])
+
+    def test_plan_and_always_proceed_overlay_without_relaunch(self):
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(self.root / "state-plan-overlay")
+            s = manager.connect({"id": "overlay", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+            self.sessions.append(s)
+            self.assertEqual(s.data["permission"], "default")
+            self.assertTrue(s.data["planModeSupported"])
+            self.assertFalse(s.data["planMode"])
+            self.assertFalse(s.data["skipPermissionsActive"])
+            self.assertEqual([p["id"] for p in s.data["permissions"]], ["default", "accept-edits", "always-proceed"])
+            with self.assertRaises(Rejected):
+                s.configure({"permission": "plan"})
+
+            s.configure({"permission": "always-proceed"})
+            self.assertEqual(s.data["permission"], "always-proceed")
+            self.assertFalse(s.data["planMode"])
+            self.assertTrue(s.data["skipPermissionsActive"])
+            invocations_after_skip = [json.loads(line)["skip"] for line in (self.store / "invocations.jsonl").read_text().splitlines()]
+            self.assertEqual(invocations_after_skip, [False, True])
+
+            s.configure({"planMode": True})
+            self.assertEqual(s.data["permission"], "always-proceed")
+            self.assertTrue(s.data["planMode"])
+            self.assertTrue(s.data["skipPermissionsActive"])
+            invocations_after_plan = [json.loads(line)["skip"] for line in (self.store / "invocations.jsonl").read_text().splitlines()]
+            self.assertEqual(invocations_after_plan, [False, True])
+
+            s.submit({"submissionId": "turn-plan-auto", "text": "run_cmd"})
+            self.wait(lambda: not s.data["running"])
+            self.assertEqual([r["text"] for r in s.rows.values() if r["role"] == "assistant"][-1], "CMD=AUTO")
+
+            s.event({"method": "session/update", "params": {"sessionId": s.data["nativeId"], "update": {"sessionUpdate": "current_mode_update", "currentModeId": "default"}}})
+            self.assertEqual(s.data["permission"], "always-proceed")
+            self.assertFalse(s.data["planMode"])
+            self.assertTrue(s.data["skipPermissionsActive"])
+
+            s.configure({"planMode": True})
+            self.assertTrue(s.data["planMode"])
+            self.assertEqual(s.data["permission"], "always-proceed")
+            s.configure({"permission": "accept-edits"})
+            self.assertTrue(s.data["planMode"])
+            self.assertEqual(s.data["permission"], "accept-edits")
+            self.assertFalse(s.data["skipPermissionsActive"])
+
+            s.configure({"planMode": False})
+            self.assertFalse(s.data["planMode"])
+            self.assertEqual(s.data["permission"], "accept-edits")
+            self.assertFalse(s.data["skipPermissionsActive"])
+
+            s.configure({"planMode": True})
+            self.assertTrue(s.data["planMode"])
+            self.assertEqual(s.data["permission"], "accept-edits")
+            self.assertFalse(s.data["skipPermissionsActive"])
+
+            s.configure({"permission": "always-proceed"})
+            self.assertTrue(s.data["planMode"])
+            self.assertEqual(s.data["permission"], "always-proceed")
+            self.assertTrue(s.data["skipPermissionsActive"])
+            invocations_final = [json.loads(line)["skip"] for line in (self.store / "invocations.jsonl").read_text().splitlines()]
+            self.assertEqual(invocations_final, [False, True, False, True])
+
+    def test_additional_mode_group_does_not_replace_the_primary_mode_or_skip_flag(self):
+        env = self.env()
+        options = copy.deepcopy(AGY_ACP_OPTIONS)
+        options.append({"id": "review", "category": "mode", "name": "Review", "type": "select", "currentValue": "off",
+                        "options": [{"value": "off", "name": "Review off"}, {"value": "on", "name": "Review on"}]})
+        env["LUMA_FIXTURE_OPTIONS"] = json.dumps(options)
+        with patch.dict(os.environ, env):
+            manager = Manager(self.root / "state-mode-groups")
+            s = manager.connect({"id": "groups", "cli": "Antigravity", "cwd": str(self.root)})
+            self.sessions.append(s)
+            s.configure({"permission": "always-proceed", "permissionConfigId": "mode"})
+            s.configure({"permission": "on", "permissionConfigId": "review"})
+            self.assertTrue(s.data["skipPermissionsActive"])
+            self.assertFalse(s.data["planMode"])
+            self.assertEqual(s.native_mode, "default")
+            self.assertEqual(s.data["permission"], "always-proceed")
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "always-proceed")["selected"])
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "on")["selected"])
+            s.configure({"planMode": True})
+            self.assertEqual(s.native_mode, "plan")
+            self.assertTrue(s.data["planMode"])
+            self.assertTrue(s.data["skipPermissionsActive"])
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "always-proceed")["selected"])
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "on")["selected"])
+            s.event({"method": "session/update", "params": {"sessionId": s.data["nativeId"], "update": {"sessionUpdate": "current_mode_update", "currentModeId": "off"}}})
+            self.assertEqual(s.native_mode, "plan")
+            self.assertTrue(s.data["planMode"])
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "always-proceed")["selected"])
+            self.assertTrue(next(p for p in s.data["permissions"] if p["id"] == "off")["selected"])
 
     def test_elicitation_folds_companion_other_and_maps_titles_back_to_const(self):
         with patch.dict(os.environ, self.env()):

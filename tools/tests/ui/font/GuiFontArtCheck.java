@@ -37,7 +37,7 @@ public final class GuiFontArtCheck {
         Bitmap bitmap=Bitmap.createBitmap(1000,280,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(bitmap);canvas.drawColor(Color.WHITE);
         a.setTextSize(60);b.setTextSize(60);a.setColor(Color.BLACK);b.setColor(Color.BLACK);
         canvas.drawText("中文字体 English，。",20,95,a);canvas.drawText("中文字体 English，。",20,205,b);
-        File outFile = new File(root, "verification/gui-snapshot-font-20261103/font-art.png");
+        File outFile = args.length > 2 ? new File(args[2]) : new File(root, "artifacts/test-runs/font-art/font-art.png");
         if (outFile.getParentFile() != null) outFile.getParentFile().mkdirs();
         try(FileOutputStream out=new FileOutputStream(outFile)){bitmap.compress(Bitmap.CompressFormat.PNG,100,out);}
         System.out.println("PASS Android: "+checked+" Han ink samples, unchanged non-Han/advance, "+text.length()+" caret offsets and "+x.getLineCount()+" wrapped lines");

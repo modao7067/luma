@@ -157,10 +157,10 @@ class MediaViewerInteractionTest {
         rule.runOnIdle { println("LEGACY touch counts rounded/generic-rect/miuix = ${clicks.toList()}"); assertEquals(1, clicks[0]) }
     }
     @Test fun headingWithResourceLinkStacksCardBelowHeadingWithoutOverlap() {
-        val uri = "file:///workspace/luma/apps/gui/app/src/main/assets/browser/luma-browser"
+        val uri = "file:///workspace/project/apps/gui/app/src/main/assets/browser/luma-browser"
         rule.setContent {
             MaterialTheme {
-                MediaViewerHost("A", previewActions, MediaContext("A", "/workspace/luma")) {
+                MediaViewerHost("A", previewActions, MediaContext("A", "/workspace/project")) {
                     NativeMarkdown("#### 3. 给 [luma-browser]($uri) 加上零转义极简命令")
                 }
             }

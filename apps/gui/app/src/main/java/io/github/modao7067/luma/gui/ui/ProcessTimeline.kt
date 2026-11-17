@@ -8,12 +8,12 @@ import kotlin.math.roundToInt
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -30,21 +30,18 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalInspectionMode
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
@@ -443,8 +440,9 @@ private fun ProcessEntry(
         ProcessCategory.Tool -> MenuSymbol.EXTENSION
     }
     val cleanTitle = processEntryContext(item, cli)
+    val canExpand = !(reasoning && item.detail.isBlank())
     val chevronFractionState = animateFloatAsState(
-        targetValue = if (expanded) 1f else 0f,
+        targetValue = if (canExpand && expanded) 1f else 0f,
         animationSpec = revealSpring(),
         label = "process-entry-chevron",
     )
@@ -454,11 +452,20 @@ private fun ProcessEntry(
             Modifier
                 .fillMaxWidth()
                 .clip(LumaCardShape(12.dp))
-                .clickable {
-                    onManualLayoutToggle?.invoke()
-                    expanded = !expanded
+                .let { mod ->
+                    if (canExpand) {
+                        mod
+                            .clickable {
+                                onManualLayoutToggle?.invoke()
+                                expanded = !expanded
+                            }
+                            .semantics { stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起$label", "Collapse $label") else tr("展开$label", "Expand $label") }
+                    } else if (running) {
+                        mod.semantics { stateDescription = tr("进行中", "Running") }
+                    } else {
+                        mod
+                    }
                 }
-                .semantics { stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起$label", "Collapse $label") else tr("展开$label", "Expand $label") }
                 .padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -493,8 +500,10 @@ private fun ProcessEntry(
                 CompositionLocalProvider(LocalContentColor provides color.copy(alpha = 0.85f)) {
                     ProcessStatus(item.outcome)
                 }
-                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.7f)) {
-                    MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { revealFraction(chevronFractionState.value) * 180f })
+                if (canExpand) {
+                    CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.7f)) {
+                        MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { revealFraction(chevronFractionState.value) * 180f })
+                    }
                 }
             }
         }
@@ -505,7 +514,7 @@ private fun ProcessEntry(
             if ((running || retiring) && displayDetail.isNotBlank()) processLiveExcerpt(displayDetail, maxChars = 2400) else ""
         }
         TopReveal(
-            expanded = expanded,
+            expanded = canExpand && expanded,
             previewFraction = previewDetailFraction,
             collapsedContent = if ((running || retiring) && liveExcerptText.isNotBlank()) {
                 {
@@ -518,8 +527,8 @@ private fun ProcessEntry(
                 }
             } else null,
         ) {
-            val readPreview = if (!reasoning && processCategory(item, cli) == ProcessCategory.Read && !failed) {
-                remember(item.id, item.input, item.detail, item.text, cli) {
+            val readPreview = if (!reasoning && processCategory(item, cli) == ProcessCategory.Read && !failed && hasProcessReadPreview(item)) {
+                remember(item, cli) {
                     parseProcessReadPreview(item, cli)
                 }
             } else null
@@ -530,9 +539,7 @@ private fun ProcessEntry(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (reasoning) {
-                    if (item.detail.isBlank()) {
-                        Text(tr("CLI 尚未提供摘要。", "No summary provided by CLI yet."), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    } else {
+                    if (item.detail.isNotBlank()) {
                         val reasoningMarkdown = rememberMarkdownPresentation(
                             identity = "reasoning:${item.id}",
                             source = item.detail,
@@ -540,11 +547,14 @@ private fun ProcessEntry(
                         )
                         NativeMarkdown(item.detail, presentation = reasoningMarkdown)
                     }
-                } else if (readPreview != null && (readPreview.filePath.isNotBlank() || item.detail.isNotBlank())) {
+                } else if (readPreview != null && (readPreview.fileName.isNotBlank() || item.detail.isNotBlank())) {
                     ProcessSingleReadPreviewCard(item, readPreview)
                 } else {
-                    if (item.input.isNotBlank()) {
-                        CodeBlock(item.input, processInputLanguage(item, cli), caption = processInputCaption(item, cli))
+                    val inputPresentation = remember(item.input, item.kind, item.toolName, item.toolKind, item.commandActions, cli) {
+                        processInputPresentation(item, cli)
+                    }
+                    if (inputPresentation.code.isNotBlank()) {
+                        CodeBlock(inputPresentation.code, inputPresentation.language, caption = inputPresentation.caption)
                     }
                     if (displayDetail.isNotBlank()) {
                         CodeBlock(
@@ -586,7 +596,7 @@ internal fun groupProcessRunSlices(
     if (entries.isEmpty()) return emptyList()
     fun isReasoning(item: ConversationItem) = item.kind == "reasoning"
     fun isMergeableRead(item: ConversationItem) =
-        !isReasoning(item) && processCategory(item, cli) == ProcessCategory.Read && item.outcome != "failed"
+        !isReasoning(item) && processCategory(item, cli) == ProcessCategory.Read && item.outcome != "failed" && hasSingleFileReadPreview(item)
     fun isMergeableEdit(item: ConversationItem) =
         !isReasoning(item) && processCategory(item, cli) == ProcessCategory.Edit &&
             item.outcome != "failed" && item.id != initiallyOpenItem && hasProcessEditPreview(item)
@@ -745,19 +755,16 @@ private fun ProcessReadBatchEntry(
             val activeIndex = entries.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
             val activeEntry = entries[activeIndex]
             val activePreview = previews[activeIndex]
-            val dark = codePaletteDark(colors)
-            val headerBg = if (dark) Color(0xFF18181A) else colors.surfaceContainerHigh.copy(alpha = 0.55f)
-            val bodyBg = if (dark) Color(0xFF121214) else colors.surfaceContainerLow.copy(alpha = 0.92f)
-            val borderColor = colors.outlineVariant.copy(alpha = 0.45f)
+            val headerBg = contentBlockColors(colors).header
+            val bodyBg = contentBlockColors(colors).surface
             Box(
                 Modifier
                     .fillMaxWidth()
                     .padding(start = 8.dp, top = 4.dp, bottom = 10.dp),
             ) {
                 Surface(
-                    shape = LumaCardShape(14.dp),
+                    shape = LumaCardShape(12.dp),
                     color = bodyBg,
-                    border = BorderStroke(1.dp, borderColor),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(Modifier.fillMaxWidth()) {
@@ -766,47 +773,28 @@ private fun ProcessReadBatchEntry(
                                 .fillMaxWidth()
                                 .background(headerBg)
                                 .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             entries.forEachIndexed { idx, entry ->
                                 val p = previews[idx]
                                 val selected = entry.id == activeEntry.id
-                                val pillBg = if (selected) {
-                                    if (dark) Color(0xFF27272B) else colors.surface
-                                } else {
-                                    colors.surfaceContainerHighest.copy(alpha = if (dark) 0.35f else 0.45f)
-                                }
-                                val pillBorder = if (selected) {
-                                    colors.outline.copy(alpha = 0.55f)
-                                } else {
-                                    borderColor
-                                }
                                 Surface(
-                                    onClick = {
+                                    shape = LumaCardShape(8.dp),
+                                    color = if (selected) contentBlockColors(colors).selected else contentBlockColors(colors).tab,
+                                    modifier = Modifier.selectable(selected = selected, role = Role.Tab) {
                                         if (selectedId != entry.id) {
                                             onManualLayoutToggle?.invoke()
                                             selectedId = entry.id
                                         }
                                     },
-                                    shape = LumaCardShape(8.dp),
-                                    color = pillBg,
-                                    border = BorderStroke(1.dp, pillBorder),
                                 ) {
                                     Row(
-                                        Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                        Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                                     ) {
-                                        CompositionLocalProvider(
-                                            LocalContentColor provides (if (selected) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.78f)),
-                                        ) {
-                                            MenuIcon(
-                                                fileNameSymbol(p.fileName) ?: fileNameSymbol(p.filePath) ?: MenuSymbol.FILE,
-                                                size = 14.dp,
-                                            )
-                                        }
                                         Text(
                                             p.fileName,
                                             style = MaterialTheme.typography.labelMedium.copy(
@@ -829,7 +817,6 @@ private fun ProcessReadBatchEntry(
                                 }
                             }
                         }
-                        HorizontalDivider(thickness = 1.dp, color = borderColor)
                         val (resolvedActivePreview, resolvingActive) = rememberResolvedReadPreview(activePreview)
                         ProcessReadFileBody(activeEntry, resolvedActivePreview, resolvingActive)
                     }
@@ -905,7 +892,7 @@ internal fun readBoundedUtf8Text(file: File, maxBytes: Int = MAX_PROCESS_PREVIEW
 private fun rememberResolvedReadPreview(
     basePreview: ProcessReadPreview,
 ): Pair<ProcessReadPreview, Boolean> {
-    if (basePreview.cleanText.isNotBlank() ||
+    if (!basePreview.resolveFromFile || basePreview.cleanText.isNotBlank() ||
         basePreview.filePath.isBlank() ||
         !isAllowedReadPreviewSource(basePreview.filePath) ||
         LocalInspectionMode.current
@@ -948,33 +935,21 @@ private fun ProcessSingleReadPreviewCard(
 ) {
     val (resolvedPreview, resolvingFile) = rememberResolvedReadPreview(preview)
     val colors = MaterialTheme.colorScheme
-    val dark = codePaletteDark(colors)
-    val clipboard = LocalClipboardManager.current
-    var copied by remember { mutableStateOf(false) }
-    LaunchedEffect(copied) {
-        if (copied) {
-            delay(2200)
-            copied = false
-        }
-    }
-    val headerBg = if (dark) Color(0xFF18181A) else colors.surfaceContainerHigh.copy(alpha = 0.55f)
-    val bodyBg = if (dark) Color(0xFF121214) else colors.surfaceContainerLow.copy(alpha = 0.92f)
-    val borderColor = colors.outlineVariant.copy(alpha = 0.45f)
-    val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
+    val headerBg = contentBlockColors(colors).header
+    val bodyBg = contentBlockColors(colors).surface
     Surface(
-        shape = LumaCardShape(14.dp),
+        shape = LumaCardShape(12.dp),
         color = bodyBg,
-        border = BorderStroke(1.dp, borderColor),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth()) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(36.dp)
+                    .heightIn(min = 30.dp)
                     .background(headerBg)
                     .padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Row(
@@ -984,12 +959,6 @@ private fun ProcessSingleReadPreviewCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.82f)) {
-                        MenuIcon(
-                            fileNameSymbol(resolvedPreview.fileName) ?: fileNameSymbol(resolvedPreview.filePath) ?: MenuSymbol.FILE,
-                            size = 15.dp,
-                        )
-                    }
                     Text(
                         resolvedPreview.fileName,
                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
@@ -1007,40 +976,15 @@ private fun ProcessSingleReadPreviewCard(
                         )
                     }
                 }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (resolvedPreview.rangeLabel.isNotBlank()) {
-                        Text(
-                            resolvedPreview.rangeLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant.copy(alpha = 0.78f),
-                            fontFamily = terminalFont(),
-                        )
-                    }
-                    Box(
-                        Modifier
-                            .size(28.dp)
-                            .clip(LumaCardShape(8.dp))
-                            .clickable {
-                                runCatching {
-                                    clipboard.setText(
-                                        AnnotatedString(resolvedPreview.cleanText.take(262_144)),
-                                    )
-                                }
-                                copied = true
-                            }
-                            .semantics { contentDescription = tr("复制", "Copy") },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
-                            ComposerGlyph(if (copied) "check" else "copy")
-                        }
-                    }
+                if (resolvedPreview.rangeLabel.isNotBlank()) {
+                    Text(
+                        resolvedPreview.rangeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+                        fontFamily = terminalFont(),
+                    )
                 }
             }
-            HorizontalDivider(thickness = 1.dp, color = borderColor)
             ProcessReadFileBody(item, resolvedPreview, resolvingFile)
         }
     }
@@ -1053,11 +997,14 @@ private fun ProcessReadFileBody(
     resolving: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
-    val dark = codePaletteDark(colors)
     if (preview.cleanText.isBlank()) {
         Box(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(
-                if (item.outcome == "running" || resolving) tr("正在读取文件…", "Reading file…") else tr("文件为空。", "File is empty."),
+                when {
+                    item.outcome == "running" || resolving -> tr("正在读取文件…", "Reading file…")
+                    !preview.resolveFromFile -> tr("未返回文件内容。", "No file content returned.")
+                    else -> tr("文件为空。", "File is empty.")
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
             )
@@ -1082,7 +1029,7 @@ private fun ProcessReadFileBody(
     }
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
-    val gutterBg = if (dark) Color(0xFF161618) else colors.surfaceContainerHigh.copy(alpha = 0.35f)
+    val gutterBg = contentBlockColors(colors).header
     val borderColor = colors.outlineVariant.copy(alpha = 0.38f)
     val displayLines = remember(preview.lines) {
         if (preview.lines.size > MAX_PROCESS_DISPLAY_ROWS) preview.lines.subList(0, MAX_PROCESS_DISPLAY_ROWS) else preview.lines
@@ -1129,6 +1076,7 @@ private fun ProcessReadFileBody(
                     .fillMaxWidth()
                     .height(IntrinsicSize.Min)
                     .drawBehind {
+                        if (!preview.sourceLinesKnown) return@drawBehind
                         val gutterW = readGutterWidth.toPx()
                         val padV = 8.dp.toPx()
                         val padH = 6.dp.toPx()
@@ -1161,13 +1109,15 @@ private fun ProcessReadFileBody(
                         }
                     },
             ) {
-                Spacer(Modifier.width(readGutterWidth))
-                Box(
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .background(borderColor),
-                )
+                if (preview.sourceLinesKnown) {
+                    Spacer(Modifier.width(readGutterWidth))
+                    Box(
+                        Modifier
+                            .width(1.dp)
+                            .fillMaxHeight()
+                            .background(borderColor),
+                    )
+                }
                 Box(
                     Modifier
                         .weight(1f)
@@ -1233,32 +1183,37 @@ private fun EditHeaderTitleLayout(
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
         val countPlaceable = measurables.firstOrNull { it.layoutId == "count" }?.measure(loose)
         val countReserved = if (countPlaceable != null) countPlaceable.width + gapPx else 0
-        val titleMaxW = (maxW - countReserved).coerceAtLeast(0)
+        val stackMetadata = countPlaceable != null && maxW - countReserved < 96.dp.roundToPx()
+        val titleMaxW = if (stackMetadata) maxW else (maxW - countReserved).coerceAtLeast(0)
         val titlePlaceable = measurables.first { it.layoutId == "title" }.measure(loose.copy(maxWidth = titleMaxW))
         val usedAfterCount = titlePlaceable.width + countReserved
-        val remForDir = maxW - usedAfterCount - gapPx
+        val remForDir = if (stackMetadata) maxW - countReserved else maxW - usedAfterCount - gapPx
         val dirPlaceable = if (remForDir >= minDirPx) {
             measurables.firstOrNull { it.layoutId == "dir" }?.measure(loose.copy(maxWidth = remForDir))
         } else null
-        val height = maxOf(titlePlaceable.height, countPlaceable?.height ?: 0, dirPlaceable?.height ?: 0)
+        val metadataHeight = maxOf(countPlaceable?.height ?: 0, dirPlaceable?.height ?: 0)
+        val height = if (stackMetadata) titlePlaceable.height + gapPx + metadataHeight
+            else maxOf(titlePlaceable.height, metadataHeight)
         layout(maxW, constraints.constrainHeight(height)) {
-            titlePlaceable.placeRelative(0, (height - titlePlaceable.height) / 2)
-            var cursorX = titlePlaceable.width
+            titlePlaceable.placeRelative(0, if (stackMetadata) 0 else (height - titlePlaceable.height) / 2)
+            var cursorX = if (stackMetadata) 0 else titlePlaceable.width
+            val metadataTop = if (stackMetadata) titlePlaceable.height + gapPx else 0
+            val metadataRowHeight = if (stackMetadata) metadataHeight else height
             if (countPlaceable != null) {
-                cursorX += gapPx
-                countPlaceable.placeRelative(cursorX, (height - countPlaceable.height) / 2)
+                if (!stackMetadata) cursorX += gapPx
+                countPlaceable.placeRelative(cursorX, metadataTop + (metadataRowHeight - countPlaceable.height) / 2)
                 cursorX += countPlaceable.width
             }
             if (dirPlaceable != null) {
                 cursorX += gapPx
-                dirPlaceable.placeRelative(cursorX, (height - dirPlaceable.height) / 2)
+                dirPlaceable.placeRelative(cursorX, metadataTop + (metadataRowHeight - dirPlaceable.height) / 2)
             }
         }
     }
 }
 
 @Composable
-private fun ProcessEditCardGroup(
+internal fun ProcessEditCardGroup(
     entries: List<ConversationItem>,
     cli: String,
     entryState: SaveableStateHolder,
@@ -1270,12 +1225,11 @@ private fun ProcessEditCardGroup(
     val mergedEdits = remember(entries, cli, langCode) { mergeConsecutiveProcessEdits(entries, cli) }
     val colors = MaterialTheme.colorScheme
     val dark = codePaletteDark(colors)
-    val headerBg = if (dark) Color(0xFF18181B) else colors.surfaceContainerHigh.copy(alpha = 0.45f)
-    val bodyBg = if (dark) Color(0xFF121214) else colors.surfaceContainerLow.copy(alpha = 0.94f)
-    val borderBaseColor = colors.outlineVariant
-    val borderMaxAlpha = 0.45f
-    val addTextColor = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
-    val delTextColor = if (dark) Color(0xFFF87171) else Color(0xFFEF4444)
+    val headerBg = contentBlockColors(colors).header
+    val bodyBg = contentBlockColors(colors).surface
+    val editPalette = codePalette(dark)
+    val addTextColor = editPalette.added
+    val delTextColor = editPalette.removed
     val onManualLayoutToggle = LocalManualLayoutToggle.current
 
     val expandedFlags = BooleanArray(mergedEdits.size)
@@ -1319,7 +1273,6 @@ private fun ProcessEditCardGroup(
                     }
                     var headerHeightPx by remember { mutableIntStateOf(0) }
                     val clipBuffer = remember { Path() }
-                    val strokeBuffer = remember { Path() }
                     val expanded = expandedFlags[index]
                     val previewFrac = matchingPreviews[index]
                     val fractionProvider = openFractions[index]
@@ -1335,13 +1288,11 @@ private fun ProcessEditCardGroup(
                                 val fPrev = if (index > 0) openFractions[index - 1]() else 0f
                                 val fNext = if (index < mergedEdits.lastIndex) openFractions[index + 1]() else 0f
                                 val frameAlpha = editSmoothStep(0.04f, 0.48f, f)
-                                val prevFrameAlpha = editSmoothStep(0.04f, 0.48f, fPrev)
                                 val topJoin = editSmoothStep(0.04f, 0.72f, minOf(fPrev, f))
                                 val bottomJoin = editSmoothStep(0.04f, 0.72f, minOf(f, fNext))
-                                val maxR = 13.dp.toPx()
+                                val maxR = 12.dp.toPx()
                                 val topR = maxR * (1f - topJoin)
                                 val bottomR = maxR * (1f - bottomJoin)
-                                val headerH = if (headerHeightPx > 0) minOf(headerHeightPx.toFloat(), size.height) else size.height
 
                                 clipBuffer.reset()
                                 clipBuffer.addRoundRect(
@@ -1357,105 +1308,11 @@ private fun ProcessEditCardGroup(
                                     ),
                                 )
                                 clipPath(clipBuffer) {
-                                    if (frameAlpha > 0.001f) {
-                                        if (size.height > headerH) {
-                                            drawRect(
-                                                color = bodyBg.copy(alpha = bodyBg.alpha * frameAlpha),
-                                                topLeft = Offset(0f, headerH),
-                                                size = Size(size.width, size.height - headerH),
-                                            )
-                                        }
-                                        drawRect(
-                                            color = headerBg.copy(alpha = headerBg.alpha * frameAlpha),
-                                            topLeft = Offset.Zero,
-                                            size = Size(size.width, headerH),
-                                        )
-                                    }
+                                    val headerH = headerHeightPx.toFloat().coerceIn(0f, size.height)
+                                    drawRect(bodyBg.copy(alpha = bodyBg.alpha * frameAlpha),
+                                        topLeft = Offset(0f, headerH), size = Size(size.width, size.height - headerH))
+                                    drawRect(headerBg.copy(alpha = headerBg.alpha * frameAlpha), size = Size(size.width, headerH))
                                     this@drawWithContent.drawContent()
-                                    if (frameAlpha > 0.001f && size.height > headerH + 0.5f) {
-                                        val divStroke = 1.dp.toPx()
-                                        drawLine(
-                                            color = borderBaseColor.copy(alpha = borderMaxAlpha * frameAlpha),
-                                            start = Offset(0f, headerH),
-                                            end = Offset(size.width, headerH),
-                                            strokeWidth = divStroke,
-                                        )
-                                    }
-                                }
-
-                                if (frameAlpha > 0.001f) {
-                                    val strokePx = 1.dp.toPx()
-                                    val half = strokePx * 0.5f
-                                    val left = half
-                                    val right = (size.width - half).coerceAtLeast(left)
-                                    val topY = half * (1f - topJoin)
-                                    val bottomY = (size.height - half * (1f - bottomJoin)).coerceAtLeast(topY)
-                                    val mainStrokeAlpha = borderMaxAlpha * frameAlpha
-                                    if (prevFrameAlpha <= 0.001f && topJoin <= 0.001f && bottomJoin <= 0.001f) {
-                                        strokeBuffer.reset()
-                                        strokeBuffer.addRoundRect(
-                                            RoundRect(
-                                                left = left,
-                                                top = half,
-                                                right = right,
-                                                bottom = (size.height - half).coerceAtLeast(half),
-                                                topLeftCornerRadius = CornerRadius((topR - half).coerceAtLeast(0f)),
-                                                topRightCornerRadius = CornerRadius((topR - half).coerceAtLeast(0f)),
-                                                bottomLeftCornerRadius = CornerRadius((bottomR - half).coerceAtLeast(0f)),
-                                                bottomRightCornerRadius = CornerRadius((bottomR - half).coerceAtLeast(0f)),
-                                            ),
-                                        )
-                                        drawPath(
-                                            path = strokeBuffer,
-                                            color = borderBaseColor.copy(alpha = mainStrokeAlpha),
-                                            style = Stroke(width = strokePx),
-                                        )
-                                    } else {
-                                        val wAvail = (right - left) * 0.5f
-                                        val hAvail = (bottomY - topY) * 0.5f
-                                        val tr = minOf((topR - half * (1f - topJoin)).coerceAtLeast(0f), wAvail, hAvail)
-                                        val br = minOf((bottomR - half * (1f - bottomJoin)).coerceAtLeast(0f), wAvail, hAvail)
-                                        strokeBuffer.reset()
-                                        strokeBuffer.moveTo(left + tr, topY)
-                                        if (tr > 0.5f) {
-                                            strokeBuffer.arcTo(Rect(left, topY, left + 2f * tr, topY + 2f * tr), 270f, -90f, false)
-                                        }
-                                        strokeBuffer.lineTo(left, bottomY - br)
-                                        if (br > 0.5f) {
-                                            strokeBuffer.arcTo(Rect(left, bottomY - 2f * br, left + 2f * br, bottomY), 180f, -90f, false)
-                                        }
-                                        strokeBuffer.lineTo(right - br, bottomY)
-                                        if (br > 0.5f) {
-                                            strokeBuffer.arcTo(Rect(right - 2f * br, bottomY - 2f * br, right, bottomY), 90f, -90f, false)
-                                        }
-                                        strokeBuffer.lineTo(right, topY + tr)
-                                        if (tr > 0.5f) {
-                                            strokeBuffer.arcTo(Rect(right - 2f * tr, topY, right, topY + 2f * tr), 0f, -90f, false)
-                                        }
-                                        if (prevFrameAlpha <= 0.001f) {
-                                            strokeBuffer.close()
-                                            drawPath(
-                                                path = strokeBuffer,
-                                                color = borderBaseColor.copy(alpha = mainStrokeAlpha),
-                                                style = Stroke(width = strokePx),
-                                            )
-                                        } else {
-                                            drawPath(
-                                                path = strokeBuffer,
-                                                color = borderBaseColor.copy(alpha = mainStrokeAlpha),
-                                                style = Stroke(width = strokePx),
-                                            )
-                                            val topFlatAlpha = borderMaxAlpha * (frameAlpha * (1f - prevFrameAlpha)).coerceIn(0f, 1f)
-                                            if (topFlatAlpha > 0.001f && right - tr > left + tr) {
-                                                drawLine(
-                                                    color = borderBaseColor.copy(alpha = topFlatAlpha),
-                                                    start = Offset(left + tr, topY),
-                                                    end = Offset(right - tr, topY),
-                                                    strokeWidth = strokePx,
-                                                )
-                                            }
-                                        }
-                                    }
                                 }
                             },
                     ) {
@@ -1498,7 +1355,7 @@ private fun ProcessEditCardGroup(
                                             }
                                         },
                                         style = MaterialTheme.typography.bodyMedium,
-                                        maxLines = 1,
+                                        maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 },
@@ -1612,10 +1469,11 @@ private fun StreamingDiffViewer(
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
     val borderColor = colors.outlineVariant.copy(alpha = 0.38f)
-    val hunkBandBg = if (dark) Color(0xFF16171B) else colors.surfaceContainerHigh.copy(alpha = 0.48f)
-    val gutterDefaultBg = if (dark) Color(0xFF161618) else colors.surfaceContainerHigh.copy(alpha = 0.35f)
-    val addBarColor = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
-    val delBarColor = if (dark) Color(0xFFF87171) else Color(0xFFEF4444)
+    val hunkBandBg = contentBlockColors(colors).header
+    val gutterDefaultBg = contentBlockColors(colors).header
+    val diffPalette = codePalette(dark)
+    val addBarColor = diffPalette.added
+    val delBarColor = diffPalette.removed
     val addRowBg = addBarColor.copy(alpha = if (dark) 0.14f else 0.12f)
     val delRowBg = delBarColor.copy(alpha = if (dark) 0.14f else 0.12f)
     val addGutterBg = addBarColor.copy(alpha = if (dark) 0.22f else 0.18f)

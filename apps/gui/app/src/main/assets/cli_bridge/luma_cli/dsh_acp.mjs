@@ -250,21 +250,13 @@ export async function apply(ctx) {
         sandbox: typeof spec?.sandbox === 'string' ? spec.sandbox : '', approval: typeof spec?.approval === 'string' ? spec.approval : '' };
     });
     const plan = getPlanState(agent);
-    if (plan.available && !options.some(option => option.value === 'plan')) {
-      options.push({
-        value: 'plan',
-        name: 'Plan mode',
-        description: 'Explore read-only and present a plan for review before execution.',
-        sandbox: 'plan',
-        approval: 'ask',
-      });
-    }
-    const currentValue = plan.active ? 'plan' : permissions.current(agent.session);
+    const currentValue = permissions.current(agent.session);
     return {
       sessionId: id,
       currentValue,
       options,
-      planActive: plan.active,
+      planAvailable: Boolean(plan.available),
+      planActive: Boolean(plan.active),
       preset: getAgentPreset(agent),
       goal: getGoalState(agent),
     };
@@ -729,19 +721,19 @@ export async function apply(ctx) {
         if (prompting.has(id) || agent.status !== 'idle') throw new Error('Wait for the native session to become idle before changing permissions');
         const before = snapshot(id);
         if (!before.options.some(option => option.value === p.value)) throw new Error('Permission preset is not in the native catalog');
-        const planMode = ctx.get('planMode');
-        if (p.value === 'plan') {
-          if (!planMode || typeof planMode.set !== 'function') throw new Error('DSH planMode service is unavailable');
-          planMode.set(agent, true);
-        } else {
-          if (planMode && typeof planMode.get === 'function' && typeof planMode.set === 'function') {
-            const st = planMode.get(agent);
-            if (st?.active || st?.pending === true) planMode.set(agent, false);
-          }
-          service().set(agent.session, p.value);
-        }
+        service().set(agent.session, p.value);
         const actual = snapshot(id);
         if (actual.currentValue !== p.value) throw new Error('DSH did not confirm the selected permission preset');
+        return { jsonrpc: '2.0', id: message.id, result: actual };
+      }
+      if (message.method === PREFIX + 'plan') {
+        if (prompting.has(id) || agent.status !== 'idle') throw new Error('Wait for the native session to become idle before changing plan mode');
+        if (typeof p.enabled !== 'boolean') throw new Error('planMode enabled boolean is required');
+        const planMode = ctx.get('planMode');
+        if (!planMode || typeof planMode.set !== 'function' || typeof planMode.get !== 'function') throw new Error('DSH planMode service is unavailable');
+        planMode.set(agent, p.enabled);
+        const actual = snapshot(id);
+        if (actual.planActive !== p.enabled) throw new Error('DSH did not confirm the requested plan mode');
         return { jsonrpc: '2.0', id: message.id, result: actual };
       }
       if (message.method === PREFIX + 'read') {

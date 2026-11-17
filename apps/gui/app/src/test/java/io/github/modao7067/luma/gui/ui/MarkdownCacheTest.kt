@@ -27,12 +27,12 @@ class MarkdownCacheTest {
     }
     @Test fun nestedFencedCodeBlocksInsideMarkdownFenceDoNotTruncateOrLeaveEmptyFence() {
         val source = buildString {
-            appendLine("下面是一份可以直接复制发给另一个模型的交接说明：")
+            appendLine("下面是一份包含嵌套代码块的示例文档：")
             appendLine()
             appendLine("---")
             appendLine()
             appendLine("```markdown")
-            appendLine("# 任务交接：优化 Luma GUI 模型选择器中的「速度」选项")
+            appendLine("# 示例文档：配置模型菜单中的「速度」选项")
             appendLine()
             appendLine("## 1. 背景与现状")
             appendLine("- UI 入口：`apps/gui/app/src/main/java/io/github/modao7067/luma/gui/ui/ModelMenu.kt`")
@@ -42,10 +42,10 @@ class MarkdownCacheTest {
             appendLine("- 数据契约：`apps/gui/app/src/main/java/io/github/modao7067/luma/gui/session/CockpitContract.kt`")
             appendLine("- 构建、校验与覆盖安装流程：")
             appendLine("  ```bash")
-            appendLine("  cd /workspace/luma")
+            appendLine("  cd /workspace/project")
             appendLine("  ./luma assets check")
             appendLine("  ```")
-            appendLine("- 注意：工作树中存在其他未暂存的历史改动。")
+            appendLine("- 说明：示例保留已有菜单选项。")
             append("```")
         }
         val docParser = MarkdownDocumentParser()
@@ -56,7 +56,7 @@ class MarkdownCacheTest {
         assertTrue(markdownBlock.literal.contains("```kotlin"))
         assertTrue(markdownBlock.literal.contains("- 数据契约：`apps/gui/app/src/main/java/io/github/modao7067/luma/gui/session/CockpitContract.kt`"))
         assertTrue(markdownBlock.literal.contains("```bash"))
-        assertTrue(markdownBlock.literal.endsWith("- 注意：工作树中存在其他未暂存的历史改动。"))
+        assertTrue(markdownBlock.literal.endsWith("- 说明：示例保留已有菜单选项。"))
         val midStream = source.substringBefore("- 构建、校验与覆盖安装流程：")
         val partialDoc = docParser.parse(midStream, complete = false)
         assertEquals(listOf(MarkdownKind.PARAGRAPH, MarkdownKind.RULE, MarkdownKind.CODE_BLOCK), partialDoc.blocks.map { it.node.kind })

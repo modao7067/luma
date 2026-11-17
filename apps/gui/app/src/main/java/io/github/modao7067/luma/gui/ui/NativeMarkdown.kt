@@ -5,19 +5,17 @@ import io.github.modao7067.luma.gui.i18n.tr
 import android.graphics.Bitmap
 import android.util.LruCache
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -45,6 +43,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -70,7 +69,6 @@ import org.commonmark.ext.gfm.strikethrough.Strikethrough
 import org.commonmark.ext.gfm.tables.*
 import org.commonmark.node.*
 import io.github.modao7067.luma.gui.session.MediaResource
-import io.github.modao7067.luma.gui.ui.shapes.addSquircleRect
 import ru.noties.jlatexmath.JLatexMathAndroid
 import ru.noties.jlatexmath.JLatexMathDrawable
 
@@ -230,13 +228,12 @@ private fun MarkdownPluginCard(catalogId: String, authUrl: String?) {
     }
     DisableSelection {
         Surface(
-            shape = LumaCardShape(18.dp),
-            color = colors.surfaceContainerLow,
-            border = BorderStroke(0.5.dp, colors.outlineVariant.copy(alpha = 0.55f)),
+            shape = LumaCardShape(12.dp),
+            color = contentBlockColors(colors).surface,
             modifier = Modifier.fillMaxWidth().testTag("plugin-card-$idLower"),
         ) {
             Row(
-                Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -280,7 +277,7 @@ private fun MarkdownPluginCard(catalogId: String, authUrl: String?) {
                 } else {
                     Surface(
                         shape = CircleShape,
-                        color = colors.surfaceContainerHighest,
+                        color = contentBlockColors(colors).tab,
                         contentColor = colors.onSurfaceVariant,
                     ) {
                         Text(
@@ -407,7 +404,7 @@ private fun MarkdownBlock(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
             val quoteBudget = if (budget >= node.revealUnits) Int.MAX_VALUE else budget
             Box(
                 Modifier.fillMaxWidth().clip(LumaCardShape(12.dp))
-                    .background(colors.surfaceContainerLow.copy(alpha = 0.65f))
+                    .background(contentBlockColors(colors).surface)
                     .drawBehind { drawRoundRect(colors.primary.copy(alpha = 0.55f), Offset.Zero, Size(2.5.dp.toPx(), size.height), CornerRadius(2.dp.toPx())) }
                     .padding(start = 14.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
             ) { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { MarkdownChildren(node.children, quoteBudget, onFileLink) } }
@@ -489,15 +486,9 @@ private fun RichText(
 ) {
     val colors = MaterialTheme.colorScheme
     val isDark = codePaletteDark(colors)
-    val nested = LocalMarkdownNestingDepth.current > 0
     val color = colors.onSurface
     val inlineCodeColor = if (isDark) Color(0xFFE8A874) else Color(0xFF924418)
-    val codeBackground = when {
-        isDark && nested -> Color(0xFF242428)
-        isDark -> colors.surfaceContainerHigh.copy(alpha = 0.82f)
-        nested -> colors.surfaceContainerHighest.copy(alpha = 0.78f)
-        else -> colors.surfaceContainerHigh.copy(alpha = 0.78f)
-    }
+    val codeBackground = contentBlockColors(colors).header
     val mono = terminalFont()
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -758,19 +749,19 @@ private fun MarkdownTable(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
     if (rows.isEmpty() || columnCount == 0) return
     val colors = MaterialTheme.colorScheme
     val borderColor = colors.outlineVariant.copy(alpha = 0.50f)
-    val headerBg = colors.surfaceContainerHigh.copy(alpha = 0.55f)
-    val stripeBg = colors.surfaceContainerLow.copy(alpha = 0.45f)
+    val headerBg = contentBlockColors(colors).header
+    val stripeBg = contentBlockColors(colors).header.copy(alpha = 0.45f)
     val density = LocalDensity.current
-    val hPadPx = with(density) { 14.dp.roundToPx() }
-    val vPadPx = with(density) { 10.dp.roundToPx() }
+    val hPadPx = with(density) { 12.dp.roundToPx() }
+    val vPadPx = with(density) { 8.dp.roundToPx() }
     val minColPx = with(density) { 72.dp.roundToPx() }
     val maxColPx = with(density) { 260.dp.roundToPx() }
     val strokePx = with(density) { 1.dp.toPx() }
     val gridOffsets = remember { mutableStateOf(intArrayOf() to intArrayOf()) }
     Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
         LiquidSurface(
-            cornerRadius = 14.dp,
-            tonalTint = colors.surfaceContainerLow.copy(alpha = 0.90f),
+            cornerRadius = 12.dp,
+            tonalTint = contentBlockColors(colors).surface,
         ) {
             androidx.compose.ui.layout.Layout(
                 modifier = Modifier.drawBehind {
@@ -800,11 +791,6 @@ private fun MarkdownTable(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
                                 strokeWidth = strokePx,
                             )
                         }
-                        drawPath(
-                            path = androidx.compose.ui.graphics.Path().apply { addSquircleRect(size.width, size.height, 14.dp.toPx()) },
-                            color = borderColor,
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokePx),
-                        )
                     }
                 },
                 content = {
@@ -912,15 +898,9 @@ internal fun MarkdownDocumentCard(
             copied = false
         }
     }
-    val outerHeaderBg = if (dark) Color(0xFF1C1C1E) else colors.surfaceContainerHigh.copy(alpha = 0.48f)
-    val outerBodyBg = if (dark) Color(0xFF161618) else colors.surfaceContainerLow.copy(alpha = 0.52f)
-    val borderColor = colors.outlineVariant.copy(alpha = if (dark) 0.38f else 0.45f)
-    val badgeBg = if (dark) Color(0xFF222225) else colors.surfaceContainerHighest.copy(alpha = 0.65f)
-    val excerptWellBg = if (dark) Color(0xFF111113) else colors.surface.copy(alpha = 0.68f)
-    val actionBtnBg = if (dark) Color(0xFF222225) else colors.surfaceContainerHigh.copy(alpha = 0.62f)
-    val trackBg = if (dark) Color.White.copy(alpha = 0.07f) else Color.Black.copy(alpha = 0.06f)
-    val thumbBg = if (dark) Color(0xFF2C2C2A) else colors.surface
-    val thumbBorder = if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.08f)
+    val outerBodyBg = contentBlockColors(colors).surface
+    val trackBg = contentBlockColors(colors).tab
+    val thumbBg = contentBlockColors(colors).selected
     val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
     val headerCaption = language.trim().substringBefore(' ').lowercase().ifBlank { "markdown" }
     val copyMarkdown = {
@@ -930,9 +910,8 @@ internal fun MarkdownDocumentCard(
     val effectiveShowSource = showSource || exceedsPreviewCap
     val retainedPresentationState = remember { mutableStateOf<MarkdownPresentation?>(null) }
     Surface(
-        shape = LumaCardShape(14.dp),
+        shape = LumaCardShape(12.dp),
         color = outerBodyBg,
-        border = BorderStroke(1.dp, borderColor),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("markdown-document-card")
@@ -949,132 +928,76 @@ internal fun MarkdownDocumentCard(
             collapsedContent = {
                 DisableSelection {
                     Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(LumaCardShape(10.dp))
-                                .clickable {
-                                    onManualLayoutToggle?.invoke()
-                                    expanded = true
-                                },
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(11.dp),
-                        ) {
-                            Box(
-                                Modifier
-                                    .size(36.dp)
-                                    .clip(LumaCardShape(10.dp))
-                                    .background(badgeBg)
-                                    .border(0.5.dp, borderColor, LumaCardShape(10.dp)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                CompositionLocalProvider(LocalContentColor provides colors.primary) {
-                                    MenuIcon(MenuSymbol.ARTICLE, size = 18.dp)
-                                }
-                            }
-                            Column(
-                                Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                Text(
-                                    summary.title,
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                    color = colors.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    summary.subtitle,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant,
-                                    fontFamily = terminalFont(),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                        if (summary.excerpt.isNotBlank()) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clip(LumaCardShape(10.dp))
-                                    .background(excerptWellBg, LumaCardShape(10.dp))
-                                    .border(0.5.dp, borderColor, LumaCardShape(10.dp))
-                                    .clickable {
-                                        onManualLayoutToggle?.invoke()
-                                        expanded = true
-                                    }
-                                    .padding(horizontal = 11.dp, vertical = 8.dp),
-                            ) {
-                                Text(
-                                    summary.excerpt,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                        Row(
                             Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Row(
                                 Modifier
                                     .weight(1f)
-                                    .height(34.dp)
-                                    .clip(LumaCardShape(9.dp))
-                                    .background(actionBtnBg, LumaCardShape(9.dp))
-                                    .border(0.5.dp, borderColor, LumaCardShape(9.dp))
+                                    .clip(LumaCardShape(8.dp))
                                     .clickable {
                                         onManualLayoutToggle?.invoke()
                                         expanded = true
                                     }
-                                    .padding(horizontal = 10.dp),
-                                horizontalArrangement = Arrangement.Center,
+                                    .semantics { contentDescription = tr("展开", "Expand") }
+                                    .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant) {
-                                    MenuIcon(MenuSymbol.DOWN, size = 14.dp)
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        summary.title,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = colors.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        summary.subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
-                                Spacer(Modifier.width(5.dp))
-                                Text(
-                                    tr("展开", "Expand"),
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                                    color = colors.onSurface,
-                                    maxLines = 1,
-                                )
+                                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant) {
+                                    MenuIcon(MenuSymbol.DOWN, size = 16.dp)
+                                }
                             }
-                            Row(
+                            Box(
                                 Modifier
-                                    .weight(1f)
-                                    .height(34.dp)
-                                    .clip(LumaCardShape(9.dp))
-                                    .background(actionBtnBg, LumaCardShape(9.dp))
-                                    .border(0.5.dp, borderColor, LumaCardShape(9.dp))
+                                    .size(28.dp)
+                                    .clip(LumaCardShape(8.dp))
                                     .clickable(onClick = copyMarkdown)
-                                    .semantics { contentDescription = tr("复制", "Copy") }
-                                    .padding(horizontal = 10.dp),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically,
+                                    .semantics { contentDescription = tr("复制", "Copy") },
+                                contentAlignment = Alignment.Center,
                             ) {
                                 CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
                                     ComposerGlyph(if (copied) "check" else "copy")
                                 }
-                                Spacer(Modifier.width(5.dp))
-                                Text(
-                                    if (copied) tr("已复制", "Copied") else tr("复制", "Copy"),
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                                    color = if (copied) copiedTint else colors.onSurface,
-                                    maxLines = 1,
-                                )
                             }
+                        }
+                        if (summary.excerpt.isNotBlank()) {
+                            Text(
+                                summary.excerpt,
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(LumaCardShape(6.dp))
+                                    .clickable {
+                                        onManualLayoutToggle?.invoke()
+                                        expanded = true
+                                    }
+                                    .padding(vertical = 2.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
@@ -1097,152 +1020,92 @@ internal fun MarkdownDocumentCard(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .height(38.dp)
-                            .background(outerHeaderBg)
-                            .padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                            .heightIn(min = 34.dp)
+                            .background(contentBlockColors(colors).header)
+                            .padding(start = 6.dp, end = 6.dp, top = 3.dp, bottom = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Row(
-                            Modifier.weight(1f, fill = false),
+                            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
-                            CompositionLocalProvider(LocalContentColor provides colors.primary) {
-                                MenuIcon(MenuSymbol.ARTICLE, size = 15.dp)
-                            }
-                            Text(
-                                headerCaption,
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                                color = colors.onSurfaceVariant,
-                                fontFamily = terminalFont(),
-                                maxLines = 1,
-                            )
-                            Text(
-                                tr("· ${summary.lineCount} 行", "· ${summary.lineCount} lines"),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant.copy(alpha = 0.72f),
-                                fontFamily = terminalFont(),
-                                maxLines = 1,
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            if (!exceedsPreviewCap) {
-                                Row(
-                                    Modifier
-                                        .height(26.dp)
-                                        .clip(CircleShape)
-                                        .background(trackBg)
-                                        .padding(1.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .fillMaxHeight()
-                                            .clip(CircleShape)
-                                            .then(
-                                                if (!showSource) {
-                                                    Modifier
-                                                        .background(thumbBg, CircleShape)
-                                                        .border(0.5.dp, thumbBorder, CircleShape)
-                                                } else {
-                                                    Modifier
-                                                },
-                                            )
-                                            .clickable {
-                                                if (showSource) {
-                                                    onManualLayoutToggle?.invoke()
-                                                    showSource = false
-                                                }
-                                            }
-                                            .padding(horizontal = 9.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            tr("预览", "Preview"),
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                fontWeight = if (!showSource) FontWeight.Medium else FontWeight.Normal,
-                                            ),
-                                            color = if (!showSource) colors.onSurface else colors.onSurfaceVariant,
-                                        )
-                                    }
-                                    Box(
-                                        Modifier
-                                            .fillMaxHeight()
-                                            .clip(CircleShape)
-                                            .then(
-                                                if (showSource) {
-                                                    Modifier
-                                                        .background(thumbBg, CircleShape)
-                                                        .border(0.5.dp, thumbBorder, CircleShape)
-                                                } else {
-                                                    Modifier
-                                                },
-                                            )
-                                            .clickable {
-                                                if (!showSource) {
-                                                    onManualLayoutToggle?.invoke()
-                                                    showSource = true
-                                                }
-                                            }
-                                            .padding(horizontal = 9.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            tr("源码", "Source"),
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                fontWeight = if (showSource) FontWeight.Medium else FontWeight.Normal,
-                                            ),
-                                            color = if (showSource) colors.onSurface else colors.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                            Row(
-                                Modifier
-                                    .height(26.dp)
-                                    .clip(LumaCardShape(8.dp))
-                                    .background(trackBg)
-                                    .clickable {
-                                        onManualLayoutToggle?.invoke()
-                                        expanded = false
-                                    }
-                                    .padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                            ) {
-                                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant) {
-                                    MenuIcon(MenuSymbol.DOWN, size = 13.dp, rotationProvider = { 180f })
-                                }
+                            if (exceedsPreviewCap) {
                                 Text(
-                                    tr("收起", "Collapse"),
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                    headerCaption,
+                                    Modifier.padding(horizontal = 6.dp),
+                                    style = MaterialTheme.typography.labelMedium,
                                     color = colors.onSurfaceVariant,
+                                    maxLines = 1,
                                 )
-                            }
-                            Box(
-                                Modifier
-                                    .size(28.dp)
-                                    .clip(LumaCardShape(8.dp))
-                                    .clickable(onClick = copyMarkdown)
-                                    .semantics { contentDescription = tr("复制", "Copy") },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
-                                    ComposerGlyph(if (copied) "check" else "copy")
+                            } else {
+                                listOf(false, true).forEach { sourceTab ->
+                                    val selected = showSource == sourceTab
+                                    Box(
+                                        Modifier
+                                            .clip(LumaCardShape(7.dp))
+                                            .background(if (selected) thumbBg else trackBg)
+                                            .selectable(selected = selected, role = Role.Tab) {
+                                                if (showSource != sourceTab) {
+                                                    onManualLayoutToggle?.invoke()
+                                                    showSource = sourceTab
+                                                }
+                                            }
+                                            .padding(horizontal = 9.dp, vertical = 5.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            if (sourceTab) tr("源码", "Source") else tr("预览", "Preview"),
+                                            style = MaterialTheme.typography.labelMedium.copy(
+                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                            ),
+                                            color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                                            maxLines = 1,
+                                        )
+                                    }
                                 }
+                            }
+                        }
+                        Text(
+                            tr("${summary.lineCount} 行", "${summary.lineCount} lines"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                        Box(
+                            Modifier
+                                .size(28.dp)
+                                .clip(LumaCardShape(8.dp))
+                                .clickable {
+                                    onManualLayoutToggle?.invoke()
+                                    expanded = false
+                                }
+                                .semantics { contentDescription = tr("收起", "Collapse") },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant) {
+                                MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { 180f })
+                            }
+                        }
+                        Box(
+                            Modifier
+                                .size(28.dp)
+                                .clip(LumaCardShape(8.dp))
+                                .clickable(onClick = copyMarkdown)
+                                .semantics { contentDescription = tr("复制", "Copy") },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
+                                ComposerGlyph(if (copied) "check" else "copy")
                             }
                         }
                     }
                 }
-                HorizontalDivider(thickness = 1.dp, color = borderColor)
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
                 ) {
                     MarkdownModeCrossfade(
                         showSource = effectiveShowSource,
@@ -1382,7 +1245,6 @@ internal fun CodeBlock(
     val clipboard = LocalClipboardManager.current
     val colors = MaterialTheme.colorScheme
     val dark = codePaletteDark(colors)
-    val nested = LocalMarkdownNestingDepth.current > 0
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -1390,51 +1252,29 @@ internal fun CodeBlock(
             copied = false
         }
     }
-    val headerBg = when {
-        dark && nested -> Color(0xFF131315)
-        dark -> Color(0xFF18181A)
-        nested -> colors.surfaceContainerHighest.copy(alpha = 0.72f)
-        else -> colors.surfaceContainerHigh.copy(alpha = 0.55f)
-    }
-    val bodyBg = when {
-        dark && nested -> Color(0xFF0C0C0E)
-        dark -> Color(0xFF121214)
-        nested -> colors.surfaceContainer.copy(alpha = 0.92f)
-        else -> colors.surfaceContainerLow.copy(alpha = 0.92f)
-    }
-    val borderColor = colors.outlineVariant.copy(alpha = if (dark) 0.40f else 0.45f)
+    val blockColors = contentBlockColors(colors)
     val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
     val headerCaption = if (caption == language && language.isNotBlank()) caption.lowercase() else caption
     Surface(
-        shape = LumaCardShape(14.dp),
-        color = bodyBg,
-        border = BorderStroke(1.dp, borderColor),
+        shape = LumaCardShape(12.dp),
+        color = blockColors.surface,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth()) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(36.dp)
-                    .background(headerBg)
-                    .padding(horizontal = 14.dp),
+                    .height(30.dp)
+                    .padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.82f)) {
-                        MenuIcon(codeBlockSymbol(language, caption), size = 15.dp)
-                    }
-                    Text(
-                        headerCaption,
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                        color = colors.onSurfaceVariant,
-                        fontFamily = terminalFont(),
-                    )
-                }
+                Text(
+                    headerCaption,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                    color = colors.onSurfaceVariant,
+                    fontFamily = terminalFont(),
+                )
                 Box(
                     Modifier
                         .size(28.dp)
@@ -1451,11 +1291,10 @@ internal fun CodeBlock(
                     }
                 }
             }
-            HorizontalDivider(thickness = 1.dp, color = borderColor)
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 11.dp)
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
                     .heightIn(max = 242.dp)
                     .clipToBounds()
                     .codeBlockScrollBoundary(bodyVerticalScrollState, bodyHorizontalScrollState)

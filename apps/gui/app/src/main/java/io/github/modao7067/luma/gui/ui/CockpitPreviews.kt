@@ -41,7 +41,7 @@ internal val previewActions = object : CockpitActions {
     override fun closePreview() {}
     override fun dismissError() {}
 }
-private val sampleSession = SessionSummary("preview", "修复终端里的链接预览", "noroot", "/workspace/luma", "gpt-6-astra", "执行中", "preview-thread", modelLabel = "GPT-6-Astra")
+private val sampleSession = SessionSummary("preview", "修复终端里的链接预览", "noroot", "/workspace/project", "gpt-6-astra", "执行中", "preview-thread", modelLabel = "GPT-6-Astra")
 private val sampleMessages = listOf(
     ConversationItem("u1", "user", "检查链接预览，先解释原因，再给出最小修复。"),
     ConversationItem("t1", "tool", "读取 TerminalLinkOpener.java", "sed -n '1,180p' TerminalLinkOpener.java", "已完成", kind = "commandExecution", input = "sed -n '1,180p' TerminalLinkOpener.java", outcome = "succeeded"),
@@ -78,7 +78,7 @@ internal fun ConversationLargePreview() = LumaTheme(seedArgb = 0xFF6750A4.toInt(
 @Preview(name = "Approval", widthDp = 393, heightDp = 852)
 @Composable
 internal fun ApprovalPreview() = LumaTheme(seedArgb = 0xFF6750A4.toInt(), darkTheme = true) {
-    CockpitScreen(CockpitState(selected = sampleView().copy(requests = listOf(UserRequest("approval", "命令需要批准", "在 /workspace/luma 执行构建", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝")))))), previewActions)
+    CockpitScreen(CockpitState(selected = sampleView().copy(requests = listOf(UserRequest("approval", "命令需要批准", "在 /workspace/project 执行构建", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝")))))), previewActions)
 }
 
 @Preview(name = "Markdown", widthDp = 393, heightDp = 852)
@@ -94,7 +94,7 @@ internal fun MarkdownPreview() = LumaTheme(seedArgb = 0xFF6750A4.toInt(), darkTh
 @Preview(name = "Approval Dialog", widthDp = 393, heightDp = 852)
 @Composable
 internal fun ApprovalDialogPreview() = LumaTheme(seedArgb = 0xFF6750A4.toInt(), darkTheme = true) { SessionTypography {
-    RequestDialog(UserRequest("approval", "命令需要批准", "在 `/workspace/luma` 执行：\n\n```sh\n./gradlew :apps:gui:assembleDebug --offline\n```", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝"))), previewActions) {}
+    RequestDialog(UserRequest("approval", "命令需要批准", "在 `/workspace/project` 执行：\n\n```sh\n./gradlew :apps:gui:assembleDebug --offline\n```", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝"))), previewActions) {}
 } }
 
 @Preview(name = "Model preferences", widthDp = 393, heightDp = 852)
@@ -300,7 +300,7 @@ internal fun Spec2025NoticesPreview(@PreviewParameter(NoticeThemeFixtureProvider
         CockpitScreen(CockpitState(selected = sampleView().copy(
             error = "无法读取文件，请检查当前环境的访问权限。",
             uncertainSubmission = true,
-            requests = listOf(UserRequest("approval", "命令需要批准", "在 /workspace/luma 执行构建", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝")))),
+            requests = listOf(UserRequest("approval", "命令需要批准", "在 /workspace/project 执行构建", listOf(RequestChoice("accept", "批准本次"), RequestChoice("decline", "拒绝")))),
         )), previewActions)
     }
 

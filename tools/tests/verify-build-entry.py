@@ -31,3 +31,8 @@ with tempfile.TemporaryDirectory(prefix='luma-entry-') as tmp:
  invalid=subprocess.run(['bash',str(p/'tools/luma'),'test-ui','one','two'],capture_output=True)
  assert invalid.returncode==2
  print('PASS opt-in offscreen Compose test dispatch, pattern, cwd independence, and argument validation')
+ (p/'tools/verify.py').write_text('import sys\nsys.stdout.write("\\n".join(sys.argv[1:]))\n')
+ for args in ([], ['--static']):
+  output=subprocess.check_output(['bash',str(p/'tools/luma'),'verify',*args],text=True,cwd='/tmp').splitlines()
+  assert output==args,(args,output)
+ print('PASS verify forwards the optional static mode without invoking Gradle')

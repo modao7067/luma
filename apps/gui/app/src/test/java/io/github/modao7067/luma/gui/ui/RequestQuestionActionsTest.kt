@@ -82,4 +82,34 @@ class RequestQuestionActionsTest {
             LumaI18n.resetForTest()
         }
     }
+
+    @Test
+    fun kimiApprovalChoicesAndDiffPayloadNormalizeForCompactLayoutAndFileView() {
+        try {
+            LumaI18n.overrideLanguage = "zh"
+            assertEquals("允许一次", normalizeChoiceDisplayLabel("Approve once"))
+            assertEquals("本会话允许", normalizeChoiceDisplayLabel("Approve for this session"))
+            assertEquals("拒绝", normalizeChoiceDisplayLabel("Reject"))
+
+            LumaI18n.overrideLanguage = "en"
+            assertEquals("Allow once", normalizeChoiceDisplayLabel("Approve once"))
+            assertEquals("Allow for session", normalizeChoiceDisplayLabel("Approve for this session"))
+            assertEquals("Reject", normalizeChoiceDisplayLabel("Reject"))
+
+            val diffBody = """{"path":"/tmp/a.py"}
+--- /tmp/a.py
++++ /tmp/a.py
+@@ -1 +1 @@
+-old
++new"""
+            val (title, parsed) = parseStructuredApprovalBody("Edit", diffBody)
+            assertEquals("file", parsed.kindHint)
+            assertEquals("/tmp/a.py", parsed.codeBlock)
+            assertTrue(title.contains("a.py"))
+            assertTrue(parsed.extraCode.contains("-old"))
+            assertTrue(parsed.extraCode.contains("+new"))
+        } finally {
+            LumaI18n.resetForTest()
+        }
+    }
 }

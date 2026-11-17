@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.unit.dp
@@ -303,5 +304,133 @@ class StreamTailFollowTest {
             anchoredAfter.top <= upperBand)
         assertTrue("Reading space below reply must remain open after switching back: reply=$replyAfter list=$listBounds",
             replyAfter.bottom < listBounds.bottom - listBounds.height * 0.4f)
+    }
+
+    @Test fun collapsingExpandedToolAtBottomTriggersSmoothSecondStageSettleInsteadOfTeleport() {
+        val history = (1..24).map { i ->
+            ConversationItem("h-$i", if (i % 2 == 1) "user" else "assistant", "历史消息 $i：用于占满历史滚动空间")
+        }
+        val toolOutput = (1..18).joinToString("\n") { "line $it: output body for collapse test" }
+        val view = SessionView(
+            summary = SessionSummary("bottom-collapse-session", "测试会话", "noroot", "/workspace", cli = "Codex"),
+            connected = true,
+            loading = false,
+            messages = history + listOf(
+                ConversationItem("t-collapse", "tool", text = "执行检查", kind = "commandExecution", input = "echo check", detail = toolOutput, outcome = "succeeded"),
+            ),
+        )
+        rule.setContent {
+            MaterialTheme {
+                SessionDetail(CockpitState(selected = view), view, previewActions, onPickImages = {})
+            }
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("1 次 shell", substring = true).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("conversation-list").performTouchInput {
+            swipe(center, center - Offset(0f, 240f), 140)
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("执行检查", substring = true).performClick()
+        rule.waitForIdle()
+
+        repeat(4) {
+            rule.onNodeWithTag("conversation-list").performTouchInput {
+                swipe(topCenter + Offset(0f, 220f), topCenter + Offset(0f, 40f), 140)
+            }
+            rule.waitForIdle()
+        }
+
+        val beforeCollapseTop = rule.onNodeWithText("执行检查", substring = true).fetchSemanticsNode().boundsInRoot.top
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithText("执行检查", substring = true).performClick()
+
+        val tops = mutableListOf<Float>()
+        repeat(80) {
+            rule.mainClock.advanceTimeBy(16L)
+            rule.waitForIdle()
+            tops += rule.onNodeWithText("执行检查", substring = true).fetchSemanticsNode().boundsInRoot.top
+        }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        val finalTop = rule.onNodeWithText("执行检查", substring = true).fetchSemanticsNode().boundsInRoot.top
+        val totalTravel = finalTop - beforeCollapseTop
+        assertTrue("Collapsing at bottom must pull tool header downward toward new tail: before=$beforeCollapseTop final=$finalTop", totalTravel > 80f)
+        val maxSingleFrameJump = (listOf(beforeCollapseTop) + tops).zipWithNext().maxOf { (a, b) -> abs(b - a) }
+        assertTrue("Second-stage settle must glide across frames instead of teleporting in one frame: maxJump=$maxSingleFrameJump total=$totalTravel tops=$tops",
+            maxSingleFrameJump < totalTravel * 0.45f)
+    }
+
+    @Test fun collapsingToolInAnchoredActiveTurnWhileScrolledPartwayDoesNotTwitchAcrossViewportThreshold() {
+        val history = (1..20).map { i ->
+            ConversationItem("h-$i", if (i % 2 == 1) "user" else "assistant", "历史消息 $i：用于占满历史滚动空间")
+        }
+        val bigToolOutput = (1..26).joinToString("\n") { "todo line $it: expanded content exceeding viewport" }
+        var view by mutableStateOf(
+            SessionView(
+                summary = SessionSummary("active-turn-collapse", "测试会话", "noroot", "/workspace", cli = "Kimi Code"),
+                connected = true,
+                loading = false,
+                messages = history,
+            ),
+        )
+        rule.setContent {
+            MaterialTheme {
+                SessionDetail(CockpitState(selected = view), view, previewActions, onPickImages = {})
+            }
+        }
+        rule.waitForIdle()
+
+        rule.runOnIdle {
+            view = view.copy(
+                activeTurnId = "turn-live",
+                messages = history + listOf(
+                    ConversationItem("u-anchor", "user", "新发送的吸顶用户消息"),
+                    ConversationItem("a-mid", "assistant", "中间阶段说明正文"),
+                    ConversationItem("t-done", "tool", toolName = "TodoList", text = "TodoList", kind = "tool", input = "{\"todos\":[]}", detail = bigToolOutput, outcome = "succeeded"),
+                    ConversationItem("t-live", "tool", toolName = "Bash", text = "gradlew test", kind = "tool", toolKind = "execute", input = "{\"command\":\"./gradlew test\"}", detail = "running step 1", outcome = "running"),
+                ),
+            )
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("TodoList", substring = true).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("TodoList").performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("conversation-list").performTouchInput {
+            swipe(center, center - Offset(0f, 180f), 180)
+        }
+        rule.waitForIdle()
+
+        val startTop = rule.onNodeWithText("中间阶段说明正文").fetchSemanticsNode().boundsInRoot.top
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithText("TodoList").performClick()
+
+        val tops = mutableListOf(startTop)
+        repeat(75) { frame ->
+            if (frame == 8 || frame == 20 || frame == 34) {
+                rule.runOnIdle {
+                    val extra = (1..(frame / 4)).joinToString("\n") { "stream chunk $it" }
+                    view = view.copy(
+                        messages = view.messages.dropLast(1) + view.messages.last().copy(detail = "running step 1\n$extra"),
+                    )
+                }
+            }
+            rule.mainClock.advanceTimeBy(16L)
+            rule.waitForIdle()
+            tops += rule.onNodeWithText("中间阶段说明正文").fetchSemanticsNode().boundsInRoot.top
+        }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        val endTop = rule.onNodeWithText("中间阶段说明正文").fetchSemanticsNode().boundsInRoot.top
+        tops += endTop
+
+        val deltas = tops.zipWithNext().map { (a, b) -> b - a }
+        val maxStep = deltas.maxOf { abs(it) }
+        val reversals = deltas.filter { abs(it) > 1.5f }.zipWithNext().count { (d1, d2) -> (d1 > 0f && d2 < 0f) || (d1 < 0f && d2 > 0f) }
+        assertTrue("Mid-collapse across reading-space threshold must not jump in one frame: maxStep=$maxStep tops=$tops", maxStep < 80f)
+        assertEquals("Collapse + settle must not bounce/twitch direction: deltas=$deltas", 0, reversals)
     }
 }

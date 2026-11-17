@@ -42,14 +42,14 @@ public final class HyperlinkCheck {
             check(URI.equals(TerminalLinks.at(e.getScreen(),2,0))&&other.equals(TerminalLinks.at(e.getScreen(),11,0)),"adjacent OSC8 labels retain their independent destinations");
             for(int col=4;col<10;col++)check(TerminalLinks.at(e.getScreen(),col,0)==null,"body between explicit labels stays inert "+col);
             for(String style:new String[]{"0","34","34;4","36;1","38;2;128;200;210","90"}){
-                e=fresh(40);feed(e,"\033["+style+"mbench-kernel-r4/REVIEW-GROK-4.7.md，模型是 Grok\r\n+ Show details /workspace/a.png\r\n查看更多 https://example.test/next\r\n图片 (/workspace/long-\r\npath/sample.png)\033[0m");
+                e=fresh(40);feed(e,"\033["+style+"mdocs/sample-review-4.7.md，模型是 Grok\r\n+ Show details /workspace/a.png\r\n查看更多 https://example.test/next\r\n图片 (/workspace/long-\r\npath/sample.png)\033[0m");
                 for(int row=0;row<8;row++)for(int col=0;col<40;col++)check(TerminalLinks.at(e.getScreen(),col,row)==null,"colored filenames, URLs, labels, controls and hard wraps never create links style="+style+" cell="+col+":"+row);
             }
             e=fresh(80);feed(e,link(URI,"CLICK HERE")+"\033[1;1H\033[34mDashboard \033[0m");
             for(int col=0;col<10;col++)check(TerminalLinks.at(e.getScreen(),col,0)==null,"dashboard overwrites old OSC8 label at cell "+col);
-            e=fresh(80);feed(e,link(URI,"bench-kernel-r4/REVIEW-GROK-4.7.md")+"，模型是 Grok");
+            e=fresh(80);feed(e,link(URI,"docs/sample-review-4.7.md")+"，模型是 Grok");
             check(URI.equals(TerminalLinks.at(e.getScreen(),5,0)),"explicit target does not depend on displayed filename");
-            for(int col="bench-kernel-r4/REVIEW-GROK-4.7.md".length();col<45;col++)check(TerminalLinks.at(e.getScreen(),col,0)==null,"Chinese punctuation and following body cannot join OSC8 target "+col);
+            for(int col="docs/sample-review-4.7.md".length();col<45;col++)check(TerminalLinks.at(e.getScreen(),col,0)==null,"Chinese punctuation and following body cannot join OSC8 target "+col);
             e=fresh(80);feed(e,"\033[8m"+link(URI,"hidden"));
             check(TerminalLinks.at(e.getScreen(),0,0)==null,"invisible OSC8 label is not a visible target");
             e=fresh(80);feed(e,link(URI,"/workspace/image.png"));e.getScreen().setChar(0,0,'/',TextStyle.encodeTerminalBitmap(0,0,0));

@@ -45,6 +45,7 @@ data class SessionRecord(
     val queueDismissals: MutableList<StoredQueueDismissal> = mutableListOf(),
     var observationRequired: Boolean = false,
     val receiptRecoveryRequired: MutableSet<String> = linkedSetOf(),
+    val dismissedAsyncQuestionItems: MutableSet<String> = linkedSetOf(),
     var lastActiveAt: Long = 0L,
     var unread: Boolean = false,
 )
@@ -81,6 +82,7 @@ internal fun SessionRecord.snapshot(): SessionRecord = copy(
     }.toMutableList(),
     queueDismissals = queueDismissals.map { it.copy() }.toMutableList(),
     receiptRecoveryRequired = LinkedHashSet(receiptRecoveryRequired),
+    dismissedAsyncQuestionItems = LinkedHashSet(dismissedAsyncQuestionItems),
 )
 internal fun SessionNavigation.snapshot(): SessionNavigation = SessionNavigation(
     initialized = initialized,
@@ -114,6 +116,9 @@ internal fun decodeSessionIndex(root: JSONObject): List<SessionRecord> {
             nativeProtocol = value.stringOrNull("nativeProtocol"),
             externalSocket = value.stringOrNull("externalSocket"),
             receiptRecoveryRequired = value.optJSONArray("receiptRecoveryRequired")?.let { a ->
+                (0 until a.length()).map { a.getString(it) }.toMutableSet()
+            } ?: linkedSetOf(),
+            dismissedAsyncQuestionItems = value.optJSONArray("dismissedAsyncQuestionItems")?.let { a ->
                 (0 until a.length()).map { a.getString(it) }.toMutableSet()
             } ?: linkedSetOf(),
             lastActiveAt = value.optLong("lastActiveAt", 0L).let { if (it > 0L) it else (index + 1).toLong() },
@@ -165,6 +170,7 @@ internal fun encodeSessionIndex(records: Collection<SessionRecord>): JSONObject 
             "nativeProtocol" to r.nativeProtocol, "externalSocket" to r.externalSocket, "observationRequired" to r.observationRequired,
             "lastActiveAt" to r.lastActiveAt, "unread" to r.unread,
             "receiptRecoveryRequired" to JSONArray(r.receiptRecoveryRequired.toList()),
+            "dismissedAsyncQuestionItems" to JSONArray(r.dismissedAsyncQuestionItems.toList()),
             "queueDismissals" to JSONArray(r.queueDismissals.map { d -> obj("id" to d.id, "clientUserMessageId" to d.clientUserMessageId,
                 "nativeQueueId" to d.nativeQueueId, "hostOwned" to d.hostOwned, "state" to d.state) }),
             "submissions" to JSONArray(r.submissions.map { m -> obj("id" to m.id, "text" to m.text, "external" to m.external, "draftRevision" to m.draftRevision, "state" to m.state, "nativeQueued" to m.nativeQueued, "settings" to JSONObject(m.settings),

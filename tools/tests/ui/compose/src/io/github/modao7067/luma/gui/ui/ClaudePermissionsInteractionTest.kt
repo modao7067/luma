@@ -39,20 +39,26 @@ class ClaudePermissionsInteractionTest {
             } }
         } } }
         rule.runOnIdle { assertTrue(calls.isEmpty()) }
-        rule.onNodeWithContentDescription("权限：逐次审批").performClick()
-        rule.onNodeWithText("自动审批").assertIsDisplayed()
-        rule.onNodeWithText("不询问（自动拒绝）").assertIsDisplayed()
-        rule.onNodeWithText("跳过审批").assertDoesNotExist()
-        rule.onNodeWithText("自动审批").performClick()
+        rule.onNodeWithContentDescription("权限：Manual").performClick()
+        rule.onNodeWithText("Auto").assertIsDisplayed()
+        rule.onNodeWithText("Don't ask").assertIsDisplayed()
+        rule.onNodeWithText("Bypass permissions").assertDoesNotExist()
+        val planTop = rule.onNodeWithText("Plan").fetchSemanticsNode().boundsInRoot.top
+        val manualTop = rule.onNodeWithText("Manual").fetchSemanticsNode().boundsInRoot.top
+        assertTrue(planTop < manualTop)
+        rule.onNodeWithText("Auto").performClick()
         rule.runOnIdle { assertEquals(listOf("auto"), calls); assertEquals("default", view.permission) }
-        rule.onNodeWithContentDescription("权限：逐次审批").performClick()
+        rule.onNodeWithContentDescription("权限：Manual").performClick()
         rule.runOnIdle { view = view.copy(configuring = true) }
-        rule.onNodeWithText("自动审批").assertIsNotEnabled()
+        rule.onNodeWithText("Auto").assertIsNotEnabled()
         rule.runOnIdle { view = view.copy(configuring = false, activeTurnId = "busy") }
-        rule.onNodeWithText("自动审批").assertIsNotEnabled()
+        rule.onNodeWithText("Auto").assertIsNotEnabled()
         rule.runOnIdle { view = view.copy(activeTurnId = null, permission = "auto") }
-        rule.onNodeWithContentDescription("权限：自动审批").assertExists()
+        rule.onNodeWithContentDescription("权限：Auto").assertExists()
+        rule.runOnIdle { view = view.copy(permission = "plan") }
+        rule.onNodeWithContentDescription("权限：Plan").assertExists()
+        rule.onNodeWithText("Plan").assertIsSelected().performClick()
         rule.runOnIdle { assertEquals(listOf("auto"), calls) }
-        println("PASS Claude Auto is visible and explicit, exact native ID only, no optimistic success, no unavailable Bypass, no busy/configuring dispatch")
+        println("PASS Claude Auto is visible and explicit, exact native ID only, Plan sorted first with no-op reclick")
     }
 }

@@ -534,7 +534,7 @@ private fun SessionDetailContent(
                         rows.mapTo(HashSet(rows.size * 2)) { anchoring.key(it.id) }
                     }
                     measuredRowHeights.keys.retainAll(currentRowKeys)
-                    val activeTurnSplitIndex = if (readingAnchorRowKey != null && readingAnchorRowKey == lastUserRowKey && lastUserRowIndex in 0 until rows.size) {
+                    val activeTurnSplitIndex = if (((readingAnchorRowKey != null && readingAnchorRowKey == lastUserRowKey) || willAnchorNewUserRow) && lastUserRowIndex in 0 until rows.size) {
                         lastUserRowIndex
                     } else {
                         -1
@@ -581,7 +581,10 @@ private fun SessionDetailContent(
                                     Box(
                                         Modifier.layout { measurable, constraints ->
                                             val placeable = measurable.measure(constraints.copy(minHeight = 0))
-                                            measuredRowHeights[rowKey] = placeable.height
+                                            val prevMeasured = measuredRowHeights.put(rowKey, placeable.height)
+                                            if (prevMeasured == null && (tailFollow.anyRevealAnimating || tailFollow.collapseSettling || tailFollow.collapseHoldPx > 0)) {
+                                                tailFollow.heldTotalPx += placeable.height
+                                            }
                                             val extraBottomPx = if (isTrailingStaticRow && lastUserRowIndex in 0 until rows.size && usableViewportPx > 0) {
                                                 tailFollow.manualLayoutPulse.intValue
                                                 turnLayoutReaders.forEach { it.invoke() }
@@ -608,7 +611,14 @@ private fun SessionDetailContent(
                                                         computedHold
                                                     }
                                                     tailFollow.collapseSettling || tailFollow.collapseHoldPx > 0 -> {
-                                                        tailFollow.collapseHoldPx
+                                                        val prevNatural = (tailFollow.heldTotalPx - tailFollow.collapseHoldPx).coerceAtLeast(0)
+                                                        val growth = (naturalTotalPx - prevNatural).coerceAtLeast(0)
+                                                        val adjustedHold = (tailFollow.collapseHoldPx - growth).coerceAtLeast(0)
+                                                        if (tailFollow.collapseHoldPx != adjustedHold) {
+                                                            tailFollow.collapseHoldPx = adjustedHold
+                                                        }
+                                                        tailFollow.heldTotalPx = naturalTotalPx + adjustedHold
+                                                        adjustedHold
                                                     }
                                                     else -> {
                                                         tailFollow.heldTotalPx = naturalTotalPx
@@ -675,7 +685,10 @@ private fun SessionDetailContent(
                                         Box(
                                             Modifier.layout { measurable, constraints ->
                                                 val placeable = measurable.measure(constraints.copy(minHeight = 0))
-                                                measuredRowHeights[userKey] = placeable.height
+                                                val prevMeasured = measuredRowHeights.put(userKey, placeable.height)
+                                                if (prevMeasured == null && (tailFollow.anyRevealAnimating || tailFollow.collapseSettling || tailFollow.collapseHoldPx > 0)) {
+                                                    tailFollow.heldTotalPx += placeable.height
+                                                }
                                                 val extraBottomPx = if (usableViewportPx > 0) {
                                                     tailFollow.manualLayoutPulse.intValue
                                                     turnLayoutReaders.forEach { it.invoke() }
@@ -685,8 +698,10 @@ private fun SessionDetailContent(
                                                     val baseReadingSpacePx = (usableViewportPx - visibleTurnHeightPx).coerceAtLeast(0)
                                                     tailFollow.readingSpaceActive = baseReadingSpacePx > 0
                                                     val naturalTotalPx = measuredRowHeights.values.sum() + baseReadingSpacePx
+                                                    val scrolledPastTurnAnchor = list.firstVisibleItemIndex == activeTurnSplitIndex &&
+                                                        list.firstVisibleItemScrollOffset > userTopAnchorOffsetPx + 1
                                                     val holdPx = when {
-                                                        baseReadingSpacePx > 0 -> {
+                                                        baseReadingSpacePx > 0 && !scrolledPastTurnAnchor -> {
                                                             tailFollow.heldTotalPx = naturalTotalPx
                                                             if (tailFollow.collapseHoldPx != 0) {
                                                                 tailFollow.collapseHoldPx = 0
@@ -711,7 +726,14 @@ private fun SessionDetailContent(
                                                             computedHold
                                                         }
                                                         tailFollow.collapseSettling || tailFollow.collapseHoldPx > 0 -> {
-                                                            tailFollow.collapseHoldPx
+                                                            val prevNatural = (tailFollow.heldTotalPx - tailFollow.collapseHoldPx).coerceAtLeast(0)
+                                                            val growth = (naturalTotalPx - prevNatural).coerceAtLeast(0)
+                                                            val adjustedHold = (tailFollow.collapseHoldPx - growth).coerceAtLeast(0)
+                                                            if (tailFollow.collapseHoldPx != adjustedHold) {
+                                                                tailFollow.collapseHoldPx = adjustedHold
+                                                            }
+                                                            tailFollow.heldTotalPx = naturalTotalPx + adjustedHold
+                                                            adjustedHold
                                                         }
                                                         else -> {
                                                             tailFollow.heldTotalPx = naturalTotalPx

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build the pinned Android ARM64 Ghostty core and Luma JNI; no network or App installation."""
+COMMAND_DESCRIPTION = """Build the pinned Android ARM64 Ghostty core and Luma JNI; no network or App installation."""
 from pathlib import Path
 import argparse, os, shutil, subprocess
 
 HERE=Path(__file__).resolve().parent
-parser=argparse.ArgumentParser(description=__doc__)
+parser=argparse.ArgumentParser(description=COMMAND_DESCRIPTION)
 parser.add_argument('--source',type=Path,required=True,help='Clean Ghostty 0e6afb2600d4 source (with offline Zig dependencies)')
 parser.add_argument('--zig',type=Path,required=True,help='Zig 0.16.0 executable')
 parser.add_argument('--ndk',type=Path,required=True,help='Android NDK r27c root')
@@ -19,7 +19,6 @@ if version != '0.16.0':parser.error('This adapter requires Zig 0.16.0, got '+ver
 if not (ORIGINAL/'src/lib_vt.zig').is_file():parser.error('Missing Ghostty source')
 BUILD.mkdir(parents=True,exist_ok=True)
 if not SRC.exists():shutil.copytree(ORIGINAL,SRC,ignore=shutil.ignore_patterns('.zig-cache','zig-out','.git','result','result-*'))
-# GHSA-w9q4-5jvv-mcv4 / upstream e257bb4: never touch a page pruned by scrollClear.
 shutil.copy2(ORIGINAL/'src/terminal/Screen.zig',SRC/'src/terminal/Screen.zig')
 subprocess.run(['patch','--batch','-p1','-i',str(HERE/'patches/scrollclear-e257bb4-functional-backport.patch')],cwd=SRC,check=True)
 shutil.copy2(HERE/'zig/luma.zig',SRC/'src/terminal/c/luma.zig')

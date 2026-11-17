@@ -7,11 +7,11 @@ import org.junit.Test
 class FileBrowserLogicTest {
     @Test fun `breadcrumbs expose every ancestor`() {
         assertEquals(listOf("/" to "/"), fileBreadcrumbs("/"))
-        assertEquals(listOf("/" to "/", "workspace" to "/workspace", "luma" to "/workspace/luma"), fileBreadcrumbs("/workspace/luma/"))
+        assertEquals(listOf("/" to "/", "workspace" to "/workspace", "project" to "/workspace/project"), fileBreadcrumbs("/workspace/project/"))
     }
 
     @Test fun `parent stops at root`() {
-        assertEquals("/workspace", fileParent("/workspace/luma"))
+        assertEquals("/workspace", fileParent("/workspace/project"))
         assertEquals("/", fileParent("/workspace"))
         assertEquals("/", fileParent("/"))
     }

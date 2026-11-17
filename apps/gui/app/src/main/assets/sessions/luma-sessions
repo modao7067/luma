@@ -8,9 +8,10 @@ def _tr(zh, en):
     return zh if os.environ.get("LUMA_LANG", "zh").strip().lower().startswith("zh") else en
 
 HELP = """luma-sessions '<JSON>' (or JSON stdin). Requires running Luma App.
-list; create(cli,cwd,requestId[,model,title]); attach(cli,cwd,nativeId[,title,externalSocket,id]);
+list; create(cli,cwd,requestId[,model,title,nativeProtocol]); attach(cli,cwd,nativeId[,title,nativeProtocol,externalSocket,id]);
 send(id,text,requestId); status(id OR requestId); read(id[,limit,before]); rename(id,title).
 Antigravity attach requires nativeProtocol from list.nativeProtocols; create may select it.
+Kimi Code defaults to kimi-web-v1; kimi-acp remains available as fallback.
 Root Codex externalSocket explicitly selects an existing Ubuntu Unix AppServer; loaded threads only.
 attach.id may repair an unbound failed reference; same CLI/nativeId, disconnected, no outbox.
 Use exact CLI names from list. id is Luma's local ID, nativeId is the CLI's ID.

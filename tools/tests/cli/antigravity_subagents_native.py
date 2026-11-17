@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import resource
+import shutil
 import sys
 import threading
 import time
@@ -17,9 +18,9 @@ sys.path.insert(0, str(ROOT/'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.antigravity_cli import AntigravityCliSession, PROTOCOL
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=pathlib.Path, required=True)
-    parser.add_argument('--agy', type=pathlib.Path, default=pathlib.Path('/root/.local/bin/agy'))
+    parser.add_argument('--agy', type=pathlib.Path, default=pathlib.Path(os.environ.get('LUMA_TEST_AGY') or shutil.which('agy') or 'agy'))
     args = parser.parse_args()
     out = args.output.resolve();out.mkdir(parents=True, exist_ok=False)
     for name in ('home', 'tmp', 'workspace'): (out/name).mkdir()

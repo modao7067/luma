@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// Clean-room Parcelable container implementing the public Shizuku Binder IPC wire contract.
 package moe.shizuku.api;
 
 import android.os.IBinder;

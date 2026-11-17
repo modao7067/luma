@@ -18,7 +18,7 @@ class ProcessToolLabelsTest {
     @Test fun bothLevelsShareLiteralFirstSeenNamesAndCountEachNativeCall() {
         val entries = toolLabelsFixture()
         assertEquals("8 次 shell、read、glob、websearch · 2 次 思考 · 1 次 失败", processGroupCaption(entries, "OpenCode"))
-        assertEquals(listOf("shell", "read", "glob", "websearch", "read", "glob", "websearch", "read", "Reasoning", "Reasoning"), entries.map { processEntryLabel(it, "OpenCode") })
+        assertEquals(listOf("shell", "read", "glob", "websearch", "read", "glob", "websearch", "read", "thought", "thought"), entries.map { processEntryLabel(it, "OpenCode") })
         assertEquals("3 次 Read、read、mcp__server__WebSearch", processGroupCaption(listOf(call("Read"), call("read"), call("mcp__server__WebSearch")), "Claude Code"))
     }
     @Test fun updatesAreOneCallAndNonCallsAreNotToolInvocations() {
@@ -29,12 +29,15 @@ class ProcessToolLabelsTest {
         assertEquals("2 次 read · 1 次 思考 · 1 次 失败 · 1 次 子代理", processGroupCaption(listOf(first, done, otherTurn) + events, "pi"))
         assertEquals(listOf(done, otherTurn), processToolInvocations(listOf(first, done, otherTurn) + events))
     }
-    @Test fun nativeFallbacksUseShellWithoutReplacingRealToolNames() {
+    @Test fun structuredCommandLabelsPreserveNativeToolSummaryNames() {
         val entries = listOf("commandExecution", "fileChange", "webSearch", "imageView").mapIndexed { i, kind -> call("").copy(id = "$i", kind = kind, text = "cat file", input = "cat file") }
         assertEquals("4 次 shell、fileChange、webSearch、imageView", processGroupCaption(entries))
-        assertEquals(listOf("shell", "fileChange", "webSearch", "imageView"), entries.map { processEntryLabel(it, "Codex") })
-        assertEquals("Bash", processEntryLabel(entries.first().copy(toolName = "Bash"), "Codex"))
+        assertEquals(listOf("read", "fileChange", "webSearch", "imageView"), entries.map { processEntryLabel(it, "Codex") })
+        assertEquals("read", processEntryLabel(entries.first().copy(toolName = "Bash"), "Codex"))
         assertEquals("1 次 Bash", processGroupCaption(listOf(entries.first().copy(toolName = "Bash"))))
+        val shell = entries.first().copy(toolName = "Bash", text = "printf synthetic", input = "printf synthetic")
+        assertEquals("Bash", processEntryLabel(shell, "Codex"))
+        assertEquals("1 次 Bash", processGroupCaption(listOf(shell)))
         assertEquals("search", processEntryLabel(call("", toolKind = "search"), "Kimi Code"))
         assertEquals("Tool call", processEntryLabel(call(""), "unknown"))
     }
@@ -64,8 +67,8 @@ class ProcessToolLabelsTest {
         val agents = (0..1).map { call("").copy(id = "a$it", kind = "subAgent") }
         val states = listOf(
             reasoning to "2 次 思考",
-            listOf(reasoning.first().copy(outcome = "running")) to "思考中",
-            listOf(reasoning.first().copy(outcome = "failed")) to "思考",
+            listOf(reasoning.first().copy(outcome = "running")) to "1 次 思考",
+            listOf(reasoning.first().copy(outcome = "failed")) to "1 次 思考",
             agents to "2 次 子代理",
             (reasoning + agents) to "2 次 思考 · 2 次 子代理",
             listOf(call("").copy(kind = "futureEvent")) to "执行过程",

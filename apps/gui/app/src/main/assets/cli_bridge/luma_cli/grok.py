@@ -21,10 +21,9 @@ CONTENT = {"agent_message_chunk": "assistant", "agent_thought_chunk": "reasoning
 
 def _grok_permissions():
     return [
-        {"id": "default", "label": tr("逐次审批", "Ask each time")},
-        {"id": "auto", "label": tr("自动审批", "Auto-approve")},
-        {"id": "plan", "label": tr("规划模式", "Plan mode")},
-        {"id": "always-approve", "label": tr("跳过审批", "Always approve")},
+        {"id": "default", "label": "Default"},
+        {"id": "auto", "label": "Auto"},
+        {"id": "always-approve", "label": "Always approve"},
     ]
 
 def safe_reason(value):
@@ -292,14 +291,31 @@ class GrokSession(AcpSession):
                     "steer": self.is_grok, "queue": False, "skills": False, "compact": False})
         if hasattr(self, "owner"): self.update(canOpenTui=True, ownerInstanceId=self.owner.handle["instanceId"])
         if self.is_grok:
-            selected = self.config.get("selectedPermission") if restored else None
+            raw_perm = self.config.get("selectedPermission") if restored else None
+            legacy_plan = restored and raw_perm == "plan"
+            selected_perm = None if raw_perm == "plan" else raw_perm
+            selected_plan = self.config.get("selectedPlanMode") if (restored and "selectedPlanMode" in self.config) else (True if legacy_plan else None)
+            roster_ok = False
             try:
                 self.refresh_roster()
+                roster_ok = True
             except (Rejected, ConnectionError, TimeoutError):
-                self.update(permission="", permissions=[], notice=tr("Grok 权限状态暂不可读；未更改原生权限。", "Grok permission state is temporarily unreadable; native permissions unchanged."))
-                if selected: raise Rejected(tr("无法确认已保存的 Grok 权限；请核对原生权限后手动重连", "Unable to confirm saved Grok permission; verify native permissions and reconnect manually"))
-            if selected:
-                self.set_native_permission(selected)
+                unreadable = tr("Grok 权限状态暂不可读；未更改原生权限。", "Grok permission state is temporarily unreadable; native permissions unchanged.")
+                self.update(permission="", permissions=[], planModeSupported=False, planMode=False, notice=unreadable, permissionNotice=unreadable)
+                if selected_perm or selected_plan is not None:
+                    raise Rejected(tr("无法确认已保存的 Grok 权限；请核对原生权限后手动重连", "Unable to confirm saved Grok permission; verify native permissions and reconnect manually"))
+            if roster_ok:
+                if selected_perm:
+                    self.set_native_permission(selected_perm)
+                if selected_plan is not None:
+                    self.set_native_plan_mode(bool(selected_plan))
+                if legacy_plan:
+                    self.config.pop("selectedPermission", None)
+                    self.config["selectedPlanMode"] = True
+                    try:
+                        self.save()
+                    except Exception:
+                        pass
         if unfinished_replay and hasattr(self, "owner") and getattr(self, "roster_running", None) is not False and not self.data.get("running"):
             if unfinished_prompt:
                 self._note_observed_prompt(unfinished_prompt)
@@ -377,8 +393,6 @@ class GrokSession(AcpSession):
     def _effective_permission(self, yolo=None):
         if yolo is None:
             yolo = self.data.get("permission") == "always-approve"
-        if getattr(self, "plan_mode_active", False):
-            return "plan"
         if yolo:
             return "always-approve"
         if getattr(self, "auto_mode_active", False):
@@ -419,7 +433,10 @@ class GrokSession(AcpSession):
                     self.auto_mode_active = False
                 self.permission_revision += 1
                 self.update(permission=self._effective_permission(entry["yolo"]),
-                            permissions=_grok_permissions())
+                            permissions=_grok_permissions(),
+                            planModeSupported=True,
+                            planMode=bool(getattr(self, "plan_mode_active", False)),
+                            permissionNotice=None)
                 return self.data["permission"]
         return None
 
@@ -428,21 +445,14 @@ class GrokSession(AcpSession):
             raise Rejected(tr("权限不在原生目录中", "Permission is not in the native catalog"))
         revision = self.permission_revision
         prev_perm = self.data.get("permission", "")
-        prev_known = prev_perm in {"default", "auto", "plan", "always-approve"}
+        prev_known = prev_perm in {"default", "auto", "always-approve"}
         prev_yolo = prev_perm == "always-approve"
-        prev_plan = getattr(self, "plan_mode_active", False)
         prev_auto = getattr(self, "auto_mode_active", False)
         prev_perm_mode = "always-approve" if prev_yolo else ("auto" if prev_auto else "ask")
         sid = self.data["nativeId"]
-        mode_switched = False
         yolo_sent = False
 
         def rollback_native():
-            if mode_switched:
-                try:
-                    self.call("session/set_mode", {"sessionId": sid, "modeId": "plan" if prev_plan else "build"})
-                except Exception:
-                    pass
             if yolo_sent and prev_known:
                 try:
                     self.peer.send({"jsonrpc": "2.0", "method": "_x.ai/yolo_mode_changed", "params": {
@@ -452,14 +462,6 @@ class GrokSession(AcpSession):
                     pass
 
         try:
-            if value == "plan" and not prev_plan:
-                self.call("session/set_mode", {"sessionId": sid, "modeId": "plan"})
-                mode_switched = True
-                self.plan_mode_active = True
-            elif value != "plan" and prev_plan:
-                self.call("session/set_mode", {"sessionId": sid, "modeId": "build"})
-                mode_switched = True
-                self.plan_mode_active = False
             want_yolo = value == "always-approve"
             want_auto = value == "auto"
             perm_mode = "always-approve" if want_yolo else ("auto" if want_auto else "ask")
@@ -470,14 +472,12 @@ class GrokSession(AcpSession):
             yolo_sent = True
             actual = self.refresh_roster()
         except Exception:
-            self.plan_mode_active = prev_plan
             self.auto_mode_active = prev_auto
             rollback_native()
             if revision == self.permission_revision:
                 self.update(permission="")
             raise
         if actual != value:
-            self.plan_mode_active = prev_plan
             self.auto_mode_active = prev_auto
             rollback_native()
             if yolo_sent and prev_known:
@@ -490,6 +490,15 @@ class GrokSession(AcpSession):
                 self.update(permission=self._effective_permission(actual_yolo) if prev_known else "default")
             raise Rejected(tr("Grok 尚未确认权限设置", "Grok has not confirmed the permission setting"))
         return actual
+
+    def set_native_plan_mode(self, enabled):
+        if not isinstance(enabled, bool):
+            raise Rejected(tr("规划模式参数无效", "Invalid Plan mode parameter"))
+        sid = self.data["nativeId"]
+        self.call("session/set_mode", {"sessionId": sid, "modeId": "plan" if enabled else "build"})
+        self.plan_mode_active = enabled
+        self.update(planModeSupported=True, planMode=enabled)
+        return enabled
 
     def terminal(self):
         if not hasattr(self, "owner"): return super().terminal()
@@ -510,7 +519,9 @@ class GrokSession(AcpSession):
 
     def _configure(self, payload):
         value = payload.get("permission")
-        rest = {k: v for k, v in payload.items() if k != "permission"}
+        has_plan = "planMode" in payload
+        plan_value = payload.get("planMode")
+        rest = {k: v for k, v in payload.items() if k not in ("permission", "planMode")}
         result = super().configure(rest)
         if value:
             actual = self.set_native_permission(value)
@@ -523,6 +534,17 @@ class GrokSession(AcpSession):
                 else: self.config["selectedPermission"] = previous
                 raise RuntimeError(tr("权限已在当前 Grok 进程生效，但会话选择保存失败；重启仍使用上次保存值",
                                       "Permission took effect in the current Grok process, but saving session selection failed; restart will use previous value")) from exc
+        if has_plan:
+            actual_plan = self.set_native_plan_mode(plan_value)
+            prev_plan = self.config.get("selectedPlanMode")
+            self.config["selectedPlanMode"] = actual_plan
+            try:
+                self.save()
+            except Exception as exc:
+                if prev_plan is None: self.config.pop("selectedPlanMode", None)
+                else: self.config["selectedPlanMode"] = prev_plan
+                raise RuntimeError(tr("规划模式已在当前 Grok 进程生效，但会话选择保存失败；重启仍使用上次保存值",
+                                      "Plan mode took effect in the current Grok process, but saving session selection failed; restart will use previous value")) from exc
         return result
 
     def apply_options(self, options):
@@ -913,8 +935,13 @@ class GrokSession(AcpSession):
                 mode_id = update.get("currentModeId")
                 if mode_id in ("plan", "build"):
                     self.plan_mode_active = mode_id == "plan"
-                    if self.data.get("permissions"):
-                        self.update(permission=self._effective_permission())
+                    self.update(planMode=self.plan_mode_active)
+                    if not getattr(self, "processing_replay", False) and self.config.get("selectedPlanMode") is not None and self.config.get("selectedPlanMode") != self.plan_mode_active:
+                        self.config["selectedPlanMode"] = self.plan_mode_active
+                        try:
+                            self.save()
+                        except Exception:
+                            pass
             elif kind == "config_option_update": self.apply_options(update.get("configOptions", []))
             elif kind == "available_commands_update": self.apply_commands(update.get("availableCommands", []))
             elif kind == "session_info_update" and update.get("title"): self.update(title=update["title"])

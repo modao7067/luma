@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -50,18 +51,18 @@ def stop(process):
     process.wait(timeout=8)
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument("--key-file", required=True, type=pathlib.Path)
-    parser.add_argument("--evidence", type=pathlib.Path, default=ROOT / "verification/gui-cli-live-20261103/codex-opencode")
+    parser.add_argument("--evidence", type=pathlib.Path, default=ROOT / "artifacts/test-runs/mimo-live")
     parser.add_argument("--only", choices=["both", "codex", "opencode"], default="both")
-    parser.add_argument("--test-method", help="JUnit method name/glob, e.g. '*Environment*'; select at most one restarting task per CLI")
-    parser.add_argument("--also-test", action="append", default=[], help="Additional affected JUnit test class/name, without another live task")
-    parser.add_argument("--codex-command", default=os.getenv("LUMA_LIVE_CODEX_COMMAND", '["/usr/bin/codex"]'))
-    parser.add_argument("--codex-work", help="Native guest cwd for a command-prefix wrapper")
-    parser.add_argument("--codex-host-work", help="Host-visible counterpart of the native fixture cwd")
-    parser.add_argument("--codex-native-home", help="Guest HOME used by command tools (no existing user HOME)")
-    parser.add_argument("--codex-launch-config", type=pathlib.Path, help="Write non-secret TOML for a command-prefix wrapper")
-    parser.add_argument("--opencode-command", default=os.getenv("LUMA_LIVE_OPENCODE_COMMAND", '["/root/.opencode/bin/opencode"]'))
+    parser.add_argument("--test-method")
+    parser.add_argument("--also-test", action="append", default=[])
+    parser.add_argument("--codex-command", default=os.getenv("LUMA_LIVE_CODEX_COMMAND", json.dumps([shutil.which("codex") or "codex"])))
+    parser.add_argument("--codex-work")
+    parser.add_argument("--codex-host-work")
+    parser.add_argument("--codex-native-home")
+    parser.add_argument("--codex-launch-config", type=pathlib.Path)
+    parser.add_argument("--opencode-command", default=os.getenv("LUMA_LIVE_OPENCODE_COMMAND", json.dumps([shutil.which("opencode") or "opencode"])))
     parser.add_argument("--opencode-work", help="Native guest cwd when the command prefix enters another environment")
     parser.add_argument("--opencode-host-work", help="Host-visible counterpart for the fixture file assertion")
     parser.add_argument("--opencode-launch-config", type=pathlib.Path, help="Write non-secret config for a command-prefix wrapper")

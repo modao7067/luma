@@ -12,12 +12,12 @@ import io.github.modao7067.luma.gui.session.SessionSummary
 private const val PREVIEW_NOW_MS = 1_794_310_020_000L
 
 private val sidebarSamples = listOf(
-    SessionSummary("1", "修复输入框的交互", "noroot", "/workspace/luma", modelLabel = "GPT-6-Astra", cli = "Codex", lastActiveAt = PREVIEW_NOW_MS - 1_800_000L),
+    SessionSummary("1", "修复输入框的交互", "noroot", "/workspace/project", modelLabel = "GPT-6-Astra", cli = "Codex", lastActiveAt = PREVIEW_NOW_MS - 1_800_000L),
     SessionSummary("2", "新会话", "noroot", "/workspace", cli = "Codex", lastActiveAt = PREVIEW_NOW_MS - 86_400_000L),
-    SessionSummary("3", "测试 OpenCode 工具调用", "noroot", "/workspace/luma", modelLabel = "Claude Sonnet", cli = "OpenCode", lastActiveAt = PREVIEW_NOW_MS - 2 * 86_400_000L),
+    SessionSummary("3", "测试 OpenCode 工具调用", "noroot", "/workspace/project", modelLabel = "Claude Sonnet", cli = "OpenCode", lastActiveAt = PREVIEW_NOW_MS - 2 * 86_400_000L),
     SessionSummary("4", "整理浏览器接口与内置 Skill 的说明", "noroot", "/workspace", cli = "OpenCode", lastActiveAt = PREVIEW_NOW_MS - 8 * 86_400_000L),
-    SessionSummary("5", "验证 Pi 原生 RPC 工具链", "noroot", "/workspace/luma", modelLabel = "Claude Opus", cli = "pi", lastActiveAt = PREVIEW_NOW_MS - 5 * 86_400_000L),
-    SessionSummary("7", "ACP 协议流式回归", "noroot", "/workspace/luma", modelLabel = "deepseek-reasoner", cli = "DeepSeek Harness", lastActiveAt = PREVIEW_NOW_MS - 380 * 86_400_000L),
+    SessionSummary("5", "验证 Pi 原生 RPC 工具链", "noroot", "/workspace/project", modelLabel = "Claude Opus", cli = "pi", lastActiveAt = PREVIEW_NOW_MS - 5 * 86_400_000L),
+    SessionSummary("7", "ACP 协议流式回归", "noroot", "/workspace/project", modelLabel = "deepseek-reasoner", cli = "DeepSeek Harness", lastActiveAt = PREVIEW_NOW_MS - 380 * 86_400_000L),
 )
 @Preview(widthDp = 365, heightDp = 720)
 @Composable

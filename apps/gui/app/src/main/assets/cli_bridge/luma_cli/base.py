@@ -146,7 +146,9 @@ class Session:
         self.data = {"cli": config["cli"], "nativeId": config.get("nativeId", ""), "title": "",
                      "connected": False, "running": False, "model": config.get("model", ""), "effort": "",
                      "models": [], "permissions": [], "permission": "", "queue": [], "requests": [],
-                     "metrics": [], "skills": [], "mcp": [], "capabilities": {}, "notice": "", "error": None}
+                     "metrics": [], "skills": [], "mcp": [], "capabilities": {}, "notice": "",
+                     "permissionNotice": None, "planModeSupported": False, "planMode": False,
+                     "skipPermissionsActive": False, "error": None}
 
     def touch(self):
         self.last_activity = time.monotonic()

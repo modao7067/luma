@@ -187,6 +187,38 @@ class SessionObservationLifecycleIntegrationTest {
             assertFalse(h.carriers.first().calls.any { it in setOf("thread/start", "thread/queue/add", "turn/steer") })
         }
     }
+    @Test fun dormantHistoryReplayWithNewIdsKeepsActivityTimeAndSessionOrder() {
+        Harness().use { h ->
+            val (oldId, oldLive) = h.parent("old-history")
+            val record = field(oldLive, "record") as SessionRecord
+            record.lastActiveAt = 100L
+            @Suppress("UNCHECKED_CAST") val items = field(oldLive, "items") as MutableMap<String, ConversationItem>
+            items["old-id"] = ConversationItem("old-id", "assistant", "Historical reply")
+            set(oldLive, "idleConfirmed", true); set(oldLive, "historyResumable", true)
+            val (newId, newLive) = h.parent("new-history")
+            (field(newLive, "record") as SessionRecord).lastActiveAt = 200L
+            @Suppress("UNCHECKED_CAST") val newerItems = field(newLive, "items") as MutableMap<String, ConversationItem>
+            newerItems["new-id"] = ConversationItem("new-id", "assistant", "More recent reply")
+            h.controller.openSession(newId)
+            set(h.controller, "idleGraceMillis", 10L); h.activate(); h.publish(); h.pump(30)
+            assertTrue(field(oldLive, "dormant") as Boolean)
+            assertEquals(100L, record.lastActiveAt)
+            set(h.controller, "scope", h.paused)
+            h.controller.openSession(oldId)
+            (field(oldLive, "connectJob") as Job).cancel(); set(oldLive, "connectJob", null)
+            items["replayed-id"] = ConversationItem("replayed-id", "assistant", "Historical reply")
+            set(oldLive, "view", (field(oldLive, "view") as SessionView).copy(connected = true, loading = false))
+            h.publish()
+            assertEquals(100L, record.lastActiveAt)
+            assertFalse(record.unread)
+            assertEquals(listOf(newId, oldId), h.controller.state.value.sessions.map { it.id })
+            assertEquals(100L, SessionStore(h.app).load().first { it.id == oldId }.lastActiveAt)
+            items["fresh-id"] = ConversationItem("fresh-id", "assistant", "A genuinely new reply")
+            h.publish()
+            assertTrue(record.lastActiveAt > 200L)
+            assertEquals(listOf(oldId, newId), h.controller.state.value.sessions.map { it.id })
+        }
+    }
     @Test fun idleExternalSessionDoesNotAutoReleaseOrStopItsOwner() {
         Harness().use { h ->
             val (_, live) = h.parent("external-idle")

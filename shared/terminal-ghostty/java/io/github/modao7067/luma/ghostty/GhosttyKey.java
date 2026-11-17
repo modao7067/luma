@@ -1,6 +1,5 @@
 package io.github.modao7067.luma.ghostty;
 
-/** C ABI values from the pinned {@code ghostty/vt/key/event.h}; kept explicit, not inferred. */
 public final class GhosttyKey {
     private GhosttyKey() {}
 

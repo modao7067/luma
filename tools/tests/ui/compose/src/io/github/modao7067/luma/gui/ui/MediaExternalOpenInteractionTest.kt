@@ -102,7 +102,7 @@ class MediaExternalOpenInteractionTest {
     @Test fun directoryMediaResourceOffersBrowseFolderAndNavigatesDirectly() {
         var browsedPath: String? = null
         var previewClosed = false
-        val dir = MediaResource("file:///workspace/luma/shared/terminal-emulator", "terminal-emulator", "inode/directory", "owner", "/workspace")
+        val dir = MediaResource("file:///workspace/project/shared/terminal-emulator", "terminal-emulator", "inode/directory", "owner", "/workspace")
         val actions = object : CockpitActions by previewActions {
             override fun browseFiles(path: String) { browsedPath = path }
             override fun closePreview() { previewClosed = true }
@@ -111,12 +111,12 @@ class MediaExternalOpenInteractionTest {
         rule.onNodeWithText("浏览文件夹").assertIsDisplayed().performClick()
         rule.runOnIdle {
             assertTrue(previewClosed)
-            assertEquals("/workspace/luma/shared/terminal-emulator", browsedPath)
+            assertEquals("/workspace/project/shared/terminal-emulator", browsedPath)
         }
     }
     @Test fun directoryMediaCardDirectlyBrowsesFilesOnClick() {
         var browsedPath: String? = null
-        val dir = MediaResource("file:///workspace/luma/shared/terminal-emulator", "terminal-emulator", "inode/directory", "owner", "/workspace")
+        val dir = MediaResource("file:///workspace/project/shared/terminal-emulator", "terminal-emulator", "inode/directory", "owner", "/workspace")
         val actions = object : CockpitActions by previewActions {
             override fun browseFiles(path: String) { browsedPath = path }
         }
@@ -134,7 +134,7 @@ class MediaExternalOpenInteractionTest {
         rule.onNodeWithText("文件夹").assertIsDisplayed()
         rule.onNodeWithTag(mediaCardTag(dir)).performClick()
         rule.runOnIdle {
-            assertEquals("/workspace/luma/shared/terminal-emulator", browsedPath)
+            assertEquals("/workspace/project/shared/terminal-emulator", browsedPath)
         }
     }
     @Test fun codeFilePreviewShowsLineNumbersAndCopyAction() {

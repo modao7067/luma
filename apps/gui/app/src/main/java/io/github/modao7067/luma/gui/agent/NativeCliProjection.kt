@@ -81,8 +81,14 @@ object NativeCliProjection {
         return previous.copy(connected = NativeCliStatePolicy.ready(s), loading = NativeCliStatePolicy.loading(s),
             connection = NativeCliStatePolicy.connection(s),
             activeTurnId = if (s.optBoolean("running")) s.getString("nativeId") else null,
-            canOpenTui = s.optBoolean("canOpenTui"), error = NativeCliStatePolicy.error(s), capabilityNotice = s.stringOrNull("notice"),
-            permission = s.optString("permission"), permissions = s.rows("permissions").map { RequestChoice(it.getString("id"), it.getString("label"), it.optString("description"), it.optString("sandbox"), it.optString("approval")) },
+            canOpenTui = s.optBoolean("canOpenTui"), error = NativeCliStatePolicy.error(s), capabilityNotice = s.stringOrNull("permissionNotice"),
+            permission = s.optString("permission"), permissions = s.rows("permissions").map {
+                RequestChoice(it.getString("id"), it.getString("label"), it.optString("description"), it.optString("sandbox"), it.optString("approval"),
+                    it.optString("configId"), it.optString("configName"), if (it.has("selected") && !it.isNull("selected")) it.getBoolean("selected") else null)
+            },
+            planModeSupported = s.optBoolean("planModeSupported"),
+            planMode = s.optBoolean("planMode"),
+            skipPermissionsActive = s.optBoolean("skipPermissionsActive"),
             metrics = s.rows("metrics").map { Metric(it.getString("label"), it.getString("value")) },
             messages = projectMessages(s.rows("messages"), s, previous.messages),
             subAgents = projectSubAgents(s.rows("subAgents"), s, previous.subAgents),
@@ -117,7 +123,8 @@ object NativeCliProjection {
                 UserRequest(r.getString("id"), title, r.optString("body"), choices,
                     questions = questionRows.map { RequestQuestion(it.getString("id"), it.optString("header"), it.optString("prompt"),
                         it.strings("options"), it.optBoolean("multiple"), it.optBoolean("secret"),
-                        allowOther = it.optBoolean("allowOther", true), required = it.optBoolean("required", true)) }, externalUrl = r.stringOrNull("externalUrl"),
+                        allowOther = it.optBoolean("allowOther", true), required = it.optBoolean("required", true),
+                        optionValues = it.strings("optionValues")) }, externalUrl = r.stringOrNull("externalUrl"),
                     submitChoice = if (r.has("submitChoice")) r.stringOrNull("submitChoice") else legacy?.first,
                     skipChoice = if (r.has("skipChoice")) r.stringOrNull("skipChoice") else legacy?.second)
             },

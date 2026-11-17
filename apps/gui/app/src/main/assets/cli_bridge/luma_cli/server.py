@@ -18,6 +18,13 @@ from .pi_native import PiNativeSession, probe_pi_native
 from .acp import AcpSession
 from .dsh import DshSession
 from .kimi import KimiSession
+from .kimi_web import KimiWebSession
+from .kimi_web_transport import (
+    PROTOCOL as KIMI_WEB_PROTOCOL,
+    KimiWebIncompatible,
+    has_live_kimi_gateway,
+    reap_idle_kimi_gateway,
+)
 from .claude import ClaudeSession
 from .antigravity import AntigravitySession
 from .antigravity_agy_acp import AntigravityAgyAcpSession, AGY_ACP_PROTOCOL
@@ -31,6 +38,7 @@ ADAPTERS = {"pi": PiSession, "DeepSeek Harness": DshSession,
             "Kimi Code": KimiSession, "Claude Code": ClaudeSession, "Antigravity": AntigravitySession,
             "Qoder CLI": QoderSession, "Grok Build": GrokSession, "CodeBuddy Code": CodeBuddySession}
 NATIVE_PROTOCOLS = {"CodeBuddy Code": ["codebuddy-http-acp"], "Antigravity": [AGY_ACP_PROTOCOL, AGY_PROTOCOL, "antigravity-acp"],
+    "Kimi Code": [KIMI_WEB_PROTOCOL, "kimi-acp"],
     "pi": ["pi-rpc", "pi-native-sdk-v1"],
     "Grok Build": ["grok-acp", "grok-private-leader-v1"]}
 
@@ -255,6 +263,7 @@ class Manager:
                         raise Rejected(tr("旧 CLI 进程仍存活但协议已断开；请在终端核对，不能启动第二个执行进程", "Previous CLI process is still alive with disconnected protocol; check in terminal instead of starting a second process"))
             path = self.directory / (key + ".json")
             config = json.loads(path.read_text()) if path.exists() else dict(p)
+            had_saved_protocol = bool(config.get("nativeProtocol"))
             if path.exists() and p.get("nativeProtocol") and p["nativeProtocol"] != config.get("nativeProtocol"):
                 raise Rejected(tr("已有会话原生协议不可变更", "Existing session native protocol cannot be changed"))
             if not path.exists() and not native and not config.get("nativeProtocol") and cli in ("pi", "Grok Build"):
@@ -262,10 +271,12 @@ class Manager:
                 config["nativeProtocol"] = protocol
                 if fallback_notice:
                     config["protocolFallbackNotice"] = fallback_notice
+            kimi_fallback_allowed = cli == "Kimi Code" and not p.get("nativeProtocol") and not had_saved_protocol
             if native and not path.exists() and config.get("nativeProtocol", "").endswith(("-sdk-v1", "-leader-v1")):
                 raise Rejected(tr("该原生双端入口仅连接本 App 已保存的执行宿主；不能另起相同 ID 的第二个进程", "This native dual-end entry only attaches to an execution host saved by Luma; cannot launch a second process with the same ID"))
             config["ownerDirectory"] = str(self.directory / (key + ".native"))
             adapter = ADAPTERS[cli]
+            if cli == "Kimi Code" and config.get("nativeProtocol") in (None, KIMI_WEB_PROTOCOL): adapter = KimiWebSession
             if cli == "pi" and config.get("nativeProtocol") == "pi-native-sdk-v1": adapter = PiNativeSession
             if cli == "Antigravity":
                 protocol = config.get("nativeProtocol") or ("antigravity-acp" if path.exists() or old or native else AGY_ACP_PROTOCOL)
@@ -316,8 +327,27 @@ class Manager:
             self.active_connects += 1
             self.touch()
         def establish():
+            nonlocal session
             try:
-                session.connect()
+                try:
+                    session.connect()
+                except KimiWebIncompatible:
+                    if not kimi_fallback_allowed:
+                        raise
+                    if session.peer:
+                        session.peer.close()
+                    notice = tr("当前 Kimi Web 协议不兼容，已自动回退到 ACP 协议。", "Current Kimi Web protocol is incompatible; automatically fell back to ACP.")
+                    config["nativeProtocol"] = "kimi-acp"
+                    config["protocolFallbackNotice"] = notice
+                    save()
+                    fallback = KimiSession(config, save)
+                    fallback.touch()
+                    fallback.update(connecting=True, nativeProtocol="kimi-acp", permissionNotice=notice)
+                    with self.lock:
+                        if self.sessions.get(key) is session:
+                            self.sessions[key] = fallback
+                    session = fallback
+                    session.connect()
                 if config.get("initialTitle") and not config.get("initialTitleApplied") and session.data["capabilities"].get("rename"):
                     session.rename(config["initialTitle"])
                     config["initialTitleApplied"] = True; save()
@@ -412,6 +442,7 @@ class Manager:
         threads = [threading.Thread(target=one, args=(sess,), daemon=True) for _, sess in candidates]
         for t in threads: t.start()
         for t in threads: t.join(max(0, deadline - time.monotonic()))
+        reap_idle_kimi_gateway(self.directory, 0)
 
     def reap_detached_owners(self, max_client_idle_sec):
         with self.reap_lock:
@@ -464,8 +495,11 @@ class Manager:
                     self._release_flock_handle(key, reap_handle, unlink=True)
             for stale in [k for k in list(self.detached_owner_idle) if k not in seen_instances]:
                 self.detached_owner_idle.pop(stale, None)
+            reap_idle_kimi_gateway(self.directory, max_client_idle_sec)
 
     def has_live_detached_owners(self):
+        if has_live_kimi_gateway(self.directory):
+            return True
         for path in sorted(self.directory.glob("*.json")):
             key = path.stem
             if self._has_remote_observer(key):

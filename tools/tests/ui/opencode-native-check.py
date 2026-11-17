@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import base64, json, os, pathlib, secrets, socket, subprocess, time, urllib.request, urllib.error
-BASE=pathlib.Path(__file__).resolve().parents[3]/'verification/gui-opencode-20261102/native'
+import base64, json, os, pathlib, secrets, shutil, socket, subprocess, time, urllib.request, urllib.error
+BASE=pathlib.Path(__file__).resolve().parents[3]/'artifacts/test-runs/opencode-native'
 BASE.mkdir(parents=True,exist_ok=True)
 home=BASE/'home';home.mkdir(exist_ok=True)
 work=BASE/'work';work.mkdir(exist_ok=True)
@@ -15,8 +15,9 @@ def call(path,method='GET',body=None,auth=True):
  req=urllib.request.Request(url+path,data=None if body is None else json.dumps(body).encode(),headers=headers,method=method)
  with opener.open(req,timeout=40) as r:
   raw=r.read();return json.loads(raw) if raw else None
+opencode_bin=os.environ.get('LUMA_TEST_OPENCODE') or shutil.which('opencode') or 'opencode'
 with (BASE/'server.log').open('w') as log:
- proc=subprocess.Popen(['/root/.opencode/bin/opencode','serve','--hostname','127.0.0.1','--port',str(port)],cwd=work,env=env,stdout=log,stderr=log)
+ proc=subprocess.Popen([opencode_bin,'serve','--hostname','127.0.0.1','--port',str(port)],cwd=work,env=env,stdout=log,stderr=log)
  try:
   for _ in range(120):
    try:info=call('/api/info');break

@@ -168,20 +168,10 @@ class PiSession(Session):
         self.update(connected=True, skills=skills,
                     capabilities={"queue": True, "steer": True, "stop": True, "images": self.supports_images,
                                   "skills": bool(skills), "maxSkills": 1, "rename": True, "compact": True},
-                    notice=self.capability_notice())
+                    permissionNotice=self.data.get("permissionNotice") or self.capability_notice())
 
     def capability_notice(self):
-        prefix = self.config.get("protocolFallbackNotice", "")
-        base = (
-            tr("使用 pi 原生行为，不增加工具权限拦截；仅处理 CLI/扩展实际发出的确认。无统一权限档位；官方 TUI 没有此进程的实时接管接口。",
-               "Uses native pi behavior without extra tool permission interception; only handles confirmations emitted by CLI/extensions. No unified permission presets or live official TUI takeover.")
-            + (tr("Pi 提供原生待发队列快照；不支持逐项编辑、删除或转引导。",
-                  " Pi provides native pending queue snapshots; per-item edit, delete, or steer conversion is unsupported.")
-               if getattr(self, "queue_readable", False)
-               else tr("当前 Pi RPC 仅提供待发数量，不提供逐项队列读取或编辑。",
-                       " Current Pi RPC only reports pending count without per-item queue inspection or editing."))
-        )
-        return (prefix + " " + base).strip() if prefix else base
+        return self.config.get("protocolFallbackNotice", "").strip()
 
     def apply_running(self, state, revision):
         with self.lock:
@@ -293,7 +283,7 @@ class PiSession(Session):
             self.update(queue=[])
         stats = self.call("get_session_stats")
         metrics = pi_usage(stats, state)
-        self.update(metrics=metrics, capabilities={**self.data["capabilities"], "images": self.supports_images}, notice=self.capability_notice())
+        self.update(metrics=metrics, capabilities={**self.data["capabilities"], "images": self.supports_images})
         return {}
 
     def project(self, m, fallback, done=True):
@@ -577,7 +567,7 @@ class PiSession(Session):
         method, ident = e["method"], str(e.get("id", ""))
         if method == "cancel": self.answered(str(e.get("targetId", ident))); return
         if method == "setTitle": return
-        if method == "notify": self.update(notice=e.get("message", "")); return
+        if method == "notify": self.update(permissionNotice=e.get("message", "")); return
         choices = []; questions = []
         if method == "confirm": choices = [{"id": "yes", "label": tr("确认", "Confirm")}, {"id": "no", "label": tr("拒绝", "Deny")}]
         elif method == "select": choices = [{"id": str(i), "label": value} for i, value in enumerate(e.get("options", []))]

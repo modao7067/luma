@@ -77,7 +77,9 @@ class LiveRun:
 - id: session-telemetry-otel
   disabled: true
 ''')
-        self.env = {'HOME': str(self.home), 'PATH': str(ROOT / 'verification/gui-cli-adapters-20261102/tooling') + ':/usr/local/bin:/usr/bin:/bin',
+        tooling = os.environ.get('LUMA_CLI_TOOLING_DIR', '')
+        path_value = (tooling + ':' if tooling else '') + '/usr/local/bin:/usr/bin:/bin'
+        self.env = {'HOME': str(self.home), 'PATH': path_value,
                     'LANG': 'C.UTF-8', 'PI_CODING_AGENT_DIR': str(agent), 'DSH_HOME': str(dsh),
                     'XDG_CONFIG_HOME': str(self.home / 'config'), 'XDG_DATA_HOME': str(self.home / 'data'),
                     'XDG_CACHE_HOME': str(self.home / 'cache'), 'MIMO_API_KEY': self.key,
@@ -273,12 +275,12 @@ class LiveRun:
         return self.result['status'] == 'passed'
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument('cli', choices=CLIS)
     parser.add_argument('--key-file', required=True, type=Path)
     parser.add_argument('--scratch-root', type=Path)
-    parser.add_argument('--environment', default='Ubuntu 26.04.1 ARM64 chroot (not App NoRoot PRoot)')
-    parser.add_argument('--output', type=Path, default=ROOT / 'verification/gui-cli-live-20261103/native')
+    parser.add_argument('--environment', default='Linux ARM64 host')
+    parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/test-runs/cli-live-native')
     args = parser.parse_args()
     key = args.key_file.read_text().strip()
     if not key: parser.error('Empty key file')

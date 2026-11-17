@@ -48,7 +48,7 @@ class ProcessCategoryTest {
         listOf("mcp__server__Read", "mcp__server__Bash", "custom-Read", "read", "Skill", "Agent", "").forEach {
             assertEquals(ProcessCategory.Tool, processCategory(named(it), "Claude Code"))
         }
-        assertEquals("Parameters", processInputCaption(named("Bash"), "Claude Code"))
+        assertEquals("shell", processInputCaption(named("Bash"), "Claude Code"))
     }
     @Test fun opaqueAndMissingNamesRemainTools() {
         listOf("mcp__server_read", "server_read", "custom-bash", "", "Read").forEach { name ->
@@ -59,24 +59,54 @@ class ProcessCategoryTest {
     @Test fun singleEntriesUseTheSameTruthfulSummary() {
         assertEquals("1 次 思考", processGroupCaption(listOf(native("reasoning"))))
         assertEquals("1 次 shell", processGroupCaption(listOf(native("commandExecution"))))
-        assertEquals("思考中", processGroupCaption(listOf(native("reasoning").copy(outcome = "running"))))
+        assertEquals("1 次 思考", processGroupCaption(listOf(native("reasoning").copy(outcome = "running"))))
     }
     @Test fun shellAndOutputLabelsDoNotRelabelNonShellParametersOrDiffs() {
         assertEquals("shell", processEntryLabel(native("commandExecution"), "Codex"))
-        assertEquals("Parameters", processInputCaption(native("commandExecution"), "Codex"))
-        assertEquals("Parameters", processInputCaption(named("bash"), "pi"))
-        assertEquals("Parameters", processInputCaption(named("shell"), "OpenCode"))
+        assertEquals("shell", processInputCaption(native("commandExecution"), "Codex"))
+        assertEquals("shell", processInputCaption(named("bash"), "pi"))
+        assertEquals("shell", processInputCaption(named("shell"), "OpenCode"))
         assertEquals("Parameters", processInputCaption(named("read"), "pi"))
-        assertEquals("Parameters", processInputCaption(named("").copy(toolKind = "execute"), "DeepSeek Harness"))
+        assertEquals("shell", processInputCaption(named("").copy(toolKind = "execute"), "DeepSeek Harness"))
         assertEquals("Diff", processOutputCaption(native("fileChange")))
         assertEquals("Output", processOutputCaption(native("commandExecution")))
         assertEquals("Error", processOutputCaption(native("commandExecution").copy(outcome = "failed")))
     }
 
+    @Test fun terminalInputsExtractOnlyPureCommandsAndExactShellWrappers() {
+        val command = "/bin/bash -lc 'printf \"%s\\n\" \"\$HOME\" | head'"
+        val wrapped = native("commandExecution").copy(input = command, text = command)
+        assertEquals(ProcessInputPresentation("printf \"%s\\n\" \"\$HOME\" | head", "shell", "bash"), processInputPresentation(wrapped, "Codex"))
+        assertEquals("printf \"%s\\n\" \"\$HOME\" | head", processEntryContext(wrapped, "Codex"))
+        val searchWrapped = native("commandExecution").copy(
+            input = "/bin/bash -lc 'rg -n foo apps/gui'",
+            text = "/bin/bash -lc 'rg -n foo apps/gui'",
+            commandActions = listOf(io.github.modao7067.luma.gui.session.CommandAction(type = "search", command = "rg -n foo apps/gui")),
+        )
+        assertEquals("rg -n foo apps/gui", processEntryContext(searchWrapped, "Codex"))
+        assertEquals(ProcessInputPresentation("git status", "shell", "zsh"),
+            processInputPresentation(named("Bash").copy(input = """{"command":"/usr/bin/zsh -lc 'git status'","description":"status","timeout":null,"cwd":""}"""), "Claude Code"))
+        assertEquals(ProcessInputPresentation("git status", "shell", "shell"), processInputPresentation(named("bash").copy(input = "git status"), "pi"))
+        assertEquals(ProcessInputPresentation("echo hi; git status", "shell", "shell"),
+            processInputPresentation(named("shell").copy(input = "echo hi; git status"), "OpenCode"))
+        assertEquals(ProcessInputPresentation("bash -c 'echo hi' extra", "shell", "shell"),
+            processInputPresentation(named("bash").copy(input = "bash -c 'echo hi' extra"), "pi"))
+
+        listOf("""{"command":"git status","timeout":30}""", """{"command":"git status","cwd":"/tmp"}""",
+            """{"command":"git status","env":{}}""", """{"command":"git status","dangerouslyDisableSandbox":true}""").forEach { input ->
+            assertEquals(ProcessInputPresentation(input, "json", "Parameters"), processInputPresentation(named("Bash").copy(input = input), "Claude Code"))
+        }
+        val longInput = """{"command":"${"x".repeat(LIBRARY_HIGHLIGHT_LIMIT)}"}"""
+        assertEquals(ProcessInputPresentation(longInput, "json", "Parameters"),
+            processInputPresentation(named("bash").copy(input = longInput), "pi"))
+        val read = named("read").copy(input = """{"command":"git status"}""")
+        assertEquals(ProcessInputPresentation(read.input, io.github.modao7067.luma.gui.i18n.tr("参数", "params"), "Parameters"), processInputPresentation(read, "pi"))
+    }
+
     @Test fun readAndEditPreviewsParseStructuredFileContentAndUnifiedDiffs() {
         val readItem = named("read_file").copy(
             toolKind = "read",
-            input = """{"Path":"/workspace/luma/apps/gui/src/ui/NativeMarkdown.kt","StartLine":180,"EndLine":182}""",
+            input = """{"Path":"/workspace/project/apps/gui/src/ui/NativeMarkdown.kt","StartLine":180,"EndLine":182}""",
             detail = "Created At: 2026-11-08T16:20:00+08:00\nCompleted At: 2026-11-08T16:20:01+08:00\nShowing lines 180-182 of 674\n180: val a = 1\n181: val b = 2\n182: val c = 3",
         )
         val readPreview = parseProcessReadPreview(readItem, "Antigravity")
@@ -89,7 +119,7 @@ class ProcessCategoryTest {
 
         val editItem = named("edit_file").copy(
             toolKind = "edit",
-            input = """{"Path":"/workspace/luma/apps/gui/src/ui/NativeMarkdown.kt","Target":"val a = 1\nval b = 2","Replacement":"val a = 1\nval b = 42\nval c = 3"}""",
+            input = """{"Path":"/workspace/project/apps/gui/src/ui/NativeMarkdown.kt","Target":"val a = 1\nval b = 2","Replacement":"val a = 1\nval b = 42\nval c = 3"}""",
             detail = "{}",
         )
         val editPreview = parseProcessEditPreview(editItem, "Antigravity")
@@ -113,8 +143,8 @@ class ProcessCategoryTest {
     @Test fun openCodeReadEditPreviewsAndReasoningInterleavedGrouping() {
         val openCodeRead1 = named("read").copy(
             id = "r1",
-            input = """{"path":"/workspace/luma/SessionDetail.kt","offset":220,"limit":3}""",
-            detail = "Read file /workspace/luma/SessionDetail.kt, lines 220-222\n\n220: val x = 1\n221: val y = 2\n222: val z = 3",
+            input = """{"path":"/workspace/project/SessionDetail.kt","offset":220,"limit":3}""",
+            detail = "Read file /workspace/project/SessionDetail.kt, lines 220-222\n\n220: val x = 1\n221: val y = 2\n222: val z = 3",
         )
         val rp = parseProcessReadPreview(openCodeRead1, "OpenCode")
         assertEquals("SessionDetail.kt", rp.fileName)
@@ -124,8 +154,8 @@ class ProcessCategoryTest {
 
         val openCodeDirRead = named("read").copy(
             id = "r2",
-            input = """{"path":"/workspace/luma"}""",
-            detail = "Read directory /workspace/luma, entries 1-2\n1: apps/\n2: tools/",
+            input = """{"path":"/workspace/project"}""",
+            detail = "Read directory /workspace/project, entries 1-2\n1: apps/\n2: tools/",
         )
         val dp = parseProcessReadPreview(openCodeDirRead, "OpenCode")
         assertEquals("L1-2", dp.rangeLabel)
@@ -134,7 +164,7 @@ class ProcessCategoryTest {
         val openCodeEditRunning = named("edit").copy(
             id = "e1",
             outcome = "running",
-            input = """{"path":"/workspace/luma/A.kt","oldString":"val a = 1","newString":"val a = 2\nval b = 3"}""",
+            input = """{"path":"/workspace/project/A.kt","oldString":"val a = 1","newString":"val a = 2\nval b = 3"}""",
             detail = "",
         )
         assertTrue(hasProcessEditPreview(openCodeEditRunning))
@@ -146,8 +176,8 @@ class ProcessCategoryTest {
         val openCodeEditCompleted = named("edit").copy(
             id = "e2",
             outcome = "succeeded",
-            input = """{"path":"/workspace/luma/B.kt","oldString":"old","newString":"new"}""",
-            detail = "Index: luma/B.kt\n===================================================================\n--- luma/B.kt\toriginal\n+++ luma/B.kt\tmodified\n@@ -1251,2 +1251,3 @@\n keep\n-old\n+new\n+extra",
+            input = """{"path":"/workspace/project/B.kt","oldString":"old","newString":"new"}""",
+            detail = "Index: project/B.kt\n===================================================================\n--- project/B.kt\toriginal\n+++ project/B.kt\tmodified\n@@ -1251,2 +1251,3 @@\n keep\n-old\n+new\n+extra",
         )
         val completedEditPreview = parseProcessEditPreview(openCodeEditCompleted, "OpenCode")
         assertEquals("B.kt", completedEditPreview.fileName)
@@ -178,8 +208,8 @@ class ProcessCategoryTest {
         )
         val openCodeTruncatedRead = named("read").copy(
             id = "r-trunc",
-            input = """{"path":"/workspace/luma/ProcessTimeline.kt","offset":1170,"limit":160}""",
-            detail = "Read file /workspace/luma/ProcessTimeline.kt, lines 1170-1172\n1170: val hScroll = rememberScrollState()\n1171: val borderColor = colors.outlineVariant\n1172: }\n[Output truncated. Continue reading with offset: 1173]",
+            input = """{"path":"/workspace/project/ProcessTimeline.kt","offset":1170,"limit":160}""",
+            detail = "Read file /workspace/project/ProcessTimeline.kt, lines 1170-1172\n1170: val hScroll = rememberScrollState()\n1171: val borderColor = colors.outlineVariant\n1172: }\n[Output truncated. Continue reading with offset: 1173]",
         )
         val tp = parseProcessReadPreview(openCodeTruncatedRead, "OpenCode")
         assertEquals("ProcessTimeline.kt", tp.fileName)

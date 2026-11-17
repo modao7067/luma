@@ -6,6 +6,7 @@ sys.path.insert(0,str(ROOT/'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.transport import Peer,Rejected
 from luma_cli.base import Session
 from luma_cli.pi import PiSession
+from luma_cli.pi_native import PiNativeSession
 from luma_cli.claude import ClaudeSession
 from luma_cli.acp import AcpSession
 from luma_cli.server import Manager
@@ -72,6 +73,35 @@ for f in reversed(frames): print(json.dumps({'id':f['id'],'result':{'method':f['
         s=session();self.assertEqual(s.data['permissions'],[])
         self.assertRaises(Rejected,s.configure,{'permission':'full-access'})
         self.assertRaises(Rejected,s.configure,{'speed':'fast'})
+    def test_pi_fallback_notice_uses_gui_runtime_notice_without_static_intro(self):
+        for fallback in ('', 'RPC fallback: SDK contract changed'):
+            with self.subTest(fallback=fallback):
+                s=session();s.config.update(nativeId='native',protocolFallbackNotice=fallback)
+                s.start=lambda argv: None
+                s.call=lambda method,*args,**kwargs: {'sessionId':'native','isSettled':True} if method=='get_state' else {}
+                s.connect()
+                self.assertEqual(s.snapshot()['permissionNotice'],fallback)
+                self.assertEqual(s.snapshot()['notice'],'')
+                s.refresh()
+                self.assertEqual(s.snapshot()['permissionNotice'],fallback)
+    def test_pi_notification_during_connect_is_not_replaced_by_fallback(self):
+        s=session();s.config.update(nativeId='native',protocolFallbackNotice='RPC fallback')
+        s.start=lambda argv: s.ui_request({'method':'notify','message':'Native startup warning'})
+        s.call=lambda method,*args,**kwargs: {'sessionId':'native','isSettled':True} if method=='get_state' else {}
+        s.connect()
+        self.assertEqual(s.snapshot()['permissionNotice'],'Native startup warning')
+    def test_pi_native_notifications_survive_routine_refresh_and_can_be_cleared(self):
+        for cls in (PiSession,PiNativeSession):
+            with self.subTest(protocol=cls.__name__):
+                s=session(cls);s.config['nativeId']='native'
+                s.call=lambda method,*args,**kwargs: {'sessionId':'native','isSettled':True} if method=='get_state' else {}
+                s.ui_request({'method':'notify','message':'Extension runtime warning'})
+                self.assertEqual(s.snapshot()['permissionNotice'],'Extension runtime warning')
+                s.refresh()
+                self.assertEqual(s.snapshot()['permissionNotice'],'Extension runtime warning')
+                self.assertEqual(s.snapshot()['notice'],'')
+                s.ui_request({'method':'notify','message':''})
+                self.assertEqual(s.snapshot()['permissionNotice'],'')
     def test_native_extension_approval_exact_values(self):
         s=session();sent=[]
         s.peer=type('Peer',(),{'send':lambda _,e:sent.append(e)})()

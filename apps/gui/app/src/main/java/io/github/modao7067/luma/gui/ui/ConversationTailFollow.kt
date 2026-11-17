@@ -504,10 +504,13 @@ internal fun rememberConversationTailFollow(
                 if (navigation.anyRevealAnimating || navigation.collapseHoldPx <= 0) return@collectLatest
                 val info = list.layoutInfo
                 val last = info.visibleItemsInfo.lastOrNull { it.index == info.totalItemsCount - 1 }
-                if (last == null || !list.canScrollBackward || !list.canScrollForward) {
+                if (last == null || !list.canScrollBackward) {
                     navigation.collapseHoldPx = 0
                     navigation.heldTotalPx = 0
                     navigation.collapseSettling = false
+                    if (!list.canScrollForward && (conversationTailDistance(list, navigation.readingSpaceBottomPx) ?: 0) == 0) {
+                        navigation.followingTail = true
+                    }
                     return@collectLatest
                 }
                 val usableEnd = info.viewportEndOffset - info.afterContentPadding
@@ -518,6 +521,9 @@ internal fun rememberConversationTailFollow(
                     navigation.collapseHoldPx = 0
                     navigation.heldTotalPx = 0
                     navigation.collapseSettling = false
+                    if (!list.canScrollForward && (conversationTailDistance(list, navigation.readingSpaceBottomPx) ?: 0) == 0) {
+                        navigation.followingTail = true
+                    }
                     return@collectLatest
                 }
                 val startHold = minOf(navigation.collapseHoldPx, deficitPx)
@@ -526,15 +532,24 @@ internal fun rememberConversationTailFollow(
                 navigation.collapseHoldPx = startHold
                 try {
                     val anim = Animatable(startHold.toFloat(), Float.VectorConverter, 0.5f)
+                    var lastAnimHold = startHold
                     anim.animateTo(0f, slowSettleTween()) {
-                        if (navigation.gestureRevision != startRev || navigation.anyRevealAnimating) {
+                        if (navigation.gestureRevision != startRev || navigation.anyRevealAnimating || navigation.collapseHoldPx <= 0) {
                             return@animateTo
                         }
-                        navigation.collapseHoldPx = value.roundToInt().coerceAtLeast(0)
+                        val targetHold = value.roundToInt().coerceAtLeast(0)
+                        val step = (lastAnimHold - targetHold).coerceAtLeast(0)
+                        lastAnimHold = targetHold
+                        if (step > 0) {
+                            navigation.collapseHoldPx = (navigation.collapseHoldPx - step).coerceAtLeast(0)
+                        }
                     }
                     if (!navigation.anyRevealAnimating && navigation.gestureRevision == startRev) {
                         navigation.collapseHoldPx = 0
                         navigation.heldTotalPx = 0
+                        if (!list.canScrollForward && (conversationTailDistance(list, navigation.readingSpaceBottomPx) ?: 0) == 0) {
+                            navigation.followingTail = true
+                        }
                     }
                 } finally {
                     navigation.collapseSettling = false

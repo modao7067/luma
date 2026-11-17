@@ -10,17 +10,6 @@ class AntigravitySession(AcpSession):
     replay_release = True
     release_empty = True
 
-    @property
-    def notice(self):
-        return tr(
-            "Google 官方 ACP；认证和会话保存在原生 antigravity-acp 目录，"
-            "与 agy CLI 的登录和会话不互换。模型、思考、模式与审批只取原生返回。"
-            "无可管理队列、逐消息 Skill、MCP 清单或实时 TUI 接管。",
-            "Official Google ACP; auth and sessions live in the native antigravity-acp directory "
-            "and are separate from agy CLI. Models, thinking, modes, and approvals come from native ACP. "
-            "No managed queue, per-message skills, MCP list, or live TUI takeover.",
-        )
-
     def start(self, argv):
         self.authenticating = False
         self.auth_cancelled = False
@@ -87,7 +76,6 @@ class AntigravitySession(AcpSession):
         super().exited(error)
 
     def connect(self):
-        self.update(notice=self.notice)
         if self.config.get("nativeProtocol", "antigravity-acp") != "antigravity-acp":
             raise Rejected(tr("此会话不属于 Google 官方 ACP；请使用原入口恢复，不能切换协议或会话存储。", "This session does not belong to official Google ACP; resume via its original entry without switching protocol or storage."))
         if "nativeProtocol" not in self.config:
@@ -109,12 +97,4 @@ class AntigravitySession(AcpSession):
                 raise Rejected(tr("Google 官方 Antigravity ACP 在本机启动失败（TCMalloc 地址空间不兼容）；当前入口不可用，请等待官方兼容版本。",
                                   "Official Google Antigravity ACP failed to start on this device (TCMalloc address space incompatibility); wait for a compatible official build.")) from None
             raise
-        self.update(notice=self.notice)
-
-    def apply_options(self, options):
-        super().apply_options(options)
-        mode = next((o for o in options if o.get("category", o.get("id")) == "mode" and o.get("type") == "select"), None)
-        if mode:
-            self.update(permissions=[{"id": v["value"], "label": v.get("name", v["value"]),
-                                      "description": v.get("description", "")}
-                                     for v in self.flatten(mode.get("options", []))])
+        self.update(connected=True)

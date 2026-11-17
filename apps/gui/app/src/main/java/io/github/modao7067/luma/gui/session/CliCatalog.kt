@@ -8,6 +8,7 @@ object CliCatalog {
     val visibleSortedIds: List<String> = sortedIds.filterNot { it in temporarilyDisabled }
     val bridged = ids.filterNot { it == "Codex" || it == "OpenCode" }.toSet()
     val nativeProtocols = mapOf("CodeBuddy Code" to listOf("codebuddy-http-acp"), "Antigravity" to listOf("antigravity-agy-acp", "antigravity-cli-stream-json", "antigravity-acp"),
+        "Kimi Code" to listOf("kimi-web-v1", "kimi-acp"),
         "pi" to listOf("pi-rpc", "pi-native-sdk-v1"),
         "Grok Build" to listOf("grok-acp", "grok-private-leader-v1"))
     fun displayName(cli: String): String = when (cli) {

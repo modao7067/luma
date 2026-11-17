@@ -8,7 +8,11 @@ import android.app.Activity
 import android.content.Intent
 import android.view.ActionMode
 import android.view.View
+import android.view.autofill.AutofillManager as SystemAutofillManager
+import android.view.autofill.AutofillValue
 import android.widget.Toast
+import androidx.compose.ui.autofill.AndroidAutofillManager
+import androidx.compose.ui.autofill.PlatformAutofillManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.collection.MutableLongLongMap
@@ -88,12 +92,26 @@ internal class EditorProcessTarget(val read: () -> TextFieldValue, val write: (T
         write(TextFieldValue(snapshot.text.replaceRange(start, end, replacement), TextRange(start + replacement.length)))
     }
 }
+internal object DisabledPlatformAutofillManager : PlatformAutofillManager {
+    override fun notifyViewEntered(view: View, semanticsId: Int, bounds: android.graphics.Rect) = Unit
+    override fun notifyViewExited(view: View, semanticsId: Int) = Unit
+    override fun notifyValueChanged(view: View, semanticsId: Int, autofillValue: AutofillValue) = Unit
+    override fun notifyViewVisibilityChanged(view: View, semanticsId: Int, isVisible: Boolean) = Unit
+    override fun commit() = Unit
+    override fun cancel() = Unit
+    override fun requestAutofill(view: View, semanticsId: Int, bounds: android.graphics.Rect) = Unit
+}
+
 internal class TextSelectionWindow(val view: View, val clipboard: SelectionClipboard, val start: (View, ActionMode.Callback2) -> ActionMode?, val launch: (Intent, (Intent?) -> Unit) -> Unit) {
     var active: NativeSelectionToolbar? = null
     private val toolbars = mutableSetOf<NativeSelectionToolbar>()
     fun register(toolbar: NativeSelectionToolbar) { toolbars += toolbar }
     fun unregister(toolbar: NativeSelectionToolbar) { toolbars -= toolbar; if (active === toolbar) active = null; toolbar.hide() }
-    fun beginGesture() { toolbars.forEach { it.allowNextGesture() } }
+    fun beginRootGesture() {
+        toolbars.forEach { toolbar ->
+            if (!toolbar.scopedToEditor && toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
+        }
+    }
     fun notifyScrollMovement() { active?.onScrollMovement() }
     fun activate(toolbar: NativeSelectionToolbar) { if (active !== toolbar) active?.hide(); active = toolbar }
 }
@@ -270,6 +288,14 @@ internal fun TextSelectionHost(content: @Composable () -> Unit) {
 private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
     val view = LocalView.current
     if (LocalInspectionMode.current || LocalSelectionWindow.current?.view === view) { content(); return }
+    val composeAutofill = LocalAutofillManager.current
+    SideEffect {
+        (composeAutofill as? AndroidAutofillManager)?.platformAutofillManager = DisabledPlatformAutofillManager
+    }
+    DisposableEffect(view) {
+        runCatching { view.context.getSystemService(SystemAutofillManager::class.java)?.cancel() }
+        onDispose {}
+    }
     val nativeClipboard = LocalClipboard.current
     val clipboard = remember(nativeClipboard) { SelectionClipboard(nativeClipboard) }
     val focus = LocalFocusManager.current
@@ -289,13 +315,19 @@ private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
     val latestLaunch by rememberUpdatedState(launch)
     val start = LocalNativeTextActionMode.current
     val window = remember(view, clipboard, start) { TextSelectionWindow(view, clipboard, start) { intent, callback -> latestLaunch(intent, callback) } }
-    CompositionLocalProvider(LocalSelectionWindow provides window, LocalReadOnlySelectionClipboard provides clipboard) {
+    CompositionLocalProvider(
+        LocalSelectionWindow provides window,
+        LocalReadOnlySelectionClipboard provides clipboard,
+        LocalAutofill provides null,
+        LocalAutofillManager provides null,
+    ) {
         SelectionToolbarProvider {
             Box(Modifier.pointerInput(window) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
                     val shown = window.active
-                    window.beginGesture()
+                    val anchorAtDown = shown?.anchorRevision ?: 0L
+                    window.beginRootGesture()
                     var tap = true
                     var notifiedScroll = false
                     var finished = false
@@ -307,14 +339,18 @@ private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
                         if (movedBeyondSlop) {
                             if (!notifiedScroll) {
                                 notifiedScroll = true
-                                window.notifyScrollMovement()
+                                if (shown != null && window.active === shown && !shown.hasSelection) {
+                                    shown.dismissOutside()
+                                } else {
+                                    window.notifyScrollMovement()
+                                }
                             }
                             tap = false
                         }
                         if (change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis) tap = false
                         if (change.changedToUpIgnoreConsumed()) {
-                            if (tap && !change.isConsumed && shown != null && window.active === shown) {
-                                val clearSelection = !shown.keepsEditorFocus && shown.status == TextToolbarStatus.Shown
+                            if (tap && shown != null && window.active === shown && shown.status == TextToolbarStatus.Shown && shown.anchorRevision == anchorAtDown) {
+                                val clearSelection = !shown.keepsEditorFocus && !change.isConsumed
                                 shown.dismissOutside()
                                 if (clearSelection) focus.clearFocus()
                             }
@@ -350,5 +386,19 @@ internal fun SelectionToolbarProvider(
             }, imagePasteAvailable = { available() }, pasteImage = { paste() }, start = window.start)
     }
     DisposableEffect(window, toolbar) { window.register(toolbar); onDispose { window.unregister(toolbar) } }
-    CompositionLocalProvider(LocalTextToolbar provides toolbar, content = content)
+    if (editor != null) {
+        Box(
+            Modifier.pointerInput(toolbar) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
+                }
+            },
+            propagateMinConstraints = true,
+        ) {
+            CompositionLocalProvider(LocalTextToolbar provides toolbar, content = content)
+        }
+    } else {
+        CompositionLocalProvider(LocalTextToolbar provides toolbar, content = content)
+    }
 }

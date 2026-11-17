@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -119,8 +120,18 @@ MODEL_PRICING_ALIASES: dict[str, str] = {
 
 MODEL_RATES_PER_M: dict[str, RateTuple] = {
     "gpt-6.1": (2.50, 15.00, 0.25, 2.50, None),
+    "gpt-6.1-sol": (2.00, 10.00, 0.10, 2.50, (272_000, 4.00, 15.00, 0.20, 5.00)),
+    "gpt-6.1-terra": (1.00, 5.00, 0.05, 1.25, (272_000, 2.00, 7.50, 0.10, 2.50)),
+    "gpt-6-astra": (10.00, 50.00, 1.00, 12.50, (272_000, 20.00, 75.00, 2.00, 25.00)),
+    "gpt-6-sol": (2.00, 10.00, 0.20, 2.50, (272_000, 4.00, 15.00, 0.40, 5.00)),
+    "gpt-6-luna": (0.10, 0.50, 0.01, 0.125, (272_000, 0.20, 0.75, 0.02, 0.25)),
     "gpt-6": (2.50, 15.00, 0.25, 2.50, None),
     "codex-auto-review": (0.40, 1.60, 0.04, 0.40, None),
+    "gpt-5.6-sol": (4.00, 20.00, 0.40, 5.00, (272_000, 8.00, 30.00, 0.80, 10.00)),
+    "gpt-5.6-terra": (2.00, 12.00, 0.20, 2.50, (272_000, 4.00, 18.00, 0.40, 5.00)),
+    "gpt-5.6-luna": (0.20, 1.20, 0.02, 0.25, (272_000, 0.40, 1.80, 0.04, 0.50)),
+    "gpt-5.6": (4.00, 20.00, 0.40, 5.00, (272_000, 8.00, 30.00, 0.80, 10.00)),
+    "gpt-5.5": (5.00, 30.00, 0.50, 5.00, (272_000, 10.00, 45.00, 1.00, 10.00)),
     "gpt-5.4": (2.50, 15.00, 0.25, 2.50, (272_000, 5.00, 22.50, 0.50, 5.00)),
     "gpt-5.4-mini": (0.40, 1.60, 0.04, 0.40, None),
     "gpt-5.3-codex": (1.75, 14.00, 0.175, 1.75, None),
@@ -1389,6 +1400,187 @@ def _scan_claude(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> lis
                 anonymous.append(rec)
     return list(deduped.values()) + anonymous
 
+def _codex_rollout_init_state() -> dict[str, Any]:
+    return {
+        "model": "gpt-5-codex",
+        "fast": False,
+        "prev_totals": None,
+        "fork_suppress_until_ms": 0,
+        "session_meta_count": 0,
+    }
+
+
+def _codex_rollout_parse_line(
+    obj: dict[str, Any],
+    state: dict[str, Any],
+    require_ts: bool = True,
+) -> dict[str, Any] | None:
+    t = obj.get("type")
+    ts = _parse_ts_ms(obj.get("timestamp"))
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if t == "session_meta":
+        state["session_meta_count"] = _safe_int(state.get("session_meta_count")) + 1
+        if state["session_meta_count"] > 1 and ts is not None:
+            state["fork_suppress_until_ms"] = ts + 1000
+        m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
+        m = payload.get("model") or payload.get("model_id") or m_info.get("slug") or m_info.get("model")
+        if isinstance(m, str) and m.strip():
+            state["model"] = _normalize_model_id(m)
+        if "service_tier" in payload:
+            tier = str(payload.get("service_tier") or "").lower()
+            state["fast"] = tier in ("fast", "priority")
+        return None
+
+    if t == "turn_context":
+        m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
+        m = payload.get("model") or payload.get("model_name") or m_info.get("slug") or m_info.get("model")
+        if isinstance(m, str) and m.strip():
+            state["model"] = _normalize_model_id(m)
+        if "service_tier" in payload:
+            tier = str(payload.get("service_tier") or "").lower()
+            state["fast"] = tier in ("fast", "priority")
+        return None
+
+    if t == "response_item":
+        m = payload.get("model") or payload.get("model_name")
+        if isinstance(m, str) and m.strip():
+            state["model"] = _normalize_model_id(m)
+        return None
+
+    if t == "thread_settings_applied":
+        settings = payload.get("settings")
+        if isinstance(settings, dict):
+            if "service_tier" in settings:
+                tier = str(settings.get("service_tier") or "").lower()
+                state["fast"] = tier in ("fast", "priority")
+            m = settings.get("model")
+            if isinstance(m, str) and m.strip():
+                state["model"] = _normalize_model_id(m)
+        return None
+
+    if t == "event_msg" and payload.get("type") in ("model_rerouted", "rerouted"):
+        r_info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        rerouted = (
+            payload.get("to_model")
+            or payload.get("destination_model")
+            or payload.get("target_model")
+            or payload.get("model")
+            or r_info.get("to_model")
+            or r_info.get("destination_model")
+            or r_info.get("model")
+        )
+        if isinstance(rerouted, str) and rerouted.strip():
+            state["model"] = _normalize_model_id(rerouted)
+        return None
+
+    if t != "event_msg" or payload.get("type") != "token_count":
+        return None
+
+    if require_ts and ts is None:
+        return None
+    if ts is not None and ts <= _safe_int(state.get("fork_suppress_until_ms")):
+        info = payload.get("info")
+        if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
+            tot = info["total_token_usage"]
+            state["prev_totals"] = {
+                "in": _safe_int(tot.get("input_tokens")),
+                "cached": _safe_int(tot.get("cached_input_tokens")),
+                "write": _safe_int(tot.get("cache_write_input_tokens")),
+                "out": _safe_int(tot.get("output_tokens")),
+                "reason": _safe_int(tot.get("reasoning_output_tokens")),
+            }
+        return None
+
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+
+    tot = info.get("total_token_usage")
+    last = info.get("last_token_usage")
+    prev = state.get("prev_totals")
+
+    cur_tot = None
+    if isinstance(tot, dict):
+        cur_tot = {
+            "in": _safe_int(tot.get("input_tokens")),
+            "cached": _safe_int(tot.get("cached_input_tokens")),
+            "write": _safe_int(tot.get("cache_write_input_tokens")),
+            "out": _safe_int(tot.get("output_tokens")),
+            "reason": _safe_int(tot.get("reasoning_output_tokens")),
+        }
+        if prev is not None and (
+            cur_tot["in"] == prev.get("in")
+            and cur_tot["cached"] == prev.get("cached")
+            and cur_tot["write"] == prev.get("write")
+            and cur_tot["out"] == prev.get("out")
+            and cur_tot["reason"] == prev.get("reason")
+        ):
+            return None
+
+    if isinstance(last, dict):
+        d_in = _safe_int(last.get("input_tokens"))
+        d_cached = _safe_int(last.get("cached_input_tokens"))
+        d_write = _safe_int(last.get("cache_write_input_tokens"))
+        d_out = _safe_int(last.get("output_tokens"))
+        d_reason = _safe_int(last.get("reasoning_output_tokens"))
+        if cur_tot is not None and prev is not None:
+            p_in = _safe_int(prev.get("in"))
+            p_out = _safe_int(prev.get("out"))
+            if cur_tot["in"] >= p_in and cur_tot["out"] >= p_out:
+                diff_in = cur_tot["in"] - p_in
+                diff_out = cur_tot["out"] - p_out
+                if d_in > diff_in or d_out > diff_out:
+                    d_in = diff_in
+                    d_cached = max(0, cur_tot["cached"] - _safe_int(prev.get("cached")))
+                    d_write = max(0, cur_tot["write"] - _safe_int(prev.get("write")))
+                    d_out = diff_out
+                    d_reason = max(0, cur_tot["reason"] - _safe_int(prev.get("reason")))
+    elif cur_tot is not None:
+        if prev is not None:
+            d_in = max(0, cur_tot["in"] - prev["in"])
+            d_cached = max(0, cur_tot["cached"] - prev["cached"])
+            d_write = max(0, cur_tot["write"] - prev["write"])
+            d_out = max(0, cur_tot["out"] - prev["out"])
+            d_reason = max(0, cur_tot["reason"] - prev["reason"])
+        else:
+            d_in = cur_tot["in"]
+            d_cached = cur_tot["cached"]
+            d_write = cur_tot["write"]
+            d_out = cur_tot["out"]
+            d_reason = cur_tot["reason"]
+    else:
+        return None
+
+    if cur_tot is not None:
+        state["prev_totals"] = cur_tot
+
+    uncached = max(0, d_in - d_cached - d_write)
+    if uncached + d_cached + d_write + d_out <= 0:
+        return None
+
+    reason_tok = min(d_out, max(0, d_reason))
+    text_out = max(0, d_out - reason_tok)
+    model = _normalize_model_id(
+        info.get("model") or info.get("model_name") or payload.get("model") or state.get("model") or "gpt-5-codex"
+    )
+    return {
+        "cli": "Codex",
+        "model": model,
+        "speed": "codex:fast" if state.get("fast") else None,
+        "timestampMs": ts or 0,
+        "uncachedInputTokens": uncached,
+        "cachedInputTokens": d_cached,
+        "cacheCreationTokens": d_write,
+        "outputTokens": text_out,
+        "reasoningTokens": reason_tok,
+        "reportedCostUsd": None,
+        "_lineOffset": _safe_int(state.get("_line_offset")),
+    }
+
+
 def _scan_codex(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
     codex_home = Path(os.environ.get("CODEX_HOME") or (home / ".codex"))
     roots = [codex_home / "sessions", codex_home / "archived_sessions"]
@@ -1402,188 +1594,146 @@ def _scan_codex(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
                 except OSError:
                     pass
 
-    def init_state() -> dict[str, Any]:
-        return {
-            "model": "gpt-5-codex",
-            "fast": False,
-            "prev_totals": None,
-            "fork_suppress_until_ms": 0,
-            "session_meta_count": 0,
-        }
-
-    def parse_line(obj: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
-        t = obj.get("type")
-        ts = _parse_ts_ms(obj.get("timestamp"))
-        payload = obj.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-
-        if t == "session_meta":
-            state["session_meta_count"] = _safe_int(state.get("session_meta_count")) + 1
-            if state["session_meta_count"] > 1 and ts is not None:
-                state["fork_suppress_until_ms"] = ts + 1000
-            m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
-            m = payload.get("model") or payload.get("model_id") or m_info.get("slug") or m_info.get("model")
-            if isinstance(m, str) and m.strip():
-                state["model"] = _normalize_model_id(m)
-            return None
-
-        if t == "turn_context":
-            m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
-            m = payload.get("model") or payload.get("model_name") or m_info.get("slug") or m_info.get("model")
-            if isinstance(m, str) and m.strip():
-                state["model"] = _normalize_model_id(m)
-            tier = str(payload.get("service_tier") or "").lower()
-            if tier:
-                state["fast"] = tier in ("fast", "priority")
-            return None
-
-        if t == "response_item":
-            m = payload.get("model") or payload.get("model_name")
-            if isinstance(m, str) and m.strip():
-                state["model"] = _normalize_model_id(m)
-            return None
-
-        if t == "thread_settings_applied":
-            settings = payload.get("settings")
-            if isinstance(settings, dict):
-                tier = str(settings.get("service_tier") or "").lower()
-                if tier:
-                    state["fast"] = tier in ("fast", "priority")
-                m = settings.get("model")
-                if isinstance(m, str) and m.strip():
-                    state["model"] = _normalize_model_id(m)
-            return None
-
-        if t == "event_msg" and payload.get("type") in ("model_rerouted", "rerouted"):
-            r_info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            rerouted = (
-                payload.get("to_model")
-                or payload.get("destination_model")
-                or payload.get("target_model")
-                or payload.get("model")
-                or r_info.get("to_model")
-                or r_info.get("destination_model")
-                or r_info.get("model")
-            )
-            if isinstance(rerouted, str) and rerouted.strip():
-                state["model"] = _normalize_model_id(rerouted)
-            return None
-
-        if t != "event_msg" or payload.get("type") != "token_count":
-            return None
-
-        if ts is None:
-            return None
-        if ts <= _safe_int(state.get("fork_suppress_until_ms")):
-            info = payload.get("info")
-            if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
-                tot = info["total_token_usage"]
-                state["prev_totals"] = {
-                    "in": _safe_int(tot.get("input_tokens")),
-                    "cached": _safe_int(tot.get("cached_input_tokens")),
-                    "write": _safe_int(tot.get("cache_write_input_tokens")),
-                    "out": _safe_int(tot.get("output_tokens")),
-                    "reason": _safe_int(tot.get("reasoning_output_tokens")),
-                }
-            return None
-
-        info = payload.get("info")
-        if not isinstance(info, dict):
-            return None
-
-        tot = info.get("total_token_usage")
-        last = info.get("last_token_usage")
-        prev = state.get("prev_totals")
-
-        cur_tot = None
-        if isinstance(tot, dict):
-            cur_tot = {
-                "in": _safe_int(tot.get("input_tokens")),
-                "cached": _safe_int(tot.get("cached_input_tokens")),
-                "write": _safe_int(tot.get("cache_write_input_tokens")),
-                "out": _safe_int(tot.get("output_tokens")),
-                "reason": _safe_int(tot.get("reasoning_output_tokens")),
-            }
-            if prev is not None and (
-                cur_tot["in"] == prev.get("in")
-                and cur_tot["cached"] == prev.get("cached")
-                and cur_tot["write"] == prev.get("write")
-                and cur_tot["out"] == prev.get("out")
-                and cur_tot["reason"] == prev.get("reason")
-            ):
-                return None
-
-        if isinstance(last, dict):
-            d_in = _safe_int(last.get("input_tokens"))
-            d_cached = _safe_int(last.get("cached_input_tokens"))
-            d_write = _safe_int(last.get("cache_write_input_tokens"))
-            d_out = _safe_int(last.get("output_tokens"))
-            d_reason = _safe_int(last.get("reasoning_output_tokens"))
-            if cur_tot is not None and prev is not None:
-                p_in = _safe_int(prev.get("in"))
-                p_out = _safe_int(prev.get("out"))
-                if cur_tot["in"] >= p_in and cur_tot["out"] >= p_out:
-                    diff_in = cur_tot["in"] - p_in
-                    diff_out = cur_tot["out"] - p_out
-                    if d_in > diff_in or d_out > diff_out:
-                        d_in = diff_in
-                        d_cached = max(0, cur_tot["cached"] - _safe_int(prev.get("cached")))
-                        d_write = max(0, cur_tot["write"] - _safe_int(prev.get("write")))
-                        d_out = diff_out
-                        d_reason = max(0, cur_tot["reason"] - _safe_int(prev.get("reason")))
-        elif cur_tot is not None:
-            if prev is not None:
-                d_in = max(0, cur_tot["in"] - prev["in"])
-                d_cached = max(0, cur_tot["cached"] - prev["cached"])
-                d_write = max(0, cur_tot["write"] - prev["write"])
-                d_out = max(0, cur_tot["out"] - prev["out"])
-                d_reason = max(0, cur_tot["reason"] - prev["reason"])
-            else:
-                d_in = cur_tot["in"]
-                d_cached = cur_tot["cached"]
-                d_write = cur_tot["write"]
-                d_out = cur_tot["out"]
-                d_reason = cur_tot["reason"]
-        else:
-            return None
-
-        if cur_tot is not None:
-            state["prev_totals"] = cur_tot
-
-        uncached = max(0, d_in - d_cached - d_write)
-        if uncached + d_cached + d_write + d_out <= 0:
-            return None
-
-        reason_tok = min(d_out, max(0, d_reason))
-        text_out = max(0, d_out - reason_tok)
-        model = _normalize_model_id(
-            info.get("model") or info.get("model_name") or payload.get("model") or state.get("model") or "gpt-5-codex"
-        )
-        return {
-            "cli": "Codex",
-            "model": model,
-            "speed": "codex:fast" if state.get("fast") else None,
-            "timestampMs": ts,
-            "uncachedInputTokens": uncached,
-            "cachedInputTokens": d_cached,
-            "cacheCreationTokens": d_write,
-            "outputTokens": text_out,
-            "reasoningTokens": reason_tok,
-            "reportedCostUsd": None,
-            "_lineOffset": _safe_int(state.get("_line_offset")),
-        }
-
     deduped: dict[str, dict[str, Any]] = {}
     for fp in sorted(files):
         fname = Path(fp).name
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line, init_state):
+        for rec in _read_jsonl_incremental(
+            fp,
+            cache_files,
+            _codex_rollout_parse_line,
+            _codex_rollout_init_state,
+        ):
             if rec["timestampMs"] >= cutoff_ms:
                 dkey = f"codex:{fname}:{_safe_int(rec.get('_lineOffset'))}"
                 clean_rec = dict(rec)
                 clean_rec.pop("_lineOffset", None)
                 deduped[dkey] = clean_rec
     return list(deduped.values())
+
+
+def _serialize_pricing_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": catalog["mode"],
+        "updatedAt": catalog["updatedAt"],
+        "digest": catalog["digest"],
+        "aliases": dict(MODEL_PRICING_ALIASES),
+        "rates": {
+            key: _serialize_rate_tuple(rate)
+            for key, rate in catalog["rates"].items()
+        },
+    }
+
+
+def summarize_codex_rollout(
+    rollout_path: str | Path,
+    catalog: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active_cat = catalog if catalog is not None else _get_pricing_catalog()
+    state = _codex_rollout_init_state()
+    cost_usd = 0.0
+    priced = False
+    event_count = 0
+    uncached_sum = 0
+    cached_sum = 0
+    write_sum = 0
+    output_sum = 0
+    reasoning_sum = 0
+    last_usage: dict[str, Any] | None = None
+    total_usage: dict[str, Any] | None = None
+    context_window: int | None = None
+    last_model: str | None = None
+    last_speed: str | None = None
+    path = Path(rollout_path)
+    if path.is_file():
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line_idx, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    state["_line_offset"] = line_idx
+                    t = obj.get("type")
+                    payload = obj.get("payload")
+                    if t == "event_msg" and isinstance(payload, dict) and payload.get("type") == "token_count":
+                        info = payload.get("info")
+                        if isinstance(info, dict):
+                            if isinstance(info.get("last_token_usage"), dict):
+                                last_usage = info["last_token_usage"]
+                            if isinstance(info.get("total_token_usage"), dict):
+                                total_usage = info["total_token_usage"]
+                            cw = _safe_int(info.get("model_context_window"))
+                            if cw > 0:
+                                context_window = cw
+                    rec = _codex_rollout_parse_line(obj, state, require_ts=False)
+                    if rec is not None:
+                        priced_rec = _price_record(rec, catalog=active_cat, event_count=1)
+                        event_count += 1
+                        cost_usd += _safe_float(priced_rec.get("costUsd")) or 0.0
+                        if priced_rec.get("costSource") != "unpriced":
+                            priced = True
+                        uncached_sum += _safe_int(rec.get("uncachedInputTokens"))
+                        cached_sum += _safe_int(rec.get("cachedInputTokens"))
+                        write_sum += _safe_int(rec.get("cacheCreationTokens"))
+                        output_sum += _safe_int(rec.get("outputTokens"))
+                        reasoning_sum += _safe_int(rec.get("reasoningTokens"))
+                        last_model = rec.get("model")
+                        last_speed = "fast" if rec.get("speed") == "codex:fast" else None
+        except OSError:
+            pass
+    prev = state.get("prev_totals")
+    if isinstance(prev, dict):
+        baseline_totals = {
+            "inputTokens": _safe_int(prev.get("in")),
+            "cachedInputTokens": _safe_int(prev.get("cached")),
+            "cacheWriteInputTokens": _safe_int(prev.get("write")),
+            "outputTokens": _safe_int(prev.get("out")),
+            "reasoningOutputTokens": _safe_int(prev.get("reason")),
+        }
+    elif isinstance(total_usage, dict):
+        baseline_totals = {
+            "inputTokens": _safe_int(total_usage.get("input_tokens")),
+            "cachedInputTokens": _safe_int(total_usage.get("cached_input_tokens")),
+            "cacheWriteInputTokens": _safe_int(total_usage.get("cache_write_input_tokens")),
+            "outputTokens": _safe_int(total_usage.get("output_tokens")),
+            "reasoningOutputTokens": _safe_int(total_usage.get("reasoning_output_tokens")),
+        }
+    else:
+        baseline_totals = {
+            "inputTokens": uncached_sum + cached_sum + write_sum,
+            "cachedInputTokens": cached_sum,
+            "cacheWriteInputTokens": write_sum,
+            "outputTokens": output_sum + reasoning_sum,
+            "reasoningOutputTokens": reasoning_sum,
+        }
+    return {
+        "costUsd": cost_usd,
+        "priced": priced,
+        "eventCount": event_count,
+        "hasUsage": event_count > 0 or isinstance(total_usage, dict) or isinstance(last_usage, dict),
+        "totals": baseline_totals,
+        "last": last_usage,
+        "modelContextWindow": context_window,
+        "model": last_model or state.get("model"),
+        "speed": last_speed if last_speed is not None else ("fast" if state.get("fast") else None),
+    }
+
+
+def collect_codex_session_pricing(rollout_path: str | None = None) -> dict[str, Any]:
+    cat = _get_pricing_catalog()
+    res: dict[str, Any] = {
+        "catalog": _serialize_pricing_catalog(cat),
+    }
+    if isinstance(rollout_path, str) and rollout_path.strip():
+        res["rollout"] = summarize_codex_rollout(rollout_path.strip(), catalog=cat)
+    else:
+        res["rollout"] = None
+    return res
 
 def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
     data_dir = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share")) / "opencode"
@@ -4537,54 +4687,73 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                 start_new_session=True,
             )
             try:
-                req = (
-                    json.dumps({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {"clientInfo": {"name": "luma-gui", "version": "1.0"}},
-                    })
-                    + "\n"
-                    + json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}})
-                    + "\n"
-                    + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}})
-                    + "\n"
-                )
-                out, _ = proc.communicate(input=req, timeout=3.0)
-                for line in out.splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        msg = json.loads(line)
-                    except Exception:
-                        continue
-                    if isinstance(msg, dict) and msg.get("id") == 2 and isinstance(msg.get("result"), dict):
-                        res = msg["result"]
-                        rl = res.get("rateLimits") if isinstance(res.get("rateLimits"), dict) else res
-                        windows = []
-                        lbl_5h = _tr("5h 窗口", "5h window")
-                        lbl_7d = _tr("7d 窗口", "7d window")
-                        for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
-                            slot = rl.get(key)
-                            if isinstance(slot, dict) and _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) is not None:
-                                used_p = _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) or 0.0
-                                mins = _safe_int(slot.get("windowDurationMins") or slot.get("window_minutes")) or default_mins
-                                lbl = lbl_5h if mins == 300 else (lbl_7d if mins == 10080 else default_label)
-                                resets = slot.get("resetsAt") or slot.get("resets_at")
-                                resets_iso = resets if isinstance(resets, str) else _iso_from_epoch_sec(resets)
-                                windows.append(_make_window(key, lbl, used_p, resets_iso, mins * 60_000))
-                        if windows:
-                            plan = rl.get("planType") or rl.get("plan_type")
-                            return {
-                                "cli": "Codex",
-                                "planType": str(plan) if plan else None,
-                                "updatedAt": now_iso,
-                                "source": "live",
-                                "status": "ok",
-                                "message": None,
-                                "windows": windows,
-                                "credits": None,
-                            }
+                deadline = time.monotonic() + 3.0
+                pending = bytearray()
+
+                def send(message: dict[str, Any]) -> None:
+                    proc.stdin.write(json.dumps(message) + "\n")
+                    proc.stdin.flush()
+
+                def read_result(request_id: int) -> dict[str, Any]:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("Codex quota RPC timed out")
+                        if b"\n" in pending:
+                            line, _, rest = pending.partition(b"\n")
+                            pending[:] = rest
+                            try:
+                                message = json.loads(line)
+                            except (ValueError, UnicodeDecodeError):
+                                continue
+                            if not isinstance(message, dict) or message.get("id") != request_id:
+                                continue
+                            result = message.get("result")
+                            if "error" in message or not isinstance(result, dict):
+                                raise ValueError("Codex quota RPC failed")
+                            return result
+                        if not select.select([proc.stdout], [], [], remaining)[0]:
+                            raise TimeoutError("Codex quota RPC timed out")
+                        chunk = os.read(proc.stdout.fileno(), 65536)
+                        if not chunk:
+                            raise EOFError("Codex quota RPC closed before replying")
+                        pending.extend(chunk)
+
+                send({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"clientInfo": {"name": "luma-gui", "version": "1.0"}},
+                })
+                read_result(1)
+                send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+                send({"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}})
+                res = read_result(2)
+                rl = res.get("rateLimits") if isinstance(res.get("rateLimits"), dict) else res
+                windows = []
+                lbl_5h = _tr("5h 窗口", "5h window")
+                lbl_7d = _tr("7d 窗口", "7d window")
+                for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
+                    slot = rl.get(key)
+                    if isinstance(slot, dict) and _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) is not None:
+                        used_p = _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) or 0.0
+                        mins = _safe_int(slot.get("windowDurationMins") or slot.get("window_minutes")) or default_mins
+                        lbl = lbl_5h if mins == 300 else (lbl_7d if mins == 10080 else default_label)
+                        resets = slot.get("resetsAt") or slot.get("resets_at")
+                        resets_iso = resets if isinstance(resets, str) else _iso_from_epoch_sec(resets)
+                        windows.append(_make_window(key, lbl, used_p, resets_iso, mins * 60_000))
+                if windows:
+                    plan = rl.get("planType") or rl.get("plan_type")
+                    return {
+                        "cli": "Codex",
+                        "planType": str(plan) if plan else None,
+                        "updatedAt": now_iso,
+                        "source": "live",
+                        "status": "ok",
+                        "message": None,
+                        "windows": windows,
+                        "credits": None,
+                    }
             finally:
                 for pipe in (proc.stdin, proc.stdout):
                     if pipe is not None:
@@ -6256,6 +6425,10 @@ def main(argv: list[str]) -> int:
         fresh = "--fresh" in argv
         res = collect_limits(fresh=fresh)
         sys.stdout.write(json.dumps(res, ensure_ascii=False))
+        return 0
+    if cmd == "codex-session":
+        rollout_path = argv[2] if len(argv) > 2 else None
+        sys.stdout.write(json.dumps(collect_codex_session_pricing(rollout_path), ensure_ascii=False))
         return 0
     if cmd == "all":
         days, period = _parse_days_or_period_arg(argv[2] if len(argv) > 2 else None)

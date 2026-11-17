@@ -31,6 +31,24 @@ class GlobalUsageTest {
         else System.setProperty("luma.lang", previousLangProp)
     }
 
+    @Test fun quotaLabelsKeepOnlyPeriodAndModelNames() {
+        val labels = mapOf(
+            "5h 窗口" to "5h",
+            "7d 窗口" to "7d",
+            "7d 总窗口" to "7d 总计",
+            "Gemini · 5h 窗口" to "Gemini · 5h",
+            "Gemini · 主窗口" to "Gemini · 常规",
+            "5h window" to "5h",
+            "Gemini · 7d Window" to "Gemini · 7d",
+            "7d overall" to "7d overall",
+            "Monthly credits" to "Monthly credits",
+            "每周 · Claude Sonnet" to "每周 · Claude Sonnet",
+        )
+        labels.forEach { (source, expected) ->
+            assertEquals(expected, formatUsageLimitLabel(source))
+        }
+    }
+
     @Test fun parsesSummaryAndDistinguishesCostSources() {
         val raw = JSONObject()
             .put("generatedAt", "2026-11-06T19:00:00Z")

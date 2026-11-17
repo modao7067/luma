@@ -301,6 +301,79 @@ class TextSelectionToolbarInteractionTest {
         } } } }
         rule.runOnIdle { assertEquals(expected, actual) }
     }
+    @Test fun composerLongPressNeverShowsAutofillAndDismissesOnAnyTapOrOutsideScroll() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        clipboard.clearPrimaryClip()
+        var startedCount = 0
+        val countingFactory: (View, ActionMode.Callback2) -> ActionMode? = { view, callback ->
+            startedCount++
+            factory(view, callback)
+        }
+        var draft by mutableStateOf("")
+        var buttonClicks = 0
+        var outerAutofillManager: Any? = null
+        var innerAutofill: Any? = "unset"
+        var innerAutofillManager: Any? = "unset"
+        val actions = object : CockpitActions by previewActions {
+            override fun draft(text: String) { draft = text }
+        }
+        rule.setContent {
+            CompositionLocalProvider(LocalNativeTextActionMode provides countingFactory) {
+                MaterialTheme {
+                    outerAutofillManager = LocalAutofillManager.current
+                    TextSelectionHost {
+                        innerAutofill = LocalAutofill.current
+                        innerAutofillManager = LocalAutofillManager.current
+                        val scroll = rememberScrollState()
+                        Column(Modifier.fillMaxSize()) {
+                            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).testTag("chat-scroll")) {
+                                repeat(24) { idx -> androidx.compose.material3.Text("message row $idx") }
+                            }
+                            androidx.compose.material3.Button(onClick = { buttonClicks++ }) {
+                                androidx.compose.material3.Text("外部按钮")
+                            }
+                            CompactComposer(CockpitState(), sampleView().copy(draft = draft), actions, {}, {}, previewExpanded = true, previewMotionFraction = 1f)
+                        }
+                    }
+                }
+            }
+        }
+        rule.runOnIdle {
+            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+            assertSame(DisabledPlatformAutofillManager, (outerAutofillManager as androidx.compose.ui.autofill.AndroidAutofillManager).platformAutofillManager)
+            assertNull(innerAutofill)
+            assertNull(innerAutofillManager)
+        }
+        rule.onNodeWithContentDescription("消息草稿").performTouchInput { longClick(center) }
+        rule.runOnIdle { assertEquals("empty draft + empty clipboard must not open an autofill-only bar", 0, startedCount) }
+
+        clipboard.setPrimaryClip(ClipData.newPlainText("clip", "hello"))
+        rule.onNodeWithContentDescription("消息草稿").performTouchInput { longClick(center) }
+        rule.runOnIdle {
+            assertEquals(1, startedCount)
+            assertFalse(mode.finished)
+            assertNull(mode.menu.findItem(android.R.id.autofill))
+            assertNotNull(mode.menu.findItem(android.R.id.paste))
+        }
+
+        rule.onNodeWithText("外部按钮").performTouchInput { click(center) }
+        rule.runOnIdle {
+            assertTrue(mode.finished)
+            assertEquals(1, buttonClicks)
+        }
+
+        rule.onNodeWithTag("chat-scroll").performTouchInput { swipeUp(durationMillis = 300) }
+        rule.runOnIdle { assertEquals(1, startedCount) }
+
+        rule.onNodeWithContentDescription("消息草稿").performTouchInput { longClick(center) }
+        rule.runOnIdle {
+            assertEquals(2, startedCount)
+            assertFalse(mode.finished)
+            assertNull(mode.menu.findItem(android.R.id.autofill))
+        }
+        rule.onNodeWithContentDescription("消息草稿").performTouchInput { click(center) }
+        rule.runOnIdle { assertTrue(mode.finished) }
+    }
     private class RecordingMode(context: Context, val callback: ActionMode.Callback2) : ActionMode() {
         private val contents = PopupMenu(context, View(context)).menu
         var finished = false

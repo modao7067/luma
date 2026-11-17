@@ -151,16 +151,14 @@ class DshSession(AcpSession):
         if self.permission_protocol:
             try: self.refresh_permissions()
             except Exception as exc:
-                self.permission_unavailable = str(exc); available = False; self.update(permission='', permissions=[])
+                self.permission_unavailable = str(exc); available = False; self.update(permission='', permissions=[], planModeSupported=False, planMode=False)
         else:
             self.permission_unavailable = capability.get('reason', self.permission_unavailable)
         self._sync_extensions(meta)
-        self.update(notice=self.data['notice'] + (
-            tr(' 权限选项由同一 DSH 进程的原生权限预设服务提供，仅明确选择后改变本会话；无文件沙箱或不逐次审批会降低对应保护，以每项实际组合为准。',
-               ' Permission presets are provided by the same DSH process and only change this session when selected; disabling sandbox or per-call approval reduces protection.')
-            if available else
-            tr(' DSH 官方 ACP 不提供会话模式切换；权限扩展不可用：',
-               ' Official DSH ACP does not support mode switching; permission extension unavailable: ') + self.permission_unavailable))
+        if not available:
+            unavail = tr('DSH 官方 ACP 不提供会话模式切换；权限扩展不可用：',
+                         'Official DSH ACP does not support mode switching; permission extension unavailable: ') + self.permission_unavailable
+            self.update(notice=unavail, permissionNotice=unavail, planModeSupported=False, planMode=False)
         self.refresh_balances()
 
     def _sync_extensions(self, meta):
@@ -229,13 +227,7 @@ class DshSession(AcpSession):
             if isinstance(restored_usage, dict):
                 self.cache_usage = {k: restored_usage.get(k) for k in ('input', 'cacheRead', 'cacheWrite', 'output')}
                 self.apply_usage(restored_usage)
-            cleaned_notice = (
-                self.data['notice']
-                .replace('原生恢复不重放历史，重启托管服务后只显示本次连接输出。', '')
-                .replace(' Native resume does not replay history; only output from the current connection is shown after host restart.', '')
-            )
-            self.update(historyReady=True, title=restored.get('title', ''),
-                        notice=cleaned_notice + tr('历史由同一原生会话的完整日志恢复。', ' History restored from the full native session log.'))
+            self.update(historyReady=True, title=restored.get('title', ''))
 
     def apply_permissions(self, value):
         if not isinstance(value, dict): raise Rejected(tr('DSH 原生权限状态不兼容', 'Incompatible native DSH permission state'))
@@ -248,8 +240,10 @@ class DshSession(AcpSession):
             if not isinstance(option, dict) or not isinstance(option.get('value'), str) or not isinstance(option.get('name'), str): raise Rejected(tr('DSH 原生权限选项不兼容', 'Incompatible native DSH permission option'))
             rows.append({'id': option['value'], 'label': option['name'], 'description': option.get('description', ''),
                          'sandbox': option.get('sandbox', ''), 'approval': option.get('approval', '')})
+        plan_supported = bool(value.get('planAvailable', False))
+        plan_active = bool(value.get('planActive', False)) if plan_supported else False
         self.permission_revision += 1
-        self.update(permission=current, permissions=rows)
+        self.update(permission=current, permissions=rows, planModeSupported=plan_supported, planMode=plan_active, permissionNotice=None)
 
     def refresh_permissions(self):
         if not self.permission_protocol: raise Rejected(tr('当前 DSH ACP 未提供可用的会话权限切换', 'Current DSH ACP does not support session permission switching'))
@@ -638,25 +632,44 @@ class DshSession(AcpSession):
         return {}
 
     def configure(self, values):
-        if 'permission' not in values: return super().configure(values)
-        if self.data['running']: raise Rejected(tr('请等待回合结束再更改权限', 'Wait for the current turn to finish before changing permissions'))
+        has_perm = 'permission' in values
+        has_plan = 'planMode' in values
+        if not has_perm and not has_plan: return super().configure(values)
+        if self.data['running']: raise Rejected(tr('请等待回合结束再更改设置', 'Wait for the current turn to finish before changing settings'))
         if not self.permission_protocol: raise Rejected(tr('当前 DSH ACP 未提供可用的会话权限切换', 'Current DSH ACP does not support session permission switching'))
-        selected = values['permission']
-        if selected not in {p['id'] for p in self.data['permissions']}: raise Rejected(tr('权限预设不在 DSH 原生目录中', 'Permission preset is not in the native DSH catalog'))
-        other = {k: v for k, v in values.items() if k != 'permission'}
+        if has_perm and values['permission'] not in {p['id'] for p in self.data['permissions']}: raise Rejected(tr('权限预设不在 DSH 原生目录中', 'Permission preset is not in the native DSH catalog'))
+        if has_plan and (not isinstance(values['planMode'], bool) or not self.data.get('planModeSupported')):
+            raise Rejected(tr('当前 DSH 会话未提供独立规划模式切换', 'Independent Plan mode switching is unavailable in this DSH session'))
+        other = {k: v for k, v in values.items() if k not in ('permission', 'planMode')}
         if other: super().configure(other)
-        revision = self.permission_revision
-        try:
-            actual = self.call('luma/permissions/set', {'sessionId': self.data['nativeId'], 'value': selected})
-            self.apply_permissions(actual)
-            if self.data['permission'] != selected: raise Rejected(tr('DSH 尚未确认所选权限', 'DSH has not confirmed the selected permission'))
-        except Rejected:
-            try: self.refresh_permissions()
-            except Exception: self.update(permission='', permissions=[])
-            raise
-        except Exception:
-            if self.permission_revision == revision: self.update(permission='')
-            raise
+        if has_perm:
+            selected = values['permission']
+            revision = self.permission_revision
+            try:
+                actual = self.call('luma/permissions/set', {'sessionId': self.data['nativeId'], 'value': selected})
+                self.apply_permissions(actual)
+                if self.data['permission'] != selected: raise Rejected(tr('DSH 尚未确认所选权限', 'DSH has not confirmed the selected permission'))
+            except Rejected:
+                try: self.refresh_permissions()
+                except Exception: self.update(permission='', permissions=[])
+                raise
+            except Exception:
+                if self.permission_revision == revision: self.update(permission='')
+                raise
+        if has_plan:
+            target_plan = values['planMode']
+            revision = self.permission_revision
+            try:
+                actual = self.call('luma/permissions/plan', {'sessionId': self.data['nativeId'], 'enabled': target_plan})
+                self.apply_permissions(actual)
+                if self.data['planMode'] != target_plan: raise Rejected(tr('DSH 尚未确认规划模式切换', 'DSH has not confirmed the Plan mode change'))
+            except Rejected:
+                try: self.refresh_permissions()
+                except Exception: self.update(planMode=False)
+                raise
+            except Exception:
+                if self.permission_revision == revision: self.update(planMode=False)
+                raise
         return {}
 
     def refresh(self):

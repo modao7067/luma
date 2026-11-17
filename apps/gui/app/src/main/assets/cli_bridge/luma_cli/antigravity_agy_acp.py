@@ -37,7 +37,7 @@ FULL_ACCESS = "always-proceed"
 def _full_access_option():
     return {
         "id": FULL_ACCESS,
-        "label": tr("全权限（跳过审批）", "Full access (skip approvals)"),
+        "label": "Always proceed",
         "description": tr("启用原生 --dangerously-skip-permissions，自动批准工具与命令执行",
                           "Enable native --dangerously-skip-permissions to auto-approve tools and commands"),
     }
@@ -82,16 +82,59 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
     replay_release = True
     release_empty = True
 
-    @property
-    def notice(self):
-        return tr(
-            "Google 官方 agy ACP；共享当前环境 agy CLI 的原生登录、会话与子代理目录，原生 load 重放历史。"
-            "支持原生模式切换与 --dangerously-skip-permissions 全权限跳过审批（保留提问表单）。"
-            "无可管理待发队列、逐消息 Skill、MCP 清单或实时 TUI 接管。",
-            "Official Google agy ACP; shares the current environment's native agy CLI login, sessions, and subagent directory with native load history replay. "
-            "Supports native mode switching and --dangerously-skip-permissions full access (retaining question forms). "
-            "No managed pending queue, per-message skills, MCP list, or live TUI takeover.",
-        )
+    def _primary_mode_option(self, options=None):
+        opts = getattr(self, "options", []) if options is None else options
+        return next((o for o in opts if o.get("type") == "select" and o.get("category", o.get("id")) == "mode"), None)
+
+    def _plan_supported_in_mode_option(self, mode_opt=None):
+        if mode_opt is None:
+            mode_opt = self._primary_mode_option()
+        if not mode_opt:
+            return False
+        return "plan" in {v["value"] for v in self.flatten(mode_opt.get("options", []))}
+
+    def _default_non_plan_mode(self, mode_opt=None):
+        if mode_opt is None:
+            mode_opt = self._primary_mode_option()
+        if not mode_opt:
+            return "default"
+        values = [v["value"] for v in self.flatten(mode_opt.get("options", [])) if v["value"] != "plan"]
+        if "default" in values:
+            return "default"
+        return values[0] if values else ""
+
+    def _saved_skip_permissions(self):
+        if "skipPermissions" in self.config:
+            return bool(self.config.get("skipPermissions"))
+        return self.config.get("selectedPermission") == FULL_ACCESS
+
+    def _saved_plan_mode(self):
+        if "selectedPlanMode" in self.config:
+            val = self.config.get("selectedPlanMode")
+            return bool(val) if val is not None else None
+        if self.config.get("selectedNativeMode") == "plan" or self.config.get("selectedPermission") == "plan":
+            return True
+        return None
+
+    def _saved_base_mode(self):
+        if "selectedBaseMode" in self.config:
+            return self.config.get("selectedBaseMode") or ""
+        for key in ("selectedNativeMode", "selectedPermission"):
+            perm = self.config.get(key) or ""
+            if perm and perm not in (FULL_ACCESS, "plan"):
+                return perm
+        return ""
+
+    def _effective_agy_permission(self):
+        if getattr(self, "skip_permissions_active", False):
+            return FULL_ACCESS
+        base = getattr(self, "base_mode", "")
+        if base:
+            return base
+        native_mode = getattr(self, "native_mode", "")
+        if native_mode and native_mode != "plan":
+            return native_mode
+        return self.data.get("permission", "") or self._default_non_plan_mode()
 
     def __init__(self, config, save):
         super().__init__(config, save)
@@ -177,7 +220,9 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.authenticating = False
         self.auth_cancelled = False
         self.auth_url_rejected = False
-        self.skip_permissions_active = self.config.get("selectedPermission") == FULL_ACCESS
+        self.skip_permissions_active = self._saved_skip_permissions()
+        self.native_mode = ""
+        self.base_mode = self._saved_base_mode()
         self.auth_browser = BrowserRelay(self.open_auth_browser, self.reject_auth_browser)
         command = [
             *argv,
@@ -228,13 +273,42 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
 
     def apply_options(self, options):
         super().apply_options(options)
-        permissions = list(self.data.get("permissions", []))
+        mode_opt = self._primary_mode_option(options)
+        plan_supported = self._plan_supported_in_mode_option(mode_opt)
+        if mode_opt is not None:
+            self.native_mode = mode_opt.get("currentValue", "")
+            non_plan_values = {v["value"] for v in self.flatten(mode_opt.get("options", [])) if v["value"] != "plan"}
+            if self.native_mode and self.native_mode != "plan":
+                self.base_mode = self.native_mode
+            elif getattr(self, "base_mode", "") not in non_plan_values:
+                saved_base = self._saved_base_mode()
+                self.base_mode = saved_base if saved_base in non_plan_values else self._default_non_plan_mode(mode_opt)
+        skip_active = bool(getattr(self, "skip_permissions_active", False))
+        multi_group = len(self.permission_options()) > 1
+        permissions = [
+            dict(p) for p in self.data.get("permissions", [])
+            if not (plan_supported and p.get("id") == "plan" and (not p.get("configId") or (mode_opt and p.get("configId") == mode_opt["id"])))
+        ]
         if not any(p.get("id") == FULL_ACCESS for p in permissions):
-            permissions.append(_full_access_option())
-        fields = {"permissions": permissions}
-        if getattr(self, "skip_permissions_active", False):
-            fields["permission"] = FULL_ACCESS
-        self.update(**fields)
+            full_opt = _full_access_option()
+            if multi_group and mode_opt is not None:
+                full_opt.update(configId=mode_opt["id"], configName=mode_opt.get("name", mode_opt["id"]))
+                insert_at = max((i + 1 for i, p in enumerate(permissions) if p.get("configId") == mode_opt["id"]), default=len(permissions))
+                permissions.insert(insert_at, full_opt)
+            else:
+                permissions.append(full_opt)
+        effective_perm = self._effective_agy_permission()
+        if multi_group and mode_opt is not None:
+            for permission in permissions:
+                if permission.get("configId") == mode_opt["id"]:
+                    permission["selected"] = permission["id"] == effective_perm
+        self.update(
+            permissions=permissions,
+            permission=effective_perm,
+            planModeSupported=plan_supported,
+            planMode=bool(plan_supported and self.native_mode == "plan"),
+            skipPermissionsActive=skip_active,
+        )
 
     def _settle_autonomous_open_tools(self, status="cancelled"):
         while self.autonomous_open_tools:
@@ -420,9 +494,55 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         return False
 
     def event(self, e):
-        if (getattr(self, "skip_permissions_active", False)
-                and e.get("method") == "session/update"
+        if (e.get("method") == "session/update"
                 and e.get("params", {}).get("update", {}).get("sessionUpdate") == "current_mode_update"):
+            native = self.data["nativeId"] or self.config.get("nativeId", "")
+            p = e.get("params", {})
+            if native and p.get("sessionId") and p["sessionId"] != native:
+                return
+            mode_id = p.get("update", {}).get("currentModeId", "")
+            if isinstance(mode_id, str) and mode_id:
+                mode_opt = self._primary_mode_option()
+                groups = self.permission_options()
+                if len(groups) > 1:
+                    try:
+                        target = self.permission_option(mode_id)
+                    except Rejected:
+                        return
+                    if mode_opt is None or target["id"] != mode_opt["id"]:
+                        return AcpSession.event(self, e)
+                self.native_mode = mode_id
+                if mode_id != "plan":
+                    self.base_mode = mode_id
+                if mode_opt is not None:
+                    mode_opt["currentValue"] = mode_id
+                    self.apply_options(self.options)
+                skip_active = bool(getattr(self, "skip_permissions_active", False))
+                effective = self._effective_agy_permission()
+                plan_supported = bool(self.data.get("planModeSupported"))
+                plan_active = bool(plan_supported and mode_id == "plan")
+                if getattr(self, "history_loaded", False):
+                    has_saved_prefs = any(k in self.config for k in ("skipPermissions", "selectedBaseMode", "selectedPlanMode", "selectedNativeMode", "selectedPermission"))
+                    if skip_active or has_saved_prefs:
+                        changed = False
+                        if plan_supported and self.config.get("selectedPlanMode") != plan_active:
+                            self.config["selectedPlanMode"] = plan_active
+                            changed = True
+                        if mode_id != "plan" and self.config.get("selectedBaseMode") != mode_id:
+                            self.config["selectedBaseMode"] = mode_id
+                            changed = True
+                        if self.config.get("selectedNativeMode") != mode_id:
+                            self.config["selectedNativeMode"] = mode_id
+                            changed = True
+                        if self.config.get("selectedPermission") != effective:
+                            self.config["selectedPermission"] = effective
+                            changed = True
+                        if changed:
+                            try:
+                                self.save()
+                            except OSError:
+                                pass
+                self.update(permission=effective, planMode=plan_active, skipPermissionsActive=skip_active)
             return
         prev_tool_outcome = ""
         prev_tool_status = ""
@@ -1184,11 +1304,34 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self.save()
         elif wanted_effort and wanted_effort in efforts and wanted_effort != self.data["effort"]:
             AcpSession.configure(self, {"effort": wanted_effort})
-        wanted_perm = self.config.get("selectedPermission")
-        if wanted_perm and wanted_perm != FULL_ACCESS:
-            native_modes = {p["id"] for p in self.data["permissions"] if p["id"] != FULL_ACCESS}
-            if wanted_perm in native_modes and wanted_perm != self.data["permission"]:
-                AcpSession.configure(self, {"permission": wanted_perm})
+        mode_opt = self._primary_mode_option()
+        if mode_opt is not None:
+            native_modes = {v["value"] for v in self.flatten(mode_opt.get("options", []))}
+            saved_base = self._saved_base_mode()
+            if saved_base and saved_base in native_modes and saved_base != "plan":
+                self.base_mode = saved_base
+            saved_plan = self._saved_plan_mode()
+            wanted_native = ""
+            if saved_plan is True and "plan" in native_modes:
+                wanted_native = "plan"
+            elif saved_plan is False:
+                wanted_native = self.base_mode or self._default_non_plan_mode(mode_opt)
+            elif saved_base and saved_base in native_modes and not self.skip_permissions_active:
+                wanted_native = saved_base
+            if wanted_native and wanted_native in native_modes and wanted_native != self.native_mode:
+                AcpSession.configure(self, {"permission": wanted_native, "permissionConfigId": mode_opt["id"]})
+            legacy_plan = ("selectedPlanMode" not in self.config) and (
+                self.config.get("selectedPermission") == "plan" or self.config.get("selectedNativeMode") == "plan"
+            )
+            if legacy_plan:
+                self.config["selectedPlanMode"] = True
+                self.config["selectedBaseMode"] = self.base_mode or self._default_non_plan_mode(mode_opt)
+                self.config["selectedPermission"] = self._effective_agy_permission()
+                try:
+                    self.save()
+                except OSError:
+                    pass
+        self.apply_options(self.options)
 
     def _connect_acp(self, is_new):
         self.history_loaded = False
@@ -1209,7 +1352,6 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.update(
             connected=True,
             capabilities={**self.data["capabilities"], "steer": True},
-            notice=self.notice,
             historyReady=True,
         )
 
@@ -1242,7 +1384,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         return {}
 
     def connect(self):
-        self.update(notice=self.notice, historyReady=False)
+        self.update(historyReady=False)
         if self.config.get("nativeProtocol") != AGY_ACP_PROTOCOL:
             raise Rejected(tr("此会话不属于 Google 官方 agy ACP；请使用原入口恢复，不能切换协议或会话存储。",
                               "This session does not belong to official Google agy ACP; resume via its original entry without switching protocol or storage."))
@@ -1270,8 +1412,36 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         target_perm = p.get("permission")
         if target_perm and target_perm not in {perm["id"] for perm in self.data["permissions"]}:
             raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
+        has_plan = "planMode" in p
+        if has_plan and (not isinstance(p["planMode"], bool) or not self.data.get("planModeSupported")):
+            raise Rejected(tr("当前 Antigravity 会话未提供独立规划模式切换", "Independent Plan mode switching is unavailable in this Antigravity session"))
+        mode_opt = self._primary_mode_option()
+        secondary_perm = False
+        if target_perm == FULL_ACCESS:
+            if p.get("permissionConfigId") and (mode_opt is None or p["permissionConfigId"] != mode_opt["id"]):
+                raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
+        elif target_perm:
+            target_group = self.permission_option(target_perm, p.get("permissionConfigId"))
+            if mode_opt is None or target_group["id"] != mode_opt["id"]:
+                if not has_plan:
+                    return AcpSession.configure(self, p)
+                secondary_perm = True
 
-        need_relaunch = bool(target_perm) and ((target_perm == FULL_ACCESS) != getattr(self, "skip_permissions_active", False))
+        cur_skip = bool(getattr(self, "skip_permissions_active", False))
+        cur_plan = bool(self.data.get("planMode", False))
+        cur_base = getattr(self, "base_mode", "") or self._default_non_plan_mode(mode_opt)
+        next_skip = cur_skip
+        next_plan = p["planMode"] if has_plan else cur_plan
+        next_base = cur_base
+        if target_perm and not secondary_perm:
+            if target_perm == FULL_ACCESS:
+                next_skip = True
+            else:
+                next_skip = False
+                next_base = target_perm
+        next_native = "plan" if next_plan else next_base
+        need_relaunch = next_skip != cur_skip
+
         if p.get("effort") and not p.get("model") and not need_relaunch:
             self._validate_effort_against_current_options(p["effort"])
 
@@ -1283,12 +1453,24 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self._validate_effort_against_current_options(p["effort"])
                 AcpSession.configure(self, {"effort": p["effort"]})
                 self.config["selectedEffort"] = self.data["effort"]
-            if target_perm:
-                if target_perm != FULL_ACCESS:
-                    AcpSession.configure(self, {"permission": target_perm})
-                self.config["selectedPermission"] = target_perm
-                if target_perm == FULL_ACCESS:
-                    self.update(permission=FULL_ACCESS)
+            if secondary_perm:
+                AcpSession.configure(self, {"permission": target_perm, **({"permissionConfigId": p["permissionConfigId"]} if p.get("permissionConfigId") else {})})
+            if (target_perm and not secondary_perm) or has_plan:
+                native_modes = {v["value"] for v in self.flatten(mode_opt.get("options", []))} if mode_opt else set()
+                if next_native and next_native in native_modes and next_native != self.native_mode:
+                    AcpSession.configure(self, {"permission": next_native, "permissionConfigId": mode_opt["id"]})
+                    if self.native_mode != next_native:
+                        raise Rejected(tr("Antigravity 尚未确认模式切换", "Antigravity has not confirmed the mode change"))
+                self.base_mode = next_base
+                self.config["skipPermissions"] = next_skip
+                if next_base:
+                    self.config["selectedBaseMode"] = next_base
+                if has_plan or "selectedPlanMode" in self.config:
+                    self.config["selectedPlanMode"] = next_plan
+                if next_native:
+                    self.config["selectedNativeMode"] = next_native
+                self.apply_options(self.options)
+                self.config["selectedPermission"] = self.data["permission"]
             cur_efforts = next((m.get("efforts", []) for m in self.data["models"] if m["id"] == self.data["model"]), [])
             if not cur_efforts or not self.data.get("effort"):
                 self.config.pop("selectedEffort", None)
@@ -1297,7 +1479,10 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             self.save()
             return {}
 
-        prev_saved = {k: self.config.get(k) for k in ("selectedModel", "selectedEffort", "selectedPermission")}
+        prev_saved = {
+            k: self.config.get(k)
+            for k in ("selectedModel", "selectedEffort", "selectedPermission", "skipPermissions", "selectedBaseMode", "selectedPlanMode", "selectedNativeMode")
+        }
         prev_rows = copy.deepcopy(self.rows)
         prev_subagents = copy.deepcopy(self.subagents)
         next_model = p.get("model") or self.config.get("selectedModel") or self.data["model"]
@@ -1306,7 +1491,12 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             self.config["selectedModel"] = next_model
         if next_effort:
             self.config["selectedEffort"] = next_effort
-        self.config["selectedPermission"] = target_perm
+        self.config["skipPermissions"] = next_skip
+        if next_base:
+            self.config["selectedBaseMode"] = next_base
+        self.config["selectedPlanMode"] = next_plan
+        self.config["selectedNativeMode"] = next_native
+        self.config["selectedPermission"] = FULL_ACCESS if next_skip else next_base
         self.save()
 
         self.update(historyReady=False)

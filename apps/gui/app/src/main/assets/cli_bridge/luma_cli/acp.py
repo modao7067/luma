@@ -1,4 +1,6 @@
+import difflib
 import json
+import re
 import threading
 import uuid
 from .base import Session, item, text, image_blocks
@@ -6,6 +8,32 @@ from .i18n import tr
 from .transport import Rejected
 from .metrics import acp_usage
 from .media import display_content, display_object
+
+def _single_line_json_dict(value):
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False), dict(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith("{"):
+            try:
+                parsed = json.loads(s)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, ensure_ascii=False), parsed
+    return "", None
+
+def _format_permission_diff(block):
+    path = block.get("path").strip() if isinstance(block.get("path"), str) else ""
+    old_raw = block.get("oldText")
+    old_text = old_raw if isinstance(old_raw, str) else ""
+    new_text = block.get("newText") if isinstance(block.get("newText"), str) else ""
+    from_label = "/dev/null" if old_raw is None and not old_text else (path or "a")
+    to_label = path or "b"
+    diff_lines = list(difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), fromfile=from_label, tofile=to_label, lineterm=""))
+    if diff_lines:
+        return "\n".join(diff_lines)
+    return new_text if new_text else path
 
 class AcpSession(Session):
     input_evidence_protocol = 1
@@ -73,9 +101,7 @@ class AcpSession(Session):
             self.configure({"model": self.config["model"]})
         self.update(connected=not getattr(self, "defer_connected", False), capabilities={"queue": False, "steer": False, "stop": True,
                     "images": caps.get("promptCapabilities", {}).get("image", False), "skills": False,
-                    "compact": any(c.get("name") == "compact" for c in self.commands)},
-                    notice=(tr("使用原生 ACP 审批。无可管理待发队列、逐消息 Skill 附件或实时 TUI 接管。", "Uses native ACP approvals. No managed queue, per-message skills, or live TUI takeover.") +
-                            (tr("原生恢复不重放历史，重启托管服务后只显示本次连接输出。", " Native resume does not replay history; only output from the current connection is shown after host restart.") if not caps.get("loadSession") else "")))
+                    "compact": any(c.get("name") == "compact" for c in self.commands)})
         self.apply_commands(self.commands)
         self.update(historyReady=True)
 
@@ -104,11 +130,32 @@ class AcpSession(Session):
                 self.update(model=o.get("currentValue", ""))
             elif cat in ("thought_level", "reasoning_effort"):
                 efforts = [v["value"] for v in values]; self.update(effort=o.get("currentValue", ""))
-            elif cat in self.permission_categories:
-                self.update(permission=o.get("currentValue", ""), permissions=[{"id": v["value"], "label": v.get("name", v["value"]), "description": v.get("description", "")} for v in values])
+        groups = self.permission_options()
+        if groups:
+            permissions = []
+            for group in groups:
+                for value in self.flatten(group.get("options", [])):
+                    row = {"id": value["value"], "label": value.get("name", value["value"]), "description": value.get("description", "")}
+                    if len(groups) > 1:
+                        row.update(configId=group["id"], configName=group.get("name", group["id"]), selected=value["value"] == group.get("currentValue"))
+                    permissions.append(row)
+            self.update(permission=groups[0].get("currentValue", ""), permissions=permissions)
         if previous_model and self.data["model"] != previous_model: self.invalidate_context()
         for m in models: m["efforts"] = efforts if m["id"] == self.data["model"] else []
         self.update(models=models, **({"effort": ""} if not efforts else {}))
+
+    def permission_options(self):
+        return [o for o in getattr(self, "options", []) if o.get("type") == "select" and o.get("category", o.get("id")) in self.permission_categories]
+
+    def permission_option(self, value, config_id=None):
+        candidates = [o for o in self.permission_options()
+                      if (config_id is None or o["id"] == config_id)
+                      and value in {v["value"] for v in self.flatten(o.get("options", []))}]
+        if not candidates:
+            raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
+        if len(candidates) != 1:
+            raise Rejected(tr("请选择具体模式组中的选项", "Select the option within its specific mode group"))
+        return candidates[0]
 
     def apply_commands(self, commands):
         self.commands = commands
@@ -226,7 +273,12 @@ class AcpSession(Session):
                 ident = "tool-" + u["toolCallId"]; old = self.rows.get(ident, item(ident, "tool", tr("工具", "Tool"), kind="tool"))
                 changes = {}
                 if "title" in u: changes["text"] = u["title"]
-                if isinstance(u.get("name"), str) and u["name"]: changes["toolName"] = u["name"]
+                if isinstance(u.get("name"), str) and u["name"]:
+                    changes["toolName"] = u["name"]
+                elif not old.get("toolName") and kind == "tool_call" and isinstance(u.get("title"), str):
+                    cand = u["title"].strip()
+                    if cand not in ("Tool", "工具") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,63}", cand):
+                        changes["toolName"] = cand
                 if u.get("kind") is not None: changes["toolKind"] = u["kind"]
                 if "rawInput" in u: changes["input"] = json.dumps(u["rawInput"], ensure_ascii=False)
                 if "status" in u: changes["status"] = u["status"]
@@ -238,7 +290,16 @@ class AcpSession(Session):
                     changes["media"] = changes.get("media", []) + self.media(u["rawOutput"].get("content") if isinstance(u["rawOutput"], dict) else None)
                 self.row({**old, **changes})
             elif kind == "config_option_update": self.apply_options(u.get("configOptions", []))
-            elif kind == "current_mode_update": self.update(permission=u["currentModeId"])
+            elif kind == "current_mode_update":
+                if self.permission_options():
+                    try:
+                        option = self.permission_option(u["currentModeId"])
+                    except Rejected:
+                        return
+                    option["currentValue"] = u["currentModeId"]
+                    self.apply_options(self.options)
+                else:
+                    self.update(permission=u["currentModeId"])
             elif kind == "available_commands_update":
                 self.apply_commands(u.get("availableCommands", []))
             elif kind == "session_info_update" and "title" in u: self.update(title=u["title"])
@@ -261,15 +322,55 @@ class AcpSession(Session):
             tool = p.get("toolCall") if isinstance(p.get("toolCall"), dict) else {}
             call_id = tool.get("toolCallId")
             prior = self.rows.get("tool-" + call_id, {}) if isinstance(call_id, str) and call_id else {}
-            if "rawInput" in tool:
-                body = json.dumps(tool["rawInput"], ensure_ascii=False)
-            elif isinstance(prior.get("input"), str):
-                body = prior["input"]
-            else:
-                body = ""
+            used_prior_outcome = False
+            body_dict = None
+            body = ""
+            raw_input = tool.get("rawInput") if "rawInput" in tool else None
+            if raw_input is not None and raw_input != {}:
+                body, body_dict = _single_line_json_dict(raw_input)
+                if not body:
+                    body = raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False)
+            elif isinstance(prior.get("input"), str) and prior["input"].strip() not in ("", "{}"):
+                body, body_dict = _single_line_json_dict(prior["input"])
+                if not body:
+                    body = prior["input"]
+            elif isinstance(prior.get("outcome"), str) and prior["outcome"].strip().startswith("{"):
+                body, body_dict = _single_line_json_dict(prior["outcome"])
+                if body:
+                    used_prior_outcome = True
+            if not body and (("rawInput" in tool and tool["rawInput"] == {}) or (isinstance(prior.get("input"), str) and prior["input"].strip() == "{}")):
+                body = "{}"
+                body_dict = {}
             if tool.get("content"):
-                display = "\n".join(text(c.get("content")) if c.get("type") == "content" else json.dumps(c, ensure_ascii=False) for c in tool.get("content", []))
-            elif isinstance(prior.get("outcome"), str):
+                parts = []
+                has_diff = False
+                first_diff_path = ""
+                for c in tool.get("content", []):
+                    if isinstance(c, dict) and c.get("type") == "diff":
+                        has_diff = True
+                        if not first_diff_path and isinstance(c.get("path"), str):
+                            first_diff_path = c["path"].strip()
+                        formatted = _format_permission_diff(c)
+                        if formatted:
+                            parts.append(formatted)
+                    elif isinstance(c, dict) and c.get("type") == "content":
+                        piece = text(c.get("content"))
+                        if body and piece.strip().startswith("Requesting approval to "):
+                            continue
+                        if piece:
+                            parts.append(piece)
+                    else:
+                        parts.append(json.dumps(c, ensure_ascii=False))
+                if has_diff:
+                    if not body and first_diff_path:
+                        body = json.dumps({"path": first_diff_path}, ensure_ascii=False)
+                    elif body_dict is not None:
+                        cleaned = {k: v for k, v in body_dict.items() if k not in {"oldText", "newText", "old_text", "new_text", "old_str", "new_str", "old_string", "new_string", "content"}}
+                        if first_diff_path and not any(isinstance(cleaned.get(k), str) and cleaned.get(k, "").strip() for k in ("file_path", "fileName", "path", "target_file", "TargetFile", "AbsolutePath")):
+                            cleaned["path"] = first_diff_path
+                        body = json.dumps(cleaned, ensure_ascii=False)
+                display = "\n".join(parts)
+            elif not used_prior_outcome and isinstance(prior.get("outcome"), str):
                 display = prior["outcome"]
             else:
                 display = ""
@@ -375,7 +476,7 @@ class AcpSession(Session):
         for key, cats in (("model", ("model",)), ("effort", ("thought_level", "reasoning_effort")), ("permission", self.permission_categories)):
             value = p.get(key)
             if not value: continue
-            option = next((o for o in self.options if o.get("category", o["id"]) in cats), None)
+            option = self.permission_option(value, p.get("permissionConfigId")) if key == "permission" else next((o for o in self.options if o.get("category", o["id"]) in cats), None)
             if option:
                 if value not in {v["value"] for v in self.flatten(option.get("options", []))}: raise Rejected(tr("选项不在原生目录中", "Option is not in the native catalog"))
                 result = self.call("session/set_config_option", {"sessionId": self.data["nativeId"], "configId": option["id"], "value": value})

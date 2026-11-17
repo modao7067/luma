@@ -5,7 +5,7 @@ import subprocess
 import sys
 import json
 repo = Path(__file__).resolve().parents[4]
-work = repo / 'verification/gui-crash-repeat-20261103/art'
+work = repo / 'artifacts/test-runs/highlight-art'
 work.mkdir(parents=True, exist_ok=True)
 classes, dex = work / 'classes', work / 'dex'
 classes.mkdir(exist_ok=True); dex.mkdir(exist_ok=True)

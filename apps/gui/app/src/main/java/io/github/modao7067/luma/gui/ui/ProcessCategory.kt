@@ -113,7 +113,7 @@ private fun antigravitySwarmContext(item: ConversationItem): String? {
 }
 
 internal fun processCategory(item: ConversationItem, cli: String = "Codex"): ProcessCategory = when (item.kind) {
-    "commandExecution" -> ProcessCategory.Terminal
+    "commandExecution" -> processCommandCategory(item)
     "fileChange" -> ProcessCategory.Edit
     "webSearch" -> ProcessCategory.WebSearch
     "imageView", "imageGeneration" -> ProcessCategory.Image
@@ -214,14 +214,118 @@ internal fun processLiveExcerpt(detail: String, maxChars: Int = 480): String {
 }
 
 internal fun processEntryLabel(item: ConversationItem, cli: String): String = when {
+    item.kind == "commandExecution" -> when (processCommandCategory(item)) {
+        ProcessCategory.Read -> "read"
+        ProcessCategory.Search -> "search"
+        ProcessCategory.Edit -> "edit"
+        else -> processToolName(item)
+    }
     item.toolName.isNotBlank() -> item.toolName
-    item.kind == "reasoning" -> if (item.outcome == "running") "Thinking" else "Reasoning"
+    item.kind == "reasoning" -> "thought"
     item.kind == "subAgentActivity" -> "Subagent activity"
     item.kind == "compaction" -> "Compaction"
     item.kind == "tool" && item.toolKind.isBlank() -> "Tool call"
     item.kind.isBlank() && cli == "OpenCode" && item.outcome == "failed" -> "Error"
     item.kind.isBlank() -> "Tool event"
     else -> processToolName(item)
+}
+
+private data class ShellCommandPresentation(val shell: String, val script: String)
+
+private fun shellWord(command: String, start: Int): Pair<String, Int>? {
+    var at = start
+    while (at < command.length && command[at].isWhitespace()) at++
+    if (at == command.length) return null
+    val word = StringBuilder()
+    var quote: Char? = null
+    var active = false
+    while (at < command.length) {
+        val ch = command[at++]
+        when {
+            quote == '\'' -> if (ch == '\'') quote = null else word.append(ch)
+            ch == '\\' -> {
+                if (at == command.length) return null
+                val next = command[at++]
+                if (quote == '"' && next !in "\"\\$`\n") word.append('\\')
+                if (next != '\n') word.append(next)
+                active = true
+            }
+            quote == '"' -> if (ch == '"') quote = null else word.append(ch)
+            ch == '\'' || ch == '"' -> {
+                quote = ch
+                active = true
+            }
+            ch in ";|&<>" -> return null
+            ch.isWhitespace() -> if (active) return word.toString() to at
+            else -> {
+                word.append(ch)
+                active = true
+            }
+        }
+    }
+    if (quote != null || !active) return null
+    return word.toString() to at
+}
+
+private fun unwrapShellCommand(command: String): ShellCommandPresentation? {
+    if (command.length > LIBRARY_HIGHLIGHT_LIMIT) return null
+    val first = shellWord(command, 0) ?: return null
+    val shell = first.first.substringAfterLast('/')
+    if (shell !in setOf("bash", "zsh", "sh")) return null
+    val second = shellWord(command, first.second) ?: return null
+    if (second.first !in setOf("-c", "-lc")) return null
+    val third = shellWord(command, second.second) ?: return null
+    var rest = third.second
+    while (rest < command.length && command[rest].isWhitespace()) rest++
+    if (rest != command.length) return null
+    return ShellCommandPresentation(shell, third.first)
+}
+
+private data class TerminalJsonInput(val command: String?)
+
+private fun terminalJsonInput(input: String): TerminalJsonInput? {
+    if (input.length > LIBRARY_HIGHLIGHT_LIMIT) return null
+    val trimmed = input.trim()
+    if (trimmed.length < 2 || trimmed.first() != '{' || trimmed.last() != '}') return null
+    val obj = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
+    var command: String? = null
+    val keys = obj.keys()
+    while (keys.hasNext()) {
+        val key = keys.next()
+        val value = obj.opt(key)
+        when {
+            key == "command" -> if (value is String && value.isNotEmpty()) command = value
+            key == "description" -> Unit
+            value == null || value == JSONObject.NULL || value is String && value.isEmpty() -> Unit
+            else -> return TerminalJsonInput(null)
+        }
+    }
+    return TerminalJsonInput(command)
+}
+
+internal data class ProcessInputPresentation(
+    val code: String,
+    val language: String,
+    val caption: String,
+)
+
+internal fun processInputPresentation(item: ConversationItem, cli: String): ProcessInputPresentation {
+    val category = processCategory(item, cli)
+    if (category != ProcessCategory.Terminal && (item.kind != "commandExecution" || category == ProcessCategory.Read)) {
+        return ProcessInputPresentation(item.input, tr("参数", "params"), "Parameters")
+    }
+    val trimmed = item.input.trim()
+    val objectInput = trimmed.length >= 2 && trimmed.first() == '{' && trimmed.last() == '}'
+    if (item.input.length > LIBRARY_HIGHLIGHT_LIMIT && objectInput) {
+        return ProcessInputPresentation(item.input, "json", "Parameters")
+    }
+    val json = terminalJsonInput(item.input)
+    if (json != null && json.command == null) {
+        return ProcessInputPresentation(item.input, "json", "Parameters")
+    }
+    val command = json?.command ?: item.input
+    val wrapped = unwrapShellCommand(command)
+    return ProcessInputPresentation(wrapped?.script ?: command, "shell", wrapped?.shell ?: "shell")
 }
 
 internal fun processEntryContext(item: ConversationItem, cli: String): String {
@@ -234,15 +338,20 @@ internal fun processEntryContext(item: ConversationItem, cli: String): String {
         } else first
         chosen.replace("**", "")
     } else item.text
+    fun terminalSummary(value: String): String {
+        val category = processCategory(item, cli)
+        if (category != ProcessCategory.Terminal && (item.kind != "commandExecution" || category == ProcessCategory.Read)) return value
+        return unwrapShellCommand(value)?.script ?: value
+    }
     if (cli == "Antigravity" && item.toolName in antigravitySwarmTools) {
         antigravitySwarmContext(item)?.takeIf { it.isNotEmpty() }?.let { return it }
         if (raw == "Run $label") return ""
     }
     if (raw == label || raw in setOf("工具", "工具调用", "Tool", "Tool call")) return ""
     if (item.kind == "mcpToolCall" && raw.trim() == "·") return ""
-    if (raw.startsWith("$label · ")) return raw.removePrefix("$label · ").trim()
-    if (raw.startsWith("$label:")) return raw.removePrefix("$label:").trim()
-    if (raw.endsWith(" · $label")) return raw.removeSuffix(" · $label").trim()
+    if (raw.startsWith("$label · ")) return terminalSummary(raw.removePrefix("$label · ").trim())
+    if (raw.startsWith("$label:")) return terminalSummary(raw.removePrefix("$label:").trim())
+    if (raw.endsWith(" · $label")) return terminalSummary(raw.removeSuffix(" · $label").trim())
     return when (item.kind) {
         "webSearch" -> raw.removePrefix("搜索 · ").removePrefix("Search · ")
         "fileChange" -> raw.takeUnless { it == "文件变更" || it == "File changes" }.orEmpty()
@@ -265,12 +374,10 @@ internal fun processEntryContext(item: ConversationItem, cli: String): String {
         "" -> if ((cli == "OpenCode" && item.outcome == "failed" && (raw == "执行失败" || raw == "Execution failed")) ||
             (cli == "Codex" && (raw == "工具事件" || raw == "Tool event"))) "" else raw
         else -> raw
-    }
+    }.let(::terminalSummary)
 }
 
-internal fun processInputLanguage(item: ConversationItem, cli: String): String =
-    if (item.kind == "commandExecution" ||
-        (processCategory(item, cli) == ProcessCategory.Terminal && item.toolName in setOf("bash", "powershell", "shell", "Bash"))) "shell" else tr("参数", "params")
+internal fun processInputLanguage(item: ConversationItem, cli: String): String = processInputPresentation(item, cli).language
 
 internal fun processOutputLanguage(item: ConversationItem): String = when {
     item.outcome == "failed" -> tr("output · 错误", "output · error")
@@ -278,7 +385,7 @@ internal fun processOutputLanguage(item: ConversationItem): String = when {
     else -> "output"
 }
 
-internal fun processInputCaption(item: ConversationItem, cli: String): String = "Parameters"
+internal fun processInputCaption(item: ConversationItem, cli: String): String = processInputPresentation(item, cli).caption
 
 internal fun processOutputCaption(item: ConversationItem): String = when {
     item.outcome == "failed" -> "Error"
@@ -298,6 +405,8 @@ internal data class ProcessReadPreview(
     val lines: List<ReadCodeLine>,
     val startLine: Int? = null,
     val endLine: Int? = null,
+    val resolveFromFile: Boolean = true,
+    val sourceLinesKnown: Boolean = true,
 )
 
 internal enum class DiffLineKind { CONTEXT, DELETION, ADDITION }
@@ -415,14 +524,18 @@ private fun extractPathFromItem(item: ConversationItem): String {
 }
 
 internal fun parseProcessReadFileName(item: ConversationItem, cli: String): String {
+    if (item.kind == "commandExecution") return commandReadSource(item)?.path?.substringAfterLast('/').orEmpty()
     val rawPath = extractPathFromItem(item)
     return splitFileDisplay(rawPath, processEntryLabel(item, cli)).second
 }
 
 internal fun parseProcessReadPreview(item: ConversationItem, cli: String): ProcessReadPreview {
+    if (item.kind == "commandExecution") {
+        return commandReadPreview(item) ?: ProcessReadPreview("", "", "", "", "", "", emptyList(), resolveFromFile = false)
+    }
     val rawPath = extractPathFromItem(item)
     val (cleanPath, fileName, parentDir) = splitFileDisplay(rawPath, processEntryLabel(item, cli))
-    val ext = fileName.substringAfterLast('.', "").lowercase()
+    val ext = resolveFileCodeLanguage(cleanPath.ifBlank { fileName })
     var startLine: Int? = null
     var endLine: Int? = null
     if (item.input.isNotBlank()) {
@@ -520,11 +633,12 @@ internal fun parseProcessReadPreview(item: ConversationItem, cli: String): Proce
         else -> ""
     }
     val cleanText = parsedLines.joinToString("\n") { it.text }
+    val resolvedLang = resolveFileCodeLanguage(cleanPath.ifBlank { fileName }, cleanText).ifBlank { ext }
     return ProcessReadPreview(
         filePath = cleanPath,
         fileName = fileName,
         parentDir = parentDir,
-        language = ext,
+        language = resolvedLang,
         rangeLabel = rangeLabel,
         cleanText = cleanText,
         lines = parsedLines,
@@ -532,6 +646,12 @@ internal fun parseProcessReadPreview(item: ConversationItem, cli: String): Proce
         endLine = endLine,
     )
 }
+
+internal fun hasProcessReadPreview(item: ConversationItem): Boolean =
+    item.kind != "commandExecution" || processCommandCategory(item) == ProcessCategory.Read
+
+internal fun hasSingleFileReadPreview(item: ConversationItem): Boolean =
+    item.kind != "commandExecution" || commandReadSource(item) != null
 
 internal fun populateReadPreviewFromText(preview: ProcessReadPreview, rawFileText: String): ProcessReadPreview {
     if (rawFileText.isEmpty()) return preview
@@ -545,7 +665,11 @@ internal fun populateReadPreviewFromText(preview: ProcessReadPreview, rawFileTex
     val range = preview.rangeLabel.ifBlank {
         if (preview.startLine != null || preview.endLine != null || e < allLines.size) "L$s-$e" else ""
     }
+    val resolvedLang = preview.language.ifBlank {
+        resolveFileCodeLanguage(preview.filePath.ifBlank { preview.fileName }, rawFileText)
+    }
     return preview.copy(
+        language = resolvedLang,
         rangeLabel = range,
         cleanText = clean,
         lines = codeLines,
@@ -858,6 +982,7 @@ private fun parseUnifiedDiff(raw: String): ParsedUnifiedDiff {
 }
 
 internal fun hasProcessEditPreview(item: ConversationItem): Boolean {
+    if (item.kind == "commandExecution") return false
     val input = item.input
     if (input.contains("\"Target\"") || input.contains("\"Replacement\"") ||
         input.contains("\"old_string\"") || input.contains("\"new_string\"") ||
@@ -948,7 +1073,7 @@ internal fun parseProcessEditPreview(item: ConversationItem, cli: String): Proce
         exactRemoved = parsed.removedCount
     }
     val (cleanPath, fileName, parentDir) = splitFileDisplay(rawPath, processEntryLabel(item, cli))
-    val ext = fileName.substringAfterLast('.', "").lowercase()
+    val ext = resolveFileCodeLanguage(cleanPath.ifBlank { fileName })
     val added = exactAdded ?: diffLines.count { it.kind == DiffLineKind.ADDITION }
     val removed = exactRemoved ?: diffLines.count { it.kind == DiffLineKind.DELETION }
     return ProcessEditPreview(

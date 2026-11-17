@@ -280,7 +280,13 @@ internal fun SmoothTailGrowth(
     val turnReaders = LocalTurnLayoutReaders.current
     val parentAnimReaders = LocalTurnAnimatingReaders.current
     val localAnimReaders = remember(rowId) { LinkedHashSet<() -> Boolean>() }
-    val turnAnimReaders = parentAnimReaders ?: localAnimReaders
+    if (parentAnimReaders != null) {
+        DisposableEffect(parentAnimReaders, localAnimReaders) {
+            val forwarder: () -> Boolean = { localAnimReaders.any { it.invoke() } }
+            parentAnimReaders.add(forwarder)
+            onDispose { parentAnimReaders.remove(forwarder) }
+        }
+    }
     if (turnReaders != null) {
         DisposableEffect(turnReaders, rowId) {
             val reader: () -> Any? = { currentPx }
@@ -315,7 +321,7 @@ internal fun SmoothTailGrowth(
     }
     Layout(
         content = {
-            CompositionLocalProvider(LocalTurnAnimatingReaders provides turnAnimReaders) {
+            CompositionLocalProvider(LocalTurnAnimatingReaders provides localAnimReaders) {
                 Box(
                     Modifier.graphicsLayer {
                         val s = popScale.value
@@ -350,7 +356,7 @@ internal fun SmoothTailGrowth(
             }
         } else {
             lastContentKey = contentKey
-            if (turnAnimReaders.any { it.invoke() }) {
+            if (localAnimReaders.any { it.invoke() }) {
                 targetPx = fullHeight
                 currentPx = fullHeight.toFloat()
                 knownHeights[rowId] = fullHeight

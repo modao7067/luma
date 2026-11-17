@@ -25,11 +25,13 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.layoutId
@@ -37,6 +39,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -148,7 +151,6 @@ internal fun CompactComposer(
     val primaryAction = composerPrimaryAction(view.activeTurnId != null, hasInput, primaryWaiting)
     val editorLineHeight = bodyLineHeight()
     val editorMaxHeight = editorLineHeight * 7 + 1.dp
-    val currentPermission = permissionPresentation(view.permission, view.permissions.find { it.id == view.permission }?.label.orEmpty(), view.summary.cli, view.permissions.find { it.id == view.permission })
     val editor = remember(view.summary.id) { ComposerEditorState(presentation.draft) }
     editor.sync(presentation.draft)
     editor.onTextChange = actions::draft
@@ -414,23 +416,52 @@ internal fun CompactComposer(
                             .then(if (!toolsInteractive) Modifier.clearAndSetSemantics {} else Modifier),
                         contentAlignment = Alignment.Center,
                     ) {
+                        val permissionButton = composerPermissionButtonState(
+                            view.summary.cli,
+                            view.permission,
+                            view.permissions,
+                            view.planModeSupported,
+                            view.planMode,
+                            view.skipPermissionsActive,
+                        )
+                        val buttonContainerColor = if (permissionButton.planHighlight) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest
+                        val buttonContentColor = if (permissionButton.planHighlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                         FilledIconButton(
                             onClick = { menus = menus.toggle(ComposerMenuAnchor.Permission) },
                             enabled = toolsInteractive && !view.preparingFirstSend,
                             colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                disabledContentColor = MaterialTheme.colorScheme.onSurface,
+                                containerColor = buttonContainerColor,
+                                contentColor = buttonContentColor,
+                                disabledContainerColor = buttonContainerColor,
+                                disabledContentColor = buttonContentColor,
                             ),
                             modifier = Modifier
                                 .size(34.dp)
                                 .focusProperties { canFocus = false }
-                                .semantics { contentDescription = tr("权限：${currentPermission.title}", "Permissions: ${currentPermission.title}") },
+                                .semantics { contentDescription = permissionButton.description },
                         ) {
-                            MenuIcon(currentPermission.icon, warning = currentPermission.warning)
+                            MenuIcon(permissionButton.symbol, warning = permissionButton.warning, containerLuminance = buttonContainerColor.luminance())
                         }
                         OriginMenu(permissions, { menus = menus.dismiss(ComposerMenuAnchor.Permission) }, width = 300.dp, preferAbove = true) {
+                            val canConfigure = !view.sending && !view.uncertainSubmission && !view.configuring && view.connected && view.activeTurnId == null && view.queue.isEmpty()
+                            val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                            if (view.planModeSupported) {
+                                ActionMenuItem(
+                                    "Plan",
+                                    MenuSymbol.PLAN,
+                                    selected = view.planMode,
+                                    iconContainer = true,
+                                    enabled = canConfigure,
+                                    onClick = { menus = menus.dismiss(ComposerMenuAnchor.Permission); actions.configurePlanMode(!view.planMode) },
+                                )
+                                if (view.permissions.isNotEmpty()) {
+                                    HorizontalDivider(
+                                        Modifier.padding(horizontal = 16.dp, vertical = 5.dp).testTag("permission-plan-divider"),
+                                        thickness = 0.5.dp,
+                                        color = dividerColor,
+                                    )
+                                }
+                            }
                             if (view.permissions.isEmpty()) {
                                 Text(
                                     view.capabilityNotice ?: tr("CLI 未提供可选权限", "No selectable permission modes from CLI"),
@@ -438,17 +469,37 @@ internal fun CompactComposer(
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                             }
-                            view.permissions.forEach { option ->
-                                val permission = permissionPresentation(option.id, option.label, view.summary.cli, option)
-                                ActionMenuItem(
-                                    permission.title,
-                                    permission.icon,
-                                    selected = option.id == view.permission,
-                                    warning = permission.warning,
-                                    iconContainer = true,
-                                    enabled = !view.sending && !view.uncertainSubmission && !view.configuring && view.connected && view.activeTurnId == null && view.queue.isEmpty(),
-                                    onClick = { menus = menus.dismiss(ComposerMenuAnchor.Permission); actions.configurePermission(option.id) },
-                                )
+                            val permissionGroups = permissionMenuGroups(view.summary.cli, view.permissions, view.planModeSupported)
+                            permissionGroups.forEachIndexed { groupIndex, group ->
+                                if (groupIndex > 0) {
+                                    HorizontalDivider(
+                                        Modifier.padding(horizontal = 16.dp, vertical = 5.dp).testTag("permission-group-divider-$groupIndex"),
+                                        thickness = 0.5.dp,
+                                        color = dividerColor,
+                                    )
+                                }
+                                if (permissionGroups.size > 1 && group.first().configName.isNotBlank()) {
+                                    Text(group.first().configName, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
+                                }
+                                group.forEach { option ->
+                                    val permission = permissionPresentation(option.id, option.label, view.summary.cli, option)
+                                    val isSelected = isPermissionSelected(option, view.permission)
+                                    ActionMenuItem(
+                                        permission.title,
+                                        permission.icon,
+                                        selected = isSelected,
+                                        warning = permission.warning,
+                                        iconContainer = true,
+                                        enabled = canConfigure,
+                                        onClick = {
+                                            menus = menus.dismiss(ComposerMenuAnchor.Permission)
+                                            if (!(isSelected && !view.planModeSupported && isPlanPermissionOption(view.summary.cli, option))) {
+                                                if (option.configId.isBlank()) actions.configurePermission(option.id)
+                                                else actions.configurePermissionGroup(option.configId, option.id)
+                                            }
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -533,21 +584,23 @@ internal fun ComposerGlyph(kind: String) {
             }
             "copy" -> {
                 val strokeStyle = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                drawRoundRect(
-                    color,
-                    Offset(2.2.dp.toPx(), 4.8.dp.toPx()),
-                    Size(8.6.dp.toPx(), 9.2.dp.toPx()),
-                    CornerRadius(2.dp.toPx()),
-                    style = strokeStyle,
-                )
+                val r = 1.6.dp.toPx()
+                val d = r * 2f
+                val b0 = 1.5.dp.toPx()
+                val b1 = 10.5.dp.toPx()
                 val backSheet = androidx.compose.ui.graphics.Path().apply {
-                    moveTo(5.4.dp.toPx(), 4.6.dp.toPx())
-                    lineTo(5.4.dp.toPx(), 2.0.dp.toPx())
-                    lineTo(13.8.dp.toPx(), 2.0.dp.toPx())
-                    lineTo(13.8.dp.toPx(), 11.0.dp.toPx())
-                    lineTo(11.0.dp.toPx(), 11.0.dp.toPx())
+                    arcTo(Rect(b0, b1 - d, b0 + d, b1), 90f, 90f, true)
+                    arcTo(Rect(b0, b0, b0 + d, b0 + d), 180f, 90f, false)
+                    arcTo(Rect(b1 - d, b0, b1, b0 + d), 270f, 90f, false)
                 }
                 drawPath(backSheet, color, style = strokeStyle)
+                drawRoundRect(
+                    color,
+                    Offset(5.5.dp.toPx(), 5.5.dp.toPx()),
+                    Size(9.0.dp.toPx(), 9.0.dp.toPx()),
+                    CornerRadius(r),
+                    style = strokeStyle,
+                )
             }
             "check" -> {
                 val path = androidx.compose.ui.graphics.Path().apply {

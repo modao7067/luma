@@ -190,25 +190,25 @@ class SendDeliveryInteractionTest {
             ConversationItem("th1", "tool", "思考", "先读第一个文件", kind = "reasoning", outcome = "succeeded"),
             ConversationItem(
                 "r1", "tool", "read",
-                detail = "Read file /workspace/luma/First.kt, lines 220-221\n\n220: val alpha = 10\n221: val beta = 20",
+                detail = "Read file /workspace/project/First.kt, lines 220-221\n\n220: val alpha = 10\n221: val beta = 20",
                 kind = "tool", toolName = "read",
-                input = """{"path":"/workspace/luma/First.kt","offset":220,"limit":2}""",
+                input = """{"path":"/workspace/project/First.kt","offset":220,"limit":2}""",
                 outcome = "succeeded",
             ),
             ConversationItem("th2", "tool", "思考", "再读第二个文件", kind = "reasoning", outcome = "succeeded"),
             ConversationItem(
                 "r2", "tool", "read",
-                detail = "Read file /workspace/luma/Second.kt, lines 10-11\n\n10: fun run() = Unit\n11: val ok = true",
+                detail = "Read file /workspace/project/Second.kt, lines 10-11\n\n10: fun run() = Unit\n11: val ok = true",
                 kind = "tool", toolName = "read",
-                input = """{"path":"/workspace/luma/Second.kt","offset":10,"limit":2}""",
+                input = """{"path":"/workspace/project/Second.kt","offset":10,"limit":2}""",
                 outcome = "succeeded",
             ),
             ConversationItem("th3", "tool", "思考", "执行第一处修改", kind = "reasoning", outcome = "succeeded"),
             ConversationItem(
                 "e1", "tool", "edit",
-                detail = "Index: luma/First.kt\n===================================================================\n--- luma/First.kt\toriginal\n+++ luma/First.kt\tmodified\n@@ -220,2 +220,3 @@\n val alpha = 10\n-val beta = 20\n+val beta = 30\n+val gamma = 40",
+                detail = "Index: project/First.kt\n===================================================================\n--- project/First.kt\toriginal\n+++ project/First.kt\tmodified\n@@ -220,2 +220,3 @@\n val alpha = 10\n-val beta = 20\n+val beta = 30\n+val gamma = 40",
                 kind = "tool", toolName = "edit",
-                input = """{"path":"/workspace/luma/First.kt","oldString":"val beta = 20","newString":"val beta = 30\nval gamma = 40"}""",
+                input = """{"path":"/workspace/project/First.kt","oldString":"val beta = 20","newString":"val beta = 30\nval gamma = 40"}""",
                 outcome = "succeeded",
             ),
             ConversationItem("th4", "tool", "思考", "执行第二处修改", kind = "reasoning", outcome = "running"),
@@ -216,7 +216,7 @@ class SendDeliveryInteractionTest {
                 "e2", "tool", "edit",
                 detail = "",
                 kind = "tool", toolName = "edit",
-                input = """{"path":"/workspace/luma/Second.kt","oldString":"val ok = true","newString":"val ok = false"}""",
+                input = """{"path":"/workspace/project/Second.kt","oldString":"val ok = true","newString":"val ok = false"}""",
                 outcome = "running",
             ),
         )
@@ -233,7 +233,7 @@ class SendDeliveryInteractionTest {
         rule.waitForIdle()
         rule.onNodeWithText("L220-221").assertIsDisplayed()
         rule.onNodeWithText("val alpha = 10", substring = true).assertIsDisplayed()
-        rule.onNodeWithText("Read file /workspace/luma/First.kt", substring = true).assertDoesNotExist()
+        rule.onNodeWithText("Read file /workspace/project/First.kt", substring = true).assertDoesNotExist()
         rule.onNodeWithText("220: val alpha", substring = true).assertDoesNotExist()
         rule.onNodeWithText("+2").assertIsDisplayed()
         rule.onNodeWithText("Parameters").assertDoesNotExist()

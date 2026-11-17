@@ -28,10 +28,24 @@ class NativeCliRuntimePolicyTest {
     }
 
     @Test fun newAcpPeersHaveAnIndependentStableTaskWithoutMovingExistingCliTasks() {
-        assertEquals("cli-bridge-v55", NativeCliRuntimePolicy.revision)
+        assertEquals("cli-bridge-v71", NativeCliRuntimePolicy.revision)
         assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v38"}""")))
-        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v54"}""")))
-        assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v55"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v55"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v56"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v57"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v58"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v59"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v60"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v61"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v62"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v63"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v64"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v65"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v66"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v68"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v69"}""")))
+        assertTrue(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v70"}""")))
+        assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject("""{"carrierRevision":"cli-bridge-v71"}""")))
         assertFalse(NativeCliRuntimePolicy.hasCarrierUpdate(JSONObject()))
         assertTrue(NativeCliRuntimePolicy.isolatedAcpClis.contains("Grok Build"))
         NativeCliRuntimePolicy.isolatedAcpClis.forEach { assertEquals("luma-acp-cli-gui", NativeCliRuntimePolicy.task(it)) }

@@ -47,6 +47,7 @@ internal object SubmissionLedger {
         val before = record.submissions.getOrNull(index)?.copy()
         val dismissals = record.queueDismissals.map { it.copy() }
         val receiptFences = record.receiptRecoveryRequired.toSet()
+        val dismissedAsync = record.dismissedAsyncQuestionItems.toSet()
         val draft = record.draft; val draftRevision = record.draftRevision
         val images = record.images.toList(); val skills = record.skills.toList()
         val hadResult = record.deliveryResults.containsKey(id); val result = record.deliveryResults[id]
@@ -60,6 +61,7 @@ internal object SubmissionLedger {
             record.images.clear(); record.images.addAll(images); record.skills.clear(); record.skills.addAll(skills)
             record.queueDismissals.clear(); record.queueDismissals.addAll(dismissals)
             record.receiptRecoveryRequired.clear(); record.receiptRecoveryRequired.addAll(receiptFences)
+            record.dismissedAsyncQuestionItems.clear(); record.dismissedAsyncQuestionItems.addAll(dismissedAsync)
             if (hadResult) record.deliveryResults[id] = result!! else record.deliveryResults.remove(id)
             syncLegacy(record)
             throw SubmissionPersistenceFailure(failure)
@@ -229,7 +231,7 @@ internal object SubmissionLedger {
     fun rejected(record: SessionRecord, id: String? = record.submissionId) {
         migrate(record)
         val message = id?.let { find(record, it) } ?: return
-        if (message.state == "accepted") return
+        if (message.state in setOf("accepted", "rejected")) return
         val canRestore = !message.dismissed && !message.external && record.draftRevision == message.draftRevision && record.draft.isEmpty() && record.images.isEmpty() && record.skills.isEmpty()
         if (canRestore) {
             record.draft = message.text
@@ -243,11 +245,13 @@ internal object SubmissionLedger {
     fun recover(record: SessionRecord, id: String, persist: () -> Unit = {}) {
         val message = find(record, id) ?: return
         when {
-            message.state == "rejected" -> checkpoint(record, id, persist) {
+            message.state == "rejected" && !message.dismissed && !message.restoredToComposer -> checkpoint(record, id, persist) {
                 if (record.draft != message.text) record.draft = listOf(record.draft, message.text).filter { it.isNotEmpty() }.joinToString("\n")
                 message.images.filterNot { image -> record.images.any { it.id == image.id } }.forEach(record.images::add)
                 message.skills.filterNot { skill -> record.skills.any { it.id == skill.id } }.forEach(record.skills::add)
                 record.draftRevision++
+                message.restoredToComposer = true
+                message.dismissed = true
             }
             message.state == "unknown" && !message.dismissed && !message.nativeConsumed -> checkpoint(record, id, persist) {
                 if (record.draft != message.text) record.draft = listOf(record.draft, message.text).filter { it.isNotEmpty() }.joinToString("\n")

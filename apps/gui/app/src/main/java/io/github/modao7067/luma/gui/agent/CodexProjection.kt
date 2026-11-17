@@ -16,6 +16,8 @@ object CodexProjection {
     fun item(item: JSONObject, previous: ConversationItem? = null): ConversationItem {
         val type = item.optString("type")
         val id = item.optString("id")
+        val previousCommand = previous?.takeIf { it.id == id && it.kind == "commandExecution" && type == "commandExecution" }
+        val command = if (type == "commandExecution") item.stringOrNull("command") ?: previousCommand?.input.orEmpty() else ""
         val projected = when (type) {
             "userMessage" -> {
                 val inputs = item.optJSONArray("content") ?: JSONArray()
@@ -39,7 +41,8 @@ object CodexProjection {
                 ConversationItem(id, "tool", tr("推理摘要", "Reasoning summary"), detail, item.optString("status"))
             }
             "plan" -> ConversationItem(id, "assistant", item.optString("text"))
-            "commandExecution" -> ConversationItem(id, "tool", item.optString("command", tr("命令", "Command")), item.optString("aggregatedOutput"), item.optString("status"))
+            "commandExecution" -> ConversationItem(id, "tool", command.ifBlank { tr("命令", "Command") },
+                item.stringOrNull("aggregatedOutput") ?: previousCommand?.detail.orEmpty(), item.optString("status"))
             "fileChange" -> ConversationItem(id, "tool", tr("文件变更", "File changes"), (item.optJSONArray("changes") ?: JSONArray()).objects().joinToString("\n\n") {
                 it.optString("path") + "\n" + it.optString("diff")
             }, item.optString("status"))
@@ -64,7 +67,7 @@ object CodexProjection {
             else -> "unknown"
         }
         val input = when (type) {
-            "commandExecution" -> item.optString("command")
+            "commandExecution" -> command
             "mcpToolCall" -> item.opt("arguments")?.toString().orEmpty()
             "webSearch" -> item.optString("query")
             "fileChange" -> item.optJSONArray("changes")?.objects()?.joinToString("\n") { it.optString("path") }.orEmpty()
@@ -73,7 +76,14 @@ object CodexProjection {
         }
         val toolName = if (type in setOf("collabAgentToolCall", "mcpToolCall", "dynamicToolCall")) item.stringOrNull("tool")
             ?: previous?.takeIf { it.id == id && it.kind == type }?.toolName.orEmpty() else ""
-        return projected.copy(kind = type, input = input, outcome = outcome, toolName = toolName, media = MediaProjection.codex(item))
+        val commandActions = if (type == "commandExecution") {
+            item.optJSONArray("commandActions")?.objects()?.map {
+                CommandAction(it.optString("type"), it.optString("command"), it.stringOrNull("path").orEmpty(), it.stringOrNull("name").orEmpty())
+            } ?: previousCommand?.commandActions.orEmpty()
+        } else emptyList()
+        return projected.copy(kind = type, input = input, outcome = outcome, toolName = toolName, media = MediaProjection.codex(item),
+            commandActions = commandActions,
+            commandCwd = if (type == "commandExecution") item.stringOrNull("cwd") ?: previousCommand?.commandCwd.orEmpty() else "")
     }
 
     private fun collabLabel(tool: String) = when (tool) {
@@ -101,7 +111,7 @@ object CodexProjection {
             it.optJSONArray("supportedReasoningEfforts")?.objects()?.map { effort -> effort.optString("reasoningEffort") }.orEmpty(),
             it.optJSONArray("inputModalities")?.strings()?.contains("image") ?: false,
             it.optJSONArray("serviceTiers")?.objects()?.map { tier -> RequestChoice(tier.getString("id"), tier.getString("name")) }.orEmpty().let { tiers ->
-                if (tiers.isEmpty()) tiers else listOf(RequestChoice("default", tr("默认速度", "Default speed"))) + tiers
+                if (tiers.isEmpty()) tiers else listOf(RequestChoice("default", "Default")) + tiers
             }, it.stringOrNull("defaultReasoningEffort").orEmpty())
     }
     private val mentionRegex = Regex("@(?:\"([^\"]+)\"|(/[^\\s@\"]+))")

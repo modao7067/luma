@@ -1,3 +1,0 @@
-# Unified-diff context preserves the reviewed source's whitespace verbatim.
-patches/*.patch -whitespace
-recipe/patches/*.patch -whitespace
