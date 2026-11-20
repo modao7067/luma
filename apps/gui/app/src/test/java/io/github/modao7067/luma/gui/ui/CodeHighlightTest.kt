@@ -132,13 +132,9 @@ class CodeHighlightTest {
     }
 
     @Test fun `fence info and file paths map to languages`() {
-        assertEquals(dev.snipme.highlights.model.SyntaxLanguage.KOTLIN, syntaxLanguage("kt"))
-        assertEquals(dev.snipme.highlights.model.SyntaxLanguage.TYPESCRIPT, syntaxLanguage("tsx title=\"a.tsx\""))
-        assertNull(syntaxLanguage("Bash"))
-        assertNull(syntaxLanguage("toml"))
-        assertNull(syntaxLanguage("diff"))
-        assertNull(syntaxLanguage("text"))
-        assertEquals(dev.snipme.highlights.model.SyntaxLanguage.DEFAULT, syntaxLanguage(""))
+        assertEquals(DarkCodePalette.keyword, highlightedCode("fun run() = 1", "kt", darkColors).colorAt("fun"))
+        assertEquals(DarkCodePalette.keyword, highlightedCode("const x = 1", "tsx title=\"a.tsx\"", darkColors).colorAt("const"))
+        assertTrue(highlightedCode("plain words", "text", darkColors).spanStyles.isEmpty())
 
         assertEquals("dockerfile", resolveFileCodeLanguage("/workspace/app/Dockerfile"))
         assertEquals("makefile", resolveFileCodeLanguage("/workspace/app/GNUmakefile"))

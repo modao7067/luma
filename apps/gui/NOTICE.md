@@ -8,7 +8,7 @@ GUI VectorDrawables use Lobe Icons, official pi artwork and the CodeBuddy mark u
 
 ## Liquid glass, press and menu motion
 
-`PrismGlass.kt`, `LiquidChrome.kt`, `ElasticPress.kt`, `MorphMenu.kt`, `PrismMotion.kt` and the opening/dismissal motion in `OriginMenu.kt` adapt the liquid glass shader/optics, downscaled backdrop, dock/menu shadows, elastic press, popup morph, droplet return, carried popup press and glyph pulse from chen08209/prism_ui, revision `6c47901cc80b5325bdb9650579ca2e000a60b39e` (the `plugins/prism_ui` submodule of chen08209/FlClash `be84736605527034689c95bf27828ff27d912c5e`).
+`PrismGlass.kt`, `LiquidChrome.kt`, `ElasticPress.kt`, `MorphMenu.kt`, `PrismMotion.kt` and the opening/dismissal motion in `OriginMenu.kt` adapt the liquid glass shader/optics, downscaled backdrop, dock/menu shadows, elastic press, popup morph, droplet return, carried popup press and glyph pulse from chen08209/prism_ui, revision `6c47901cc80b5325bdb9650579ca2e000a60b39e`.
 
 Source: https://github.com/chen08209/prism_ui/tree/6c47901cc80b5325bdb9650579ca2e000a60b39e
 
@@ -34,9 +34,9 @@ Source: https://github.com/anthropics/claude-agent-sdk-python/tree/d38e51e
 
 Copyright Anthropic. The MIT license is retained in `app/src/main/assets/cli_bridge/CLAUDE-SDK-LICENSE.txt`. Claude Code and Kimi Code executables are not bundled; Luma uses the user's installed CLIs and configuration.
 
-## Luma, Ubuntu Glass and Termux provenance
+## Termux and terminal provenance
 
-Luma incorporates code from Ubuntu Glass 1.7. Terminal emulator and view sources originate from Termux through jeffusion/Termix commit `4bcbac08fcd15c91c65d50df90159b45544433c3`. Original copyrights and license exceptions are retained in `COPYING`, `GPL-3.0.txt`, `UPSTREAM-LICENSE` and the shared source files. Parts derived from jackpal's Android-Terminal-Emulator retain their Apache-2.0 terms.
+Terminal emulator and view sources originate from Termux through jeffusion/Termix commit `4bcbac08fcd15c91c65d50df90159b45544433c3`. Original copyrights and license exceptions are retained in `COPYING`, `GPL-3.0.txt`, `UPSTREAM-LICENSE` and the shared source files. Parts derived from jackpal's Android-Terminal-Emulator retain their Apache-2.0 terms.
 
 `libtermux.so` is built from `shared/terminal-emulator/upstream-native-source/termux.c` using `shared/terminal-emulator/build-native.sh`.
 
@@ -56,13 +56,12 @@ XZ for Java 1.12 (Tukaani Project) is used under 0BSD; its complete notice is in
 
 ## Fonts
 
-The terminal and GUI font chain uses Maple Mono NL NF CN 7.9, JetBrains Mono NL Nerd Font Mono from Nerd Fonts 3.5.1, Noto Sans Mono, Noto Sans Symbols, Noto Sans Math, Noto Music, Noto Sans Symbols 2, Noto Color Emoji and derived Luma subsets under SIL OFL 1.1.
+The terminal and GUI font chain uses Maple Mono NL NF CN 7.9, JetBrains Mono NL Nerd Font Mono from Nerd Fonts 3.5.1, Noto Sans Mono, Noto Sans Symbols, Noto Sans Math, Noto Music, Noto Sans Symbols 2, Noto Sans Arabic, Noto Sans Thai, Noto Sans Kannada, Noto Sans Canadian Aboriginal, Noto Sans Georgian, Noto Color Emoji and derived Luma subsets under SIL OFL 1.1.
 
 - Maple Mono: Copyright 2022 The Maple Mono Project Authors; CN glyphs are based on Resource Han Rounded. Source: https://github.com/subframe7536/maple-font
 - JetBrains Mono and Nerd Fonts: https://github.com/ryanoasis/nerd-fonts
 - Noto fonts: Copyright The Noto Project Authors. Sources: https://github.com/notofonts/noto-fonts and https://github.com/googlefonts/noto-emoji
 - Luma CJK Forms is a renamed Unicode-block subset of Noto Sans CJK SC 2.004. Source: https://github.com/notofonts/noto-cjk
-- Luma Connector Symbols is a renamed two-character subset of Sarasa Term SC Nerd Regular, Copyright Renzhi Li and the Inter, Adobe and Google contributors.
 
 Full OFL texts, pinned revisions, hashes and subset ranges are retained in the runtime asset directories and `terminal-fonts-manifest.json`.
 

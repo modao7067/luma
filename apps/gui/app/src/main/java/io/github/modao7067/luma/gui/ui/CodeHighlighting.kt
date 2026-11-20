@@ -6,7 +6,6 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import dev.snipme.highlights.model.SyntaxLanguage
 
 internal data class CodePalette(
     val keyword: Color,
@@ -114,29 +113,6 @@ internal fun resolveFileCodeLanguage(filePath: String, content: String = ""): St
         }
     }
     return ""
-}
-
-internal fun syntaxLanguage(language: String): SyntaxLanguage? = when (language.trim().substringBefore(' ').lowercase()) {
-    "kotlin", "kt", "kts", "gradle", "groovy" -> SyntaxLanguage.KOTLIN
-    "java" -> SyntaxLanguage.JAVA
-    "c", "h" -> SyntaxLanguage.C
-    "cpp", "c++", "cc", "cxx", "hpp", "hh", "hxx", "objc", "m", "mm" -> SyntaxLanguage.CPP
-    "cs", "csharp", "c#" -> SyntaxLanguage.CSHARP
-    "rust", "rs" -> SyntaxLanguage.RUST
-    "go", "golang" -> SyntaxLanguage.GO
-    "swift" -> SyntaxLanguage.SWIFT
-    "dart" -> SyntaxLanguage.DART
-    "python", "py", "pyi", "python3" -> SyntaxLanguage.PYTHON
-    "ruby", "rb" -> SyntaxLanguage.RUBY
-    "perl", "pl", "pm" -> SyntaxLanguage.PERL
-    "php" -> SyntaxLanguage.PHP
-    "coffee", "coffeescript" -> SyntaxLanguage.COFFEESCRIPT
-    "javascript", "js", "mjs", "cjs", "jsx" -> SyntaxLanguage.JAVASCRIPT
-    "typescript", "ts", "tsx", "mts", "cts" -> SyntaxLanguage.TYPESCRIPT
-    in plainLanguages, "output", "diff", "patch",
-    in markdownLanguages, in markupLanguages, in styleLanguages,
-    in jsonLanguages, in shellLanguages, in configLanguages -> null
-    else -> SyntaxLanguage.DEFAULT
 }
 
 private fun codeLanguageFamily(normalized: String): Int = when (normalized) {

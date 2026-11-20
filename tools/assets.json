@@ -227,10 +227,6 @@
     "bytes": 272768,
     "sha256": "abf7775352578569cc4edd42e795d3f74ffc27edb67eaf3e4c8b7fa9c8c2d343"
   },
-  "runtime/noroot/src/main/assets/LumaConnectorSymbols-OFL.txt": {
-    "bytes": 4702,
-    "sha256": "32c932e0dbae4f6e6386964bbc2d04178707665a05ca65cf636241af13d50a53"
-  },
   "runtime/noroot/src/main/assets/MapleMono-OFL.txt": {
     "bytes": 4394,
     "sha256": "eb2d28d2e565a0757e3d64e34ebb452e75a0cad87c0ab3faf4e08ba7596de902"
@@ -2242,10 +2238,6 @@
   "runtime/root/src/main/assets/LumaCjkForms-Regular.otf": {
     "bytes": 272768,
     "sha256": "abf7775352578569cc4edd42e795d3f74ffc27edb67eaf3e4c8b7fa9c8c2d343"
-  },
-  "runtime/root/src/main/assets/LumaConnectorSymbols-OFL.txt": {
-    "bytes": 4702,
-    "sha256": "32c932e0dbae4f6e6386964bbc2d04178707665a05ca65cf636241af13d50a53"
   },
   "runtime/root/src/main/assets/MapleMono-OFL.txt": {
     "bytes": 4394,
