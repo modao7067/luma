@@ -434,5 +434,39 @@ class ProcessCategoryTest {
         val multiEditPreview = parseProcessEditPreview(multiEditItem, "Claude Code")
         assertEquals(2, multiEditPreview.addedCount)
         assertEquals(2, multiEditPreview.removedCount)
+        assertSame(multiEditPreview, parseProcessEditPreview(multiEditItem, "Claude Code"))
+    }
+
+    @Test fun lightweightReadTabHeadersMatchFullReadPreviewLabels() {
+        val cases = listOf(
+            named("read_file").copy(
+                id = "t1",
+                toolKind = "read",
+                input = """{"Path":"/w/src/Foo.kt","StartLine":10,"EndLine":12}""",
+                detail = "Showing lines 10-12 of 50\n10: a\n11: b\n12: c",
+            ) to "Antigravity",
+            named("read").copy(
+                id = "t2",
+                input = """{"path":"/w/src/Bar.py","offset":null,"limit":null}""",
+                detail = "line one\nline two\n\n[Showing lines 1-2 of 57 (50.0KB limit). Use offset=3 to continue.]",
+            ) to "pi",
+            named("read").copy(
+                id = "t3",
+                input = """{"path":"/w/src/Baz.kt"}""",
+                detail = "5: val a = 1\n6: val b = 2\n7: val c = 3",
+            ) to "OpenCode",
+            native("commandExecution").copy(
+                id = "t4",
+                input = "nl -ba /w/src/Main.kt",
+                text = "nl -ba /w/src/Main.kt",
+                detail = "     4\tpackage demo\n     5\tfun main() {}\n",
+            ) to "Codex",
+        )
+        cases.forEach { (item, cli) ->
+            val header = parseProcessReadTabHeader(item, cli)
+            val full = parseProcessReadPreview(item, cli)
+            assertEquals("fileName mismatch for ${item.id}", full.fileName, header.fileName)
+            assertEquals("rangeLabel mismatch for ${item.id}", full.rangeLabel, header.rangeLabel)
+        }
     }
 }

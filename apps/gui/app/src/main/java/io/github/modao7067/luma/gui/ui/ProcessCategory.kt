@@ -703,6 +703,178 @@ private fun extractPathFromItem(item: ConversationItem): String {
     return ""
 }
 
+internal data class ProcessReadTabHeader(
+    val fileName: String,
+    val rangeLabel: String,
+)
+
+private fun countLinesInRange(text: String, start: Int, end: Int, maxLines: Int): Int {
+    if (end <= start) return 0
+    var count = 1
+    var pos = start
+    while (pos < end && count < maxLines) {
+        val ch = text[pos]
+        if (ch == '\n') {
+            count++
+        } else if (ch == '\r') {
+            count++
+            if (pos + 1 < end && text[pos + 1] == '\n') pos++
+        }
+        pos++
+    }
+    return count
+}
+
+private fun nextLineBounds(text: String, pos: Int, end: Int): Triple<Int, Int, Int> {
+    var i = pos
+    while (i < end && text[i] != '\n' && text[i] != '\r') i++
+    var next = i
+    if (next < end && text[next] == '\r') next++
+    if (next < end && text[next] == '\n') next++
+    return Triple(pos, i, next)
+}
+
+private fun prevLineBounds(text: String, start: Int, end: Int): Triple<Int, Int, Int> {
+    var lineEnd = end
+    var prevEnd = end
+    if (lineEnd > start && text[lineEnd - 1] == '\n') {
+        lineEnd--
+        prevEnd = lineEnd
+        if (lineEnd > start && text[lineEnd - 1] == '\r') {
+            lineEnd--
+            prevEnd = lineEnd
+        }
+    } else if (lineEnd > start && text[lineEnd - 1] == '\r') {
+        lineEnd--
+        prevEnd = lineEnd
+    }
+    var lineStart = lineEnd
+    while (lineStart > start && text[lineStart - 1] != '\n' && text[lineStart - 1] != '\r') lineStart--
+    return Triple(lineStart, lineEnd, if (lineStart < prevEnd) lineStart else prevEnd)
+}
+
+internal fun parseProcessReadTabHeader(item: ConversationItem, cli: String): ProcessReadTabHeader {
+    if (item.kind == "commandExecution") {
+        val source = commandReadSource(item)
+            ?: return ProcessReadTabHeader(
+                fileName = if (item.commandActions.size > 1) tr("合并读取输出", "Combined read output") else tr("读取输出", "Read output"),
+                rangeLabel = "",
+            )
+        val fileName = source.path.substringAfterLast('/')
+        var end = minOf(item.detail.length, MAX_PROCESS_PREVIEW_CHARS)
+        if (end > 0 && item.detail[end - 1] == '\n') end--
+        if (end <= 0) return ProcessReadTabHeader(fileName, "")
+        val lineCount = countLinesInRange(item.detail, 0, end, MAX_PROCESS_DIFF_LINES)
+        var firstNum = source.startLine
+        var lastNum = source.startLine + lineCount - 1
+        if (source.numbered) {
+            val numberedTab = Regex("""^\s*([0-9]+)\t.*$""")
+            val (fs, fe, _) = nextLineBounds(item.detail, 0, end)
+            numberedTab.matchEntire(item.detail.substring(fs, fe))?.groupValues?.get(1)?.toIntOrNull()?.let { firstNum = it }
+            if (lineCount < MAX_PROCESS_DIFF_LINES) {
+                val (ls, le, _) = prevLineBounds(item.detail, 0, end)
+                numberedTab.matchEntire(item.detail.substring(ls, le))?.groupValues?.get(1)?.toIntOrNull()?.let { lastNum = it }
+            }
+        }
+        return ProcessReadTabHeader(fileName, "L$firstNum-$lastNum")
+    }
+    val rawPath = extractPathFromItem(item)
+    val fileName = splitFileDisplay(rawPath, processEntryLabel(item, cli)).second
+    var startLine: Int? = null
+    var endLine: Int? = null
+    if (item.input.isNotBlank()) {
+        runCatching {
+            val json = JSONObject(item.input)
+            val s = json.optInt("StartLine", json.optInt("start_line", json.optInt("offset", -1)))
+            val e = json.optInt("EndLine", json.optInt("end_line", -1))
+            val limit = json.optInt("limit", -1)
+            if (s > 0) startLine = s
+            if (e > 0) endLine = e else if (s > 0 && limit > 0) endLine = s + limit - 1
+        }
+    }
+    val detail = item.detail
+    val detailLen = minOf(detail.length, MAX_PROCESS_PREVIEW_CHARS)
+    var bodyStart = 0
+    var strippedHeader = false
+    var headerSteps = 0
+    while (bodyStart < detailLen && headerSteps < 16) {
+        headerSteps++
+        val (ls, le, next) = nextLineBounds(detail, bodyStart, detailLen)
+        val trimmed = detail.substring(ls, le).trim()
+        if (strippedHeader && trimmed.isEmpty()) {
+            bodyStart = next
+            continue
+        }
+        if (isReadWrapperHeaderLine(trimmed)) {
+            strippedHeader = true
+            bodyStart = next
+            continue
+        }
+        val m = showingLinesRegex.find(trimmed)
+            ?: openCodeReadFileRegex.find(trimmed)
+            ?: openCodeReadDirRegex.find(trimmed)
+        if (m != null) {
+            val parsedStart = m.groupValues[1].toIntOrNull()
+            val parsedEnd = m.groupValues[2].toIntOrNull() ?: parsedStart
+            startLine = parsedStart ?: startLine
+            endLine = parsedEnd ?: endLine
+            strippedHeader = true
+            bodyStart = next
+            continue
+        }
+        break
+    }
+    var bodyEnd = detailLen
+    var strippedFooter = false
+    var footerSteps = 0
+    while (bodyEnd > bodyStart && footerSteps < 8) {
+        footerSteps++
+        val (ls, le, prev) = prevLineBounds(detail, bodyStart, bodyEnd)
+        val tail = detail.substring(ls, le).trim()
+        bracketShowingLinesRegex.find(tail)?.let { m ->
+            val parsedStart = m.groupValues[1].toIntOrNull()
+            val parsedEnd = m.groupValues[2].toIntOrNull() ?: parsedStart
+            startLine = parsedStart ?: startLine
+            endLine = parsedEnd ?: endLine
+        }
+        if (isReadWrapperFooterLine(tail)) {
+            strippedFooter = true
+            bodyEnd = prev
+            continue
+        }
+        if (strippedFooter && tail.isEmpty()) {
+            bodyEnd = prev
+            continue
+        }
+        break
+    }
+    if (startLine == null && bodyEnd > bodyStart) {
+        val (fls, fle, _) = nextLineBounds(detail, bodyStart, bodyEnd)
+        val firstLine = detail.substring(fls, fle)
+        val firstMatch = numberedLineRegex.matchEntire(firstLine)
+        val lineCount = countLinesInRange(detail, bodyStart, bodyEnd, MAX_PROCESS_DIFF_LINES)
+        if (firstMatch != null) {
+            val firstNum = firstMatch.groupValues[1].toIntOrNull() ?: 1
+            startLine = firstNum
+            var lastNum = firstNum + (lineCount - 1).coerceAtLeast(0)
+            if (lineCount < MAX_PROCESS_DIFF_LINES) {
+                val (lls, lle, _) = prevLineBounds(detail, bodyStart, bodyEnd)
+                numberedLineRegex.matchEntire(detail.substring(lls, lle))?.groupValues?.get(1)?.toIntOrNull()?.let { lastNum = it }
+            }
+            endLine = lastNum
+        } else {
+            startLine = 1
+            endLine = lineCount.coerceAtLeast(1)
+        }
+    }
+    val rangeLabel = when {
+        startLine != null && endLine != null && endLine >= startLine -> "L$startLine-$endLine"
+        startLine != null -> "L$startLine"
+        else -> ""
+    }
+    return ProcessReadTabHeader(fileName, rangeLabel)
+}
+
 internal fun parseProcessReadFileName(item: ConversationItem, cli: String): String {
     if (item.kind == "commandExecution") return commandReadSource(item)?.path?.substringAfterLast('/').orEmpty()
     val rawPath = extractPathFromItem(item)
@@ -1176,7 +1348,41 @@ internal fun hasProcessEditPreview(item: ConversationItem): Boolean {
     return raw.lineSequence().any { (it.startsWith("+") && !it.startsWith("+++")) || (it.startsWith("-") && !it.startsWith("---")) }
 }
 
+private data class EditPreviewCacheKey(
+    val id: String,
+    val outcome: String,
+    val kind: String,
+    val toolName: String,
+    val text: String,
+    val input: String,
+    val detail: String,
+    val cli: String,
+    val langCode: String,
+)
+
+private val editPreviewCache = object : LinkedHashMap<EditPreviewCacheKey, ProcessEditPreview>(32, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<EditPreviewCacheKey, ProcessEditPreview>?) = size > 64
+}
+
 internal fun parseProcessEditPreview(item: ConversationItem, cli: String): ProcessEditPreview {
+    val cacheKey = EditPreviewCacheKey(
+        id = item.id,
+        outcome = item.outcome,
+        kind = item.kind,
+        toolName = item.toolName,
+        text = item.text,
+        input = item.input,
+        detail = item.detail,
+        cli = cli,
+        langCode = io.github.modao7067.luma.gui.i18n.LumaI18n.langCode(),
+    )
+    synchronized(editPreviewCache) { editPreviewCache[cacheKey] }?.let { return it }
+    val computed = computeProcessEditPreview(item, cli)
+    synchronized(editPreviewCache) { editPreviewCache[cacheKey] = computed }
+    return computed
+}
+
+private fun computeProcessEditPreview(item: ConversationItem, cli: String): ProcessEditPreview {
     var rawPath = extractPathFromItem(item)
     var diffLines = emptyList<DiffLine>()
     var hunks = emptyList<List<DiffLine>>()

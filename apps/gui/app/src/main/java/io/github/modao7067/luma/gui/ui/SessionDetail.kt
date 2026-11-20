@@ -961,7 +961,10 @@ internal fun BoxScope.ConversationScrollOverlay(
     if (runningCount > 0) retainedCount = runningCount
     val numberStyle = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
     val density = LocalDensity.current
-    val numberWidth = with(density) { rememberTextMeasurer().measure(retainedCount.toString(), numberStyle).size.width.toDp() }
+    val numberMeasurer = rememberTextMeasurer(cacheSize = 4)
+    val numberWidth = remember(retainedCount, numberStyle, density) {
+        with(density) { numberMeasurer.measure(retainedCount.toString(), numberStyle).size.width.toDp() }
+    }
     val animatedExtraWidth by androidx.compose.animation.core.animateDpAsState(
         if (runningCount > 0) numberWidth + 10.dp else 0.dp, spatialDpSpring(), label = "subagent-running-width")
     val extraWidth = previewRunningFraction?.let { (numberWidth + 10.dp) * it.coerceIn(0f, 1f) } ?: animatedExtraWidth

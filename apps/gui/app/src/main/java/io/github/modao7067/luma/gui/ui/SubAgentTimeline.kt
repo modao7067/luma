@@ -27,14 +27,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -181,16 +179,7 @@ internal fun SubAgentDetails(task: String, detail: String, status: String, id: S
     }
     val hasTask = task.isNotBlank()
     val hasDetail = detail.isNotBlank()
-    val measurer = rememberTextMeasurer(cacheSize = 4)
-    val density = LocalDensity.current
-    val bodyStyle = MaterialTheme.typography.bodyLarge
-    val dividerHeightDp = remember(bodyStyle, density) {
-        val oneLinePx = measurer.measure("M", style = bodyStyle, softWrap = false, maxLines = 1).size.height
-        val twoLinePx = measurer.measure("M\nM", style = bodyStyle, softWrap = false).size.height
-        val lineStepPx = (twoLinePx - oneLinePx).coerceAtLeast(1)
-        val slotPx = (2 * lineStepPx - oneLinePx).coerceAtLeast(with(density) { 1.dp.roundToPx() })
-        with(density) { slotPx.toDp() }
-    }
+    val dividerHeightDp = rememberLineDividerHeightDp(MaterialTheme.typography.bodyLarge)
     val dividerColor = colors.outlineVariant.copy(alpha = 0.45f)
     Surface(
         shape = LumaCardShape(12.dp),

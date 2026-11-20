@@ -201,7 +201,9 @@ internal fun TopReveal(
             modifier = Modifier.clipToBounds(),
         ) { children, constraints ->
             val loose = constraints.copy(minHeight = 0)
-            val child = children.firstOrNull { it.layoutId == "detail" }?.measure(loose)
+            val f = currentFraction()
+            val measureDetail = expanded || f > 0f
+            val child = if (measureDetail) children.firstOrNull { it.layoutId == "detail" }?.measure(loose) else null
             val excerpt = children.firstOrNull { it.layoutId == "excerpt" }?.measure(loose)
             val measuredExcerptH = excerpt?.height ?: 0
             if (hasCollapsedNow) {
@@ -214,7 +216,6 @@ internal fun TopReveal(
             } else {
                 excerptCurrentPx.roundToInt().coerceIn(0, maxOf(measuredExcerptH, excerptTargetPx))
             }
-            val f = currentFraction()
             val detailHeight = child?.height ?: collapsedHeight
             val height = (collapsedHeight + (detailHeight - collapsedHeight) * f).roundToInt()
             val width = maxOf(child?.width ?: 0, excerpt?.width ?: 0, constraints.minWidth)
@@ -224,8 +225,8 @@ internal fun TopReveal(
             slideRangePx[0] = maxSlidePx
             layout(width, constraints.constrainHeight(height)) {
                 if (excerptAlpha > 0f && collapsedHeight > 0) excerpt?.placeRelative(0, 0)
-                if (detailAlpha > 0f || (keepDetailComposed && !excerptVisible)) {
-                    child?.placeRelative(0, 0)
+                if (child != null && (detailAlpha > 0f || (keepDetailComposed && !excerptVisible))) {
+                    child.placeRelative(0, 0)
                 }
             }
         }

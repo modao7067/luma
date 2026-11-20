@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui;
 
+import java.util.Arrays;
+import java.util.Locale;
 import java.util.Set;
 
 public final class CodeTokens {
@@ -12,7 +14,17 @@ public final class CodeTokens {
     public static final int LANG_DEFAULT = 0, LANG_KOTLIN = 1, LANG_JAVA = 2, LANG_C_FAMILY = 3,
             LANG_RUST = 4, LANG_GO = 5, LANG_SWIFT_DART = 6, LANG_PYTHON = 7,
             LANG_JS_TS = 8, LANG_RUBY_PERL = 9, LANG_PHP = 10, LANG_SQL = 11, LANG_ZIG = 12;
+    private static final int EMBED_NONE = -99, EMBED_SHELL = -1, EMBED_JSON = -2, EMBED_JSON_EXT = -3,
+            EMBED_CONFIG = -4, EMBED_MARKUP = -5, EMBED_STYLE = -6, EMBED_STYLE_SCSS = -7, EMBED_MARKDOWN = -8;
     private static final int MAX_JSON_DEPTH = 256;
+    private static final int MAX_EMBED_DEPTH = 6;
+    private static final Set<String> SHELL_INTERPRETERS = Set.of("sh", "bash", "zsh", "dash", "ksh", "ash", "fish");
+    private static final Set<String> PYTHON_INTERPRETERS = Set.of("python", "python3", "python2", "pypy", "pypy3");
+    private static final Set<String> JS_INTERPRETERS = Set.of("node", "nodejs", "bun", "deno");
+    private static final Set<String> RUBY_PERL_INTERPRETERS = Set.of("ruby", "perl");
+    private static final Set<String> SQL_INTERPRETERS = Set.of("sqlite3", "sqlite", "psql", "mysql", "mariadb", "duckdb");
+    private static final Set<String> SQL_LEAD_KEYWORDS = Set.of(
+            "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "WITH", "PRAGMA", "EXPLAIN", "REPLACE", "BEGIN");
     private static final Set<String> KEYWORDS = Set.of("fun", "val", "var", "class", "return",
             "if", "else", "for", "while", "import", "package", "public", "private", "static",
             "void", "def", "from", "const", "let", "function", "async", "await", "true",
@@ -546,32 +558,597 @@ public final class CodeTokens {
         return false;
     }
 
-    private static int scanShellDoubleString(String text, int openStart, Cursor c, int limit, int count, Sink sink) {
-        int segStart = openStart;
+    private static final class UnescapedSlice {
+        final String text;
+        final int[] starts;
+        final int[] ends;
+        final int[] quoteStarts;
+        final int[] quoteEnds;
+        final int quoteCount;
+
+        UnescapedSlice(String text, int[] starts, int[] ends, int[] quoteStarts, int[] quoteEnds, int quoteCount) {
+            this.text = text;
+            this.starts = starts;
+            this.ends = ends;
+            this.quoteStarts = quoteStarts;
+            this.quoteEnds = quoteEnds;
+            this.quoteCount = quoteCount;
+        }
+    }
+
+    private static int resolveEmbedLang(String raw) {
+        if (raw == null || raw.isEmpty()) return EMBED_NONE;
+        int s = 0;
+        int e = raw.length();
+        while (s < e && raw.charAt(s) <= ' ') s++;
+        int sp = s;
+        while (sp < e && raw.charAt(sp) > ' ') sp++;
+        if (sp <= s) return EMBED_NONE;
+        String norm = raw.substring(s, sp).toLowerCase(Locale.ROOT);
+        switch (norm) {
+            case "sh":
+            case "bash":
+            case "zsh":
+            case "shell":
+            case "fish":
+            case "ksh":
+            case "ash":
+            case "dash":
+            case "console":
+            case "shellsession":
+            case "bashrc":
+            case "zshrc":
+            case "profile":
+            case "env":
+            case "dotenv":
+            case "dockerfile":
+            case "makefile":
+            case "mk":
+                return EMBED_SHELL;
+            case "json":
+                return EMBED_JSON;
+            case "jsonc":
+            case "json5":
+                return EMBED_JSON_EXT;
+            case "yaml":
+            case "yml":
+            case "toml":
+            case "ini":
+            case "conf":
+            case "cfg":
+            case "properties":
+            case "gitignore":
+            case "gitattributes":
+            case "cmake":
+                return EMBED_CONFIG;
+            case "xml":
+            case "html":
+            case "htm":
+            case "xhtml":
+            case "svg":
+            case "vue":
+            case "svelte":
+            case "plist":
+                return EMBED_MARKUP;
+            case "css":
+                return EMBED_STYLE;
+            case "scss":
+            case "sass":
+            case "less":
+                return EMBED_STYLE_SCSS;
+            case "md":
+            case "markdown":
+                return EMBED_MARKDOWN;
+            case "kotlin":
+            case "kt":
+            case "kts":
+            case "gradle":
+            case "groovy":
+                return LANG_KOTLIN;
+            case "java":
+                return LANG_JAVA;
+            case "c":
+            case "h":
+            case "cpp":
+            case "c++":
+            case "cc":
+            case "cxx":
+            case "hpp":
+            case "hh":
+            case "hxx":
+            case "objc":
+            case "m":
+            case "mm":
+            case "cs":
+            case "csharp":
+            case "c#":
+                return LANG_C_FAMILY;
+            case "rust":
+            case "rs":
+                return LANG_RUST;
+            case "go":
+            case "golang":
+                return LANG_GO;
+            case "swift":
+            case "dart":
+                return LANG_SWIFT_DART;
+            case "python":
+            case "py":
+            case "pyi":
+            case "python3":
+            case "python2":
+            case "pypy":
+            case "pypy3":
+                return LANG_PYTHON;
+            case "javascript":
+            case "js":
+            case "mjs":
+            case "cjs":
+            case "jsx":
+            case "typescript":
+            case "ts":
+            case "tsx":
+            case "mts":
+            case "cts":
+            case "node":
+            case "nodejs":
+            case "bun":
+            case "deno":
+                return LANG_JS_TS;
+            case "ruby":
+            case "rb":
+            case "perl":
+            case "pl":
+            case "pm":
+                return LANG_RUBY_PERL;
+            case "php":
+                return LANG_PHP;
+            case "sql":
+            case "sqlite":
+            case "sqlite3":
+            case "postgres":
+            case "postgresql":
+            case "psql":
+            case "mysql":
+            case "mariadb":
+            case "duckdb":
+                return LANG_SQL;
+            case "zig":
+                return LANG_ZIG;
+            default:
+                return EMBED_NONE;
+        }
+    }
+
+    private static int resolveLangFromFileName(String path) {
+        if (path == null || path.isEmpty()) return EMBED_NONE;
+        int slash = path.lastIndexOf('/');
+        String name = (slash >= 0 ? path.substring(slash + 1) : path).toLowerCase(Locale.ROOT);
+        if (name.isEmpty()) return EMBED_NONE;
+        if (name.equals("dockerfile") || name.startsWith("dockerfile.")
+                || name.equals("makefile") || name.equals("gnumakefile")
+                || name.equals("gradlew") || name.equals(".env") || name.startsWith(".env.")
+                || name.equals(".bashrc") || name.equals(".zshrc") || name.equals(".profile")) {
+            return EMBED_SHELL;
+        }
+        if (name.equals("cmakelists.txt") || name.equals(".gitignore") || name.equals(".gitattributes")) {
+            return EMBED_CONFIG;
+        }
+        if (name.endsWith(".gradle.kts")) return LANG_KOTLIN;
+        int dot = name.lastIndexOf('.');
+        if (dot > 0 && dot + 1 < name.length()) {
+            return resolveEmbedLang(name.substring(dot + 1));
+        }
+        return EMBED_NONE;
+    }
+
+    private static int inferHeredocLang(String redirectTarget, String heredocCmd, String heredocEnd) {
+        if (redirectTarget != null) {
+            int r = resolveLangFromFileName(redirectTarget);
+            if (r != EMBED_NONE) return r;
+        }
+        if (heredocCmd != null) {
+            if (PYTHON_INTERPRETERS.contains(heredocCmd)) return LANG_PYTHON;
+            if (SHELL_INTERPRETERS.contains(heredocCmd)) return EMBED_SHELL;
+            if (JS_INTERPRETERS.contains(heredocCmd)) return LANG_JS_TS;
+            if (RUBY_PERL_INTERPRETERS.contains(heredocCmd)) return LANG_RUBY_PERL;
+            if ("php".equals(heredocCmd)) return LANG_PHP;
+            if (SQL_INTERPRETERS.contains(heredocCmd)) return LANG_SQL;
+        }
+        if (heredocEnd != null && heredocEnd.length() >= 2) {
+            int direct = resolveEmbedLang(heredocEnd);
+            if (direct != EMBED_NONE) return direct;
+            int pos = 0;
+            int len = heredocEnd.length();
+            while (pos < len) {
+                while (pos < len && (heredocEnd.charAt(pos) == '_' || heredocEnd.charAt(pos) == '-')) pos++;
+                int start = pos;
+                while (pos < len && heredocEnd.charAt(pos) != '_' && heredocEnd.charAt(pos) != '-') pos++;
+                if (pos - start >= 2) {
+                    int partLang = resolveEmbedLang(heredocEnd.substring(start, pos));
+                    if (partLang != EMBED_NONE) return partLang;
+                }
+            }
+        }
+        return EMBED_NONE;
+    }
+
+    private static boolean isShortFlagBundleContaining(String flag, char target, int maxLen) {
+        int len = flag.length();
+        if (len < 2 || len > maxLen || flag.charAt(0) != '-' || flag.charAt(1) == '-') return false;
+        boolean found = false;
+        for (int i = 1; i < len; i++) {
+            char ch = flag.charAt(i);
+            if (ch == target) found = true;
+            else if (!Character.isLetter(ch)) return false;
+        }
+        return found;
+    }
+
+    private static int inferFlagEmbedLang(String cmd, String flag) {
+        if (cmd == null || flag == null) return EMBED_NONE;
+        if (SHELL_INTERPRETERS.contains(cmd) || "su".equals(cmd)) {
+            if ("--command".equals(flag) || isShortFlagBundleContaining(flag, 'c', 6)) return EMBED_SHELL;
+        } else if (PYTHON_INTERPRETERS.contains(cmd)) {
+            if ("-c".equals(flag) || (isShortFlagBundleContaining(flag, 'c', 5) && flag.charAt(flag.length() - 1) == 'c')) {
+                return LANG_PYTHON;
+            }
+        } else if (JS_INTERPRETERS.contains(cmd)) {
+            if ("-e".equals(flag) || "--eval".equals(flag) || "-p".equals(flag) || "--print".equals(flag)) {
+                return LANG_JS_TS;
+            }
+        } else if (RUBY_PERL_INTERPRETERS.contains(cmd)) {
+            if ("-e".equals(flag) || "-E".equals(flag)
+                    || (isShortFlagBundleContaining(flag, 'e', 5) && flag.charAt(flag.length() - 1) == 'e')
+                    || (isShortFlagBundleContaining(flag, 'E', 5) && flag.charAt(flag.length() - 1) == 'E')) {
+                return LANG_RUBY_PERL;
+            }
+        } else if ("php".equals(cmd)) {
+            if ("-r".equals(flag)) return LANG_PHP;
+        } else if (SQL_INTERPRETERS.contains(cmd)) {
+            if ("-c".equals(flag) || "-e".equals(flag) || "--command".equals(flag) || "--execute".equals(flag)) {
+                return LANG_SQL;
+            }
+        }
+        return EMBED_NONE;
+    }
+
+    private static boolean startsWithSqlKeyword(String text, int start, int end) {
+        int p = start;
+        while (p < end && (text.charAt(p) == ' ' || text.charAt(p) == '\t' || text.charAt(p) == '\n' || text.charAt(p) == '\r' || text.charAt(p) == '(')) {
+            p++;
+        }
+        int ws = p;
+        while (p < end && identPart(text.charAt(p))) p++;
+        if (p <= ws || p - ws > 12) return false;
+        return SQL_LEAD_KEYWORDS.contains(text.substring(ws, p).toUpperCase(Locale.ROOT));
+    }
+
+    private static void scanEmbeddedText(
+            String text,
+            int embedLang,
+            int limit,
+            int[] count,
+            int depth,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        if (embedLang == EMBED_NONE || depth >= MAX_EMBED_DEPTH || text.isEmpty() || count[0] >= limit) return;
+        if (embedLang == EMBED_SHELL) {
+            scanShellRange(text, 0, text.length(), limit, count, depth + 1, false, sink, checkpoint);
+        } else if (embedLang == EMBED_MARKDOWN) {
+            scanMarkdownRange(text, 0, text.length(), limit, count, depth + 1, sink, checkpoint);
+        } else if (embedLang >= 0) {
+            scanCodeRange(text, new Cursor(text, 0, text.length(), checkpoint), embedLang, limit, count, depth + 1, (char) 0, sink, checkpoint);
+        } else {
+            int remaining = limit - count[0];
+            if (remaining <= 0) return;
+            Sink counted = (s, e, k) -> emitToken(sink, count, limit, s, e, k);
+            if (embedLang == EMBED_JSON || embedLang == EMBED_JSON_EXT) {
+                scanJsonFragment(text, remaining, counted, checkpoint);
+            } else if (embedLang == EMBED_CONFIG) {
+                scanConfig(text, remaining, counted, checkpoint);
+            } else if (embedLang == EMBED_MARKUP) {
+                scanMarkup(text, remaining, counted, checkpoint);
+            } else if (embedLang == EMBED_STYLE || embedLang == EMBED_STYLE_SCSS) {
+                scanStyle(text, embedLang == EMBED_STYLE_SCSS, remaining, counted, checkpoint);
+            }
+        }
+    }
+
+    private static void scanEmbeddedRange(
+            String text,
+            int rangeStart,
+            int rangeEnd,
+            int embedLang,
+            int limit,
+            int[] count,
+            int depth,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        if (embedLang == EMBED_NONE || depth >= MAX_EMBED_DEPTH || rangeEnd <= rangeStart || count[0] >= limit) return;
+        if (embedLang == EMBED_SHELL) {
+            scanShellRange(text, rangeStart, rangeEnd, limit, count, depth + 1, false, sink, checkpoint);
+        } else if (embedLang == EMBED_MARKDOWN) {
+            scanMarkdownRange(text, rangeStart, rangeEnd, limit, count, depth + 1, sink, checkpoint);
+        } else if (embedLang >= 0) {
+            scanCodeRange(text, new Cursor(text, rangeStart, rangeEnd, checkpoint), embedLang, limit, count, depth + 1, (char) 0, sink, checkpoint);
+        } else {
+            Sink shifted = (s, e, k) -> sink.token(rangeStart + s, rangeStart + e, k);
+            scanEmbeddedText(text.substring(rangeStart, rangeEnd), embedLang, limit, count, depth, shifted, checkpoint);
+        }
+    }
+
+    private static void scanEmbeddedSlice(
+            UnescapedSlice slice,
+            int embedLang,
+            int limit,
+            int[] count,
+            int depth,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        if (slice.text.isEmpty()) {
+            for (int i = 0; i < slice.quoteCount; i++) {
+                emitToken(sink, count, limit, slice.quoteStarts[i], slice.quoteEnds[i], STRING);
+            }
+            return;
+        }
+        int contentStart = slice.starts[0];
+        int contentEnd = slice.ends[slice.ends.length - 1];
+        for (int i = 0; i < slice.quoteCount; i++) {
+            if (slice.quoteEnds[i] <= contentStart) {
+                emitToken(sink, count, limit, slice.quoteStarts[i], slice.quoteEnds[i], STRING);
+            }
+        }
+        Sink mapped = (s, e, k) -> {
+            if (s >= 0 && e > s && e <= slice.ends.length) {
+                sink.token(slice.starts[s], slice.ends[e - 1], k);
+            }
+        };
+        scanEmbeddedText(slice.text, embedLang, limit, count, depth, mapped, checkpoint);
+        for (int i = 0; i < slice.quoteCount; i++) {
+            if (slice.quoteStarts[i] >= contentEnd) {
+                emitToken(sink, count, limit, slice.quoteStarts[i], slice.quoteEnds[i], STRING);
+            }
+        }
+    }
+
+    private static UnescapedSlice parseShellEmbeddedWord(String text, Cursor c) {
+        StringBuilder out = new StringBuilder(64);
+        int[] starts = new int[64];
+        int[] ends = new int[64];
+        int n = 0;
+        int[] qStarts = new int[8];
+        int[] qEnds = new int[8];
+        int qCount = 0;
+
+        while (c.has() && !shellBoundary(c.get())) {
+            char ch = c.get();
+            if (ch == '\'') {
+                int qs = c.at;
+                c.step();
+                if (qCount == qStarts.length) {
+                    qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                    qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                }
+                qStarts[qCount] = qs;
+                qEnds[qCount++] = c.at;
+                while (c.has()) {
+                    char cur = c.get();
+                    int p = c.at;
+                    c.step();
+                    if (cur == '\'') {
+                        if (qCount == qStarts.length) {
+                            qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                            qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                        }
+                        qStarts[qCount] = p;
+                        qEnds[qCount++] = c.at;
+                        break;
+                    }
+                    if (n == starts.length) {
+                        starts = Arrays.copyOf(starts, starts.length * 2);
+                        ends = Arrays.copyOf(ends, ends.length * 2);
+                    }
+                    out.append(cur);
+                    starts[n] = p;
+                    ends[n++] = c.at;
+                }
+            } else if (ch == '"') {
+                int qs = c.at;
+                c.step();
+                if (qCount == qStarts.length) {
+                    qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                    qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                }
+                qStarts[qCount] = qs;
+                qEnds[qCount++] = c.at;
+                while (c.has()) {
+                    char cur = c.get();
+                    int p = c.at;
+                    c.step();
+                    if (cur == '"') {
+                        if (qCount == qStarts.length) {
+                            qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                            qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                        }
+                        qStarts[qCount] = p;
+                        qEnds[qCount++] = c.at;
+                        break;
+                    }
+                    if (cur == '\\' && c.has()) {
+                        char esc = c.get();
+                        if (esc == '\n') {
+                            c.step();
+                            continue;
+                        }
+                        if (esc == '\r' && c.at + 1 < c.end && text.charAt(c.at + 1) == '\n') {
+                            c.step();
+                            c.step();
+                            continue;
+                        }
+                        if (esc == '"' || esc == '\\' || esc == '$' || esc == '`') {
+                            c.step();
+                            if (n == starts.length) {
+                                starts = Arrays.copyOf(starts, starts.length * 2);
+                                ends = Arrays.copyOf(ends, ends.length * 2);
+                            }
+                            out.append(esc);
+                            starts[n] = p;
+                            ends[n++] = c.at;
+                            continue;
+                        }
+                    }
+                    if (n == starts.length) {
+                        starts = Arrays.copyOf(starts, starts.length * 2);
+                        ends = Arrays.copyOf(ends, ends.length * 2);
+                    }
+                    out.append(cur);
+                    starts[n] = p;
+                    ends[n++] = c.at;
+                }
+            } else if (ch == '$' && c.at + 1 < c.end && text.charAt(c.at + 1) == '\'') {
+                int qs = c.at;
+                c.step();
+                c.step();
+                if (qCount == qStarts.length) {
+                    qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                    qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                }
+                qStarts[qCount] = qs;
+                qEnds[qCount++] = c.at;
+                while (c.has()) {
+                    char cur = c.get();
+                    int p = c.at;
+                    c.step();
+                    if (cur == '\'') {
+                        if (qCount == qStarts.length) {
+                            qStarts = Arrays.copyOf(qStarts, qStarts.length * 2);
+                            qEnds = Arrays.copyOf(qEnds, qEnds.length * 2);
+                        }
+                        qStarts[qCount] = p;
+                        qEnds[qCount++] = c.at;
+                        break;
+                    }
+                    char decoded = cur;
+                    if (cur == '\\' && c.has()) {
+                        char esc = c.get();
+                        c.step();
+                        if (esc == 'n') decoded = '\n';
+                        else if (esc == 't') decoded = '\t';
+                        else if (esc == 'r') decoded = '\r';
+                        else decoded = esc;
+                    }
+                    if (n == starts.length) {
+                        starts = Arrays.copyOf(starts, starts.length * 2);
+                        ends = Arrays.copyOf(ends, ends.length * 2);
+                    }
+                    out.append(decoded);
+                    starts[n] = p;
+                    ends[n++] = c.at;
+                }
+            } else if (ch == '\\' && c.at + 1 < c.end) {
+                int p = c.at;
+                char esc = text.charAt(c.at + 1);
+                if (esc == '\n') {
+                    c.step();
+                    c.step();
+                    continue;
+                }
+                if (esc == '\r' && c.at + 2 < c.end && text.charAt(c.at + 2) == '\n') {
+                    c.step();
+                    c.step();
+                    c.step();
+                    continue;
+                }
+                c.step();
+                c.step();
+                if (n == starts.length) {
+                    starts = Arrays.copyOf(starts, starts.length * 2);
+                    ends = Arrays.copyOf(ends, ends.length * 2);
+                }
+                out.append(esc);
+                starts[n] = p;
+                ends[n++] = c.at;
+            } else {
+                int p = c.at;
+                c.step();
+                if (n == starts.length) {
+                    starts = Arrays.copyOf(starts, starts.length * 2);
+                    ends = Arrays.copyOf(ends, ends.length * 2);
+                }
+                out.append(ch);
+                starts[n] = p;
+                ends[n++] = c.at;
+            }
+        }
+        return new UnescapedSlice(
+                out.toString(),
+                Arrays.copyOf(starts, n),
+                Arrays.copyOf(ends, n),
+                qStarts,
+                qEnds,
+                qCount
+        );
+    }
+
+    private static UnescapedSlice parseShellBacktickSlice(String text, Cursor c) {
+        StringBuilder out = new StringBuilder(32);
+        int[] starts = new int[32];
+        int[] ends = new int[32];
+        int n = 0;
         while (c.has()) {
+            char cur = c.get();
+            if (cur == '`') break;
+            int p = c.at;
+            c.step();
+            char decoded = cur;
+            if (cur == '\\' && c.has()) {
+                char esc = c.get();
+                if (esc == '`' || esc == '\\' || esc == '$') {
+                    c.step();
+                    decoded = esc;
+                }
+            }
+            if (n == starts.length) {
+                starts = Arrays.copyOf(starts, starts.length * 2);
+                ends = Arrays.copyOf(ends, ends.length * 2);
+            }
+            out.append(decoded);
+            starts[n] = p;
+            ends[n++] = c.at;
+        }
+        return new UnescapedSlice(out.toString(), Arrays.copyOf(starts, n), Arrays.copyOf(ends, n), new int[0], new int[0], 0);
+    }
+
+    private static void scanShellDoubleString(
+            String text,
+            int openStart,
+            Cursor c,
+            int limit,
+            int[] count,
+            int depth,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        int segStart = openStart;
+        while (c.has() && count[0] < limit) {
             char q = c.get();
             if (q == '"') {
                 c.step();
-                if (c.at > segStart && count < limit) {
-                    sink.token(segStart, c.at, STRING);
-                    count++;
-                }
-                return count;
+                emitToken(sink, count, limit, segStart, c.at, STRING);
+                return;
             }
-            if (q == '\\' && c.at + 1 < text.length()) {
+            if (q == '\\' && c.at + 1 < c.end) {
                 char esc = text.charAt(c.at + 1);
                 if (esc == '"' || esc == '\\' || esc == '$' || esc == '`' || esc == 'n' || esc == 'r' || esc == 't' || esc == '\n') {
-                    if (c.at > segStart && count < limit) {
-                        sink.token(segStart, c.at, STRING);
-                        count++;
-                    }
+                    emitToken(sink, count, limit, segStart, c.at, STRING);
                     int escStart = c.at;
                     c.step();
                     c.step();
-                    if (count < limit) {
-                        sink.token(escStart, c.at, ESCAPE);
-                        count++;
-                    }
+                    emitToken(sink, count, limit, escStart, c.at, ESCAPE);
                     segStart = c.at;
                 } else {
                     c.step();
@@ -579,27 +1156,56 @@ public final class CodeTokens {
                 }
                 continue;
             }
-            if (q == '$' && c.at + 1 < text.length()) {
+            if (q == '`' && depth < MAX_EMBED_DEPTH) {
+                emitToken(sink, count, limit, segStart, c.at, STRING);
+                int openBt = c.at;
+                c.step();
+                emitToken(sink, count, limit, openBt, c.at, OPERATOR);
+                UnescapedSlice bt = parseShellBacktickSlice(text, c);
+                scanEmbeddedSlice(bt, EMBED_SHELL, limit, count, depth, sink, checkpoint);
+                if (c.has() && c.get() == '`') {
+                    int closeBt = c.at;
+                    c.step();
+                    emitToken(sink, count, limit, closeBt, c.at, OPERATOR);
+                }
+                segStart = c.at;
+                continue;
+            }
+            if (q == '$' && c.at + 1 < c.end) {
                 char next = text.charAt(c.at + 1);
                 int varStart = c.at;
+                if (next == '(' && !(c.at + 2 < c.end && text.charAt(c.at + 2) == '(') && depth < MAX_EMBED_DEPTH) {
+                    emitToken(sink, count, limit, segStart, varStart, STRING);
+                    c.step();
+                    c.step();
+                    emitToken(sink, count, limit, varStart, c.at, OPERATOR);
+                    c.at = scanShellRange(text, c.at, c.end, limit, count, depth + 1, true, sink, checkpoint);
+                    if (c.has() && c.get() == ')') {
+                        int closeP = c.at;
+                        c.step();
+                        emitToken(sink, count, limit, closeP, c.at, OPERATOR);
+                    }
+                    segStart = c.at;
+                    continue;
+                }
                 boolean matched = false;
-                if (next == '(' && c.at + 2 < text.length() && text.charAt(c.at + 2) == '(') {
+                if (next == '(' && c.at + 2 < c.end && text.charAt(c.at + 2) == '(') {
                     c.step();
                     c.step();
                     c.step();
-                    int depth = 2;
-                    while (c.has() && depth > 0) {
+                    int pDepth = 2;
+                    while (c.has() && pDepth > 0) {
                         char d = c.get();
                         c.step();
-                        if (d == '(') depth++;
-                        else if (d == ')') depth--;
+                        if (d == '(') pDepth++;
+                        else if (d == ')') pDepth--;
                     }
                     matched = true;
                 } else if (next == '(') {
                     c.step();
                     c.step();
-                    int depth = 1;
-                    while (c.has() && depth > 0) {
+                    int pDepth = 1;
+                    while (c.has() && pDepth > 0) {
                         char d = c.get();
                         c.step();
                         if (d == '\\' && c.has()) c.step();
@@ -609,20 +1215,20 @@ public final class CodeTokens {
                                 c.step();
                                 if (sq == '\'') break;
                             }
-                        } else if (d == '(') depth++;
-                        else if (d == ')') depth--;
+                        } else if (d == '(') pDepth++;
+                        else if (d == ')') pDepth--;
                     }
                     matched = true;
                 } else if (next == '{') {
                     c.step();
                     c.step();
-                    int depth = 1;
-                    while (c.has() && depth > 0) {
+                    int bDepth = 1;
+                    while (c.has() && bDepth > 0) {
                         char b = c.get();
                         c.step();
                         if (b == '\\' && c.has()) c.step();
-                        else if (b == '{') depth++;
-                        else if (b == '}') depth--;
+                        else if (b == '{') bDepth++;
+                        else if (b == '}') bDepth--;
                     }
                     matched = true;
                 } else if (identStart(next)) {
@@ -635,41 +1241,52 @@ public final class CodeTokens {
                     matched = true;
                 }
                 if (matched) {
-                    if (varStart > segStart && count < limit) {
-                        sink.token(segStart, varStart, STRING);
-                        count++;
-                    }
-                    if (count < limit) {
-                        sink.token(varStart, c.at, VARIABLE);
-                        count++;
-                    }
+                    emitToken(sink, count, limit, segStart, varStart, STRING);
+                    emitToken(sink, count, limit, varStart, c.at, VARIABLE);
                     segStart = c.at;
                     continue;
                 }
             }
             c.step();
         }
-        if (c.at > segStart && count < limit) {
-            sink.token(segStart, c.at, STRING);
-            count++;
-        }
-        return count;
+        emitToken(sink, count, limit, segStart, c.at, STRING);
     }
 
     public static void scanShell(String text, int limit, Sink sink, Runnable checkpoint) {
         checkpoint.run();
-        Cursor c = new Cursor(text, checkpoint);
-        int count = 0;
+        int[] count = {0};
+        scanShellRange(text, 0, text.length(), limit, count, 0, false, sink, checkpoint);
+    }
+
+    private static int scanShellRange(
+            String text,
+            int rangeStart,
+            int rangeEnd,
+            int limit,
+            int[] count,
+            int depth,
+            boolean stopAtCloseParen,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        Cursor c = new Cursor(text, rangeStart, rangeEnd, checkpoint);
         boolean expectCommand = true;
         boolean inPrecommand = false;
         boolean inAssignmentValue = false;
         boolean expectWordListKeyword = false;
         boolean afterFunctionKeyword = false;
         boolean expectSubcommand = false;
+        boolean expectRedirectTarget = false;
+        String currentCmd = null;
+        int pendingEmbedLang = EMBED_NONE;
+        String redirectTarget = null;
+        String heredocCmd = null;
         String heredocEnd = null;
         boolean heredocStripTabs = false;
+        int parenNest = 0;
+        int caseDepth = 0;
 
-        while (c.has() && count < limit) {
+        while (c.has() && count[0] < limit) {
             char ch = c.get();
             if (ch == ' ' || ch == '\t') {
                 inAssignmentValue = false;
@@ -685,13 +1302,19 @@ public final class CodeTokens {
                 expectWordListKeyword = false;
                 afterFunctionKeyword = false;
                 expectSubcommand = false;
+                expectRedirectTarget = false;
+                currentCmd = null;
+                pendingEmbedLang = EMBED_NONE;
                 if (heredocEnd != null && c.has()) {
                     int bodyStart = c.at;
+                    int bodyEnd = c.at;
+                    int closeStart = -1;
+                    int closeEnd = -1;
                     while (c.has()) {
                         int lineStart = c.at;
                         int cmpStart = lineStart;
                         if (heredocStripTabs) {
-                            while (cmpStart < text.length() && text.charAt(cmpStart) == '\t') cmpStart++;
+                            while (cmpStart < c.end && text.charAt(cmpStart) == '\t') cmpStart++;
                         }
                         while (c.has() && c.get() != '\n' && c.get() != '\r') c.step();
                         int lineEnd = c.at;
@@ -699,64 +1322,133 @@ public final class CodeTokens {
                                 && text.regionMatches(cmpStart, heredocEnd, 0, heredocEnd.length());
                         if (c.has() && c.get() == '\r') c.step();
                         if (c.has() && c.get() == '\n') c.step();
-                        if (matched) break;
+                        if (matched) {
+                            bodyEnd = lineStart;
+                            closeStart = cmpStart;
+                            closeEnd = lineEnd;
+                            break;
+                        }
+                        bodyEnd = c.at;
                     }
-                    if (c.at > bodyStart && count < limit) {
-                        sink.token(bodyStart, c.at, STRING);
-                        count++;
+                    int heredocLang = inferHeredocLang(redirectTarget, heredocCmd, heredocEnd);
+                    if (heredocLang != EMBED_NONE && depth < MAX_EMBED_DEPTH && bodyEnd > bodyStart) {
+                        scanEmbeddedRange(text, bodyStart, bodyEnd, heredocLang, limit, count, depth, sink, checkpoint);
+                    } else if (bodyEnd > bodyStart) {
+                        emitToken(sink, count, limit, bodyStart, bodyEnd, STRING);
+                    }
+                    if (closeStart >= 0 && closeEnd > closeStart) {
+                        emitToken(sink, count, limit, closeStart, closeEnd, KEYWORD);
                     }
                     heredocEnd = null;
                     heredocStripTabs = false;
+                    heredocCmd = null;
+                    redirectTarget = null;
+                } else {
+                    redirectTarget = null;
                 }
                 continue;
             }
-            if (ch == '\\' && c.at + 1 < text.length()) {
+            if (ch == '\\' && c.at + 1 < c.end) {
                 char next = text.charAt(c.at + 1);
                 if (next == '\n') {
                     c.step();
                     c.step();
                     continue;
                 }
-                if (next == '\r' && c.at + 2 < text.length() && text.charAt(c.at + 2) == '\n') {
+                if (next == '\r' && c.at + 2 < c.end && text.charAt(c.at + 2) == '\n') {
                     c.step();
                     c.step();
                     c.step();
                     continue;
                 }
             }
-            boolean boundary = c.at == 0 || shellBoundary(text.charAt(c.at - 1));
+            boolean boundary = c.at == rangeStart || shellBoundary(text.charAt(c.at - 1));
             if (ch == '#' && boundary && !inAssignmentValue) {
                 int start = c.at;
                 while (c.has() && c.get() != '\n' && c.get() != '\r') c.step();
-                sink.token(start, c.at, COMMENT);
-                count++;
+                emitToken(sink, count, limit, start, c.at, COMMENT);
                 continue;
             }
-            if (ch == '"') {
-                int start = c.at;
-                c.step();
-                count = scanShellDoubleString(text, start, c, limit, count, sink);
-                if (!inAssignmentValue) {
-                    expectCommand = false;
-                    inPrecommand = false;
-                    expectSubcommand = false;
-                }
-                continue;
-            }
-            if (ch == '\'' || ch == '`') {
-                int start = c.at;
-                c.step();
-                while (c.has()) {
-                    char next = c.get();
-                    c.step();
-                    if (ch != '\'' && next == '\\' && c.has()) {
-                        c.step();
-                    } else if (next == ch) {
-                        break;
+            if (ch == '"' || ch == '\'' || (ch == '$' && c.at + 1 < c.end && text.charAt(c.at + 1) == '\'')) {
+                int activeEmbed = pendingEmbedLang;
+                if (activeEmbed == EMBED_NONE && !inAssignmentValue && !expectRedirectTarget
+                        && currentCmd != null && SQL_INTERPRETERS.contains(currentCmd)) {
+                    int peekStart = ch == '$' ? c.at + 2 : c.at + 1;
+                    if (startsWithSqlKeyword(text, peekStart, c.end)) {
+                        activeEmbed = LANG_SQL;
                     }
                 }
-                sink.token(start, c.at, STRING);
-                count++;
+                if (activeEmbed != EMBED_NONE && depth < MAX_EMBED_DEPTH) {
+                    UnescapedSlice slice = parseShellEmbeddedWord(text, c);
+                    scanEmbeddedSlice(slice, activeEmbed, limit, count, depth, sink, checkpoint);
+                    pendingEmbedLang = EMBED_NONE;
+                    expectRedirectTarget = false;
+                    if (!inAssignmentValue) {
+                        expectCommand = false;
+                        inPrecommand = false;
+                        expectSubcommand = false;
+                    }
+                    continue;
+                }
+                if (ch == '"') {
+                    int start = c.at;
+                    c.step();
+                    scanShellDoubleString(text, start, c, limit, count, depth, sink, checkpoint);
+                    if (expectRedirectTarget) {
+                        int innerEnd = (c.at > start + 1 && text.charAt(c.at - 1) == '"') ? c.at - 1 : c.at;
+                        if (innerEnd > start + 1) redirectTarget = text.substring(start + 1, innerEnd);
+                        expectRedirectTarget = false;
+                    }
+                    if (!inAssignmentValue) {
+                        expectCommand = false;
+                        inPrecommand = false;
+                        expectSubcommand = false;
+                    }
+                    continue;
+                }
+                if (ch == '\'') {
+                    int start = c.at;
+                    c.step();
+                    while (c.has()) {
+                        char next = c.get();
+                        c.step();
+                        if (next == '\'') break;
+                    }
+                    emitToken(sink, count, limit, start, c.at, STRING);
+                    if (expectRedirectTarget) {
+                        int innerEnd = (c.at > start + 1 && text.charAt(c.at - 1) == '\'') ? c.at - 1 : c.at;
+                        if (innerEnd > start + 1) redirectTarget = text.substring(start + 1, innerEnd);
+                        expectRedirectTarget = false;
+                    }
+                    if (!inAssignmentValue) {
+                        expectCommand = false;
+                        inPrecommand = false;
+                        expectSubcommand = false;
+                    }
+                    continue;
+                }
+            }
+            if (ch == '`') {
+                int start = c.at;
+                c.step();
+                if (depth < MAX_EMBED_DEPTH) {
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
+                    UnescapedSlice bt = parseShellBacktickSlice(text, c);
+                    scanEmbeddedSlice(bt, EMBED_SHELL, limit, count, depth, sink, checkpoint);
+                    if (c.has() && c.get() == '`') {
+                        int closeBt = c.at;
+                        c.step();
+                        emitToken(sink, count, limit, closeBt, c.at, OPERATOR);
+                    }
+                } else {
+                    while (c.has()) {
+                        char next = c.get();
+                        c.step();
+                        if (next == '\\' && c.has()) c.step();
+                        else if (next == '`') break;
+                    }
+                    emitToken(sink, count, limit, start, c.at, STRING);
+                }
                 if (!inAssignmentValue) {
                     expectCommand = false;
                     inPrecommand = false;
@@ -771,7 +1463,7 @@ public final class CodeTokens {
                 char next = c.get();
                 if (next == '"') {
                     c.step();
-                    count = scanShellDoubleString(text, start, c, limit, count, sink);
+                    scanShellDoubleString(text, start, c, limit, count, depth, sink, checkpoint);
                     if (!inAssignmentValue) {
                         expectCommand = false;
                         inPrecommand = false;
@@ -787,8 +1479,7 @@ public final class CodeTokens {
                         if (q == '\\' && c.has()) c.step();
                         else if (q == next) break;
                     }
-                    sink.token(start, c.at, STRING);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, STRING);
                     if (!inAssignmentValue) {
                         expectCommand = false;
                         inPrecommand = false;
@@ -796,18 +1487,17 @@ public final class CodeTokens {
                     }
                     continue;
                 }
-                if (next == '(' && c.at + 1 < text.length() && text.charAt(c.at + 1) == '(') {
+                if (next == '(' && c.at + 1 < c.end && text.charAt(c.at + 1) == '(') {
                     c.step();
                     c.step();
-                    int depth = 2;
-                    while (c.has() && depth > 0) {
+                    int pDepth = 2;
+                    while (c.has() && pDepth > 0) {
                         char d = c.get();
                         c.step();
-                        if (d == '(') depth++;
-                        else if (d == ')') depth--;
+                        if (d == '(') pDepth++;
+                        else if (d == ')') pDepth--;
                     }
-                    sink.token(start, c.at, VARIABLE);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, VARIABLE);
                     if (!inAssignmentValue) {
                         expectCommand = false;
                         inPrecommand = false;
@@ -817,26 +1507,40 @@ public final class CodeTokens {
                 }
                 if (next == '(') {
                     c.step();
-                    sink.token(start, c.at, OPERATOR);
-                    count++;
-                    expectCommand = true;
-                    inPrecommand = false;
-                    inAssignmentValue = false;
-                    expectSubcommand = false;
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
+                    if (depth < MAX_EMBED_DEPTH) {
+                        c.at = scanShellRange(text, c.at, c.end, limit, count, depth + 1, true, sink, checkpoint);
+                        if (c.has() && c.get() == ')') {
+                            int closeP = c.at;
+                            c.step();
+                            emitToken(sink, count, limit, closeP, c.at, OPERATOR);
+                        }
+                        if (!inAssignmentValue) {
+                            expectCommand = false;
+                            inPrecommand = false;
+                            expectSubcommand = false;
+                        }
+                    } else {
+                        expectCommand = true;
+                        inPrecommand = false;
+                        inAssignmentValue = false;
+                        expectSubcommand = false;
+                        currentCmd = null;
+                        pendingEmbedLang = EMBED_NONE;
+                    }
                     continue;
                 }
                 if (next == '{') {
                     c.step();
-                    int depth = 1;
-                    while (c.has() && depth > 0) {
+                    int bDepth = 1;
+                    while (c.has() && bDepth > 0) {
                         char b = c.get();
                         c.step();
                         if (b == '\\' && c.has()) c.step();
-                        else if (b == '{') depth++;
-                        else if (b == '}') depth--;
+                        else if (b == '{') bDepth++;
+                        else if (b == '}') bDepth--;
                     }
-                    sink.token(start, c.at, VARIABLE);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, VARIABLE);
                     if (!inAssignmentValue) {
                         expectCommand = false;
                         inPrecommand = false;
@@ -850,8 +1554,7 @@ public final class CodeTokens {
                     c.step();
                 }
                 if (c.at > start + 1) {
-                    sink.token(start, c.at, VARIABLE);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, VARIABLE);
                     if (!inAssignmentValue) {
                         expectCommand = false;
                         inPrecommand = false;
@@ -860,37 +1563,48 @@ public final class CodeTokens {
                 }
                 continue;
             }
-            if (boundary && ch >= '0' && ch <= '9' && c.at + 1 < text.length()) {
+            if (boundary && ch >= '0' && ch <= '9' && c.at + 1 < c.end) {
                 char peek = text.charAt(c.at + 1);
                 if (peek == '>' || peek == '<') {
                     int start = c.at;
                     c.step();
                     c.step();
+                    boolean dupFd = false;
                     if (c.has() && (c.get() == peek || c.get() == '&' || c.get() == '|')) {
                         char r = c.get();
                         c.step();
-                        if (r == '&' && c.has() && (c.get() == '-' || Character.isDigit(c.get()))) {
-                            while (c.has() && Character.isDigit(c.get())) c.step();
-                            if (c.has() && c.get() == '-') c.step();
+                        if (r == '&') {
+                            dupFd = true;
+                            if (c.has() && (c.get() == '-' || Character.isDigit(c.get()))) {
+                                while (c.has() && Character.isDigit(c.get())) c.step();
+                                if (c.has() && c.get() == '-') c.step();
+                            }
                         }
                     }
-                    sink.token(start, c.at, OPERATOR);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
                     inAssignmentValue = false;
                     expectSubcommand = false;
+                    expectRedirectTarget = peek == '>' && !dupFd;
                     continue;
                 }
             }
             if (ch == '|' || ch == '&' || ch == ';' || ch == '(' || ch == ')' || ch == '<' || ch == '>') {
+                if (ch == ')') {
+                    if (stopAtCloseParen && parenNest == 0 && caseDepth == 0) {
+                        return c.at;
+                    }
+                    if (parenNest > 0) parenNest--;
+                } else if (ch == '(') {
+                    parenNest++;
+                }
                 int start = c.at;
                 inAssignmentValue = false;
-                if (ch == '<' && c.at + 1 < text.length() && text.charAt(c.at + 1) == '<') {
+                if (ch == '<' && c.at + 1 < c.end && text.charAt(c.at + 1) == '<') {
                     c.step();
                     c.step();
                     if (c.has() && c.get() == '<') {
                         c.step();
-                        sink.token(start, c.at, OPERATOR);
-                        count++;
+                        emitToken(sink, count, limit, start, c.at, OPERATOR);
                         expectSubcommand = false;
                         continue;
                     }
@@ -899,8 +1613,7 @@ public final class CodeTokens {
                         stripTabs = true;
                         c.step();
                     }
-                    sink.token(start, c.at, OPERATOR);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
                     expectSubcommand = false;
                     while (c.has() && (c.get() == ' ' || c.get() == '\t')) c.step();
                     if (c.has() && c.get() != '\n' && c.get() != '\r' && !shellBoundary(c.get())) {
@@ -924,10 +1637,8 @@ public final class CodeTokens {
                         if (delim.length() > 0) {
                             heredocEnd = delim.toString();
                             heredocStripTabs = stripTabs;
-                            if (count < limit) {
-                                sink.token(tagStart, c.at, KEYWORD);
-                                count++;
-                            }
+                            heredocCmd = currentCmd;
+                            emitToken(sink, count, limit, tagStart, c.at, KEYWORD);
                         }
                     }
                     continue;
@@ -939,33 +1650,44 @@ public final class CodeTokens {
                     else if (c.get() == '>') {
                         c.step();
                         if (c.has() && c.get() == '>') c.step();
-                        sink.token(start, c.at, OPERATOR);
-                        count++;
+                        emitToken(sink, count, limit, start, c.at, OPERATOR);
                         expectSubcommand = false;
+                        expectRedirectTarget = true;
                         continue;
                     }
                 } else if (ch == ';' && c.has() && (c.get() == ';' || c.get() == '&')) {
                     c.step();
                     if (c.has() && c.get() == '&') c.step();
                 } else if ((ch == '>' || ch == '<') && c.has()) {
+                    boolean dupFd = false;
                     if (c.get() == ch || c.get() == '&' || c.get() == '|') {
                         char r = c.get();
                         c.step();
-                        if (r == '&' && c.has() && (c.get() == '-' || Character.isDigit(c.get()))) {
-                            while (c.has() && Character.isDigit(c.get())) c.step();
-                            if (c.has() && c.get() == '-') c.step();
+                        if (r == '&') {
+                            dupFd = true;
+                            if (c.has() && (c.get() == '-' || Character.isDigit(c.get()))) {
+                                while (c.has() && Character.isDigit(c.get())) c.step();
+                                if (c.has() && c.get() == '-') c.step();
+                            }
                         }
                     }
-                    sink.token(start, c.at, OPERATOR);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
                     expectSubcommand = false;
+                    expectRedirectTarget = ch == '>' && !dupFd;
+                    continue;
+                } else if (ch == '>' || ch == '<') {
+                    emitToken(sink, count, limit, start, c.at, OPERATOR);
+                    expectSubcommand = false;
+                    expectRedirectTarget = ch == '>';
                     continue;
                 }
-                sink.token(start, c.at, OPERATOR);
-                count++;
+                emitToken(sink, count, limit, start, c.at, OPERATOR);
                 expectCommand = true;
                 inPrecommand = false;
                 expectSubcommand = false;
+                expectRedirectTarget = false;
+                currentCmd = null;
+                pendingEmbedLang = EMBED_NONE;
                 if (ch == ';') expectWordListKeyword = false;
                 continue;
             }
@@ -973,49 +1695,46 @@ public final class CodeTokens {
             int start = c.at;
             if ((expectCommand || inPrecommand) && !inAssignmentValue && identStart(ch)) {
                 int scan = c.at + 1;
-                while (scan < text.length() && identPart(text.charAt(scan))) scan++;
-                boolean plusEq = scan + 1 < text.length() && text.charAt(scan) == '+' && text.charAt(scan + 1) == '=';
-                boolean eq = scan < text.length() && text.charAt(scan) == '=';
+                while (scan < c.end && identPart(text.charAt(scan))) scan++;
+                boolean plusEq = scan + 1 < c.end && text.charAt(scan) == '+' && text.charAt(scan + 1) == '=';
+                boolean eq = scan < c.end && text.charAt(scan) == '=';
                 if (eq || plusEq) {
                     while (c.at < scan) c.step();
-                    sink.token(start, c.at, VARIABLE);
-                    count++;
+                    emitToken(sink, count, limit, start, c.at, VARIABLE);
                     int opStart = c.at;
                     c.step();
                     if (plusEq) c.step();
-                    if (count < limit) {
-                        sink.token(opStart, c.at, OPERATOR);
-                        count++;
-                    }
+                    emitToken(sink, count, limit, opStart, c.at, OPERATOR);
                     inAssignmentValue = true;
                     continue;
                 }
             }
 
             if (ch == '-' && boundary && !inAssignmentValue && (!expectCommand || inPrecommand)
-                    && c.at + 1 < text.length() && !shellSpecial(text.charAt(c.at + 1)) && text.charAt(c.at + 1) != '=') {
+                    && c.at + 1 < c.end && !shellSpecial(text.charAt(c.at + 1)) && text.charAt(c.at + 1) != '=') {
                 c.step();
                 while (c.has() && !shellSpecial(c.get()) && c.get() != '=') {
-                    if (c.get() == '\\' && c.at + 1 < text.length()) c.step();
+                    if (c.get() == '\\' && c.at + 1 < c.end) c.step();
                     c.step();
                 }
-                sink.token(start, c.at, FLAG);
-                count++;
+                int flagEnd = c.at;
+                emitToken(sink, count, limit, start, flagEnd, FLAG);
                 expectSubcommand = false;
+                if (flagEnd - start <= 16) {
+                    int flagEmbed = inferFlagEmbedLang(currentCmd, text.substring(start, flagEnd));
+                    if (flagEmbed != EMBED_NONE) pendingEmbedLang = flagEmbed;
+                }
                 if (c.has() && c.get() == '=') {
                     int eqStart = c.at;
                     c.step();
-                    if (count < limit) {
-                        sink.token(eqStart, c.at, OPERATOR);
-                        count++;
-                    }
+                    emitToken(sink, count, limit, eqStart, c.at, OPERATOR);
                     inAssignmentValue = true;
                 }
                 continue;
             }
 
             while (c.has() && !shellSpecial(c.get())) {
-                if (c.get() == '\\' && c.at + 1 < text.length()) {
+                if (c.get() == '\\' && c.at + 1 < c.end) {
                     char esc = text.charAt(c.at + 1);
                     if (esc == '\n' || esc == '\r') break;
                     c.step();
@@ -1029,82 +1748,93 @@ public final class CodeTokens {
             }
             if (inAssignmentValue) {
                 if (isNumericWord(text, start, end)) {
-                    sink.token(start, end, NUMBER);
-                    count++;
+                    emitToken(sink, count, limit, start, end, NUMBER);
                 } else if (isShellPathOrTarget(text, start, end)) {
-                    sink.token(start, end, PROPERTY);
-                    count++;
+                    emitToken(sink, count, limit, start, end, PROPERTY);
                 }
+                pendingEmbedLang = EMBED_NONE;
                 continue;
             }
             String token = end - start <= 16 ? text.substring(start, end) : null;
+            if (expectRedirectTarget) {
+                redirectTarget = text.substring(start, end);
+                expectRedirectTarget = false;
+            } else if ("tee".equals(currentCmd) && text.charAt(start) != '-') {
+                redirectTarget = text.substring(start, end);
+            }
             if (afterFunctionKeyword) {
-                sink.token(start, end, COMMAND);
-                count++;
+                emitToken(sink, count, limit, start, end, COMMAND);
                 afterFunctionKeyword = false;
                 expectCommand = false;
                 expectSubcommand = false;
+                currentCmd = null;
+                pendingEmbedLang = EMBED_NONE;
             } else if (expectWordListKeyword && "in".equals(token)) {
-                sink.token(start, end, KEYWORD);
-                count++;
+                emitToken(sink, count, limit, start, end, KEYWORD);
                 expectWordListKeyword = false;
                 expectSubcommand = false;
             } else if (expectCommand) {
                 if ("function".equals(token)) {
-                    sink.token(start, end, KEYWORD);
-                    count++;
+                    emitToken(sink, count, limit, start, end, KEYWORD);
                     afterFunctionKeyword = true;
                     expectSubcommand = false;
                 } else if (token != null && SHELL_WORDLIST_KEYWORDS.contains(token)) {
-                    sink.token(start, end, KEYWORD);
-                    count++;
+                    emitToken(sink, count, limit, start, end, KEYWORD);
                     expectCommand = false;
                     expectWordListKeyword = true;
                     expectSubcommand = false;
+                    if ("case".equals(token)) caseDepth++;
                 } else if (token != null && SHELL_OPEN_KEYWORDS.contains(token)) {
-                    sink.token(start, end, KEYWORD);
-                    count++;
+                    emitToken(sink, count, limit, start, end, KEYWORD);
                     expectCommand = true;
                     expectSubcommand = false;
+                    if ("esac".equals(token) && caseDepth > 0) caseDepth--;
                 } else if ("[".equals(token) || "[[".equals(token)) {
-                    sink.token(start, end, OPERATOR);
-                    count++;
+                    emitToken(sink, count, limit, start, end, OPERATOR);
                     expectCommand = false;
                     expectSubcommand = false;
                 } else {
-                    sink.token(start, end, COMMAND);
-                    count++;
+                    emitToken(sink, count, limit, start, end, COMMAND);
+                    int slash = text.lastIndexOf('/', end - 1);
+                    int baseStart = slash >= start ? slash + 1 : start;
+                    int baseLen = end - baseStart;
+                    String baseName = baseLen > 0 && baseLen <= 20 ? text.substring(baseStart, end).toLowerCase(Locale.ROOT) : null;
                     if (token != null && SHELL_PRECOMMANDS.contains(token)) {
                         expectCommand = true;
                         inPrecommand = true;
                         expectSubcommand = false;
+                        currentCmd = null;
+                        pendingEmbedLang = EMBED_NONE;
                     } else {
                         expectCommand = false;
                         inPrecommand = false;
-                        int slash = text.lastIndexOf('/', end - 1);
-                        int baseStart = slash >= start ? slash + 1 : start;
-                        int baseLen = end - baseStart;
-                        expectSubcommand = baseLen > 0 && baseLen <= 12
-                                && SHELL_SUBCOMMAND_TOOLS.contains(text.substring(baseStart, end));
+                        currentCmd = baseName;
+                        pendingEmbedLang = "eval".equals(baseName) ? EMBED_SHELL : EMBED_NONE;
+                        expectSubcommand = baseName != null && baseName.length() <= 12
+                                && SHELL_SUBCOMMAND_TOOLS.contains(baseName);
                     }
                 }
             } else {
                 if ("]".equals(token) || "]]".equals(token)) {
-                    sink.token(start, end, OPERATOR);
-                    count++;
+                    emitToken(sink, count, limit, start, end, OPERATOR);
                 } else if (isNumericWord(text, start, end)) {
-                    sink.token(start, end, NUMBER);
-                    count++;
+                    emitToken(sink, count, limit, start, end, NUMBER);
                 } else if (isShellPathOrTarget(text, start, end)) {
-                    sink.token(start, end, PROPERTY);
-                    count++;
+                    emitToken(sink, count, limit, start, end, PROPERTY);
                 } else if (expectSubcommand) {
-                    sink.token(start, end, TYPE);
-                    count++;
+                    emitToken(sink, count, limit, start, end, TYPE);
+                    if ("adb".equals(currentCmd) && "shell".equals(token)) {
+                        pendingEmbedLang = EMBED_SHELL;
+                    } else if ("deno".equals(currentCmd) && "eval".equals(token)) {
+                        pendingEmbedLang = LANG_JS_TS;
+                    }
+                } else {
+                    pendingEmbedLang = EMBED_NONE;
                 }
                 expectSubcommand = false;
             }
         }
+        return c.at;
     }
 
     private static boolean isConfigScalarDateOrVersion(String text, int start, int end) {
@@ -1512,23 +2242,41 @@ public final class CodeTokens {
         return p < end && text.charAt(p) == '(';
     }
 
-    private static int findInterpEnd(String text, int openStart, int end, char closeChar) {
+    private static int findBalancedBrace(String text, int openStart, int end) {
         int pos = openStart;
         int depth = 1;
-        char openChar = closeChar == ')' ? '(' : '{';
         while (pos < end && depth > 0) {
             char ch = text.charAt(pos);
+            if (ch == '/' && pos + 1 < end) {
+                char next = text.charAt(pos + 1);
+                if (next == '/') {
+                    pos += 2;
+                    while (pos < end && text.charAt(pos) != '\n' && text.charAt(pos) != '\r') pos++;
+                    continue;
+                }
+                if (next == '*') {
+                    pos += 2;
+                    while (pos < end) {
+                        if (text.charAt(pos) == '*' && pos + 1 < end && text.charAt(pos + 1) == '/') {
+                            pos += 2;
+                            break;
+                        }
+                        pos++;
+                    }
+                    continue;
+                }
+            }
             if (ch == '"' || ch == '\'' || ch == '`') {
                 pos++;
                 while (pos < end) {
                     char q = text.charAt(pos++);
-                    if (ch != '\'' && q == '\\' && pos < end) pos++;
+                    if (q == '\\' && pos < end) pos++;
                     else if (q == ch) break;
                 }
                 continue;
             }
-            if (ch == openChar) depth++;
-            else if (ch == closeChar) {
+            if (ch == '{') depth++;
+            else if (ch == '}') {
                 depth--;
                 if (depth == 0) return pos;
             }
@@ -1592,20 +2340,19 @@ public final class CodeTokens {
             }
             char ch = c.get();
             if (allowParenInterp && ch == '\\' && c.at + 1 < c.end && text.charAt(c.at + 1) == '(' && depth < 8) {
-                int exprClose = findInterpEnd(text, c.at + 2, c.end, ')');
-                if (exprClose >= 0) {
-                    emitToken(sink, count, limit, segStart, c.at, STRING);
-                    int dStart = c.at;
+                emitToken(sink, count, limit, segStart, c.at, STRING);
+                int dStart = c.at;
+                c.step();
+                c.step();
+                emitToken(sink, count, limit, dStart, c.at, ESCAPE);
+                scanCodeRange(text, c, lang, limit, count, depth + 1, ')', sink, checkpoint);
+                if (c.has() && c.get() == ')') {
+                    int closeStart = c.at;
                     c.step();
-                    c.step();
-                    emitToken(sink, count, limit, dStart, c.at, ESCAPE);
-                    scanCodeRange(text, c.at, exprClose, lang, limit, count, depth + 1, sink, checkpoint);
-                    c.at = exprClose;
-                    c.step();
-                    emitToken(sink, count, limit, exprClose, c.at, ESCAPE);
-                    segStart = c.at;
-                    continue;
+                    emitToken(sink, count, limit, closeStart, c.at, ESCAPE);
                 }
+                segStart = c.at;
+                continue;
             }
             if (allowEscape && ch == '\\' && c.at + 1 < c.end) {
                 emitToken(sink, count, limit, segStart, c.at, STRING);
@@ -1639,19 +2386,18 @@ public final class CodeTokens {
                     continue;
                 }
                 if (depth < 8) {
-                    int exprClose = findInterpEnd(text, c.at + 1, c.end, '}');
-                    if (exprClose >= 0) {
-                        emitToken(sink, count, limit, segStart, c.at, STRING);
-                        int dStart = c.at;
+                    emitToken(sink, count, limit, segStart, c.at, STRING);
+                    int dStart = c.at;
+                    c.step();
+                    emitToken(sink, count, limit, dStart, c.at, ESCAPE);
+                    scanCodeRange(text, c, lang, limit, count, depth + 1, '}', sink, checkpoint);
+                    if (c.has() && c.get() == '}') {
+                        int closeStart = c.at;
                         c.step();
-                        emitToken(sink, count, limit, dStart, c.at, ESCAPE);
-                        scanCodeRange(text, c.at, exprClose, lang, limit, count, depth + 1, sink, checkpoint);
-                        c.at = exprClose;
-                        c.step();
-                        emitToken(sink, count, limit, exprClose, c.at, ESCAPE);
-                        segStart = c.at;
-                        continue;
+                        emitToken(sink, count, limit, closeStart, c.at, ESCAPE);
                     }
+                    segStart = c.at;
+                    continue;
                 }
             }
             if (allowBraceInterp && ch == '}' && c.at + 1 < c.end && text.charAt(c.at + 1) == '}') {
@@ -1664,38 +2410,36 @@ public final class CodeTokens {
                 continue;
             }
             if (allowHashInterp && ch == '#' && c.at + 1 < c.end && text.charAt(c.at + 1) == '{' && depth < 8) {
-                int exprClose = findInterpEnd(text, c.at + 2, c.end, '}');
-                if (exprClose >= 0) {
+                emitToken(sink, count, limit, segStart, c.at, STRING);
+                int dStart = c.at;
+                c.step();
+                c.step();
+                emitToken(sink, count, limit, dStart, c.at, ESCAPE);
+                scanCodeRange(text, c, lang, limit, count, depth + 1, '}', sink, checkpoint);
+                if (c.has() && c.get() == '}') {
+                    int closeStart = c.at;
+                    c.step();
+                    emitToken(sink, count, limit, closeStart, c.at, ESCAPE);
+                }
+                segStart = c.at;
+                continue;
+            }
+            if ((allowDollarBraceInterp || allowBareDollarInterp) && ch == '$' && c.at + 1 < c.end) {
+                char next = text.charAt(c.at + 1);
+                if (allowDollarBraceInterp && next == '{' && depth < 8) {
                     emitToken(sink, count, limit, segStart, c.at, STRING);
                     int dStart = c.at;
                     c.step();
                     c.step();
                     emitToken(sink, count, limit, dStart, c.at, ESCAPE);
-                    scanCodeRange(text, c.at, exprClose, lang, limit, count, depth + 1, sink, checkpoint);
-                    c.at = exprClose;
-                    c.step();
-                    emitToken(sink, count, limit, exprClose, c.at, ESCAPE);
+                    scanCodeRange(text, c, lang, limit, count, depth + 1, '}', sink, checkpoint);
+                    if (c.has() && c.get() == '}') {
+                        int closeStart = c.at;
+                        c.step();
+                        emitToken(sink, count, limit, closeStart, c.at, ESCAPE);
+                    }
                     segStart = c.at;
                     continue;
-                }
-            }
-            if ((allowDollarBraceInterp || allowBareDollarInterp) && ch == '$' && c.at + 1 < c.end) {
-                char next = text.charAt(c.at + 1);
-                if (allowDollarBraceInterp && next == '{' && depth < 8) {
-                    int exprClose = findInterpEnd(text, c.at + 2, c.end, '}');
-                    if (exprClose >= 0) {
-                        emitToken(sink, count, limit, segStart, c.at, STRING);
-                        int dStart = c.at;
-                        c.step();
-                        c.step();
-                        emitToken(sink, count, limit, dStart, c.at, ESCAPE);
-                        scanCodeRange(text, c.at, exprClose, lang, limit, count, depth + 1, sink, checkpoint);
-                        c.at = exprClose;
-                        c.step();
-                        emitToken(sink, count, limit, exprClose, c.at, ESCAPE);
-                        segStart = c.at;
-                        continue;
-                    }
                 } else if (allowBareDollarInterp && identStart(next)) {
                     emitToken(sink, count, limit, segStart, c.at, STRING);
                     int vStart = c.at;
@@ -1763,7 +2507,7 @@ public final class CodeTokens {
                 continue;
             }
             if (cur == '{') {
-                int braceEnd = findInterpEnd(text, scan + 1, c.end, '}');
+                int braceEnd = findBalancedBrace(text, scan + 1, c.end);
                 if (braceEnd < 0) return false;
                 scan = braceEnd + 1;
                 continue;
@@ -1816,13 +2560,10 @@ public final class CodeTokens {
                 continue;
             }
             if (cur == '{') {
-                int braceEnd = findInterpEnd(text, c.at + 1, closePos, '}');
-                if (braceEnd >= 0) {
-                    c.step();
-                    scanCodeRange(text, c.at, braceEnd, lang, limit, count, depth + 1, sink, checkpoint);
-                    c.at = braceEnd + 1;
-                    continue;
-                }
+                c.step();
+                scanCodeRange(text, c, lang, limit, count, depth + 1, '}', sink, checkpoint);
+                if (c.at < closePos && c.get() == '}') c.step();
+                continue;
             }
             if (identStart(cur)) {
                 int s = c.at;
@@ -1839,21 +2580,20 @@ public final class CodeTokens {
     public static void scanCode(String text, int lang, int limit, Sink sink, Runnable checkpoint) {
         checkpoint.run();
         int[] count = {0};
-        scanCodeRange(text, 0, text.length(), lang, limit, count, 0, sink, checkpoint);
+        scanCodeRange(text, new Cursor(text, 0, text.length(), checkpoint), lang, limit, count, 0, (char) 0, sink, checkpoint);
     }
 
     private static void scanCodeRange(
             String text,
-            int rangeStart,
-            int rangeEnd,
+            Cursor c,
             int lang,
             int limit,
             int[] count,
             int depth,
+            char stopChar,
             Sink sink,
             Runnable checkpoint
     ) {
-        Cursor c = new Cursor(text, rangeStart, rangeEnd, checkpoint);
         final int declNone = 0, declFunc = 1, declType = 2, declVar = 3, declImport = 4;
         int afterDecl = declNone;
         boolean afterDot = false;
@@ -1868,6 +2608,9 @@ public final class CodeTokens {
 
         while (c.has() && count[0] < limit) {
             char ch = c.get();
+            if (stopChar != 0 && ((ch == '}' && stopChar == '}' && braceDepth == 0) || (ch == ')' && stopChar == ')' && parenDepth == 0))) {
+                return;
+            }
             if (ch == ' ' || ch == '\t') {
                 c.step();
                 continue;
@@ -1939,6 +2682,41 @@ public final class CodeTokens {
                     }
                     emitToken(sink, count, limit, start, c.at, COMMENT);
                     continue;
+                }
+            }
+            if (lang == LANG_JS_TS && ch == '/' && jsxAllowed && c.at + 1 < c.end) {
+                char next = text.charAt(c.at + 1);
+                if (next != '/' && next != '*') {
+                    int scan = c.at + 1;
+                    boolean inClass = false;
+                    int closeAt = -1;
+                    while (scan < c.end) {
+                        char rc = text.charAt(scan);
+                        if (rc == '\n' || rc == '\r') break;
+                        if (rc == '\\') {
+                            scan += 2;
+                            continue;
+                        }
+                        if (rc == '[' && !inClass) inClass = true;
+                        else if (rc == ']' && inClass) inClass = false;
+                        else if (rc == '/' && !inClass) {
+                            closeAt = scan;
+                            break;
+                        }
+                        scan++;
+                    }
+                    if (closeAt > c.at) {
+                        int start = c.at;
+                        c.at = closeAt + 1;
+                        while (c.has() && "dgimsuvy".indexOf(c.get()) >= 0) c.step();
+                        emitToken(sink, count, limit, start, c.at, ESCAPE);
+                        lineStart = false;
+                        afterDecl = declNone;
+                        afterDot = false;
+                        atMemberKeyStart = false;
+                        jsxAllowed = false;
+                        continue;
+                    }
                 }
             }
             if (lang == LANG_C_FAMILY && lineStart && ch == '#') {
@@ -2748,79 +3526,130 @@ public final class CodeTokens {
 
     public static void scanMarkdown(String text, int limit, Sink sink, Runnable checkpoint) {
         checkpoint.run();
-        int len = text.length();
-        int pos = 0;
-        int count = 0;
-        boolean inFence = false;
-        while (pos < len && count < limit) {
+        int[] count = {0};
+        scanMarkdownRange(text, 0, text.length(), limit, count, 0, sink, checkpoint);
+    }
+
+    private static void scanMarkdownRange(
+            String text,
+            int rangeStart,
+            int rangeEnd,
+            int limit,
+            int[] count,
+            int depth,
+            Sink sink,
+            Runnable checkpoint
+    ) {
+        int pos = rangeStart;
+        while (pos < rangeEnd && count[0] < limit) {
             if ((pos & 4095) == 0) checkpoint.run();
             int lineStart = pos;
             int lineEnd = pos;
-            while (lineEnd < len && text.charAt(lineEnd) != '\n' && text.charAt(lineEnd) != '\r') lineEnd++;
+            while (lineEnd < rangeEnd && text.charAt(lineEnd) != '\n' && text.charAt(lineEnd) != '\r') lineEnd++;
             int nextPos = lineEnd;
-            if (nextPos < len && text.charAt(nextPos) == '\r') nextPos++;
-            if (nextPos < len && text.charAt(nextPos) == '\n') nextPos++;
+            if (nextPos < rangeEnd && text.charAt(nextPos) == '\r') nextPos++;
+            if (nextPos < rangeEnd && text.charAt(nextPos) == '\n') nextPos++;
             int p = lineStart;
             while (p < lineEnd && (text.charAt(p) == ' ' || text.charAt(p) == '\t')) p++;
-            if ((p + 2 < lineEnd && ((text.charAt(p) == '`' && text.charAt(p + 1) == '`' && text.charAt(p + 2) == '`')
-                    || (text.charAt(p) == '~' && text.charAt(p + 1) == '~' && text.charAt(p + 2) == '~')))) {
-                sink.token(lineStart, lineEnd, ANNOTATION);
-                count++;
-                inFence = !inFence;
-                pos = nextPos;
-                continue;
-            }
-            if (inFence) {
-                if (lineEnd > lineStart) {
-                    sink.token(lineStart, lineEnd, STRING);
-                    count++;
+            if (p + 2 < lineEnd && (text.charAt(p) == '`' || text.charAt(p) == '~')) {
+                char fenceChar = text.charAt(p);
+                int fEnd = p;
+                while (fEnd < lineEnd && text.charAt(fEnd) == fenceChar) fEnd++;
+                int fenceLen = fEnd - p;
+                boolean validFence = fenceLen >= 3;
+                if (validFence && fenceChar == '`') {
+                    for (int k = fEnd; k < lineEnd; k++) {
+                        if (text.charAt(k) == '`') {
+                            validFence = false;
+                            break;
+                        }
+                    }
                 }
-                pos = nextPos;
-                continue;
+                if (validFence) {
+                    emitToken(sink, count, limit, lineStart, lineEnd, ANNOTATION);
+                    String info = text.substring(fEnd, lineEnd);
+                    int embedLang = resolveEmbedLang(info);
+                    int bodyStart = nextPos;
+                    int bodyEnd = nextPos;
+                    int closeStart = -1;
+                    int closeEnd = -1;
+                    pos = nextPos;
+                    while (pos < rangeEnd) {
+                        if ((pos & 4095) == 0) checkpoint.run();
+                        int ls = pos;
+                        int le = pos;
+                        while (le < rangeEnd && text.charAt(le) != '\n' && text.charAt(le) != '\r') le++;
+                        int np = le;
+                        if (np < rangeEnd && text.charAt(np) == '\r') np++;
+                        if (np < rangeEnd && text.charAt(np) == '\n') np++;
+                        int cp = ls;
+                        while (cp < le && (text.charAt(cp) == ' ' || text.charAt(cp) == '\t')) cp++;
+                        int cf = cp;
+                        while (cf < le && text.charAt(cf) == fenceChar) cf++;
+                        boolean isClose = cf - cp >= fenceLen;
+                        if (isClose) {
+                            int tail = cf;
+                            while (tail < le && (text.charAt(tail) == ' ' || text.charAt(tail) == '\t')) tail++;
+                            isClose = tail == le;
+                        }
+                        if (isClose) {
+                            bodyEnd = ls;
+                            closeStart = ls;
+                            closeEnd = le;
+                            pos = np;
+                            break;
+                        }
+                        bodyEnd = np;
+                        pos = np;
+                    }
+                    if (embedLang != EMBED_NONE && depth < MAX_EMBED_DEPTH && bodyEnd > bodyStart) {
+                        scanEmbeddedRange(text, bodyStart, bodyEnd, embedLang, limit, count, depth, sink, checkpoint);
+                    } else if (bodyEnd > bodyStart) {
+                        emitToken(sink, count, limit, bodyStart, bodyEnd, STRING);
+                    }
+                    if (closeStart >= 0 && closeEnd > closeStart) {
+                        emitToken(sink, count, limit, closeStart, closeEnd, ANNOTATION);
+                    }
+                    continue;
+                }
             }
             if (p < lineEnd && text.charAt(p) == '#') {
                 int h = p;
                 while (h < lineEnd && h - p < 6 && text.charAt(h) == '#') h++;
                 if (h < lineEnd && (text.charAt(h) == ' ' || text.charAt(h) == '\t')) {
-                    sink.token(lineStart, lineEnd, KEYWORD);
-                    count++;
+                    emitToken(sink, count, limit, lineStart, lineEnd, KEYWORD);
                     pos = nextPos;
                     continue;
                 }
             }
             if (p < lineEnd && text.charAt(p) == '>') {
-                sink.token(p, p + 1, ANNOTATION);
-                count++;
+                emitToken(sink, count, limit, p, p + 1, ANNOTATION);
                 p++;
             } else if (p + 1 < lineEnd && (text.charAt(p) == '-' || text.charAt(p) == '*' || text.charAt(p) == '+')
                     && (text.charAt(p + 1) == ' ' || text.charAt(p + 1) == '\t')) {
-                sink.token(p, p + 1, ANNOTATION);
-                count++;
+                emitToken(sink, count, limit, p, p + 1, ANNOTATION);
                 p += 2;
             } else if (p < lineEnd && Character.isDigit(text.charAt(p))) {
                 int d = p;
                 while (d < lineEnd && Character.isDigit(text.charAt(d))) d++;
                 if (d + 1 < lineEnd && text.charAt(d) == '.' && (text.charAt(d + 1) == ' ' || text.charAt(d + 1) == '\t')) {
-                    sink.token(p, d + 1, ANNOTATION);
-                    count++;
+                    emitToken(sink, count, limit, p, d + 1, ANNOTATION);
                     p = d + 2;
                 }
             }
-            while (p < lineEnd && count < limit) {
+            while (p < lineEnd && count[0] < limit) {
                 char ch = text.charAt(p);
                 if (ch == '`') {
                     int close = text.indexOf('`', p + 1);
                     if (close > p && close < lineEnd) {
-                        sink.token(p, close + 1, STRING);
-                        count++;
+                        emitToken(sink, count, limit, p, close + 1, STRING);
                         p = close + 1;
                         continue;
                     }
                 } else if (ch == '*' && p + 1 < lineEnd && text.charAt(p + 1) == '*') {
                     int close = text.indexOf("**", p + 2);
                     if (close > p + 1 && close < lineEnd) {
-                        sink.token(p, close + 2, TYPE);
-                        count++;
+                        emitToken(sink, count, limit, p, close + 2, TYPE);
                         p = close + 2;
                         continue;
                     }
@@ -2829,12 +3658,8 @@ public final class CodeTokens {
                     if (closeBracket > p && closeBracket + 1 < lineEnd && text.charAt(closeBracket + 1) == '(') {
                         int closeParen = text.indexOf(')', closeBracket + 2);
                         if (closeParen > closeBracket + 1 && closeParen < lineEnd) {
-                            sink.token(p, closeBracket + 1, FUNCTION);
-                            count++;
-                            if (count < limit) {
-                                sink.token(closeBracket + 2, closeParen, PROPERTY);
-                                count++;
-                            }
+                            emitToken(sink, count, limit, p, closeBracket + 1, FUNCTION);
+                            emitToken(sink, count, limit, closeBracket + 2, closeParen, PROPERTY);
                             p = closeParen + 1;
                             continue;
                         }
@@ -2842,8 +3667,7 @@ public final class CodeTokens {
                 } else if (ch == '<' && p + 3 < lineEnd && text.regionMatches(p, "<!--", 0, 4)) {
                     int close = text.indexOf("-->", p + 4);
                     int end = (close >= 0 && close < lineEnd) ? close + 3 : lineEnd;
-                    sink.token(p, end, COMMENT);
-                    count++;
+                    emitToken(sink, count, limit, p, end, COMMENT);
                     p = end;
                     continue;
                 }
@@ -2889,8 +3713,10 @@ public final class CodeTokens {
                 kind = STRING;
                 c.step();
                 while (c.has()) {
-                    char next = c.get(); c.step();
-                    if (next == '\\' && c.has()) c.step();
+                    char next = c.get();
+                    if (next == '\n' || next == '\r') break;
+                    c.step();
+                    if (next == '\\' && c.has() && c.get() != '\n' && c.get() != '\r') c.step();
                     else if (next == ch) break;
                 }
             } else if (ch == '#' || (ch == '/' && c.at + 1 < text.length() && text.charAt(c.at + 1) == '/')) {

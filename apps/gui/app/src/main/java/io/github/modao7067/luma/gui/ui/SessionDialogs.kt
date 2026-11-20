@@ -247,7 +247,7 @@ internal fun CodeFileViewer(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    val highlighted = rememberHighlightedCode(code, language, colors)
+    val highlighted = rememberHighlightedCode(code, language, colors, streamingHint = false)
     val lineCount = remember(code) { if (code.isEmpty()) 1 else code.count { it == '\n' } + 1 }
     val lineNumbers = remember(lineCount) { (1..lineCount).joinToString("\n") }
     val codeStyle = MaterialTheme.typography.bodyMedium.copy(

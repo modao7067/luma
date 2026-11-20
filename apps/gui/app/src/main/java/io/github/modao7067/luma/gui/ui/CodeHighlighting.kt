@@ -1,3 +1,5 @@
+// Adapted from antfu/vscode-theme-vitesse (Vitesse Light, MIT) and enkia/tokyo-night-vscode-theme (Tokyo Night, MIT).
+// Source details and notices: THIRD_PARTY_NOTICES.md
 package io.github.modao7067.luma.gui.ui
 
 import androidx.compose.material3.ColorScheme
@@ -26,39 +28,39 @@ internal data class CodePalette(
 )
 
 internal val LightCodePalette = CodePalette(
-    keyword = Color(0xFF7B3E98),
-    function = Color(0xFF225C9C),
-    command = Color(0xFF225C9C),
-    type = Color(0xFF945B1A),
-    string = Color(0xFF2B6E44),
-    number = Color(0xFFB24A2A),
-    property = Color(0xFF4B5D74),
-    variable = Color(0xFF9A4154),
-    comment = Color(0xFF7E7A72),
-    annotation = Color(0xFF1F6D70),
-    escape = Color(0xFFA6581F),
-    operator = Color(0xFF68645D),
-    added = Color(0xFF256D40),
-    removed = Color(0xFFB33D3A),
-    hunk = Color(0xFF225C9C),
+    keyword = Color(0xFF1E754F),
+    function = Color(0xFF3E5696),
+    command = Color(0xFF3E5696),
+    type = Color(0xFF7A6316),
+    string = Color(0xFF9B4B3B),
+    number = Color(0xFF206B7A),
+    property = Color(0xFF52606E),
+    variable = Color(0xFF96455A),
+    comment = Color(0xFF727B71),
+    annotation = Color(0xFF3B6F2E),
+    escape = Color(0xFF914E1E),
+    operator = Color(0xFF605F58),
+    added = Color(0xFF1E754F),
+    removed = Color(0xFFA33A3A),
+    hunk = Color(0xFF3E5696),
 )
 
 internal val DarkCodePalette = CodePalette(
-    keyword = Color(0xFFC8A3E3),
-    function = Color(0xFF82B0E3),
-    command = Color(0xFF82B0E3),
-    type = Color(0xFFDDB776),
-    string = Color(0xFF8AC79B),
-    number = Color(0xFFDE9773),
-    property = Color(0xFFB5C4D6),
-    variable = Color(0xFFDA9BA6),
-    comment = Color(0xFF9A968E),
-    annotation = Color(0xFF7BC0BF),
-    escape = Color(0xFFE0AA76),
-    operator = Color(0xFFA8A49B),
-    added = Color(0xFF82C995),
-    removed = Color(0xFFE28783),
-    hunk = Color(0xFF82B0E3),
+    keyword = Color(0xFFBB9AF7),
+    function = Color(0xFF7AA2F7),
+    command = Color(0xFF7AA2F7),
+    type = Color(0xFF2AC3DE),
+    string = Color(0xFF9ECE6A),
+    number = Color(0xFFFF9E64),
+    property = Color(0xFFA9B1D6),
+    variable = Color(0xFFF7768E),
+    comment = Color(0xFF8B94BA),
+    annotation = Color(0xFF73DACA),
+    escape = Color(0xFFE0AF68),
+    operator = Color(0xFF89DDFF),
+    added = Color(0xFF9ECE6A),
+    removed = Color(0xFFF7768E),
+    hunk = Color(0xFF7AA2F7),
 )
 
 internal fun codePaletteDark(colors: ColorScheme): Boolean = colors.surface.luminance() < 0.5f
@@ -131,13 +133,55 @@ private fun codeLanguageFamily(normalized: String): Int = when (normalized) {
     else -> CodeTokens.LANG_DEFAULT
 }
 
-private data class HighlightKey(val code: String, val language: String, val dark: Boolean)
-private val highlightCache = object : LinkedHashMap<HighlightKey, AnnotatedString>(32, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<HighlightKey, AnnotatedString>?) = size > 48
+private const val MAX_HIGHLIGHT_CACHE_ENTRIES = 96
+private const val MAX_HIGHLIGHT_CACHE_CHARS = 512 * 1024
+private const val MAX_CACHED_CODE_CHARS = 128 * 1024
+private const val MAX_DIFF_CACHE_ENTRIES = 64
+private const val MAX_DIFF_CACHE_CHARS = 256 * 1024
+
+private class CharBudgetLruCache<K, V>(
+    private val maxEntries: Int,
+    private val maxChars: Int,
+) {
+    private class Entry<V>(val value: V, val chars: Int)
+    private val map = LinkedHashMap<K, Entry<V>>(32, 0.75f, true)
+    private var totalChars = 0
+
+    @Synchronized
+    fun get(key: K): V? = map[key]?.value
+
+    @Synchronized
+    fun put(key: K, value: V, chars: Int) {
+        if (chars > maxChars) return
+        map.remove(key)?.let { totalChars -= it.chars }
+        map[key] = Entry(value, chars)
+        totalChars += chars
+        val it = map.entries.iterator()
+        while ((map.size > maxEntries || totalChars > maxChars) && it.hasNext()) {
+            val eldest = it.next()
+            totalChars -= eldest.value.chars
+            it.remove()
+        }
+    }
 }
 
+private data class HighlightKey(val code: String, val language: String, val dark: Boolean)
+private data class DiffHighlightKey(val lines: List<DiffLine>, val language: String, val dark: Boolean)
+
+private val highlightCache = CharBudgetLruCache<HighlightKey, AnnotatedString>(
+    maxEntries = MAX_HIGHLIGHT_CACHE_ENTRIES,
+    maxChars = MAX_HIGHLIGHT_CACHE_CHARS,
+)
+private val diffHighlightCache = CharBudgetLruCache<DiffHighlightKey, AnnotatedString>(
+    maxEntries = MAX_DIFF_CACHE_ENTRIES,
+    maxChars = MAX_DIFF_CACHE_CHARS,
+)
+
 internal fun cachedHighlight(code: String, language: String, dark: Boolean): AnnotatedString? =
-    synchronized(highlightCache) { highlightCache[HighlightKey(code, language, dark)] }
+    highlightCache.get(HighlightKey(code, language, dark))
+
+internal fun cachedDiffHighlight(lines: List<DiffLine>, language: String, dark: Boolean): AnnotatedString? =
+    diffHighlightCache.get(DiffHighlightKey(lines, language, dark))
 
 internal fun highlightedCode(
     code: String,
@@ -178,7 +222,9 @@ internal fun highlightedCode(
         code.length <= LIBRARY_HIGHLIGHT_LIMIT -> codeHighlight(code, codeLanguageFamily(normalized), CodeTokens.RICH_SPAN_LIMIT, palette, checkpoint)
         else -> scannerHighlight(code, false, CodeTokens.DISPLAY_SPAN_LIMIT, palette, checkpoint)
     }
-    if (code.length <= LIBRARY_HIGHLIGHT_LIMIT) synchronized(highlightCache) { highlightCache[HighlightKey(code, language, dark)] = result }
+    if (code.length <= MAX_CACHED_CODE_CHARS) {
+        highlightCache.put(HighlightKey(code, language, dark), result, code.length)
+    }
     return result
 }
 
@@ -196,6 +242,7 @@ internal fun highlightedDiffHunk(
     checkpoint: () -> Unit = {},
 ): AnnotatedString {
     if (lines.isEmpty()) return AnnotatedString("")
+    cachedDiffHighlight(lines, language, dark)?.let { return it }
     val cleanLineStarts = IntArray(lines.size)
     val hunkLineStarts = IntArray(lines.size)
     val cleanBuilder = StringBuilder()
@@ -257,7 +304,11 @@ internal fun highlightedDiffHunk(
             idx++
         }
     }
-    return builder.toAnnotatedString()
+    val result = builder.toAnnotatedString()
+    if (hunkCode.length <= MAX_CACHED_CODE_CHARS) {
+        diffHighlightCache.put(DiffHighlightKey(lines, language, dark), result, hunkCode.length)
+    }
+    return result
 }
 
 private fun tokenColor(kind: Int, palette: CodePalette): Color? = when (kind) {
@@ -283,11 +334,7 @@ private fun tokenColor(kind: Int, palette: CodePalette): Color? = when (kind) {
 
 private fun addTokenSpan(builder: AnnotatedString.Builder, start: Int, end: Int, color: Color?) {
     if (color != null && end > start) {
-        builder.addStyle(
-            SpanStyle(color = color, fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS),
-            start,
-            end,
-        )
+        builder.addStyle(SpanStyle(color = color), start, end)
     }
 }
 

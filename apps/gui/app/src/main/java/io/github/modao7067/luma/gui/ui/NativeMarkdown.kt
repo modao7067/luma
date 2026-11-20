@@ -1541,10 +1541,15 @@ internal fun CodeBlock(
 }
 
 @Composable
-internal fun rememberHighlightedCode(code: String, language: String, colors: ColorScheme): AnnotatedString {
+internal fun rememberHighlightedCode(
+    code: String,
+    language: String,
+    colors: ColorScheme,
+    streamingHint: Boolean? = null,
+): AnnotatedString {
     val dark = codePaletteDark(colors)
     var mountedCode by remember { mutableStateOf(code) }
-    val streaming = code != mountedCode
+    val streaming = streamingHint ?: (code != mountedCode)
     val immediate = remember(code, language, dark) {
         cachedHighlight(code, language, dark)
             ?: if (!streaming && code.length <= IMMEDIATE_HIGHLIGHT_LIMIT) highlightedCode(code, language, dark) else null
@@ -1571,7 +1576,8 @@ internal fun rememberHighlightedDiffHunk(
     val dark = codePaletteDark(colors)
     val totalChars = remember(lines) { lines.sumOf { it.text.length + 3 } }
     val immediate = remember(lines, language, dark) {
-        if (totalChars <= IMMEDIATE_HIGHLIGHT_LIMIT) highlightedDiffHunk(lines, language, dark) else null
+        cachedDiffHighlight(lines, language, dark)
+            ?: if (totalChars <= IMMEDIATE_HIGHLIGHT_LIMIT) highlightedDiffHunk(lines, language, dark) else null
     }
     val result = remember(lines, language, dark) { mutableStateOf(immediate) }
     LaunchedEffect(result) {

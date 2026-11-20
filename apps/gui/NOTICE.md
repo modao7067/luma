@@ -76,3 +76,5 @@ AndroidX, Jetpack Compose, OkHttp, Okio, Kotlin Coroutines, AndroidSVG and Mater
 `ui/shapes/MiuixSquirclePath.kt`, `ui/thirdparty/miuix/Overscroll.kt` and `SpringUtils.kt` adapt compose-miuix-ui 0.9.4, revision `39c40f99844227b853f0049a0933b1f3ae6c00ba`, under Apache-2.0. Their original copyright notices and packaged licenses are retained.
 
 `ui/OriginMenu.kt` adapts AndroidX Material3 1.4.0's DropdownMenu shell, MenuContent and standard motion tokens under Apache-2.0, Copyright 2021 The Android Open Source Project. The source artifact and maintenance constraints are recorded in `THIRD_PARTY_NOTICES.md`; the full license is in `third-party/androidx-material-menu/LICENSE-Apache-2.0.txt`.
+
+`ui/CodeHighlighting.kt` adapts syntax highlighting color palettes from Vitesse Light (`antfu/vscode-theme-vitesse`, MIT, Copyright (c) Anthony Fu, contrast-calibrated for Luma's light code surface) and Tokyo Night (`enkia/tokyo-night-vscode-theme`, MIT, Copyright (c) 2018 Enkia).

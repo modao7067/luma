@@ -94,13 +94,13 @@ class CodeHighlightTest {
             val darkContrast = contrast(dark, darkBg)
             assertTrue("light $name contrast $lightContrast < 4.5", lightContrast >= 4.5f)
             assertTrue("dark $name contrast $darkContrast < 4.5", darkContrast >= 4.5f)
-            assertTrue("dark $name saturation ${hslSaturation(dark)} > 0.68", hslSaturation(dark) <= 0.68f)
+            assertTrue("light $name saturation ${hslSaturation(light)} > 0.72", hslSaturation(light) <= 0.72f)
         }
         val lightCommentContrast = contrast(LightCodePalette.comment, lightBg)
         val darkCommentContrast = contrast(DarkCodePalette.comment, darkBg)
         assertTrue("light comment contrast $lightCommentContrast out of 3.5..5.5", lightCommentContrast in 3.5f..5.5f)
         assertTrue("dark comment contrast $darkCommentContrast out of 3.5..5.5", darkCommentContrast in 3.5f..5.5f)
-        assertTrue("dark comment saturation ${hslSaturation(DarkCodePalette.comment)} > 0.68", hslSaturation(DarkCodePalette.comment) <= 0.68f)
+        assertTrue("dark comment saturation ${hslSaturation(DarkCodePalette.comment)} > 0.45", hslSaturation(DarkCodePalette.comment) <= 0.45f)
 
         val primaryLight = listOf(
             "keyword" to LightCodePalette.keyword,
@@ -115,6 +115,18 @@ class CodeHighlightTest {
         primaryLight.forEach { (name, color) ->
             val sat = hslSaturation(color)
             assertTrue("light $name saturation $sat < 0.38", sat >= 0.38f)
+        }
+        val primaryDark = listOf(
+            "keyword" to DarkCodePalette.keyword,
+            "function" to DarkCodePalette.function,
+            "type" to DarkCodePalette.type,
+            "string" to DarkCodePalette.string,
+            "number" to DarkCodePalette.number,
+            "variable" to DarkCodePalette.variable,
+        )
+        primaryDark.forEach { (name, color) ->
+            val sat = hslSaturation(color)
+            assertTrue("dark $name saturation $sat < 0.45", sat >= 0.45f)
         }
         assertTrue(hslSaturation(LightCodePalette.property) < hslSaturation(LightCodePalette.function))
         assertTrue(hslSaturation(DarkCodePalette.property) < hslSaturation(DarkCodePalette.function))
@@ -173,7 +185,9 @@ class CodeHighlightTest {
         assertEquals(LightCodePalette.comment, script.colorAt("# note"))
         assertEquals(LightCodePalette.keyword, script.colorAt("if"))
         assertEquals(LightCodePalette.keyword, script.colorAt("then"))
-        assertEquals(LightCodePalette.string, script.colorAt("print(\"don't bleed\")"))
+        assertEquals(LightCodePalette.function, script.colorAt("print"))
+        assertEquals(LightCodePalette.string, script.colorAt("\"don't bleed\""))
+        assertEquals(LightCodePalette.keyword, script.colorAt("PY", complex.indexOf("\nPY\n") + 1))
         assertEquals(LightCodePalette.command, script.colorAt("echo"))
         assertEquals(LightCodePalette.variable, script.colorAt("\$HOME"))
         assertEquals(LightCodePalette.number, script.colorAt("42"))
@@ -361,5 +375,86 @@ class CodeHighlightTest {
         listOf("io", "github", "example", "androidx", "compose", "phase", "preview", "phaseState").forEach { ident ->
             assertNull("plain identifier $ident must stay default color", highlighted.colorAt(ident))
         }
+        assertTrue(highlighted.spanStyles.all { it.item.fontFeatureSettings == null })
+    }
+
+    @Test fun `nested shell inline scripts heredocs subshells and markdown fences highlight inner languages`() {
+        val nested = "bash -lc \"python3 -c \\\"import json; print(len('hi') + 42)\\\"\""
+        val nestedHl = highlightedCode(nested, "bash", darkColors)
+        assertEquals(nested, nestedHl.text)
+        assertEquals(DarkCodePalette.command, nestedHl.colorAt("bash"))
+        assertEquals(DarkCodePalette.annotation, nestedHl.colorAt("-lc"))
+        assertEquals(DarkCodePalette.command, nestedHl.colorAt("python3"))
+        assertEquals(DarkCodePalette.annotation, nestedHl.colorAt("-c"))
+        assertEquals(DarkCodePalette.keyword, nestedHl.colorAt("import"))
+        assertEquals(DarkCodePalette.function, nestedHl.colorAt("print"))
+        assertEquals(DarkCodePalette.function, nestedHl.colorAt("len"))
+        assertEquals(DarkCodePalette.string, nestedHl.colorAt("'hi'"))
+        assertEquals(DarkCodePalette.number, nestedHl.colorAt("42"))
+
+        val singleSplice = "python3 -c 'def run(): return '\\''ok'\\'''"
+        val spliceHl = highlightedCode(singleSplice, "bash", colors)
+        assertEquals(singleSplice, spliceHl.text)
+        assertEquals(LightCodePalette.keyword, spliceHl.colorAt("def"))
+        assertEquals(LightCodePalette.function, spliceHl.colorAt("run"))
+        assertEquals(LightCodePalette.keyword, spliceHl.colorAt("return"))
+        assertEquals(LightCodePalette.string, spliceHl.colorAt("ok"))
+
+        val fileHeredoc = "cat <<'EOF' > /tmp/check.py\nfor i in range(3):\n    print(i)\nEOF\n"
+        val fileHeredocHl = highlightedCode(fileHeredoc, "bash", colors)
+        assertEquals(LightCodePalette.keyword, fileHeredocHl.colorAt("for"))
+        assertEquals(LightCodePalette.function, fileHeredocHl.colorAt("range"))
+        assertEquals(LightCodePalette.number, fileHeredocHl.colorAt("3"))
+        assertEquals(LightCodePalette.function, fileHeredocHl.colorAt("print"))
+
+        val subshell = "msg=\"out=\$(node -e 'console.log(123)')\""
+        val subshellHl = highlightedCode(subshell, "bash", darkColors)
+        assertEquals(DarkCodePalette.command, subshellHl.colorAt("node"))
+        assertEquals(DarkCodePalette.annotation, subshellHl.colorAt("-e"))
+        assertEquals(DarkCodePalette.function, subshellHl.colorAt("log"))
+        assertEquals(DarkCodePalette.number, subshellHl.colorAt("123"))
+
+        val sql = "sqlite3 app.db \"SELECT id FROM users WHERE active = 1\""
+        val sqlHl = highlightedCode(sql, "bash", colors)
+        assertEquals(LightCodePalette.command, sqlHl.colorAt("sqlite3"))
+        assertEquals(LightCodePalette.keyword, sqlHl.colorAt("SELECT"))
+        assertEquals(LightCodePalette.keyword, sqlHl.colorAt("FROM"))
+        assertEquals(LightCodePalette.keyword, sqlHl.colorAt("WHERE"))
+        assertEquals(LightCodePalette.number, sqlHl.colorAt("1"))
+
+        val mdNested = "````markdown\n# Outer\n```python\ndef hello():\n    return 7\n```\n````\n"
+        val mdHl = highlightedCode(mdNested, "markdown", darkColors)
+        assertEquals(DarkCodePalette.keyword, mdHl.colorAt("# Outer"))
+        assertEquals(DarkCodePalette.keyword, mdHl.colorAt("def"))
+        assertEquals(DarkCodePalette.function, mdHl.colorAt("hello"))
+        assertEquals(DarkCodePalette.number, mdHl.colorAt("7"))
+    }
+
+    @Test fun `nested code interpolations regex literals and line slicing stay accurate`() {
+        val js = "const re = /a\"b\\/c/gi;\nconst msg = `outer \${`inner \${count + '}\\\''}`}`;"
+        val jsHl = highlightedCode(js, "ts", darkColors)
+        assertEquals(DarkCodePalette.escape, jsHl.colorAt("/a\"b\\/c/gi"))
+        assertEquals(DarkCodePalette.keyword, jsHl.colorAt("const", js.indexOf("const msg")))
+        assertEquals(DarkCodePalette.operator, jsHl.colorAt("+"))
+        assertEquals(DarkCodePalette.string, jsHl.colorAt("'}"))
+        assertEquals(DarkCodePalette.escape, jsHl.colorAt("\\'"))
+
+        val py = "s = f\"{data['a\\'b'] + 9}\"\n"
+        val pyHl = highlightedCode(py, "python", colors)
+        assertEquals(LightCodePalette.string, pyHl.colorAt("'a"))
+        assertEquals(LightCodePalette.escape, pyHl.colorAt("\\'"))
+        assertEquals(LightCodePalette.string, pyHl.colorAt("b'"))
+        assertEquals(LightCodePalette.number, pyHl.colorAt("9"))
+
+        val hunk = listOf(
+            DiffLine(DiffLineKind.CONTEXT, 1, 1, "/* block"),
+            DiffLine(DiffLineKind.ADDITION, null, 2, "comment */"),
+            DiffLine(DiffLineKind.ADDITION, null, 3, "val x = 42"),
+        )
+        val diffHl = highlightedDiffHunk(hunk, "kotlin", colors)
+        assertEquals(LightCodePalette.comment, diffHl.colorAt("comment"))
+        assertEquals(LightCodePalette.keyword, diffHl.colorAt("val"))
+        assertEquals(LightCodePalette.number, diffHl.colorAt("42"))
+        assertSame(diffHl, cachedDiffHighlight(hunk, "kotlin", false))
     }
 }

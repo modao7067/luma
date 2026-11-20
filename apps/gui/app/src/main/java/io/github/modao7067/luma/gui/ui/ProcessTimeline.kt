@@ -43,7 +43,9 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -51,6 +53,8 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
@@ -62,6 +66,8 @@ import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,6 +80,7 @@ import kotlin.math.exp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -348,6 +355,47 @@ internal class ProcessGroupExpansionState(
 }
 
 private val nextStandaloneDurationId = AtomicLong(0L)
+private val StaticOneState: State<Float> = object : State<Float> { override val value: Float = 1f }
+private val StaticZeroState: State<Float> = object : State<Float> { override val value: Float = 0f }
+
+private data class LineDividerHeightKey(
+    val fontSize: TextUnit,
+    val lineHeight: TextUnit,
+    val fontFamilyHash: Int,
+    val density: Float,
+    val fontScale: Float,
+)
+
+private val lineDividerHeightCache = HashMap<LineDividerHeightKey, Dp>(8)
+
+@Composable
+internal fun rememberLineDividerHeightDp(style: TextStyle): Dp {
+    val density = LocalDensity.current
+    val layoutDirection = LocalLayoutDirection.current
+    val fontFamilyResolver = LocalFontFamilyResolver.current
+    val key = LineDividerHeightKey(
+        fontSize = style.fontSize,
+        lineHeight = style.lineHeight,
+        fontFamilyHash = style.fontFamily?.hashCode() ?: 0,
+        density = density.density,
+        fontScale = density.fontScale,
+    )
+    return remember(key, fontFamilyResolver, layoutDirection) {
+        synchronized(lineDividerHeightCache) { lineDividerHeightCache[key] } ?: run {
+            val measurer = TextMeasurer(fontFamilyResolver, density, layoutDirection, cacheSize = 2)
+            val oneLinePx = measurer.measure("M", style = style, softWrap = false, maxLines = 1).size.height
+            val twoLinePx = measurer.measure("M\nM", style = style, softWrap = false).size.height
+            val lineStepPx = (twoLinePx - oneLinePx).coerceAtLeast(1)
+            val slotPx = (2 * lineStepPx - oneLinePx).coerceAtLeast(with(density) { 1.dp.roundToPx() })
+            val dp = with(density) { slotPx.toDp() }
+            synchronized(lineDividerHeightCache) {
+                if (lineDividerHeightCache.size >= 16) lineDividerHeightCache.clear()
+                lineDividerHeightCache[key] = dp
+            }
+            dp
+        }
+    }
+}
 
 @Composable
 internal fun ProcessGroup(
@@ -415,24 +463,36 @@ internal fun ProcessGroup(
     }
     val arrivalStates = entries.associate { entry ->
         key(entry.id) {
-            var introduced by rememberSaveable(entry.id) { mutableStateOf(entry.id in settledEntryIds) }
-            val arrivalState = animateFloatAsState(
-                targetValue = if (introduced) 1f else 0f,
-                animationSpec = revealSpring(),
-                label = "process-arrival-reveal",
-            )
-            LaunchedEffect(Unit) { introduced = true }
-            entry.id to arrivalState
+            val initiallySettled = remember(entry.id) { entry.id in settledEntryIds }
+            if (initiallySettled) {
+                entry.id to StaticOneState
+            } else {
+                var introduced by rememberSaveable(entry.id) { mutableStateOf(false) }
+                val arrivalState = animateFloatAsState(
+                    targetValue = if (introduced) 1f else 0f,
+                    animationSpec = revealSpring(),
+                    label = "process-arrival-reveal",
+                )
+                LaunchedEffect(Unit) { introduced = true }
+                entry.id to arrivalState
+            }
         }
     }
     val retentionStates = entries.associate { entry ->
         key(entry.id) {
-            val retainedState = animateFloatAsState(
-                targetValue = if (processEntryRetained(entry) || expansion.isItemPinned(entry.id)) 1f else 0f,
-                animationSpec = revealSpring(),
-                label = "process-completion-reveal",
-            )
-            entry.id to retainedState
+            val targetRetained = processEntryRetained(entry) || expansion.isItemPinned(entry.id)
+            var everDynamic by remember(entry.id) { mutableStateOf(targetRetained) }
+            if (targetRetained) everDynamic = true
+            if (!everDynamic) {
+                entry.id to StaticZeroState
+            } else {
+                val retainedState = animateFloatAsState(
+                    targetValue = if (targetRetained) 1f else 0f,
+                    animationSpec = revealSpring(),
+                    label = "process-completion-reveal",
+                )
+                entry.id to retainedState
+            }
         }
     }
     val hasPinnedEntries = entries.any { expansion.isItemPinned(it.id) }
@@ -825,15 +885,7 @@ private fun ProcessMergedToolCard(
             trim = LineHeightStyle.Trim.None,
         ),
     )
-    val measurer = rememberTextMeasurer(cacheSize = 8)
-    val density = LocalDensity.current
-    val singleLineHeightDp = remember(codeStyle, density) {
-        val oneLinePx = measurer.measure("M", style = codeStyle, softWrap = false, maxLines = 1).size.height
-        val twoLinePx = measurer.measure("M\nM", style = codeStyle, softWrap = false).size.height
-        val lineStepPx = (twoLinePx - oneLinePx).coerceAtLeast(1)
-        val slotPx = (2 * lineStepPx - oneLinePx).coerceAtLeast(with(density) { 1.dp.roundToPx() })
-        with(density) { slotPx.toDp() }
-    }
+    val singleLineHeightDp = rememberLineDividerHeightDp(codeStyle)
     val dividerColor = colors.outlineVariant.copy(alpha = 0.45f)
     val wrapIndicatorColor = colors.onSurfaceVariant.copy(alpha = if (dark) 0.46f else 0.40f)
     val inputWrapPath = remember { Path() }
@@ -1130,10 +1182,43 @@ private fun ProcessReadBatchEntry(
             expanded = expanded,
             previewFraction = previewDetailFraction.takeIf { entries.any { e -> e.id == initiallyOpenItem } },
         ) {
-            val previews = remember(entries, cli) { entries.map { parseProcessReadPreview(it, cli) } }
+            val tabHeaders = remember(entries, cli) { entries.map { parseProcessReadTabHeader(it, cli) } }
+            val previewCache = remember(entries, cli) { HashMap<String, ProcessReadPreview>() }
             val activeIndex = entries.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
             val activeEntry = entries[activeIndex]
-            val activePreview = previews[activeIndex]
+            val activePreview = remember(activeEntry, cli) {
+                synchronized(previewCache) {
+                    previewCache.getOrPut(activeEntry.id) { parseProcessReadPreview(activeEntry, cli) }
+                }
+            }
+            val dark = codePaletteDark(colors)
+            LaunchedEffect(expanded, entries, activeEntry.id, cli, dark) {
+                if (!expanded) return@LaunchedEffect
+                withContext(Dispatchers.Default) {
+                    val order = buildList(entries.size) {
+                        if (activeIndex + 1 < entries.size) add(entries[activeIndex + 1])
+                        if (activeIndex - 1 >= 0) add(entries[activeIndex - 1])
+                        for (i in entries.indices) {
+                            if (i != activeIndex && i != activeIndex + 1 && i != activeIndex - 1) add(entries[i])
+                        }
+                    }
+                    for (entry in order) {
+                        coroutineContext.ensureActive()
+                        val preview = synchronized(previewCache) { previewCache[entry.id] }
+                            ?: parseProcessReadPreview(entry, cli).also { parsed ->
+                                synchronized(previewCache) { previewCache[entry.id] = parsed }
+                            }
+                        if (preview.cleanText.isNotBlank() && preview.language !in setOf("md", "markdown")) {
+                            val cappedText = if (preview.lines.size > MAX_PROCESS_DISPLAY_ROWS) {
+                                preview.lines.subList(0, MAX_PROCESS_DISPLAY_ROWS).joinToString("\n") { it.text }
+                            } else {
+                                preview.cleanText
+                            }
+                            highlightedCode(cappedText, preview.language, dark) { coroutineContext.ensureActive() }
+                        }
+                    }
+                }
+            }
             val headerBg = contentBlockColors(colors).header
             val bodyBg = contentBlockColors(colors).surface
             Box(
@@ -1158,7 +1243,7 @@ private fun ProcessReadBatchEntry(
                         ) {
                             val tabShape = LumaCardShape(8.dp)
                             entries.forEachIndexed { idx, entry ->
-                                val p = previews[idx]
+                                val h = tabHeaders[idx]
                                 val selected = entry.id == activeEntry.id
                                 Surface(
                                     shape = tabShape,
@@ -1178,7 +1263,7 @@ private fun ProcessReadBatchEntry(
                                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                                     ) {
                                         Text(
-                                            p.fileName,
+                                            h.fileName,
                                             style = MaterialTheme.typography.labelMedium.copy(
                                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                             ),
@@ -1186,9 +1271,9 @@ private fun ProcessReadBatchEntry(
                                             fontFamily = terminalFont(),
                                             maxLines = 1,
                                         )
-                                        if (p.rangeLabel.isNotBlank()) {
+                                        if (h.rangeLabel.isNotBlank()) {
                                             Text(
-                                                p.rangeLabel,
+                                                h.rangeLabel,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = colors.onSurfaceVariant.copy(alpha = 0.68f),
                                                 fontFamily = terminalFont(),
@@ -1199,8 +1284,10 @@ private fun ProcessReadBatchEntry(
                                 }
                             }
                         }
-                        val (resolvedActivePreview, resolvingActive) = rememberResolvedReadPreview(activePreview)
-                        ProcessReadFileBody(activeEntry, resolvedActivePreview, resolvingActive)
+                        key(activeEntry.id) {
+                            val (resolvedActivePreview, resolvingActive) = rememberResolvedReadPreview(activePreview)
+                            ProcessReadFileBody(activeEntry, resolvedActivePreview, resolvingActive)
+                        }
                     }
                 }
             }
@@ -1441,13 +1528,15 @@ private fun ProcessReadFileBody(
         ),
     )
     val gutterTextStyle = codeStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f))
-    val readTextMeasurer = rememberTextMeasurer(cacheSize = 512)
+    val readTextMeasurer = rememberTextMeasurer(cacheSize = 256)
     var readCodeLayout by remember(displayLines) { mutableStateOf<TextLayoutResult?>(null) }
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
 
     Box(
         Modifier
             .fillMaxWidth()
             .heightIn(max = 236.dp)
+            .onSizeChanged { viewportHeightPx = it.height.toFloat() }
             .clipToBounds()
             .codeBlockScrollBoundary(vScroll, hScroll)
             .verticalScroll(vScroll),
@@ -1456,20 +1545,32 @@ private fun ProcessReadFileBody(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(IntrinsicSize.Min)
                     .drawBehind {
                         if (!preview.sourceLinesKnown) return@drawBehind
                         val gutterW = readGutterWidth.toPx()
                         val padV = 8.dp.toPx()
                         val padH = 6.dp.toPx()
                         val fallbackH = 19.sp.toPx()
-                        val viewportMargin = 260.dp.toPx() + padV * 2f
+                        val viewH = if (viewportHeightPx > 1f) viewportHeightPx else 236.dp.toPx()
+                        val bufferPx = fallbackH * 4f
                         val scrollY = vScroll.value.toFloat()
-                        val visibleTop = scrollY - viewportMargin
-                        val visibleBottom = scrollY + viewportMargin * 2f
+                        val visibleTop = (scrollY - bufferPx).coerceAtLeast(0f)
+                        val visibleBottom = (scrollY + viewH + bufferPx).coerceAtLeast(0f)
                         val layout = readCodeLayout
                         drawRect(gutterBg, Offset.Zero, Size(gutterW, size.height))
-                        displayLines.forEachIndexed { idx, rLine ->
+                        val lineTotal = displayLines.size
+                        if (lineTotal <= 0 || visibleBottom <= 0f || visibleTop > size.height) return@drawBehind
+                        val firstIdx: Int
+                        val lastIdx: Int
+                        if (layout != null && layout.lineCount > 0) {
+                            firstIdx = layout.getLineForVerticalPosition((visibleTop - padV).coerceAtLeast(0f)).coerceIn(0, lineTotal - 1)
+                            lastIdx = layout.getLineForVerticalPosition((visibleBottom - padV).coerceAtLeast(0f)).coerceIn(firstIdx, lineTotal - 1)
+                        } else {
+                            firstIdx = ((visibleTop - padV) / fallbackH).toInt().coerceIn(0, lineTotal - 1)
+                            lastIdx = ((visibleBottom - padV) / fallbackH).toInt().coerceIn(firstIdx, lineTotal - 1)
+                        }
+                        for (idx in firstIdx..lastIdx) {
+                            val rLine = displayLines[idx]
                             val top: Float
                             val bottom: Float
                             if (layout != null && idx < layout.lineCount) {
@@ -1479,7 +1580,7 @@ private fun ProcessReadFileBody(
                                 top = padV + idx * fallbackH
                                 bottom = top + fallbackH
                             }
-                            if (bottom < visibleTop || top > visibleBottom) return@forEachIndexed
+                            if (bottom < visibleTop || top > visibleBottom) continue
                             val m = readTextMeasurer.measure(rLine.lineNumber.toString(), style = gutterTextStyle, softWrap = false, maxLines = 1)
                             val x = (gutterW - padH - m.size.width).coerceAtLeast(2f)
                             val y = if (layout != null && idx < layout.lineCount) {
@@ -1493,12 +1594,6 @@ private fun ProcessReadFileBody(
             ) {
                 if (preview.sourceLinesKnown) {
                     Spacer(Modifier.width(readGutterWidth))
-                    Box(
-                        Modifier
-                            .width(1.dp)
-                            .fillMaxHeight()
-                            .background(borderColor),
-                    )
                 }
                 Box(
                     Modifier
@@ -1507,7 +1602,7 @@ private fun ProcessReadFileBody(
                 ) {
                     LumaSelectionContainer {
                         Text(
-                            rememberHighlightedCode(displayCleanText, preview.language, colors),
+                            rememberHighlightedCode(displayCleanText, preview.language, colors, streamingHint = false),
                             Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(hScroll),
@@ -1888,10 +1983,13 @@ private fun StreamingDiffViewer(
         else -> 80.dp
     }
 
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
+
     Box(
         Modifier
             .fillMaxWidth()
             .heightIn(max = 260.dp)
+            .onSizeChanged { viewportHeightPx = it.height.toFloat() }
             .clipToBounds()
             .codeBlockScrollBoundary(vScroll, hScroll)
             .verticalScroll(vScroll),
@@ -1925,7 +2023,6 @@ private fun StreamingDiffViewer(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .height(IntrinsicSize.Min)
                         .onGloballyPositioned { coords ->
                             rowOffsetInColumn = coords.positionInParent().y
                         }
@@ -1934,70 +2031,80 @@ private fun StreamingDiffViewer(
                             val padPx = vPad.toPx()
                             val barW = 2.dp.toPx()
                             val gutterW = gutterWidthDp.toPx()
+                            val dividerW = 1.dp.toPx()
                             val colPad = 4.dp.toPx()
                             val colGap = 4.dp.toPx()
                             val singleColW = ((gutterW - colPad * 2f - colGap) / 2f).coerceAtLeast(8f)
-                            val viewportMargin = 260.dp.toPx() + padPx * 2f
+                            val viewH = if (viewportHeightPx > 1f) viewportHeightPx else 260.dp.toPx()
+                            val bufferPx = fallbackLineH * 4f
                             val localScrollY = vScroll.value.toFloat() - rowOffsetInColumn
-                            val visibleTop = localScrollY - viewportMargin
-                            val visibleBottom = localScrollY + viewportMargin * 2f
+                            val visibleTop = (localScrollY - bufferPx).coerceAtLeast(0f)
+                            val visibleBottom = (localScrollY + viewH + bufferPx).coerceAtLeast(0f)
                             val layout = codeLayout
 
                             drawRect(gutterDefaultBg, Offset.Zero, Size(gutterW, size.height))
-                            hunk.diffLines.forEachIndexed { idx, dLine ->
-                                val top: Float
-                                val bottom: Float
-                                val rowH: Float
-                                val baselineY: Float?
-                                if (layout != null && idx < layout.lineCount) {
-                                    top = padPx + layout.getLineTop(idx)
-                                    bottom = padPx + layout.getLineBottom(idx)
-                                    rowH = (bottom - top).coerceAtLeast(1f)
-                                    baselineY = padPx + layout.getLineBaseline(idx)
+                            val lineTotal = hunk.diffLines.size
+                            if (lineTotal > 0 && visibleBottom > 0f && visibleTop <= size.height) {
+                                val firstIdx: Int
+                                val lastIdx: Int
+                                if (layout != null && layout.lineCount > 0) {
+                                    firstIdx = layout.getLineForVerticalPosition((visibleTop - padPx).coerceAtLeast(0f)).coerceIn(0, lineTotal - 1)
+                                    lastIdx = layout.getLineForVerticalPosition((visibleBottom - padPx).coerceAtLeast(0f)).coerceIn(firstIdx, lineTotal - 1)
                                 } else {
-                                    top = padPx + idx * fallbackLineH
-                                    bottom = top + fallbackLineH
-                                    rowH = fallbackLineH
-                                    baselineY = null
+                                    firstIdx = ((visibleTop - padPx) / fallbackLineH).toInt().coerceIn(0, lineTotal - 1)
+                                    lastIdx = ((visibleBottom - padPx) / fallbackLineH).toInt().coerceIn(firstIdx, lineTotal - 1)
                                 }
-                                if (bottom < visibleTop || top > visibleBottom) return@forEachIndexed
-
-                                when (dLine.kind) {
-                                    DiffLineKind.ADDITION -> {
-                                        drawRect(addGutterBg, Offset(0f, top), Size(gutterW, rowH))
-                                        drawRect(addRowBg, Offset(gutterW, top), Size((size.width - gutterW).coerceAtLeast(0f), rowH))
-                                        drawRect(addBarColor, Offset(0f, top), Size(barW, rowH))
+                                for (idx in firstIdx..lastIdx) {
+                                    val dLine = hunk.diffLines[idx]
+                                    val top: Float
+                                    val bottom: Float
+                                    val rowH: Float
+                                    val baselineY: Float?
+                                    if (layout != null && idx < layout.lineCount) {
+                                        top = padPx + layout.getLineTop(idx)
+                                        bottom = padPx + layout.getLineBottom(idx)
+                                        rowH = (bottom - top).coerceAtLeast(1f)
+                                        baselineY = padPx + layout.getLineBaseline(idx)
+                                    } else {
+                                        top = padPx + idx * fallbackLineH
+                                        bottom = top + fallbackLineH
+                                        rowH = fallbackLineH
+                                        baselineY = null
                                     }
-                                    DiffLineKind.DELETION -> {
-                                        drawRect(delGutterBg, Offset(0f, top), Size(gutterW, rowH))
-                                        drawRect(delRowBg, Offset(gutterW, top), Size((size.width - gutterW).coerceAtLeast(0f), rowH))
-                                        drawRect(delBarColor, Offset(0f, top), Size(barW, rowH))
-                                    }
-                                    DiffLineKind.CONTEXT -> Unit
-                                }
+                                    if (bottom < visibleTop || top > visibleBottom) continue
 
-                                dLine.oldLine?.let { oldNum ->
-                                    val m = textMeasurer.measure(oldNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
-                                    val x = (colPad + singleColW - m.size.width).coerceAtLeast(1f)
-                                    val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
-                                    drawText(m, topLeft = Offset(x, y))
-                                }
-                                dLine.newLine?.let { newNum ->
-                                    val m = textMeasurer.measure(newNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
-                                    val x = (gutterW - colPad - m.size.width).coerceAtLeast(colPad + singleColW + colGap)
-                                    val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
-                                    drawText(m, topLeft = Offset(x, y))
+                                    when (dLine.kind) {
+                                        DiffLineKind.ADDITION -> {
+                                            drawRect(addGutterBg, Offset(0f, top), Size(gutterW, rowH))
+                                            drawRect(addRowBg, Offset(gutterW + dividerW, top), Size((size.width - gutterW - dividerW).coerceAtLeast(0f), rowH))
+                                            drawRect(addBarColor, Offset(0f, top), Size(barW, rowH))
+                                        }
+                                        DiffLineKind.DELETION -> {
+                                            drawRect(delGutterBg, Offset(0f, top), Size(gutterW, rowH))
+                                            drawRect(delRowBg, Offset(gutterW + dividerW, top), Size((size.width - gutterW - dividerW).coerceAtLeast(0f), rowH))
+                                            drawRect(delBarColor, Offset(0f, top), Size(barW, rowH))
+                                        }
+                                        DiffLineKind.CONTEXT -> Unit
+                                    }
+
+                                    dLine.oldLine?.let { oldNum ->
+                                        val m = textMeasurer.measure(oldNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
+                                        val x = (colPad + singleColW - m.size.width).coerceAtLeast(1f)
+                                        val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
+                                        drawText(m, topLeft = Offset(x, y))
+                                    }
+                                    dLine.newLine?.let { newNum ->
+                                        val m = textMeasurer.measure(newNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
+                                        val x = (gutterW - colPad - m.size.width).coerceAtLeast(colPad + singleColW + colGap)
+                                        val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
+                                        drawText(m, topLeft = Offset(x, y))
+                                    }
                                 }
                             }
+                            drawRect(borderColor, Offset(gutterW, 0f), Size(dividerW, size.height))
                         },
                 ) {
-                    Spacer(Modifier.width(gutterWidthDp))
-                    Box(
-                        Modifier
-                            .width(1.dp)
-                            .fillMaxHeight()
-                            .background(borderColor),
-                    )
+                    Spacer(Modifier.width(gutterWidthDp + 1.dp))
                     Box(
                         Modifier
                             .weight(1f)

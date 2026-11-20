@@ -27,6 +27,7 @@ shipped inside release APKs, so the obligations below apply to every release.
 | claude-agent-sdk-python `sessions.py` transcript projection (revision `d38e51e`) | `…/cli_bridge/luma_cli/claude_history.py` | MIT, Copyright Anthropic | License: `…/assets/cli_bridge/CLAUDE-SDK-LICENSE.txt`. |
 | Provider / CLI icons: Lobe Icons (`@lobehub/icons-static-svg` 1.102.0), pi artwork, CodeBuddy mark | `apps/gui/app/src/main/res/drawable/ic_provider_*` | MIT (the SVG files); brand marks remain trademarks of their owners | Inventory and revisions: `apps/gui/PROVIDER-ICONS.md`; licenses in `apps/gui/app/src/main/res/raw/provider_*_license.txt`. See "Trademarks". |
 | Shizuku-compatible provider / binder-container stubs | `runtime/noroot/src/main/java/moe/shizuku`, `…/rikka/shizuku` | Apache-2.0 | Minimal clean-room implementations of the public Shizuku Binder IPC contract (`SPDX-License-Identifier: Apache-2.0`). |
+| Syntax highlighting palettes: Vitesse Light (`antfu/vscode-theme-vitesse`) and Tokyo Night (`enkia/tokyo-night-vscode-theme`) | `apps/gui/app/src/main/java/io/github/modao7067/luma/gui/ui/CodeHighlighting.kt` | MIT (Copyright (c) Anthony Fu; Copyright (c) 2018 Enkia) | Light syntax palette adapted from Vitesse Light (contrast-calibrated for Luma's light card surface); dark syntax palette adapted from Tokyo Night. |
 | Gradle wrapper | `gradle/wrapper` | Apache-2.0 | |
 | Android NDK notice text | `runtime/noroot/src/main/assets/licenses/Android-NDK-NOTICE.txt` | NDK licenses | |
 
