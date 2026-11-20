@@ -15,7 +15,6 @@ public class RuntimeCheck {
         check(Files.mismatch(binary,assets.resolve("pnpm/node_modules/@pnpm/exe.linux-arm64/pnpm"))==-1,"pnpm binary mismatch");
         check(Files.isExecutable(binary),"pnpm not executable");
         for(String cmd:new String[]{"android-run","luma-compute-check","adb-shell","shizuku","rish","pnpm","pnpx","luma-tools","lumactl"})check(Files.isExecutable(runtime.resolve("bin/"+cmd)),"command missing: "+cmd);
-        check(!Files.exists(runtime.resolve("bin/sd-cli")),"removed sd-cli wrapper still present");
         Path skill=LinuxEnvironment.workspace(context).toPath().resolve(".agents/skills/luma-environment/SKILL.md");
         check(Files.mismatch(skill,assets.resolve("workspace/.agents/skills/luma-environment/SKILL.md"))==-1,"skill not initialized");
         Files.writeString(skill,"outdated Luma instructions");

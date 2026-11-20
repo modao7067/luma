@@ -317,8 +317,10 @@ internal object DebianRootMode {
               tb grep -q '^aid_net_raw:' "${'$'}ROOTFS/etc/group" 2>/dev/null || printf 'aid_net_raw:x:3004:root,_apt\n' >> "${'$'}ROOTFS/etc/group"
             fi
             if [ ! -L "${'$'}ROOTFS/sdcard" ]; then
-              tb rm -rf "${'$'}ROOTFS/sdcard" 2>/dev/null || true
-              tb ln -s /storage/emulated/0 "${'$'}ROOTFS/sdcard" 2>/dev/null || true
+              tb rmdir "${'$'}ROOTFS/sdcard" 2>/dev/null || true
+              if [ ! -e "${'$'}ROOTFS/sdcard" ]; then
+                tb ln -s /storage/emulated/0 "${'$'}ROOTFS/sdcard" 2>/dev/null || true
+              fi
             fi
             tb ln -sfn /opt/luma/bin/android-sh "${'$'}ROOTFS/usr/local/bin/android-sh" 2>/dev/null || true
         """.trimIndent()
@@ -389,13 +391,13 @@ internal object DebianRootMode {
               tb mount -o bind "${'$'}FILES_DIR/workspace" "${'$'}ROOTFS/workspace"
               tb mkdir -p "${'$'}FILES_DIR/runtime" "${'$'}ROOTFS/opt/luma"
               tb mount -o bind "${'$'}FILES_DIR/runtime" "${'$'}ROOTFS/opt/luma"
-              tb mkdir -p "${'$'}CACHE_DIR/kitty-frames" "${'$'}ROOTFS${'$'}CACHE_DIR/kitty-frames"
-              tb mount -o bind "${'$'}CACHE_DIR/kitty-frames" "${'$'}ROOTFS${'$'}CACHE_DIR/kitty-frames"
 
               tb mkdir -p "${'$'}ROOTFS/storage/emulated/0"
               if [ ! -L "${'$'}ROOTFS/sdcard" ]; then
-                tb rm -rf "${'$'}ROOTFS/sdcard" 2>/dev/null || true
-                tb ln -s /storage/emulated/0 "${'$'}ROOTFS/sdcard"
+                tb rmdir "${'$'}ROOTFS/sdcard" 2>/dev/null || true
+                if [ ! -e "${'$'}ROOTFS/sdcard" ]; then
+                  tb ln -s /storage/emulated/0 "${'$'}ROOTFS/sdcard"
+                fi
               fi
               if [ -d /storage/emulated/0 ]; then
                 tb mount -o bind /storage/emulated/0 "${'$'}ROOTFS/storage/emulated/0" 2>/dev/null || true

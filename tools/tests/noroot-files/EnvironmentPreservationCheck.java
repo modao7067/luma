@@ -140,12 +140,12 @@ public final class EnvironmentPreservationCheck {
             &&!Files.exists(dpkg.resolve(".l2s.status0001.0002"))
             &&!Files.exists(dpkg.resolve("status-new"))
             &&Files.isRegularFile(dpkg.resolve("updates/0000")),"dpkg self-heal restores displaced status, removes builder links, and retains updates log");
-        check(!Files.exists(healRoot.resolve("root/.npmrc"))
+        check(Files.readString(healRoot.resolve("root/.npmrc")).equals("package-import-method=copy\n")
             &&Files.isDirectory(healRoot.resolve("var/log/apt"))
             &&Files.isDirectory(healRoot.resolve("var/lib/systemd"))
             &&Files.isDirectory(healRoot.resolve("run/lock"))
             &&Files.isSymbolicLink(healRoot.resolve("etc/mtab"))
-            &&Files.readString(healRoot.resolve("etc/pip.conf")).contains("break-system-packages"),"Debian runtime skeleton, mtab, pip.conf, and npmrc hygiene verified");
+            &&Files.readString(healRoot.resolve("etc/pip.conf")).contains("break-system-packages"),"Debian runtime skeleton, mtab, pip.conf, and user npmrc preservation verified");
         System.out.println("ALL PASS "+checks+" environment preservation checks");
     }
 }

@@ -20,19 +20,10 @@ final class RootShellIntegration {
             "export PS0=$'\\e]133;C\\a'\"${PS0-}\"");
     }
 
-    static String startupScript(java.io.File cache, int uid) {return frameEnvironment(cache,uid)+startupScript();}
+    static String startupScript(java.io.File cache, int uid) {return startupScript();}
     static String managedScript(java.io.File cache,int uid,String script,boolean ordinary){
-        return frameEnvironment(cache,uid)+(ordinary?markers()+"\n":"")+script;
+        return (ordinary?markers()+"\n":"")+script;
     }
-    private static String frameEnvironment(java.io.File cache, int uid) {
-        String host = new java.io.File(cache,"kitty-frames").getAbsolutePath();
-        String writer = "/proc/1/root" + host;
-        String env = "export TERMINAL_BROWSER_FRAME_DIR="+quote(writer)+"\n"+
-            "export TERMINAL_BROWSER_FRAME_HOST_DIR="+quote(host)+"\n"+
-            "export TERMINAL_BROWSER_FRAME_UID="+uid+"\n";
-        return env;
-    }
-    private static String quote(String value) { return "'"+value.replace("'","'\"'\"'")+"'"; }
 
     static String command() {
         String quoted = "'" + startupScript().replace("'", "'\"'\"'") + "'";

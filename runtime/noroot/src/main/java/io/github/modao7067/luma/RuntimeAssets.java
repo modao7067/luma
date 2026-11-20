@@ -42,7 +42,6 @@ final class RuntimeAssets {
         write(hostPathsFile,(hostPaths+"\n").getBytes(StandardCharsets.UTF_8));
         Os.chmod(hostPathsFile.getAbsolutePath(),0644);
         File bin=new File(directory(c),"bin");
-        Files.deleteIfExists(new File(bin,"sd-cli").toPath());
         File androidSh=new File(bin,"android-sh");
         write(androidSh,(
             "#!/bin/bash\n"+
@@ -255,11 +254,6 @@ final class RuntimeAssets {
     static void repairDebianRoot(File root)throws Exception {
         if(!new File(root,"etc/debian_version").isFile())return;
         prepareDebianSkeleton(root);
-        File npmrc=new File(root,"root/.npmrc");
-        if(npmrc.isFile()&&!Files.isSymbolicLink(npmrc.toPath())){
-            String text=new String(Files.readAllBytes(npmrc.toPath()),StandardCharsets.UTF_8).trim();
-            if(text.equals("package-import-method=copy"))Files.deleteIfExists(npmrc.toPath());
-        }
         String tz=LinuxEnvironment.timezoneId();
         if(!tz.isEmpty()&&new File(root,"usr/share/zoneinfo/"+tz).isFile()){
             File tzFile=new File(root,"etc/timezone");

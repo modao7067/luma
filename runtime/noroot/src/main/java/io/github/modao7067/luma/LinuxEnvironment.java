@@ -90,10 +90,6 @@ final class LinuxEnvironment {
             if(new File(path).isDirectory())Collections.addAll(args,"-b",path);
         }
         Collections.addAll(args,"-b",workspace(c).getAbsolutePath()+":/workspace","-b",temp.getAbsolutePath()+":/dev/shm");
-        File frames=new File(c.getCacheDir(),"kitty-frames");
-        if(frames.isDirectory() || frames.mkdirs()){
-            Collections.addAll(args,"-b",frames.getAbsolutePath()+":"+frames.getAbsolutePath());
-        }
         File runtime=new File(c.getFilesDir(),"runtime");
         if(runtime.isDirectory())Collections.addAll(args,"-b",runtime.getAbsolutePath()+":/opt/luma");
         if(storageAvailable())Collections.addAll(args,"-b",sharedStorage().getAbsolutePath()+":/sdcard");
@@ -118,10 +114,6 @@ final class LinuxEnvironment {
         guestEnv.put("LUMA_ENV","debian-proot");
         guestEnv.put("LUMA_WORKSPACE","/workspace");
         guestEnv.put("LUMA_NATIVE_SOCKET",socketName(c));
-        if(frames.isDirectory()){
-            guestEnv.put("TERMINAL_BROWSER_FRAME_DIR",frames.getAbsolutePath());
-            guestEnv.put("TERMINAL_BROWSER_FRAME_HOST_DIR",frames.getAbsolutePath());
-        }
         if(extraEnv!=null)for(Map.Entry<String,String> entry:extraEnv.entrySet()){
             if(entry.getKey()!=null && entry.getValue()!=null)guestEnv.put(entry.getKey(),entry.getValue());
         }
