@@ -7,14 +7,14 @@
  * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
  * See THIRD_PARTY_NOTICES.md for the pinned upstream and adaptations.
  */
+// Opening and dismissal motion adapted from chen08209/prism_ui under GPL-3.0. See apps/gui/third-party/prism-ui/.
 package io.github.modao7067.luma.gui.ui
 
 import android.content.Context
 import android.view.WindowManager
-import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -23,6 +23,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlurEffect
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -33,11 +39,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 internal val LocalMenuActive = compositionLocalOf { true }
 internal val LocalMenuViewportHeight = compositionLocalOf<() -> Int> { { Int.MAX_VALUE } }
@@ -55,9 +65,9 @@ internal fun OriginMenu(
         SideEffect { if (expanded) onDismiss() }
         return
     }
-    val expandedState = remember { MutableTransitionState(false) }
-    expandedState.targetState = expanded
-    if (expandedState.currentState || expandedState.targetState) {
+    val motion = remember { OriginMenuMotion() }
+    LaunchedEffect(expanded) { motion.drive(expanded) }
+    if (expanded || motion.present) {
         val density = LocalDensity.current
         val hostView = LocalView.current
         val safe = WindowInsets.systemBars.union(WindowInsets.displayCutout)
@@ -96,7 +106,7 @@ internal fun OriginMenu(
                             LocalMenuActive provides expanded,
                             LocalMenuViewportHeight provides { position.contentMaxHeight },
                         ) {
-                            MaterialDropdownContent(expandedState, position, content)
+                            MaterialDropdownContent(motion, position, content)
                         }
                     },
                 ) { children, constraints ->
@@ -138,6 +148,8 @@ internal class StationaryMenuPosition(
         private set
     var pivot = TransformOrigin.Center
         private set
+    var anchor = Rect.Zero
+        private set
 
     fun prepareMeasure(size: IntSize, maxHeight: Int) {
         if (frame != size) {
@@ -174,35 +186,109 @@ internal class StationaryMenuPosition(
             if (growsUp) 1f else 0f,
         )
         val p = IntOffset(x, top)
+        anchor = Rect(
+            (anchorBounds.left - x).toFloat(), (anchorBounds.top - top).toFloat(),
+            (anchorBounds.right - x).toFloat(), (anchorBounds.bottom - top).toFloat(),
+        )
         point = p
         postRemeasure { remeasurement?.forceRemeasure() }
         return p
     }
 }
 
+@Stable
+internal class OriginMenuMotion {
+    val open = Animatable(0f)
+    val shrink = Animatable(0f)
+    var present by mutableStateOf(false)
+        private set
+
+    suspend fun drive(expanded: Boolean) {
+        if (expanded) {
+            present = true
+            coroutineScope {
+                if (shrink.value > 0f) {
+                    launch { shrink.animateTo(0f, tween((shrink.value * MORPH_SHRINK_MILLIS).roundToInt(), easing = LinearEasing)) }
+                }
+                launch { open.animateTo(MORPH_OPEN_SECONDS, tween(((MORPH_OPEN_SECONDS - open.value) * 1000f).roundToInt(), easing = LinearEasing)) }
+            }
+        } else if (present) {
+            shrink.animateTo(1f, tween(((1f - shrink.value) * MORPH_SHRINK_MILLIS).roundToInt(), easing = LinearEasing))
+            present = false
+            open.snapTo(0f)
+            shrink.snapTo(0f)
+        }
+    }
+}
+
 @Composable
 private fun MaterialDropdownContent(
-    expandedState: MutableTransitionState<Boolean>,
+    motion: OriginMenuMotion,
     position: StationaryMenuPosition,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    @Suppress("DEPRECATION") val transition = updateTransition(expandedState, "DropDownMenu")
-    val scale by transition.animateFloat(transitionSpec = { spring(dampingRatio = .9f, stiffness = 1400f) }, label = "menu-scale") { if (it) 1f else .8f }
-    val alpha by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 3800f) }, label = "menu-alpha") { if (it) 1f else 0f }
     val inspecting = LocalInspectionMode.current
-    Surface(
-        modifier = Modifier.graphicsLayer {
-            scaleX = if (inspecting) 1f else scale
-            scaleY = if (inspecting) 1f else scale
-            this.alpha = if (inspecting) 1f else alpha
-            transformOrigin = position.pivot
-        },
-        shape = LumaCardShape(28.dp),
-        color = MenuDefaults.containerColor,
-        tonalElevation = MenuDefaults.TonalElevation,
-        shadowElevation = MenuDefaults.ShadowElevation,
-    ) {
-        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp).verticalScroll(rememberScrollState()), content = content)
+    val density = LocalDensity.current
+    val color = MenuDefaults.containerColor
+    val shadowPx = with(density) { MenuDefaults.ShadowElevation.toPx() }
+    val unseenBlurPx = with(density) { 0.1.dp.toPx() }
+    fun frame(size: Size): DetachedFrame = density.detachedFrame(
+        if (inspecting) MORPH_OPEN_SECONDS else motion.open.value,
+        Rect(Offset.Zero, size),
+        position.anchor.translate(0f, -position.surfaceY.toFloat()),
+    )
+    Box(Modifier.graphicsLayer {
+        val d = if (inspecting) 0f else morphShrinkEasing.transform(motion.shrink.value)
+        if (d > 0f && size.width > 0f && size.height > 0f) {
+            val s = 1f + (MORPH_DISMISS_SCALE - 1f) * d
+            scaleX = s
+            scaleY = s
+            alpha = 1f - d
+            val a = position.anchor.translate(0f, -position.surfaceY.toFloat()).center
+            transformOrigin = TransformOrigin((a.x / size.width).coerceIn(0f, 1f), (a.y / size.height).coerceIn(0f, 1f))
+        }
+    }) {
+        Box(
+            Modifier
+                .matchParentSize()
+                .graphicsLayer {
+                    val f = frame(size)
+                    shape = OffsetSquircleShape(f.platter, f.radius)
+                    shadowElevation = shadowPx * f.settled
+                }
+                .drawBehind {
+                    val f = frame(size)
+                    drawPath(squirclePath(f.platter, f.radius), color.copy(alpha = color.alpha * f.settled))
+                },
+        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .then(if (LocalMenuActive.current) Modifier else Modifier.clearAndSetSemantics {})
+                .graphicsLayer {
+                    val f = frame(size)
+                    if (f.settled >= 1f && f.contentScale == 1f && f.contentBlur == 0f) {
+                        shape = LumaCardShape(28.dp)
+                        clip = true
+                        return@graphicsLayer
+                    }
+                    val s = f.contentScale
+                    transformOrigin = TransformOrigin.Center
+                    scaleX = s
+                    scaleY = s
+                    translationX = f.platter.center.x - size.width / 2f
+                    translationY = f.platter.center.y - size.height / 2f
+                    alpha = f.settled
+                    renderEffect = if (f.contentBlur >= unseenBlurPx) BlurEffect(f.contentBlur, f.contentBlur, TileMode.Decal) else null
+                    if (s > 0f) {
+                        shape = PlatterClipShape(f.platter.width / s, f.platter.height / s, f.radius / s, f.radius / s)
+                        clip = true
+                    }
+                }
+                .padding(vertical = 8.dp)
+                .verticalScroll(rememberScrollState()),
+            content = content,
+        )
     }
 }
 

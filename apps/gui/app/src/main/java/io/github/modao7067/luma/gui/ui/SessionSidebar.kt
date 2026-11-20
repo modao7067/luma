@@ -1,15 +1,14 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import android.content.Context
 import android.system.Os
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -101,16 +100,17 @@ internal fun SessionSidebar(
     Column(
         Modifier
             .fillMaxSize()
-            .windowInsetsPadding(systemInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-            .padding(horizontal = 14.dp),
+            .windowInsetsPadding(systemInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
     ) {
-        SidebarEnvironmentHeader(
-            environment = environment,
-            onClick = onSwitchEnvironment,
-        )
+        Box(Modifier.padding(horizontal = 14.dp)) {
+            SidebarEnvironmentHeader(
+                environment = environment,
+                onClick = onSwitchEnvironment,
+            )
+        }
         LazyColumn(
             state = listState,
-            contentPadding = PaddingValues(bottom = bottomNavPadding + 16.dp),
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 4.dp, bottom = bottomNavPadding + 16.dp),
             modifier = Modifier
                 .weight(1f)
                 .testTag("session-sidebar-list")
@@ -171,25 +171,34 @@ internal fun SessionSidebar(
                 val expanded = expansion[cli] == true
                 val expansionKey = "sidebar-expanded:$cli"
                 item(key = "cli:$cli") {
-                    val chevronRotationState = animateFloatAsState(if (expanded) 180f else 0f, spatialSpring(), label = "sidebar-cli-chevron")
+                    val chevronRotationState = animateFloatAsState(
+                        targetValue = if (expanded) 180f else 0f,
+                        animationSpec = MaterialStandardMotion.defaultSpatialSpec(),
+                        label = "sidebar-cli-chevron",
+                    )
+                    val headerBg by animateColorAsState(
+                        targetValue = when {
+                            hasSelected && !expanded -> colors.secondaryContainer
+                            hasSelected -> colors.secondaryContainer.copy(alpha = 0.5f)
+                            else -> androidx.compose.ui.graphics.Color.Transparent
+                        },
+                        animationSpec = MaterialStandardMotion.defaultEffectsSpec(),
+                        label = "sidebar-cli-header-bg",
+                    )
                     Column(Modifier.padding(top = 10.dp, bottom = 4.dp)) {
                         Row(
                             Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            val groupHaptic = LocalHapticFeedback.current
                             Row(
                                 Modifier
                                     .weight(1f)
                                     .clip(LumaCardShape(16.dp))
-                                    .background(
-                                        when {
-                                            hasSelected && !expanded -> colors.secondaryContainer
-                                            hasSelected -> colors.secondaryContainer.copy(alpha = 0.5f)
-                                            else -> androidx.compose.ui.graphics.Color.Transparent
-                                        },
-                                    )
+                                    .background(headerBg)
                                     .clickable {
+                                        groupHaptic.tick()
                                         expansion[cli] = !expanded
                                         preferences?.edit()?.putBoolean(expansionKey, !expanded)?.apply()
                                     }
@@ -233,7 +242,7 @@ internal fun SessionSidebar(
                                 Modifier
                                     .size(38.dp)
                                     .focusProperties { canFocus = false }
-                                    .liquidClickable(cornerRadius = 19.dp) {
+                                    .liquidClickable(stretch = false, blockDrawerSwipe = false) {
                                         onNew(cli)
                                     }
                                     .semantics { contentDescription = tr("新建 $cli 会话", "New $cli session") },
@@ -260,6 +269,7 @@ internal fun SessionSidebar(
                                 val active = selected == session.id
                                 val rowRadius = 16.dp
                                 var menuOpen by remember { mutableStateOf(false) }
+                                val rowHaptic = LocalHapticFeedback.current
                                 Box {
                                     Surface(
                                         shape = LumaCardShape(rowRadius),
@@ -269,8 +279,14 @@ internal fun SessionSidebar(
                                             .focusProperties { canFocus = false }
                                             .clip(LumaCardShape(rowRadius))
                                             .combinedClickable(
-                                                onClick = { onOpen(session.id) },
-                                                onLongClick = { menuOpen = true },
+                                                onClick = {
+                                                    rowHaptic.tick()
+                                                    onOpen(session.id)
+                                                },
+                                                onLongClick = {
+                                                    rowHaptic.longPress()
+                                                    menuOpen = true
+                                                },
                                             )
                                             .semantics {
                                                 this.selected = active
@@ -491,8 +507,13 @@ internal fun parseSubAgentIdentityKey(key: String, parentSessionId: String): Str
 
 @Composable
 private fun SidebarChildReveal(expanded: Boolean, content: @Composable () -> Unit) {
-    AnimatedVisibility(expanded, enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-        exit = shrinkVertically(spatialSizeSpring()) + fadeOut()) { content() }
+    AnimatedVisibility(
+        visible = expanded,
+        enter = collapsibleEnter(expandFrom = Alignment.Top),
+        exit = collapsibleExit(shrinkTowards = Alignment.Top),
+    ) {
+        content()
+    }
 }
 
 @Composable

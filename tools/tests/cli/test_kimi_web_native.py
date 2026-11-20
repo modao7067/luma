@@ -155,7 +155,12 @@ class KimiWebNativeTest(unittest.TestCase):
         self.assertTrue(s.config['consumedSubmissions']['approval-input'])
         self.assertEqual([r['text'] for r in s.rows.values() if r['role'] == 'user'], [payload['text']])
         self.assertTrue(any(r.get('detail') == 'luma-kimi-fixture' for r in s.rows.values()))
-        self.assertIn('date_change', json.dumps(s.transcript()))
+        snapshot = s.fetch_snapshot()
+        if 'turns' in snapshot and 'items' not in snapshot:
+            self.assertTrue(snapshot['turns'])
+            self.assertEqual([i['text'] for i in snapshot['turns'][0]['items'] if i.get('type') == 'user_message'], [payload['text']])
+        else:
+            self.assertIn('date_change', json.dumps(snapshot))
         native = s.config['nativeId']
         count = len(ModelFixture.calls)
         s.stop_observation()
@@ -209,7 +214,7 @@ class KimiWebNativeTest(unittest.TestCase):
         user = [r for r in s.rows.values() if r['role'] == 'user']
         self.assertEqual(len(user), 1)
         self.assertEqual(user[0]['text'], '')
-        self.assertTrue(user[0]['media'], json.dumps(s.transcript()))
+        self.assertTrue(user[0]['media'], json.dumps(s.fetch_snapshot()))
         self.assertTrue(pathlib.Path(user[0]['media'][0]['source']).is_file())
         native = s.config['nativeId']
         s.stop_observation()
@@ -219,7 +224,7 @@ class KimiWebNativeTest(unittest.TestCase):
         self.assertEqual(restored.config['nativeId'], native)
         restored_user = [r for r in restored.rows.values() if r['role'] == 'user']
         self.assertEqual(len(restored_user), 1)
-        self.assertTrue(restored_user[0]['media'], json.dumps(restored.transcript()))
+        self.assertTrue(restored_user[0]['media'], json.dumps(restored.fetch_snapshot()))
 
     def test_queue_cancel_stop_and_shared_gateway_observer_release(self):
         s = self.create_session('queue')

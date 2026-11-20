@@ -252,4 +252,67 @@ class SessionSidebarInteractionTest {
             java.io.File(ctx.filesDir, "linux").deleteRecursively()
         }
     }
+
+    @Test fun cliDrawerCollapseDeceleratesSmoothlyAndReversesCleanlyMidFlight() {
+        val multiSessions = listOf(
+            SessionSummary("c1", "Codex session 1", "noroot", "/workspace", cli = "Codex", lastActiveAt = 400L),
+            SessionSummary("c2", "Codex session 2", "noroot", "/workspace", cli = "Codex", lastActiveAt = 300L),
+            SessionSummary("c3", "Codex session 3", "noroot", "/workspace", cli = "Codex", lastActiveAt = 200L),
+            SessionSummary("c4", "Codex session 4", "noroot", "/workspace", cli = "Codex", lastActiveAt = 100L),
+            SessionSummary("o1", "OpenCode session 1", "noroot", "/workspace", cli = "OpenCode", lastActiveAt = 50L),
+        )
+        rule.setContent {
+            MaterialTheme {
+                SessionSidebar(
+                    multiSessions,
+                    selected = "c1",
+                    onOpen = {},
+                    onNew = {},
+                    enabledClis = setOf("Codex", "OpenCode"),
+                )
+            }
+        }
+        rule.onNodeWithText("Codex", substring = false).performClick()
+        rule.waitForIdle()
+        val expandedOpenCodeY = rule.onNodeWithText("OpenCode", substring = false).fetchSemanticsNode().boundsInRoot.top
+
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithText("Codex", substring = false).performClick()
+        val ys = mutableListOf(expandedOpenCodeY)
+        repeat(20) {
+            rule.mainClock.advanceTimeBy(16)
+            rule.waitForIdle()
+            ys += rule.onNodeWithText("OpenCode", substring = false).fetchSemanticsNode().boundsInRoot.top
+        }
+        val deltas = ys.zipWithNext { prev, next -> prev - next }
+        val peakDelta = deltas.maxOrNull() ?: 0f
+        val peakIdx = deltas.indexOf(peakDelta)
+        assertTrue("Expected lower CLI header to move upward smoothly (peakDelta=$peakDelta)", peakDelta > 5f)
+        assertTrue("Expected collapse velocity to peak early, not slam at the end (peakIdx=$peakIdx, deltas=$deltas)", peakIdx in 0..6)
+        val lateDelta = deltas.drop(peakIdx + 4).firstOrNull { it > 0.1f } ?: 0f
+        assertTrue("Expected smooth deceleration toward rest (late=$lateDelta, peak=$peakDelta, deltas=$deltas)", lateDelta < peakDelta * 0.55f)
+
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        rule.onNodeWithText("Codex session 1").assertDoesNotExist()
+        val collapsedOpenCodeY = rule.onNodeWithText("OpenCode", substring = false).fetchSemanticsNode().boundsInRoot.top
+        assertTrue("Collapsed OpenCode header must sit well above expanded position", collapsedOpenCodeY < expandedOpenCodeY - 100f)
+
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithText("Codex", substring = false).performClick()
+        repeat(4) {
+            rule.mainClock.advanceTimeBy(16)
+            rule.waitForIdle()
+        }
+        rule.onNodeWithText("Codex", substring = false).performClick()
+        repeat(4) {
+            rule.mainClock.advanceTimeBy(16)
+            rule.waitForIdle()
+        }
+        rule.onNodeWithText("Codex", substring = false).performClick()
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        rule.onNodeWithText("Codex session 1").assertIsDisplayed()
+        rule.onNodeWithText("Codex session 4").assertIsDisplayed()
+    }
 }

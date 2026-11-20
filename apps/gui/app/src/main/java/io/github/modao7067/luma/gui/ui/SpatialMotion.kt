@@ -1,10 +1,6 @@
 package io.github.modao7067.luma.gui.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.SpringSpec
@@ -40,28 +36,31 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 private const val REVEAL_TOE = 0.001f
+private val TITLE_SPRING_STIFFNESS = (2f * PI.toFloat() / 0.33f).pow(2)
 private val ClaudeSlowSettleEasing = CubicBezierEasing(0.165f, 0.84f, 0.44f, 1f)
 
 internal val LocalTurnLayoutReaders = compositionLocalOf<MutableSet<() -> Any?>?> { null }
 internal val LocalTurnAnimatingReaders = compositionLocalOf<MutableSet<() -> Boolean>?> { null }
 
-internal fun spatialSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = 260f, visibilityThreshold = .001f)
-internal fun spatialPxSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = 260f, visibilityThreshold = 0.5f)
-internal fun revealSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = 240f, visibilityThreshold = REVEAL_TOE)
-internal fun revealPxSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = 240f, visibilityThreshold = 0.5f)
+internal fun spatialSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = .001f)
+internal fun spatialPxSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = 0.5f)
+internal fun revealSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = REVEAL_TOE)
+internal fun revealPxSpring(): SpringSpec<Float> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = 0.5f)
 internal fun slowSettleTween(): TweenSpec<Float> = tween(durationMillis = 450, easing = ClaudeSlowSettleEasing)
 internal fun revealFraction(raw: Float): Float = when {
     raw <= REVEAL_TOE -> 0f
     raw >= 1f - REVEAL_TOE -> 1f
     else -> ((raw - REVEAL_TOE) / (1f - REVEAL_TOE * 2f)).coerceIn(0f, 1f)
 }
-internal fun spatialSizeSpring(): SpringSpec<IntSize> = spring(dampingRatio = 1f, stiffness = 260f, visibilityThreshold = IntSize(1, 1))
-internal fun spatialOffsetSpring(): SpringSpec<IntOffset> = spring(dampingRatio = 1f, stiffness = 260f, visibilityThreshold = IntOffset(1, 1))
-internal fun spatialDpSpring(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(dampingRatio = 1f, stiffness = 260f)
+internal fun spatialSizeSpring(): SpringSpec<IntSize> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = IntSize(1, 1))
+internal fun spatialOffsetSpring(): SpringSpec<IntOffset> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS, visibilityThreshold = IntOffset(1, 1))
+internal fun spatialDpSpring(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(dampingRatio = 1f, stiffness = TITLE_SPRING_STIFFNESS)
 
 internal fun composerControlsFraction(fraction: Float) = (fraction / .6f).coerceIn(0f, 1f)
 internal fun composerTextWidthFraction(fraction: Float) = ((fraction - .6f) / .4f).coerceIn(0f, 1f)
@@ -246,8 +245,8 @@ internal fun MenuSectionReveal(
     AnimatedVisibility(
         visible = expanded,
         modifier = Modifier.padding(horizontal = horizontalPadding),
-        enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-        exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+        enter = menuUnfoldEnter(),
+        exit = menuFoldExit(),
     ) {
         CompositionLocalProvider(LocalMenuActive provides (active && expanded)) {
             Column(Modifier.fillMaxWidth().clipToBounds().background(containerColor, RoundedCornerShape(cornerRadius)).padding(vertical = verticalPadding), content = content)

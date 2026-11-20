@@ -88,7 +88,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
             back()
             internalBackProgress.snapTo(0f)
         } catch (cancelled: CancellationException) {
-            scope.launch { internalBackProgress.animateTo(0f, spatialSpring()) }
+            scope.launch { internalBackProgress.animateTo(0f, PrismSprings.dragBackRelease()) }
             throw cancelled
         }
     }
@@ -113,11 +113,13 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                     subtitle = browser.path,
                     backLabel = if (history.isEmpty() && !selecting) tr("关闭文件", "Close files") else tr("返回上一个位置", "Back"),
                 ) {
+                    val closeElastic = rememberElasticPress()
                     LiquidGlass(
                         Modifier.size(FloatingChromeSize)
-                            .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = actions::closeFiles)
+                            .liquidClickable(press = closeElastic, onClick = actions::closeFiles)
                             .semantics { contentDescription = tr("关闭", "Close") },
                         cornerRadius = FloatingChromeRadius,
+                        press = closeElastic,
                     ) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { ComposerGlyph("close") } }
                 }
             },
@@ -130,7 +132,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                     .graphicsLayer {
                         if (backShift > 0f) {
                             translationX = backShift * 42.dp.toPx()
-                            alpha = 1f - backShift * 0.28f
+                            alpha = (1f - backShift.coerceAtLeast(0f) * 0.28f).coerceIn(0f, 1f)
                         }
                     }
                     .padding(top = padding.calculateTopPadding()),

@@ -59,4 +59,20 @@ class ConversationTailFollowTest {
         val resolved3 = step3.map { keys3.getValue(it.id) }
         assertEquals("all LazyColumn slot keys must be strictly unique: $resolved3", step3.size, resolved3.toSet().size)
     }
+
+    @Test fun canonicalRowKeyRemapPreservesUnsettledArrivalStatus() {
+        val canonicalRowIds = HashMap<String, String>()
+        val settledRowIds = HashSet<String>()
+        val rowHeights = HashMap<String, Int>()
+        val measuredRowHeights = HashMap<String, Int>()
+        val pending = ConversationItem("client-u1", "user", text = "新消息", delivery = "pending")
+        val native = ConversationItem("native-u1", "user", text = "新消息")
+        val step1 = conversationRows(listOf(pending))
+        val keys1 = resolveCanonicalRowKeys(step1, emptyList(), canonicalRowIds, settledRowIds, rowHeights, measuredRowHeights)
+        val step2 = conversationRows(listOf(native))
+        val keys2 = resolveCanonicalRowKeys(step2, step1, canonicalRowIds, settledRowIds, rowHeights, measuredRowHeights)
+        assertEquals(keys1.getValue(step1.single().id), keys2.getValue(step2.single().id))
+        assertFalse(step2.single().id in settledRowIds)
+        assertFalse(keys2.getValue(step2.single().id) in settledRowIds)
+    }
 }

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.i18n.tr
 
@@ -7,12 +9,8 @@ import androidx.activity.compose.PredictiveBackHandler
 import kotlinx.coroutines.CancellationException
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -211,15 +209,37 @@ private fun SessionDetailContent(
             if (visibleQueue.size == view.queue.size) view else view.copy(queue = visibleQueue)
         }
     }
+    val hasVisibleQueueItems = gatedQueueView.queue.isNotEmpty() || gatedQueueView.queueRecovery != null
+    var hadVisibleQueueItems by remember(view.summary.id) { mutableStateOf(hasVisibleQueueItems) }
+    SideEffect {
+        hadVisibleQueueItems = hasVisibleQueueItems
+    }
+    val queueCollapseStarting = hadVisibleQueueItems && !hasVisibleQueueItems
+    val effectiveQueueCollapsing = queueCollapsing || queueCollapseStarting
     val activeWide = imeVisible || view.draft.isNotEmpty() || view.attachments.isNotEmpty() || view.skills.isNotEmpty() || gatedQueueView.queue.isNotEmpty()
     val composerWidthState = animateFloatAsState(if (activeWide) 1f else 0.88f, spatialSpring(), label = "composer-width")
-    val allRows = remember(view.messages, view.subAgents) { conversationRows(view.messages, view.subAgents) }
+    val (allRows, openProcessRowId) = remember(view.messages, view.subAgents, view.activeTurnId, view.loading) {
+        sessionConversationRows(view.messages, view.subAgents, view.loading, view.activeTurnId)
+    }
+    val processSlotKeys = remember(allRows) { processGroupSlotKeys(allRows) }
+    val nativeProcessDurations = remember(allRows, openProcessRowId) {
+        buildMap<String, Long> {
+            allRows.forEachIndexed { idx, r ->
+                if (r.process) {
+                    nativeProcessGroupDurationMs(allRows, idx, turnOpen = r.id == openProcessRowId)?.let { put(r.id, it) }
+                }
+            }
+        }
+    }
     val releasedUserRowIds = remember(view.summary.id) {
         HashSet<String>().apply {
             allRows.filter { !it.process && it.entries.firstOrNull()?.role == "user" }.forEach { add(it.id) }
         }
     }
-    val readyToRevealTurn = view.loading || (bottomChromeSettled && !queueCollapsing)
+    val allLastUserPendingDelivery = allRows.lastOrNull { !it.process && it.entries.firstOrNull()?.role == "user" }
+        ?.entries?.firstOrNull()?.delivery?.isNotEmpty() == true
+    val allHistoryLoading = view.loading && !allLastUserPendingDelivery
+    val readyToRevealTurn = allHistoryLoading || (bottomChromeSettled && !effectiveQueueCollapsing)
     if (readyToRevealTurn) {
         allRows.forEach { row ->
             if (!row.process && row.entries.firstOrNull()?.role == "user") {
@@ -231,11 +251,17 @@ private fun SessionDetailContent(
         !row.process && row.entries.firstOrNull()?.role == "user" && row.id !in releasedUserRowIds
     }
     val rows = if (gatedRowIndex >= 0) allRows.subList(0, gatedRowIndex) else allRows
-    if (!view.loading && (gatedRowIndex >= 0 || gatedQueueView.queue.size < view.queue.size) && !sendCollapseArmed) {
+    if (!allHistoryLoading && (gatedRowIndex >= 0 || gatedQueueView.queue.size < view.queue.size) && !sendCollapseArmed) {
         sendCollapseArmed = true
         lockedBottomPadPx = maxOf(lockedBottomPadPx, lastLiveBottomPadPx)
     }
-    val anchoring = rememberConversationRowAnchoring(view.summary.id, rows, view.loading)
+    val lastUserRowIndex = remember(rows) {
+        rows.indexOfLast { !it.process && it.entries.firstOrNull()?.role == "user" }
+    }
+    val lastUserRowPendingDelivery = lastUserRowIndex >= 0 &&
+        rows[lastUserRowIndex].entries.firstOrNull()?.delivery?.isNotEmpty() == true
+    val historyLoading = view.loading && !lastUserRowPendingDelivery
+    val anchoring = rememberConversationRowAnchoring(view.summary.id, rows, historyLoading, openProcessRowId = openProcessRowId)
     val list = anchoring.list
     val tailFollow = anchoring.tailFollow
     val arrivingRowIds = anchoring.arrivingRowIds
@@ -247,17 +273,16 @@ private fun SessionDetailContent(
         allRows.filter { !it.process && it.entries.firstOrNull()?.role == "user" }.mapTo(HashSet()) { it.id }
     }
     releasedUserRowIds.retainAll(allUserRowIds)
-    val lastUserRowIndex = remember(rows) {
-        rows.indexOfLast { !it.process && it.entries.firstOrNull()?.role == "user" }
-    }
     val lastUserRowKey = if (lastUserRowIndex >= 0) anchoring.key(rows[lastUserRowIndex].id) else null
-    var savedAnchoredUserRowKey by rememberSaveable(view.summary.id) { mutableStateOf(lastUserRowKey) }
+    var savedAnchoredUserRowKey by rememberSaveable(view.summary.id) {
+        mutableStateOf(if (rows.size == 1 && isLivePendingUserRow(rows.first())) null else lastUserRowKey)
+    }
     var readingAnchorRowKey by rememberSaveable(view.summary.id) { mutableStateOf<String?>(null) }
     val anchoredUserRowKeys = remember(view.summary.id) {
         HashSet<String>().apply {
             savedAnchoredUserRowKey?.let(::add)
             rows.forEach { r ->
-                if (!r.process && r.entries.firstOrNull()?.role == "user") {
+                if (!r.process && r.entries.firstOrNull()?.role == "user" && !(rows.size == 1 && isLivePendingUserRow(r))) {
                     add(anchoring.key(r.id))
                 }
             }
@@ -267,9 +292,6 @@ private fun SessionDetailContent(
         allRows.filter { !it.process && it.entries.firstOrNull()?.role == "user" }.mapTo(HashSet()) { anchoring.key(it.id) }
     }
     anchoredUserRowKeys.retainAll(currentUserKeys)
-    val lastUserRowPendingDelivery = lastUserRowIndex >= 0 &&
-        rows[lastUserRowIndex].entries.firstOrNull()?.delivery?.isNotEmpty() == true
-    val historyLoading = view.loading && !lastUserRowPendingDelivery
     if (historyLoading && lastUserRowKey != null) {
         anchoredUserRowKeys.add(lastUserRowKey)
         savedAnchoredUserRowKey = lastUserRowKey
@@ -293,7 +315,11 @@ private fun SessionDetailContent(
             readingAnchorRowKey = lastUserRowKey
             tailFollow.resetReadingSpace()
             val anchorOffsetPx = if (lastUserRowIndex > 0) rowTopSpacingPx else 0
-            tailFollow.anchorRowToTop(lastUserRowIndex, anchorOffsetPx, list)
+            try {
+                tailFollow.anchorRowToTop(lastUserRowIndex, anchorOffsetPx, list)
+            } finally {
+                anchoring.markRowComposed(lastUserRowKey)
+            }
         }
     }
     var retainedSheetRequest by remember(view.summary.id) { mutableStateOf<UserRequest?>(null) }
@@ -356,8 +382,8 @@ private fun SessionDetailContent(
                             SideEffect { if (currentRequest != null) retainedRequest = currentRequest }
                             AnimatedVisibility(
                                 visible = currentRequest != null,
-                                enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-                                exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+                                enter = collapsibleEnter(),
+                                exit = collapsibleExit(),
                             ) {
                                 val request = currentRequest ?: retainedRequest
                                 if (request != null) {
@@ -407,8 +433,10 @@ private fun SessionDetailContent(
                                                     )
                                                 }
                                             }
+                                            val requestHaptic = LocalHapticFeedback.current
                                             Surface(
                                                 onClick = {
+                                                    requestHaptic.tick()
                                                     focusManager.clearFocus()
                                                     requestId = request.id
                                                 },
@@ -416,7 +444,9 @@ private fun SessionDetailContent(
                                                 shape = CircleShape,
                                                 color = bannerPalette.primaryBg,
                                                 contentColor = bannerPalette.primaryText,
-                                                modifier = Modifier.height(31.dp),
+                                                modifier = Modifier
+                                                    .height(31.dp)
+                                                    .blockHorizontalPageSwipe(enabled = currentRequest != null),
                                             ) {
                                                 Box(
                                                     Modifier.padding(horizontal = 13.dp),
@@ -577,6 +607,7 @@ private fun SessionDetailContent(
                                     val rowKey = anchoring.key(row.id)
                                     val topSpacing = if (index > 0) 20.dp else 0.dp
                                     val animateRowArrival = remember(rowKey) { rowKey in arrivingRowIds }
+                                    SideEffect { anchoring.markRowComposed(rowKey) }
                                     val isTrailingStaticRow = activeTurnSplitIndex < 0 && index == indexedRows.lastIndex
                                     Box(
                                         Modifier.layout { measurable, constraints ->
@@ -653,6 +684,10 @@ private fun SessionDetailContent(
                                                 topSpacing = topSpacing,
                                                 entries = entries,
                                                 cli = view.summary.cli,
+                                                durationMsOverride = processSlotKeys[row.id]?.let { view.processDurations[it] },
+                                                fallbackDurationMs = nativeProcessDurations[row.id],
+                                                turnOpen = row.id == openProcessRowId,
+                                                expansionState = anchoring.processExpansionState(rowKey),
                                             )
                                         } else {
                                             val entry = row.entries.first()
@@ -761,6 +796,7 @@ private fun SessionDetailContent(
                                                     val topSpacing = if (activeTurnSplitIndex + turnOffset > 0) 20.dp else 0.dp
                                                     key(rowKey) {
                                                         val animateRowArrival = remember(rowKey) { rowKey in arrivingRowIds }
+                                                        SideEffect { anchoring.markRowComposed(rowKey) }
                                                         if (row.process) {
                                                             val entries = remember(row.entries, row.agents) { processGroupEntries(row) }
                                                             ConversationProcessRowItem(
@@ -770,6 +806,10 @@ private fun SessionDetailContent(
                                                                 topSpacing = topSpacing,
                                                                 entries = entries,
                                                                 cli = view.summary.cli,
+                                                                durationMsOverride = processSlotKeys[row.id]?.let { view.processDurations[it] },
+                                                                fallbackDurationMs = nativeProcessDurations[row.id],
+                                                                turnOpen = row.id == openProcessRowId,
+                                                                expansionState = anchoring.processExpansionState(rowKey),
                                                             )
                                                         } else {
                                                             val entry = row.entries.first()
@@ -875,15 +915,17 @@ internal fun ConversationMessage(item: ConversationItem, actions: CockpitActions
             MessageMedia(messageMedia(item))
             NativeMarkdown(item.text, actions::previewFile, markdown)
             if (item.detail.isNotBlank()) {
+                val detailHaptic = LocalHapticFeedback.current
                 val onManualLayoutToggle = LocalManualLayoutToggle.current
                 var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
                 TextButton(
                     onClick = {
+                        detailHaptic.tick()
                         onManualLayoutToggle?.invoke()
                         expanded = !expanded
                     },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    modifier = Modifier.height(32.dp),
+                    modifier = Modifier.height(32.dp).blockHorizontalPageSwipe(allowVerticalScroll = true),
                 ) {
                     Text(if (expanded) tr("收起详情", "Less") else tr("展开详情", "Details"), style = MaterialTheme.typography.labelMedium)
                 }
@@ -986,37 +1028,50 @@ internal fun BoxScope.ConversationScrollOverlay(
                             }
                         },
                 ) {
-                    LiquidGlass(
+                    val subAgentAnchor = rememberMorphAnchor()
+                    val subAgentElastic = rememberElasticPress()
+                    Box(
                         Modifier
                             .height(FloatingChromeSize)
                             .width(FloatingChromeSize + extraWidth)
                             .testTag("subagent-capsule")
-                            .liquidClickable(
+                            .morphAnchor(
+                                anchor = subAgentAnchor,
                                 enabled = hasAgents && sessionInteractive,
-                                cornerRadius = FloatingChromeRadius,
-                                onClick = { menuOpen = !menuOpen },
+                                elastic = subAgentElastic,
+                                onOpen = { menuOpen = !menuOpen },
                             )
                             .semantics(mergeDescendants = true) {
                                 contentDescription = tr("子代理 ${displayedAgents.size} 个", "${displayedAgents.size} sub-agents")
                                 stateDescription = if (menuActive) tr("已展开", "Expanded") else tr("已收起", "Collapsed")
                             },
-                        cornerRadius = FloatingChromeRadius,
-                        alphaProvider = { subAgentsProgressState.value.coerceIn(0f, 1f) },
                     ) {
-                        Box(Modifier.fillMaxSize()) {
-                            Box(Modifier.size(FloatingChromeSize).align(Alignment.CenterStart), contentAlignment = Alignment.Center) {
-                                MenuIcon(MenuSymbol.MODEL, size = 20.dp)
+                        LiquidGlass(
+                            Modifier.fillMaxSize(),
+                            cornerRadius = FloatingChromeRadius,
+                            alphaProvider = { subAgentsProgressState.value.coerceIn(0f, 1f) },
+                            press = subAgentElastic,
+                        ) {
+                            Box(Modifier.fillMaxSize()) {
+                                Box(Modifier.size(FloatingChromeSize).align(Alignment.CenterStart), contentAlignment = Alignment.Center) {
+                                    Box(Modifier.glyphPulse(runningCount)) {
+                                        MenuIcon(MenuSymbol.MODEL, size = 20.dp)
+                                    }
+                                }
+                                Text(retainedCount.toString(), style = numberStyle, maxLines = 1,
+                                    modifier = Modifier.align(Alignment.CenterStart).offset(x = 40.dp)
+                                        .graphicsLayer { alpha = (extraWidth.value / (numberWidth.value + 10f)).coerceIn(0f, 1f) }
+                                        .then(if (runningCount > 0) Modifier else Modifier.clearAndSetSemantics {}))
                             }
-                            Text(retainedCount.toString(), style = numberStyle, maxLines = 1,
-                                modifier = Modifier.align(Alignment.CenterStart).offset(x = 40.dp)
-                                    .graphicsLayer { alpha = (extraWidth.value / (numberWidth.value + 10f)).coerceIn(0f, 1f) }
-                                    .then(if (runningCount > 0) Modifier else Modifier.clearAndSetSemantics {}))
                         }
                     }
-                    OriginMenu(
+                    MorphMenu(
                         expanded = menuActive,
                         onDismiss = { menuOpen = false },
+                        anchor = subAgentAnchor,
                         width = 280.dp,
+                        placement = MorphPlacement.Start,
+                        preferAbove = true,
                     ) {
                         SubAgentPopupItems(
                             agents = displayedAgents,
@@ -1036,6 +1091,7 @@ internal fun BoxScope.ConversationScrollOverlay(
             )
             val jumpProgress = jumpProgressState.value.coerceIn(0f, 1f)
             if (spatialContentVisible(visible, jumpProgress)) {
+                val jumpElastic = rememberElasticPress()
                 LiquidGlass(
                     Modifier
                         .align(Alignment.CenterEnd)
@@ -1048,12 +1104,13 @@ internal fun BoxScope.ConversationScrollOverlay(
                         .size(FloatingChromeSize)
                         .liquidClickable(
                             enabled = visible && sessionInteractive,
-                            cornerRadius = FloatingChromeRadius,
+                            press = jumpElastic,
                             onClick = onJump,
                         )
                         .semantics { contentDescription = tr("↓ 回到底部", "↓ Scroll to bottom") },
                     cornerRadius = FloatingChromeRadius,
                     alphaProvider = { jumpProgressState.value.coerceIn(0f, 1f) },
+                    press = jumpElastic,
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         ComposerGlyph("down")

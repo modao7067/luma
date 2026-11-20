@@ -1103,7 +1103,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_chroot_exit_end(tracee, config, false);
 
 	case PR_getsockopt:
-		return handle_getsockopt_exit_end(tracee);
+		return handle_getsockopt_exit_end(tracee, config);
 
 #ifdef USERLAND
 /** Check to see if a meta was created for a file that no longer exists.

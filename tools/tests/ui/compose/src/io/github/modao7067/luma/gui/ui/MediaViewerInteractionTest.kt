@@ -293,4 +293,31 @@ class MediaViewerInteractionTest {
             MediaFrameCache.clear()
         }
     }
+
+    @Test fun markdownSmallBadgesRenderAtCompactIntrinsicSizeAndFlowHorizontally() {
+        rule.setContent {
+            MaterialTheme {
+                val badgeA = remember { android.graphics.Bitmap.createBitmap(408, 60, android.graphics.Bitmap.Config.ARGB_8888) }
+                val badgeB = remember { android.graphics.Bitmap.createBitmap(318, 60, android.graphics.Bitmap.Config.ARGB_8888) }
+                CompositionLocalProvider(LocalMediaFrameLoader provides { res, _, _ ->
+                    if (res.source.contains("badge-a")) MediaFrame(badgeA, intrinsicWidth = 136, intrinsicHeight = 20)
+                    else MediaFrame(badgeB, intrinsicWidth = 106, intrinsicHeight = 20)
+                }) {
+                    MediaViewerHost("A", previewActions, MediaContext("A", "/workspace/A")) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                            NativeMarkdown("![License](badge-a.svg)\n![ABI](badge-b.svg)")
+                        }
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+        val aBounds = rule.onNodeWithTag("media-card:badge-a.svg").fetchSemanticsNode().boundsInRoot
+        val bBounds = rule.onNodeWithTag("media-card:badge-b.svg").fetchSemanticsNode().boundsInRoot
+        assertTrue("Badge A height (${aBounds.height}) should stay compact", aBounds.height <= 30f)
+        assertTrue("Badge A width (${aBounds.width}) should stay near intrinsic", aBounds.width in 120f..150f)
+        assertTrue("Badge B height (${bBounds.height}) should stay compact", bBounds.height <= 30f)
+        assertTrue("Badge B (${bBounds.left}) should flow beside Badge A (${aBounds.right})", bBounds.left >= aBounds.right)
+        assertEquals(aBounds.top, bBounds.top, 2f)
+    }
 }

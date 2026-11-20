@@ -142,19 +142,30 @@ class ContentBlocksInteractionTest {
     }
 
     @Test fun narrowEditHeaderKeepsTheFilenameAheadOfSecondaryMetadata() {
+        var cardWidth by mutableStateOf(248.dp)
         rule.setContent { MaterialTheme {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 1.3f)) {
-                Box(Modifier.width(248.dp)) {
+                Box(Modifier.width(cardWidth)) {
                     ProcessEditCardGroup(contentBlockEditFixture, "OpenCode", rememberSaveableStateHolder(), null, false, null)
                 }
             }
         } }
-        val layouts = mutableListOf<TextLayoutResult>()
+        val narrowLayouts = mutableListOf<TextLayoutResult>()
         rule.onNodeWithText("edit · Message.kt", useUnmergedTree = true)
-            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
-        assertTrue(layouts.isNotEmpty())
-        assertFalse("filename must not disappear behind the edit count", layouts.single().isLineEllipsized(layouts.single().lineCount - 1))
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(narrowLayouts) }
+        assertTrue(narrowLayouts.isNotEmpty())
+        assertEquals(1, narrowLayouts.single().lineCount)
+        rule.onNodeWithText("2 处", useUnmergedTree = true).assertIsDisplayed()
+        rule.onAllNodesWithText("src", useUnmergedTree = true).assertCountEquals(0)
+
+        rule.runOnIdle { cardWidth = 300.dp }
+        val widerLayouts = mutableListOf<TextLayoutResult>()
+        rule.onNodeWithText("edit · Message.kt", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(widerLayouts) }
+        assertTrue(widerLayouts.isNotEmpty())
+        assertEquals(1, widerLayouts.single().lineCount)
+        assertFalse("filename must not ellipsize when width suffices", widerLayouts.single().isLineEllipsized(0))
         rule.onNodeWithText("2 处", useUnmergedTree = true).assertIsDisplayed()
     }
 
@@ -209,6 +220,45 @@ class ContentBlocksInteractionTest {
         rule.onNodeWithContentDescription("复制").performClick()
         assertEquals(script, copied?.text)
         assertEquals(command, item.input)
+    }
+
+    @Test fun mergedToolCardBalancesDividerAcrossThreeLineSlotsAndCopiesOnlyInput() {
+        val inputText = "echo alpha\necho beta"
+        val outputText = "alpha\nbeta"
+        val item = io.github.modao7067.luma.gui.session.ConversationItem(
+            "merged-cmd",
+            "tool",
+            text = inputText,
+            input = inputText,
+            detail = outputText,
+            kind = "commandExecution",
+            outcome = "succeeded",
+        )
+        rule.setContent { MaterialTheme {
+            CompositionLocalProvider(LocalClipboardManager provides clipboard) {
+                Box(Modifier.width(350.dp)) {
+                    ProcessGroup(listOf(item), cli = "Codex", initiallyExpanded = true, initiallyOpenItem = item.id)
+                }
+            }
+        } }
+        rule.onAllNodesWithText("Output").assertCountEquals(0)
+        rule.onAllNodesWithText("output").assertCountEquals(0)
+        rule.onNodeWithContentDescription("复制").performClick()
+        assertEquals(inputText, copied?.text)
+        val inputNode = rule.onNodeWithText(inputText, useUnmergedTree = true)
+        val outputNode = rule.onNodeWithText(outputText, useUnmergedTree = true)
+        val inputBounds = inputNode.fetchSemanticsNode().boundsInRoot
+        val outputBounds = outputNode.fetchSemanticsNode().boundsInRoot
+        val inputLayouts = mutableListOf<TextLayoutResult>()
+        val outputLayouts = mutableListOf<TextLayoutResult>()
+        inputNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(inputLayouts) }
+        outputNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(outputLayouts) }
+        val inputLayout = inputLayouts.single()
+        val outputLayout = outputLayouts.single()
+        val lineStepPx = inputLayout.getLineBaseline(1) - inputLayout.getLineBaseline(0)
+        val inputLastBaseline = inputBounds.top + inputLayout.getLineBaseline(1)
+        val outputFirstBaseline = outputBounds.top + outputLayout.getLineBaseline(0)
+        assertEquals(2f * lineStepPx, outputFirstBaseline - inputLastBaseline, 1.5f)
     }
 
     private fun assertBodyScrollsBothWays() {

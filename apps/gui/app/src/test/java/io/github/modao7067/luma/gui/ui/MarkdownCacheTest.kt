@@ -100,4 +100,13 @@ class MarkdownCacheTest {
         assertEquals(MenuSymbol.TERMINAL, codeBlockSymbol("", "build.sh"))
         assertEquals(MenuSymbol.ARTICLE, codeBlockSymbol("", "README.md"))
     }
+    @Test fun singleTildesDoNotTriggerStrikethroughWhileDoubleTildesStillDo() {
+        val parser = MarkdownDocumentParser()
+        val singleTilde = parser.parse("手机每行 20~24 字，进入嵌套列表后只有 17~19 字。", complete = true)
+        fun hasKind(node: MarkdownAst, kind: MarkdownKind): Boolean =
+            node.kind == kind || node.children.any { hasKind(it, kind) }
+        assertFalse(singleTilde.blocks.any { hasKind(it.node, MarkdownKind.STRIKE) })
+        val doubleTilde = parser.parse("保留 ~~删除内容~~ 结尾", complete = true)
+        assertTrue(doubleTilde.blocks.any { hasKind(it.node, MarkdownKind.STRIKE) })
+    }
 }

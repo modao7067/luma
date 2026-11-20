@@ -175,7 +175,7 @@ class SendDeliveryInteractionTest {
         fixture()
         rule.onNodeWithContentDescription("停止任务").assertIsEnabled()
         rule.onNodeWithText("待发消息 · 2").assertExists()
-        rule.onNodeWithText("3 次 子代理", substring = true).assertExists()
+        rule.onNodeWithText("正在召唤子代理…").assertExists()
         editor().performTextInput("下一个问题")
         editor().assertTextEquals("下一个问题")
         rule.onNodeWithText("核对").assertDoesNotExist()
@@ -237,5 +237,103 @@ class SendDeliveryInteractionTest {
         rule.onNodeWithText("220: val alpha", substring = true).assertDoesNotExist()
         rule.onNodeWithText("+2").assertIsDisplayed()
         rule.onNodeWithText("Parameters").assertDoesNotExist()
+    }
+
+    @Test fun sendingAfterTallAnchoredTurnStillTriggersBubblePopAndSmoothAnchorGlide() {
+        val history = (1..12).map { i ->
+            ConversationItem("h-$i", if (i % 2 == 1) "user" else "assistant", "历史消息 $i")
+        }
+        val tallReply = (1..40).joinToString("\n\n") { "第 $it 段较长回复内容，用来把上一轮撑出超过一屏的高度。" }
+        view = sendDeliveryFixture().copy(messages = history, draft = "", sending = false)
+        fixture()
+        rule.runOnIdle {
+            view = view.copy(
+                activeTurnId = "turn-1",
+                messages = history + listOf(
+                    ConversationItem("u-first", "user", "第一轮提问"),
+                    ConversationItem("a-first", "assistant", tallReply),
+                ),
+            )
+        }
+        rule.waitForIdle()
+        rule.runOnIdle {
+            view = view.copy(activeTurnId = null, draft = "第二轮正常提问")
+        }
+        rule.waitForIdle()
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithContentDescription("发送").performClick()
+        val bubbleHeights = mutableListOf<Float>()
+        val bubbleTops = mutableListOf<Float>()
+        repeat(70) {
+            rule.mainClock.advanceTimeByFrame()
+            rule.waitForIdle()
+            val bounds = rule.onAllNodesWithTag("user-bubble:stable-local-id", useUnmergedTree = true)
+                .fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+            if (bounds != null && bounds.height > 0f) {
+                bubbleHeights += bounds.height
+                bubbleTops += bounds.top
+            }
+        }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        assertTrue("bubble pop must animate across intermediate scaled heights: $bubbleHeights", bubbleHeights.distinct().size > 3)
+        assertTrue("top anchor glide must travel across intermediate vertical positions: $bubbleTops", bubbleTops.distinct().size > 3)
+        assertTrue("bubble must glide upward toward top anchor: first=${bubbleTops.firstOrNull()} last=${bubbleTops.lastOrNull()}",
+            bubbleTops.first() > bubbleTops.last() + 40f)
+    }
+
+    @Test fun interjectingFromQueueDuringTallActiveGenerationCollapsesQueueThenAnimatesUserBubble() {
+        val history = (1..10).map { i ->
+            ConversationItem("h-$i", if (i % 2 == 1) "user" else "assistant", "历史消息 $i")
+        }
+        val tallReply = (1..38).joinToString("\n\n") { "正在生成的第 $it 段输出内容，占满多个屏幕高度。" }
+        view = sendDeliveryFixture().copy(messages = history, draft = "", sending = false)
+        fixture()
+        rule.runOnIdle {
+            view = view.copy(
+                activeTurnId = "turn-live",
+                messages = history + listOf(
+                    ConversationItem("u-live", "user", "第一轮生成中任务"),
+                    ConversationItem("a-live", "assistant", tallReply),
+                ),
+            )
+        }
+        rule.waitForIdle()
+        rule.runOnIdle {
+            view = view.copy(
+                queue = listOf(QueueEntry("q-steer", "生成中插话内容", "待发送", canEdit = true, canSteer = true, canRemove = true, clientUserMessageId = "steer-user-id")),
+            )
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("生成中插话内容").assertIsDisplayed()
+        rule.mainClock.autoAdvance = false
+        rule.runOnIdle {
+            view = view.copy(
+                queue = emptyList(),
+                messages = view.messages + ConversationItem("steer-user-id", "user", "生成中插话内容"),
+            )
+        }
+        val firstFrameVisible = mutableListOf<Boolean>()
+        val bubbleHeights = mutableListOf<Float>()
+        val bubbleTops = mutableListOf<Float>()
+        repeat(80) { frame ->
+            rule.mainClock.advanceTimeByFrame()
+            rule.waitForIdle()
+            val bounds = rule.onAllNodesWithTag("user-bubble:steer-user-id", useUnmergedTree = true)
+                .fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+            if (frame == 0) {
+                firstFrameVisible += (bounds != null)
+            }
+            if (bounds != null && bounds.height > 0f) {
+                bubbleHeights += bounds.height
+                bubbleTops += bounds.top
+            }
+        }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        assertEquals("interjected bubble must wait for queued card collapse before appearing", listOf(false), firstFrameVisible)
+        assertTrue("interjected bubble pop must animate across intermediate scaled heights: $bubbleHeights", bubbleHeights.distinct().size > 3)
+        assertTrue("interjected bubble must glide upward toward top anchor: $bubbleTops",
+            bubbleTops.distinct().size > 3 && bubbleTops.first() > bubbleTops.last() + 40f)
     }
 }

@@ -114,7 +114,7 @@ final class LinuxEnvironment {
         guestEnv.put("SSL_CERT_FILE","/etc/ssl/certs/ca-certificates.crt");
         guestEnv.put("NO_PROXY","127.0.0.1,localhost,::1");
         guestEnv.put("no_proxy","127.0.0.1,localhost,::1");
-        guestEnv.put("PATH","/opt/luma/bin:/root/.local/share/pnpm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        guestEnv.put("PATH","/opt/luma/bin:/root/.local/share/pnpm/bin:/root/.local/bin:/root/.kimi-code/bin:/root/.opencode/bin:/root/.grok/bin:/root/.qoder/bin:/root/.codebuddy/bin:/root/.cargo/bin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         guestEnv.put("LUMA_ENV","debian-proot");
         guestEnv.put("LUMA_WORKSPACE","/workspace");
         guestEnv.put("LUMA_NATIVE_SOCKET",socketName(c));

@@ -341,7 +341,9 @@ internal fun freezeMarkdownNode(node: Node): MarkdownAst {
 }
 
 internal class MarkdownDocumentParser {
-    private val parser = Parser.builder().extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
+    private val parser = Parser.builder().extensions(
+        listOf(TablesExtension.create(), StrikethroughExtension.builder().requireTwoTildes(true).build()),
+    )
         .includeSourceSpans(org.commonmark.parser.IncludeSourceSpans.BLOCKS_AND_INLINES).build()
     var parses: Long = 0; private set
     var parseNanos: Long = 0; private set
@@ -371,7 +373,7 @@ internal class MarkdownDocumentParser {
         parseNanos += System.nanoTime() - begin
         return MarkdownDocument(source, blocks.toList(), complete = complete)
     }
-    companion object { const val CONFIGURATION = "commonmark-0.32.0:gfm-tables+strike:math-fences:v3" }
+    companion object { const val CONFIGURATION = "commonmark-0.32.0:gfm-tables+strike2:math-fences:v4" }
 }
 
 internal data class MarkdownCacheUsage(val entries: Int, val sourceUnits: Int, val nodes: Int, val hits: Long, val misses: Long, val rejected: Long)

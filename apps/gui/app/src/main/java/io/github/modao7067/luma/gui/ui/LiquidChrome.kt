@@ -1,22 +1,13 @@
-// Lens portions adapted from Kyant0 / SukiSU under Apache-2.0.
-// Source details and notices: apps/gui/third-party/sukisu-glass.
+// Adapted from chen08209/prism_ui under GPL-3.0. See apps/gui/third-party/prism-ui/.
 package io.github.modao7067.luma.gui.ui
 
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.RenderEffect
-import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
-import androidx.annotation.RequiresApi
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
@@ -26,15 +17,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.GraphicsLayer
@@ -43,15 +37,25 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
-import kotlin.math.ceil
 import androidx.compose.ui.unit.dp
+import kotlin.math.ceil
 
-internal class GlassScene(val layer: GraphicsLayer) {
+internal class GlassScene(
+    val layer: GraphicsLayer,
+    val regularLayer: GraphicsLayer,
+    val hazeLayer: GraphicsLayer,
+    val regularScale: Float = PrismGlassDefaults.regularScale,
+    val hazeScale: Float = PrismGlassDefaults.hazeScale,
+) {
     var rootCoordinates: androidx.compose.ui.layout.LayoutCoordinates? = null
+    var regularConsumers by mutableIntStateOf(0)
+        internal set
+    var hazeConsumers by mutableIntStateOf(0)
+        internal set
     fun localOffsetOf(coordinates: androidx.compose.ui.layout.LayoutCoordinates): Offset {
         val root = rootCoordinates
         return if (root != null && root.isAttached && coordinates.isAttached) {
@@ -72,31 +76,49 @@ internal val FloatingOverlayBottomGap = 8.dp
 @Composable
 internal fun Modifier.liquidClickable(
     enabled: Boolean = true,
-    cornerRadius: Dp = 22.dp,
-    pressScale: Float = 0.96f,
-    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(cornerRadius),
+    stretch: Boolean = true,
+    blockDrawerSwipe: Boolean = true,
+    press: ElasticPressState = rememberElasticPress(),
     onClick: () -> Unit,
 ): Modifier {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scaleState = animateFloatAsState(
-        targetValue = if (enabled && pressed) pressScale else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium),
-        label = "liquid-press-scale",
-    )
+    val haptic = LocalHapticFeedback.current
     return this
-        .graphicsLayer {
-            val s = scaleState.value
-            scaleX = s
-            scaleY = s
-        }
-        .clip(shape)
+        .elasticPress(enabled = enabled, stretch = stretch, state = press)
+        .blockHorizontalPageSwipe(enabled = enabled && blockDrawerSwipe)
         .clickable(
-            interactionSource = interactionSource,
-            indication = androidx.compose.foundation.LocalIndication.current,
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
             enabled = enabled,
-            onClick = onClick,
-        )
+        ) {
+            haptic.tick()
+            onClick()
+        }
+}
+
+internal class PrismBackdropBlur(
+    val regularScale: Float,
+    val hazeScale: Float,
+    val regularEffect: androidx.compose.ui.graphics.RenderEffect,
+    val hazeEffect: androidx.compose.ui.graphics.RenderEffect,
+)
+
+@Composable
+internal fun rememberPrismBackdropBlur(density: Float): PrismBackdropBlur = remember(density) {
+    val regScale = PrismGlassDefaults.regularScaleFor(density)
+    val hzScale = PrismGlassDefaults.hazeScaleFor(density)
+    val regSigma = PrismGlassDefaults.effectiveCaptureSigma(PrismGlassDefaults.regularBlurDp, density, regScale)
+    val regRadius = PrismGlassDefaults.blurSigmaToAndroidRadius(regSigma)
+    val step = hzScale / regScale
+    val targetHazeSigma = PrismGlassDefaults.effectiveCaptureSigma(PrismGlassDefaults.hazeBlurDp, density, hzScale)
+    val existingHazeSigma = PrismGlassDefaults.regularBlurDp * density * regScale * step
+    val extraHazeSigma = PrismGlassDefaults.cascadeExtraSigma(targetHazeSigma, existingHazeSigma)
+    val hazeRadius = PrismGlassDefaults.blurSigmaToAndroidRadius(extraHazeSigma)
+    PrismBackdropBlur(
+        regularScale = regScale,
+        hazeScale = hzScale,
+        regularEffect = RenderEffect.createBlurEffect(regRadius, regRadius, Shader.TileMode.CLAMP).asComposeRenderEffect(),
+        hazeEffect = RenderEffect.createBlurEffect(hazeRadius, hazeRadius, Shader.TileMode.CLAMP).asComposeRenderEffect(),
+    )
 }
 
 @Composable
@@ -110,11 +132,17 @@ internal fun LiquidScaffold(
     overlay: @Composable BoxScope.(PaddingValues) -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val density = LocalDensity.current
+    val backdropBlur = rememberPrismBackdropBlur(density.density)
     val backdrop = rememberGraphicsLayer()
-    val glassScene = remember(backdrop) { GlassScene(backdrop) }
+    val regularBackdrop = rememberGraphicsLayer()
+    val hazeBackdrop = rememberGraphicsLayer()
+    val glassScene = remember(backdrop, regularBackdrop, hazeBackdrop, backdropBlur) {
+        GlassScene(backdrop, regularBackdrop, hazeBackdrop, backdropBlur.regularScale, backdropBlur.hazeScale)
+    }
+    val menuHost = remember { MorphMenuHost() }
     var topInnerHeight by remember { mutableIntStateOf(0) }
     var bottomInnerHeight by remember { mutableIntStateOf(0) }
-    val density = LocalDensity.current
     val background = MaterialTheme.colorScheme.background
     val fullInsets = WindowInsets.safeDrawing.asPaddingValues()
     val contentTopInset = if (edgeToEdgeContent) fullInsets.calculateTopPadding() else 0.dp
@@ -138,6 +166,7 @@ internal fun LiquidScaffold(
     CompositionLocalProvider(
         LocalContentColor provides MaterialTheme.colorScheme.onSurface,
         LocalGlassScene provides glassScene,
+        LocalMorphMenuHost provides menuHost,
     ) {
         Box(
             Modifier
@@ -145,6 +174,7 @@ internal fun LiquidScaffold(
                 .then(if (edgeToEdgeContent) Modifier else Modifier.windowInsetsPadding(WindowInsets.safeDrawing).imePadding())
                 .onGloballyPositioned {
                     glassScene.rootCoordinates = it
+                    menuHost.root = it
                 }
         ) {
             Box(
@@ -154,6 +184,17 @@ internal fun LiquidScaffold(
                         val upper = ((topHeight.toFloat() + contentTopInset.toPx()) * 1.18f).coerceIn(1f, size.height.coerceAtLeast(1f))
                         val lower = ((bottomHeight.toFloat() + contentBottomInset.toPx()) * 1.12f).coerceIn(1f, size.height.coerceAtLeast(1f))
                         val lowerStart = (size.height - lower).coerceAtLeast(0f)
+                        val regularSize = IntSize(
+                            ceil(size.width * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                            ceil(size.height * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                        )
+                        val hazeSize = IntSize(
+                            ceil(size.width * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                            ceil(size.height * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                        )
+                        val hazeStepScale = backdropBlur.hazeScale / backdropBlur.regularScale
+                        regularBackdrop.renderEffect = backdropBlur.regularEffect
+                        hazeBackdrop.renderEffect = backdropBlur.hazeEffect
                         val upperBrush = Brush.verticalGradient(
                             0f to background.copy(alpha = 0.95f),
                             0.62f to background.copy(alpha = 0.62f),
@@ -169,20 +210,38 @@ internal fun LiquidScaffold(
                             endY = size.height,
                         )
                         onDrawWithContent {
-                            backdrop.record {
-                                drawRect(background)
+                            val needHaze = glassScene.hazeConsumers > 0 || menuHost.entries.isNotEmpty()
+                            val needRegular = needHaze || glassScene.regularConsumers > 0
+                            if (needRegular) {
+                                backdrop.record {
+                                    drawRect(background)
+                                    this@onDrawWithContent.drawContent()
+                                }
+                                drawLayer(backdrop)
+                                regularBackdrop.record(size = regularSize) {
+                                    scale(backdropBlur.regularScale, backdropBlur.regularScale, pivot = Offset.Zero) {
+                                        drawLayer(backdrop)
+                                    }
+                                }
+                                if (needHaze) {
+                                    hazeBackdrop.record(size = hazeSize) {
+                                        scale(hazeStepScale, hazeStepScale, pivot = Offset.Zero) {
+                                            drawLayer(regularBackdrop)
+                                        }
+                                    }
+                                }
+                            } else {
                                 this@onDrawWithContent.drawContent()
                             }
-                            drawLayer(backdrop)
                             drawRect(
                                 brush = upperBrush,
                                 topLeft = Offset.Zero,
-                                size = androidx.compose.ui.geometry.Size(size.width, upper),
+                                size = Size(size.width, upper),
                             )
                             drawRect(
                                 brush = lowerBrush,
                                 topLeft = Offset(0f, lowerStart),
-                                size = androidx.compose.ui.geometry.Size(size.width, (size.height - lowerStart).coerceAtLeast(0f)),
+                                size = Size(size.width, (size.height - lowerStart).coerceAtLeast(0f)),
                             )
                         }
                     }
@@ -219,11 +278,18 @@ internal fun LiquidScaffold(
                     .padding(horizontal = FloatingChromeHorizontalPadding, vertical = FloatingChromeVerticalPadding)
                     .onSizeChanged { bottomInnerHeight = it.height },
             ) {
-                if (wrapBottom) LiquidGlass(Modifier.fillMaxWidth(), content = bottomBar) else bottomBar()
+                if (wrapBottom) LiquidGlass(Modifier.fillMaxWidth(), style = PrismGlassStyle.dock(MaterialTheme.colorScheme), shadow = GlassShadow.Dock, content = bottomBar) else bottomBar()
             }
+            MorphMenuLayer(
+                menuHost,
+                glassScene,
+                if (edgeToEdgeContent) WindowInsets.safeDrawing.union(WindowInsets.ime) else WindowInsets(0, 0, 0, 0),
+            )
         }
     }
 }
+
+internal enum class GlassShadow { None, Dock }
 
 @Composable
 internal fun LiquidGlass(
@@ -231,14 +297,16 @@ internal fun LiquidGlass(
     cornerRadius: Dp = 24.dp,
     tonalTint: Color? = null,
     @Suppress("UNUSED_PARAMETER") elevated: Boolean = false,
-    blurRadius: Dp = SukiGlassDefaults.blurRadiusDp.dp,
-    containerAlpha: Float = SukiGlassDefaults.containerAlpha,
+    style: PrismGlassStyle? = null,
     alphaProvider: (() -> Float)? = null,
+    shadow: GlassShadow = GlassShadow.None,
+    press: ElasticPressState? = null,
     content: @Composable () -> Unit,
 ) {
     val scene = LocalGlassScene.current
     if (scene != null) {
-        LiquidPanel(scene, modifier, cornerRadius, tonalTint, blurRadius, containerAlpha, alphaProvider, content)
+        val resolvedStyle = style ?: PrismGlassStyle.regular(MaterialTheme.colorScheme, tonalTint)
+        LiquidPanel(scene, modifier, cornerRadius, resolvedStyle, alphaProvider, shadow, press, content)
     } else {
         LiquidSurface(
             modifier = if (alphaProvider != null) modifier.graphicsLayer { alpha = alphaProvider().coerceIn(0f, 1f) } else modifier,
@@ -251,16 +319,16 @@ internal fun LiquidGlass(
 }
 
 internal object ComposerGlassDefaults {
-    const val blurRadiusDp = 12f
-    const val containerAlpha = 0.82f
+    const val blurRadiusDp = PrismGlassDefaults.hazeBlurDp
+    const val containerAlpha = PrismGlassDefaults.dockLightAlpha
 }
 
 @Composable
 internal fun ComposerGlass(modifier: Modifier = Modifier, content: @Composable () -> Unit) = LiquidGlass(
-    modifier = modifier,
+    modifier = modifier.blockHorizontalPageSwipe(),
     cornerRadius = 24.dp,
-    blurRadius = ComposerGlassDefaults.blurRadiusDp.dp,
-    containerAlpha = ComposerGlassDefaults.containerAlpha,
+    style = PrismGlassStyle.dock(MaterialTheme.colorScheme),
+    shadow = GlassShadow.Dock,
     content = content,
 )
 
@@ -284,78 +352,147 @@ private fun LiquidPanel(
     scene: GlassScene,
     modifier: Modifier,
     cornerRadius: Dp,
-    tonalTint: Color?,
-    blurRadius: Dp,
-    containerAlpha: Float,
+    style: PrismGlassStyle,
     alphaProvider: (() -> Float)? = null,
+    shadow: GlassShadow = GlassShadow.None,
+    press: ElasticPressState? = null,
     content: @Composable () -> Unit,
 ) {
-    val backdrop = scene.layer
+    DisposableEffect(scene, style.useHaze) {
+        if (style.useHaze) scene.hazeConsumers++ else scene.regularConsumers++
+        onDispose {
+            if (style.useHaze) {
+                scene.hazeConsumers = (scene.hazeConsumers - 1).coerceAtLeast(0)
+            } else {
+                scene.regularConsumers = (scene.regularConsumers - 1).coerceAtLeast(0)
+            }
+        }
+    }
     val layer = rememberGraphicsLayer()
-    val shadowLayer = rememberGraphicsLayer()
+    val hasDockShadow = shadow == GlassShadow.Dock
+    val dropShadowLayer = if (hasDockShadow) rememberGraphicsLayer() else null
+    val contactShadowLayer = if (hasDockShadow) rememberGraphicsLayer() else null
     var offset by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
     val radius = with(density) { cornerRadius.toPx() }
-    val blur = with(density) { blurRadius.toPx() }
-    val samplePadding = with(density) { SukiGlassDefaults.samplePaddingDp.dp.toPx() }
-    val refractionHeight = with(density) { SukiGlassDefaults.refractionHeightDp.dp.toPx() }
-    val refractionAmount = with(density) { SukiGlassDefaults.refractionAmountDp.dp.toPx() }
     val scheme = MaterialTheme.colorScheme
-    val tint = tonalTint ?: scheme.surfaceContainerHigh
-    val shadowAlpha = if (scheme.surface.luminance() > 0.5f) SukiGlassDefaults.lightShadowAlpha else SukiGlassDefaults.darkShadowAlpha
-    val shadowRadius = with(density) { SukiGlassDefaults.shadowRadiusDp.dp.toPx() }
-    val shadowBlur = remember(shadowRadius) {
-        RenderEffect.createBlurEffect(shadowRadius, shadowRadius, Shader.TileMode.DECAL).asComposeRenderEffect()
+    val darkSurface = scheme.surface.luminance() <= 0.5f
+    val shadowStrength = if (darkSurface) 3f else 1f
+    val dropBlurPx = if (hasDockShadow) with(density) { 24.dp.toPx() } else 0f
+    val dropOffsetY = if (hasDockShadow) with(density) { 8.dp.toPx() } else 0f
+    val contactBlurPx = if (hasDockShadow) with(density) { 3.dp.toPx() } else 0f
+    val contactOffsetY = if (hasDockShadow) with(density) { 1.dp.toPx() } else 0f
+    val dropShadowScale = 0.25f
+    val dropBlur = remember(hasDockShadow, dropBlurPx) {
+        if (hasDockShadow) {
+            val scaled = dropBlurPx * dropShadowScale
+            RenderEffect.createBlurEffect(scaled, scaled, Shader.TileMode.DECAL).asComposeRenderEffect()
+        } else null
     }
-    val lens = remember { if (Build.VERSION.SDK_INT >= 33) LiquidLens() else null }
-    val highlight = remember { if (Build.VERSION.SDK_INT >= 33) SukiGlassHighlight() else null }
-    val frost = remember(blur) { sukiGlassFrost(blur).asComposeRenderEffect() }
+    val contactBlur = remember(hasDockShadow, contactBlurPx) {
+        if (hasDockShadow) RenderEffect.createBlurEffect(contactBlurPx, contactBlurPx, Shader.TileMode.DECAL).asComposeRenderEffect() else null
+    }
+    val shader = remember { if (Build.VERSION.SDK_INT >= 33) PrismGlassShader() else null }
+    val fallbackFilter = remember(style.saturation, style.brightness) {
+        if (Build.VERSION.SDK_INT < 33) prismOpticsColorFilter(style.saturation, style.brightness).asComposeRenderEffect() else null
+    }
+    val sourceLayer = if (style.useHaze) scene.hazeLayer else scene.regularLayer
+    val sourceScale = if (style.useHaze) scene.hazeScale else scene.regularScale
+    val invScale = 1f / sourceScale
     Box(
         Modifier
-            .drawWithCache {
-                val r = radius.coerceAtMost(size.minDimension / 2f)
-                val apron = shadowRadius * 3f
-                val shadowSize = IntSize(ceil(size.width + apron * 2).toInt(), ceil(size.height + apron * 2).toInt())
-                val panelSize = size
-                shadowLayer.record(size = shadowSize) {
-                    drawRoundRect(Color.Black.copy(alpha = shadowAlpha), topLeft = Offset(apron, apron), size = panelSize, cornerRadius = CornerRadius(r))
-                }
-                shadowLayer.renderEffect = shadowBlur
-                onDrawBehind {
-                    val a = (alphaProvider?.invoke() ?: 1f).coerceIn(0f, 1f)
-                    if (a > 0f) {
-                        shadowLayer.alpha = a
-                        translate(-apron, -apron) { drawLayer(shadowLayer) }
-                    }
-                }
-            }
             .then(modifier)
             .onGloballyPositioned {
                 val next = scene.localOffsetOf(it)
                 if (offset != next) offset = next
             }
             .drawWithCache {
-                val r = radius.coerceAtMost(minOf(size.width, size.height) / 2f)
-                val silhouette = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(r))) }
-                val captureSize = IntSize(ceil(size.width + 2 * samplePadding).toInt(), ceil(size.height + 2 * samplePadding).toInt())
-                layer.renderEffect = if (Build.VERSION.SDK_INT >= 33 && lens != null) {
-                    lens.effect(size.width, size.height, r, blur, samplePadding, refractionHeight, refractionAmount)
-                } else frost
+                val r = radius.coerceAtMost(size.minDimension / 2f)
+                val panelSize = size
+                val platterRect = Rect(0f, 0f, size.width, size.height)
+                val silhouette = if (hasDockShadow || Build.VERSION.SDK_INT < 33) {
+                    Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(r))) }
+                } else null
+                val dropApron = dropBlurPx * 2f + 2f
+                val contactApron = contactBlurPx * 2f + 2f
+                if (hasDockShadow && dropShadowLayer != null && contactShadowLayer != null) {
+                    val dropSize = IntSize(
+                        ceil((size.width + dropApron * 2) * dropShadowScale).toInt().coerceAtLeast(1),
+                        ceil((size.height + dropApron * 2) * dropShadowScale).toInt().coerceAtLeast(1),
+                    )
+                    dropShadowLayer.record(size = dropSize) {
+                        scale(dropShadowScale, dropShadowScale, pivot = Offset.Zero) {
+                            drawRoundRect(
+                                Color.Black.copy(alpha = 0.08f * shadowStrength),
+                                topLeft = Offset(dropApron, dropApron),
+                                size = panelSize,
+                                cornerRadius = CornerRadius(r),
+                            )
+                        }
+                    }
+                    dropShadowLayer.renderEffect = dropBlur
+                    val contactSize = IntSize(ceil(size.width + contactApron * 2).toInt(), ceil(size.height + contactApron * 2).toInt())
+                    contactShadowLayer.record(size = contactSize) {
+                        drawRoundRect(
+                            Color.Black.copy(alpha = 0.04f * shadowStrength),
+                            topLeft = Offset(contactApron, contactApron),
+                            size = panelSize,
+                            cornerRadius = CornerRadius(r),
+                        )
+                    }
+                    contactShadowLayer.renderEffect = contactBlur
+                }
+                val captureSize = IntSize(ceil(size.width).toInt().coerceAtLeast(1), ceil(size.height).toInt().coerceAtLeast(1))
+                if (Build.VERSION.SDK_INT < 33) {
+                    layer.renderEffect = fallbackFilter
+                }
                 onDrawWithContent {
                     val a = (alphaProvider?.invoke() ?: 1f).coerceIn(0f, 1f)
                     if (a > 0f) {
-                        layer.alpha = a
-                        layer.record(size = captureSize) {
-                            translate(samplePadding - offset.x, samplePadding - offset.y) { drawLayer(backdrop) }
-                        }
-                        clipPath(silhouette) {
-                            translate(-samplePadding, -samplePadding) { drawLayer(layer) }
-                            drawRoundRect(tint.copy(alpha = containerAlpha * a), cornerRadius = CornerRadius(r))
-                            if (Build.VERSION.SDK_INT >= 33 && highlight != null) {
-                                with(highlight) { draw(r, alpha = a) }
+                        if (hasDockShadow && dropShadowLayer != null && contactShadowLayer != null && silhouette != null) {
+                            clipPath(silhouette, clipOp = ClipOp.Difference) {
+                                if (dropShadowLayer.alpha != a) dropShadowLayer.alpha = a
+                                translate(-dropApron, -dropApron + dropOffsetY) {
+                                    scale(1f / dropShadowScale, 1f / dropShadowScale, pivot = Offset.Zero) {
+                                        drawLayer(dropShadowLayer)
+                                    }
+                                }
+                                if (contactShadowLayer.alpha != a) contactShadowLayer.alpha = a
+                                translate(-contactApron, -contactApron + contactOffsetY) { drawLayer(contactShadowLayer) }
                             }
-                            this@onDrawWithContent.drawContent()
                         }
+                        layer.record(size = captureSize) {
+                            scale(invScale, invScale, pivot = Offset.Zero) {
+                                translate(-offset.x * sourceScale, -offset.y * sourceScale) {
+                                    drawLayer(sourceLayer)
+                                }
+                            }
+                        }
+                        if (Build.VERSION.SDK_INT >= 33 && shader != null) {
+                            val glowStrength = press?.glowStrength ?: 0f
+                            val glowCenter = if (glowStrength > 0.0005f && press != null) press.glowCenter(size) else Offset.Zero
+                            val glowReach = if (glowStrength > 0.0005f && press != null) press.glowReach(size) else 1f
+                            layer.renderEffect = shader.effect(
+                                boundsPx = size,
+                                density = density.density,
+                                platterPx = platterRect,
+                                radiusPx = r,
+                                style = style,
+                                alpha = a,
+                                glowCenterPx = glowCenter,
+                                glowStrength = glowStrength,
+                                glowReachPx = glowReach,
+                            )
+                            layer.alpha = 1f
+                            drawLayer(layer)
+                        } else if (silhouette != null) {
+                            layer.alpha = a
+                            clipPath(silhouette) {
+                                drawLayer(layer)
+                                drawPrismFallbackOverlay(silhouette, platterRect, style, a)
+                            }
+                        }
+                        this@onDrawWithContent.drawContent()
                     }
                 }
             },
@@ -365,117 +502,6 @@ private fun LiquidPanel(
         } else {
             content()
         }
-    }
-}
-
-private fun sukiGlassFrost(blurRadius: Float): RenderEffect {
-    val saturation = SukiGlassDefaults.saturation
-    val r = (1f - saturation) * 0.2126f
-    val g = (1f - saturation) * 0.7152f
-    val b = (1f - saturation) * 0.0722f
-    val matrix = ColorMatrix(floatArrayOf(
-        r + saturation, g, b, 0f, 0f,
-        r, g + saturation, b, 0f, 0f,
-        r, g, b + saturation, 0f, 0f,
-        0f, 0f, 0f, 1f, 0f,
-    ))
-    val vibrancy = RenderEffect.createColorFilterEffect(ColorMatrixColorFilter(matrix))
-    val nativeRadius = SukiGlassDefaults.nativeBlurRadius(blurRadius)
-    return RenderEffect.createChainEffect(
-        RenderEffect.createBlurEffect(nativeRadius, nativeRadius, Shader.TileMode.CLAMP),
-        vibrancy,
-    )
-}
-
-/** Adapted Apache-2.0 lens from SukiSU/Kyant0. See third-party/sukisu-glass. */
-@RequiresApi(33)
-private class LiquidLens {
-    private val shader = RuntimeShader(
-        """
-        uniform shader scene;
-        uniform float2 dimensions;
-        uniform float radius;
-        uniform float samplePadding;
-        uniform float refractionHeight;
-        uniform float refractionAmount;
-
-        float sdRoundedRect(float2 coord, float2 halfSize, float r) {
-            float2 cornerCoord = abs(coord) - (halfSize - float2(r));
-            float outside = length(max(cornerCoord, 0.0)) - r;
-            float inside = min(max(cornerCoord.x, cornerCoord.y), 0.0);
-            return outside + inside;
-        }
-
-        float2 gradSdRoundedRect(float2 coord, float2 halfSize, float r) {
-            float2 cornerCoord = abs(coord) - (halfSize - float2(r));
-            if (cornerCoord.x >= 0.0 || cornerCoord.y >= 0.0) {
-                float2 m = max(cornerCoord, 0.0);
-                return sign(coord) * (m / max(length(m), 0.0001));
-            } else {
-                float gradX = step(cornerCoord.y, cornerCoord.x);
-                return sign(coord) * float2(gradX, 1.0 - gradX);
-            }
-        }
-
-        float circleMap(float x) {
-            float clamped = clamp(x, 0.0, 1.0);
-            return 1.0 - sqrt(max(0.0, 1.0 - clamped * clamped));
-        }
-
-        half4 main(float2 p) {
-            float2 halfSize = dimensions * 0.5;
-            float2 centered = p - samplePadding - halfSize;
-            float sd = sdRoundedRect(centered, halfSize, radius);
-            if (-sd >= refractionHeight) {
-                return scene.eval(p);
-            }
-            sd = min(sd, 0.0);
-            float d = circleMap(1.0 - (-sd) / max(refractionHeight, 1.0)) * (-refractionAmount);
-            float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
-            float2 grad = gradSdRoundedRect(centered, halfSize, gradRadius);
-            grad = grad / max(length(grad), 0.0001);
-            float2 refracted = p + d * grad;
-            return scene.eval(refracted);
-        }
-        """.trimIndent(),
-    )
-    private var lastWidth = -1f
-    private var lastHeight = -1f
-    private var lastRadius = -1f
-    private var lastBlur = -1f
-    private var lastPadding = -1f
-    private var lastRefractionHeight = -1f
-    private var lastRefractionAmount = -1f
-    private var cached: androidx.compose.ui.graphics.RenderEffect? = null
-    fun effect(
-        width: Float,
-        height: Float,
-        radius: Float,
-        blur: Float,
-        samplePadding: Float,
-        refractionHeight: Float,
-        refractionAmount: Float,
-    ): androidx.compose.ui.graphics.RenderEffect {
-        if (width != lastWidth || height != lastHeight || radius != lastRadius || blur != lastBlur || samplePadding != lastPadding ||
-            refractionHeight != lastRefractionHeight || refractionAmount != lastRefractionAmount || cached == null) {
-            shader.setFloatUniform("dimensions", width.coerceAtLeast(1f), height.coerceAtLeast(1f))
-            shader.setFloatUniform("radius", radius.coerceAtLeast(0f))
-            shader.setFloatUniform("samplePadding", samplePadding)
-            shader.setFloatUniform("refractionHeight", refractionHeight.coerceAtLeast(1f))
-            shader.setFloatUniform("refractionAmount", refractionAmount.coerceAtLeast(0f))
-            cached = RenderEffect.createChainEffect(
-                RenderEffect.createRuntimeShaderEffect(shader, "scene"),
-                sukiGlassFrost(blur),
-            ).asComposeRenderEffect()
-            lastWidth = width
-            lastHeight = height
-            lastRadius = radius
-            lastBlur = blur
-            lastPadding = samplePadding
-            lastRefractionHeight = refractionHeight
-            lastRefractionAmount = refractionAmount
-        }
-        return cached!!
     }
 }
 

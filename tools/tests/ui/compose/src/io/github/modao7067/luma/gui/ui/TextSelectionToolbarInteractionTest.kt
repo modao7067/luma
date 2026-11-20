@@ -59,8 +59,14 @@ class TextSelectionToolbarInteractionTest {
         shadowOf(context.packageManager).addResolveInfoForIntent(intent, service(permission = "fixture.denied", suffix = "Protected"))
     }
     @Composable private fun Host(content: @Composable () -> Unit) {
-        CompositionLocalProvider(LocalNativeTextActionMode provides factory,
-            LocalProcessTextLauncher provides { intent, callback -> launched = intent; returnResult = callback }) {
+        val catalog = remember {
+            ProcessTextCatalog(context, java.util.concurrent.Executor { it.run() }, registerPackageReceiver = false)
+        }
+        CompositionLocalProvider(
+            LocalNativeTextActionMode provides factory,
+            LocalProcessTextCatalog provides catalog,
+            LocalProcessTextLauncher provides { intent, callback -> launched = intent; returnResult = callback },
+        ) {
             MaterialTheme { TextSelectionHost { content() } }
         }
     }
@@ -211,13 +217,14 @@ class TextSelectionToolbarInteractionTest {
             paragraphs.forEach { assertTrue("copy retained $it", copied.contains(it)) }
         }
     }
-    @Test fun inlineCodeKeepsItsExactTextAndPlacesBackingOutsideGlyphSpans() {
+    @Test fun inlineCodeKeepsItsExactTextWithoutBackgroundOrExtraSpaces() {
         rule.setContent { Host { NativeMarkdown("path `alpha beta`") } }
         val layouts = mutableListOf<TextLayoutResult>()
-        rule.onNodeWithText("path  alpha beta ").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        rule.onNodeWithText("path alpha beta").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
         val text = layouts.single().layoutInput.text
-        val code = text.getStringAnnotations(INLINE_CODE_BACKGROUND, 0, text.length).single()
-        assertEquals(" alpha beta ", text.text.substring(code.start, code.end))
+        assertEquals("path alpha beta", text.text)
+        val codeSpan = text.spanStyles.single { it.start == 5 && it.end == 15 }
+        assertNotNull(codeSpan.item.fontFamily)
         assertTrue(text.spanStyles.none { it.item.background != androidx.compose.ui.graphics.Color.Unspecified })
     }
     @Test fun ordinaryWordSelectionHidesOffscreenAndReopensOnReentryWithoutLosingCopy() {
@@ -227,6 +234,7 @@ class TextSelectionToolbarInteractionTest {
             scroll = rememberScrollState()
             Column(Modifier.fillMaxSize().verticalScroll(scroll)) { NativeMarkdown(source) }
         } }
+        rule.waitUntil(3_000) { rule.onAllNodesWithText("alpha beta").fetchSemanticsNodes().isNotEmpty() }
         longPressText()
         val original = mode
         rule.runOnIdle { kotlinx.coroutines.runBlocking { scroll.scrollTo(500) } }
@@ -247,6 +255,7 @@ class TextSelectionToolbarInteractionTest {
             scroll = rememberScrollState()
             Column(Modifier.fillMaxSize().verticalScroll(scroll)) { NativeMarkdown(source) }
         } }
+        rule.waitUntil(3_000) { rule.onAllNodesWithText("alpha beta").fetchSemanticsNodes().isNotEmpty() }
         longPressText()
         rule.runOnIdle { mode.choose(android.R.id.selectAll) }
         rule.runOnIdle { kotlinx.coroutines.runBlocking { scroll.scrollTo(1) } }

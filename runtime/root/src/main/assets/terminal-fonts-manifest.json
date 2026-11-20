@@ -135,5 +135,40 @@
         "end": "FFEF"
       }
     ]
+  },
+  {
+    "file": "NotoSansArabic-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansArabic",
+    "sha256": "ceea25b464a656dc3b26849bab9356740401af62aedf1bfa8b7f0d9b75925b1b",
+    "bytes": 240456,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansThai-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansThai",
+    "sha256": "404ddfb5ed0aaa6b6ec8a85700d682978992062d67da93903967b56cbd9a4acc",
+    "bytes": 37752,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansKannada-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansKannada",
+    "sha256": "5c804033c57f2c2844b1cd425f45b9a78d81d2f71bf358351b24258ebe168aea",
+    "bytes": 151940,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansCanadianAboriginal-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansCanadianAboriginal",
+    "sha256": "70735441641a0a90f9f1baa45c7340deea77f19c5829fc71162bb443acad2ca7",
+    "bytes": 113740,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
+  },
+  {
+    "file": "NotoSansGeorgian-Regular.ttf",
+    "source": "https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansGeorgian",
+    "sha256": "b36ab61cbdd820ffd32f957f704f5bf0c53655e820b7a64001091058919a11a6",
+    "bytes": 53948,
+    "license": "SIL Open Font License 1.1; Noto-OFL.txt"
   }
 ]

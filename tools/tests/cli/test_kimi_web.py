@@ -3,6 +3,7 @@ import copy
 import fcntl
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -18,11 +19,15 @@ from luma_cli.kimi_web import KimiWebSession
 from luma_cli.kimi_web_transport import (
     KimiWebGateway,
     KimiWebIncompatible,
+    KimiWebPeer,
+    KimiWebRejected,
     KimiWebSocket,
     PROTOCOL,
     has_live_kimi_gateway,
     reap_idle_kimi_gateway,
+    resolve_kimi_binary,
 )
+from luma_cli.metrics import kimi_web_metrics
 from luma_cli.server import Manager
 from luma_cli.transport import Rejected
 
@@ -527,6 +532,386 @@ class KimiWebTest(unittest.TestCase):
             with self.assertRaises(Rejected):
                 s.prompt({'submissionId': 'img-2', 'text': 'Retry', 'images': [str(img)]})
             self.assertNotIn('f_2', s.api.files)
+
+    def test_kimi_binary_resolves_from_kimi_code_home_when_noninteractive_path_omits_bashrc(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = pathlib.Path(root)
+            kimi_bin_dir = home / '.kimi-code' / 'bin'
+            kimi_bin_dir.mkdir(parents=True)
+            kimi_exe = kimi_bin_dir / 'kimi'
+            kimi_exe.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            kimi_exe.chmod(0o755)
+            with mock.patch.dict(os.environ, {'HOME': str(home), 'PATH': '/usr/bin:/bin'}, clear=False):
+                self.assertEqual(resolve_kimi_binary(), str(kimi_exe))
+                sess = KimiSession({'id': 's', 'cli': 'Kimi Code', 'cwd': root}, lambda: None)
+                with mock.patch('luma_cli.acp.AcpSession.start') as acp_start:
+                    sess.start(['kimi', 'acp'])
+                acp_start.assert_called_once_with([str(kimi_exe), 'acp'], None)
+                kimi_exe.unlink()
+                self.assertIsNone(resolve_kimi_binary())
+                with self.assertRaises(Rejected):
+                    KimiWebGateway(home / '.kimi-web').launch(mock.Mock())
+                with self.assertRaises(Rejected):
+                    KimiSession({'id': 's', 'cli': 'Kimi Code', 'cwd': root}, lambda: None).start(['kimi', 'acp'])
+
+    def test_kimi_26_turns_pagination_ws_subscribe_payloadless_ping_interactions_and_metrics(self):
+        with tempfile.TemporaryDirectory() as root:
+            gw = KimiWebGateway(pathlib.Path(root) / '.kimi-web')
+            gw.handle = {'pid': 99999}
+            gw.api = mock.Mock()
+            gw.api.port = 12345
+            gw.api.token = 'tok'
+            gw.api.request.return_value = {
+                'server_version': '2.6.3',
+                'dangerous_bypass_auth': False,
+                'backend': 'v2',
+                'capabilities': {'websocket': True},
+            }
+            gw.validate()
+            self.assertTrue(gw.uses_turns_api)
+
+            fake_sock = mock.Mock()
+            incoming = [
+                {'type': 'ping'},
+                {'type': 'response', 'request_id': 'subscribe', 'code': 0},
+                {'type': 'ping', 'payload': {'ts': 1}},
+                {
+                    'type': 'interaction',
+                    'session_id': 'native',
+                    'agent_id': 'main',
+                    'interaction_id': 'int-1',
+                    'kind': 'approval',
+                    'status': 'pending',
+                    'tool_call_id': 'tc-shell',
+                    'request': {'tool_name': 'Shell', 'action': 'ls'},
+                },
+                ConnectionError('eof'),
+            ]
+            gate = threading.Event()
+            interaction_seen = threading.Event()
+            def next_frame():
+                nxt = incoming.pop(0)
+                if isinstance(nxt, BaseException):
+                    gate.wait(2)
+                    raise nxt
+                return nxt
+            fake_sock.receive.side_effect = next_frame
+            events = []
+            def on_event(frame):
+                events.append(frame)
+                if frame.get('type') == 'interaction':
+                    interaction_seen.set()
+            sess = mock.Mock(config={'id': 'local', 'nativeId': 'native'})
+            exits = []
+            with mock.patch('luma_cli.kimi_web_transport.KimiWebSocket', return_value=fake_sock):
+                peer = KimiWebPeer(gw, sess, on_event, exits.append)
+                peer.start_read()
+                self.assertTrue(peer.ready.wait(2))
+                self.assertTrue(interaction_seen.wait(2))
+                peer.ensure_agent_subscriptions(['agent-sub-1', 'main', 'agent-sub-1'])
+                gate.set()
+                peer.thread.join(2)
+            sent_frames = [c.args[0] for c in fake_sock.send.call_args_list]
+            self.assertEqual(sent_frames[0], {
+                'type': 'subscribe',
+                'request_id': 'subscribe',
+                'session_id': 'native',
+                'agent_ids': ['main'],
+            })
+            self.assertIn({'type': 'pong'}, sent_frames)
+            self.assertIn({'type': 'pong', 'payload': {'ts': 1}}, sent_frames)
+            self.assertIn({
+                'type': 'subscribe',
+                'request_id': 'sub:agent-sub-1',
+                'session_id': 'native',
+                'agent_ids': ['agent-sub-1'],
+            }, sent_frames)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]['interaction_id'], 'int-1')
+
+            s = KimiWebSession({
+                'id': 'local',
+                'cli': 'Kimi Code',
+                'cwd': root,
+                'nativeId': 'native',
+                'nativeProtocol': PROTOCOL,
+                'receipts': {'p0': 'unknown', 'p1': 'unknown'},
+                'deliveries': {},
+                'consumedSubmissions': {},
+            }, lambda: None)
+            s.gateway = gw
+            s.path = '/sessions/native'
+            s.models = [{'alias': 'kimi-k2.5', 'model': 'kimi-k2.5', 'max_context_size': 262144}]
+            s.peer = mock.Mock(closed=False)
+            turn0 = {
+                'turn_id': 'turn-0',
+                'ordinal': 0,
+                'kind': 'agent',
+                'status': 'ended',
+                'outcome': 'completed',
+                'usage': {'input_other': 1000, 'input_cache_read': 500, 'input_cache_creation': 0, 'output': 200},
+                'steps': [{'index': 1, 'outcome': 'completed', 'usage': {'input_other': 1000, 'input_cache_read': 500, 'input_cache_creation': 0, 'output': 200}}],
+                'items': [
+                    {'type': 'user_message', 'item_id': 'u0', 'prompt_ids': ['p0'], 'placement': 'opener', 'origin': {'kind': 'user'}, 'text': 'hi', 'attachments': [], 'skills': []},
+                    {'type': 'reasoning', 'item_id': 'r0', 'status': 'ended', 'outcome': 'completed', 'text': 'think'},
+                    {'type': 'assistant_message', 'item_id': 'a0', 'status': 'ended', 'outcome': 'completed', 'text': 'hello'},
+                ],
+            }
+            turn1 = {
+                'turn_id': 'turn-1',
+                'ordinal': 1,
+                'kind': 'agent',
+                'status': 'running',
+                'usage': {'input_other': 2000, 'input_cache_read': 2000, 'input_cache_creation': 0, 'output': 300},
+                'steps': [{'index': 1, 'outcome': 'completed', 'usage': {'input_other': 2000, 'input_cache_read': 2000, 'input_cache_creation': 0, 'output': 300}}],
+                'items': [
+                    {'type': 'user_message', 'item_id': 'u1', 'prompt_ids': ['p1'], 'placement': 'opener', 'origin': {'kind': 'user'}, 'text': 'run sub', 'attachments': [], 'skills': []},
+                    {
+                        'type': 'tool_call',
+                        'item_id': 'tc1',
+                        'name': 'Agent',
+                        'status': 'running',
+                        'input': {'subagent_type': 'coder', 'description': 'helper task'},
+                        'output': '',
+                        'agent_refs': [{'agent_id': 'agent-sub-1', 'role': 'child'}],
+                    },
+                ],
+            }
+            sub_turn = {
+                'turn_id': 'st-0',
+                'ordinal': 0,
+                'kind': 'agent',
+                'status': 'ended',
+                'outcome': 'completed',
+                'steps': [{'index': 1, 'outcome': 'completed', 'usage': {'input_other': 500, 'input_cache_read': 500, 'input_cache_creation': 0, 'output': 50}}],
+                'items': [
+                    {'type': 'user_message', 'item_id': 'su0', 'prompt_ids': ['sp0'], 'placement': 'opener', 'origin': {'kind': 'user'}, 'text': 'sub prompt', 'attachments': [], 'skills': []},
+                    {'type': 'assistant_message', 'item_id': 'sa0', 'status': 'ended', 'outcome': 'completed', 'text': 'sub done'},
+                ],
+            }
+            def req_side_effect(method, path, body=None, binary=False):
+                if path == '/sessions/native':
+                    return {'id': 'native', 'metadata': {'cwd': root}, 'title': 't', 'agent_config': {'model': 'kimi-k2.5'}, 'main_turn_active': False}
+                if path == '/sessions/native/prompts':
+                    return {'active': None, 'queued': []}
+                if path == '/sessions/native/agents/main/turns?page_size=200':
+                    return {'turns': [turn1], 'has_more': True}
+                if path == '/sessions/native/agents/main/turns?page_size=200&before_ordinal=1':
+                    return {'turns': [turn0], 'has_more': False}
+                if path == '/sessions/native/agents/agent-sub-1/turns?page_size=200':
+                    return {'turns': [sub_turn], 'has_more': False}
+                if path == '/sessions/native/interactions/int-1':
+                    return {'outcome': 'approved'}
+                raise AssertionError(f'Unexpected request: {method} {path}')
+            s.api = mock.Mock()
+            s.api.request.side_effect = req_side_effect
+
+            s.event({'session_id': 'native', 'agent_id': 'main', 'type': 'usage', 'context_tokens': 12000, 'max_context_tokens': 262144})
+            s.event({'session_id': 'native', 'agent_id': 'main', 'type': 'agent', 'status': 'running', 'compacting': False, 'model': 'kimi-k2.5', 'plan_mode': True})
+            s.event({
+                'type': 'interaction',
+                'session_id': 'native',
+                'agent_id': 'main',
+                'interaction_id': 'int-1',
+                'kind': 'approval',
+                'status': 'pending',
+                'tool_call_id': 'tc1',
+                'request': {'tool_name': 'Shell', 'action': 'ls'},
+            })
+            s.refresh()
+
+            self.assertEqual(s.config['receipts']['p0'], 'accepted')
+            self.assertEqual(s.config['receipts']['p1'], 'accepted')
+            self.assertTrue(s.config['consumedSubmissions']['p0'])
+            self.assertTrue(s.config['consumedSubmissions']['p1'])
+            self.assertIn('p0', s.rows)
+            self.assertEqual(s.rows['r0']['kind'], 'reasoning')
+            self.assertEqual(s.rows['a0']['text'], 'hello')
+            self.assertIn('tc1', s.rows)
+            self.assertTrue(s.data['running'])
+            self.assertTrue(s.data['planMode'])
+            self.assertEqual(len(s.data['requests']), 1)
+            self.assertEqual(s.data['requests'][0]['id'], 'int-1')
+            self.assertIn('agent-sub-1', s.subagents)
+            self.assertEqual(s.subagents['agent-sub-1']['status'], 'succeeded')
+            self.assertEqual(s.subagents['agent-sub-1']['task'], 'sub prompt')
+            s.peer.ensure_agent_subscriptions.assert_called_once_with(['agent-sub-1'])
+            labels = {m['label']: m['value'] for m in s.data['metrics']}
+            self.assertIn('上下文', labels)
+            self.assertIn('缓存命中', labels)
+            self.assertTrue(any('估算' in k or '费用' in k or 'USD' in k for k in labels), labels)
+
+            s.answer({'id': 'int-1', 'choice': 'approved'})
+            self.assertEqual(s.pending_requests, {})
+            self.assertEqual(s.ws_interactions, {})
+
+            metrics_res = kimi_web_metrics(
+                {'id': 'native'},
+                {'turns': [turn0, turn1]},
+                [{'turns': [sub_turn]}],
+                s.models,
+                {'context_tokens': 12000, 'max_context_tokens': 262144},
+                'kimi-k2.5',
+            )
+            self.assertTrue(any('3000 / 6500' in m['value'] for m in metrics_res), metrics_res)
+
+    def test_turns_api_404_fallback_updates_existing_peers_and_subscribes(self):
+        with tempfile.TemporaryDirectory() as root:
+            gw = KimiWebGateway(pathlib.Path(root) / '.kimi-web')
+            gw.handle = {'pid': 99999}
+            gw.api = mock.Mock()
+            gw.api.port = 12345
+            gw.api.token = 'tok'
+            gw.uses_turns_api = False
+
+            fake_sock = mock.Mock()
+            gate = threading.Event()
+            def wait_eof():
+                gate.wait(2)
+                raise ConnectionError('eof')
+            fake_sock.receive.side_effect = wait_eof
+
+            fake_sock2 = mock.Mock()
+            gate2 = threading.Event()
+            def wait_eof2():
+                gate2.wait(2)
+                raise ConnectionError('eof')
+            fake_sock2.receive.side_effect = wait_eof2
+
+            sess = KimiWebSession({
+                'id': 'local',
+                'cli': 'Kimi Code',
+                'cwd': root,
+                'nativeId': 'native',
+                'nativeProtocol': PROTOCOL,
+                'receipts': {},
+                'deliveries': {},
+                'consumedSubmissions': {},
+            }, lambda: None)
+            sess.gateway = gw
+            sess.path = '/sessions/native'
+            sess.models = [{'alias': 'kimi-k2.5', 'model': 'kimi-k2.5', 'max_context_size': 262144}]
+
+            sub_turn = {
+                'turn_id': 'st-0',
+                'ordinal': 0,
+                'kind': 'agent',
+                'status': 'ended',
+                'outcome': 'completed',
+                'items': [
+                    {'type': 'user_message', 'item_id': 'su0', 'prompt_ids': [], 'placement': 'opener', 'origin': {'kind': 'user'}, 'text': 'sub prompt', 'attachments': [], 'skills': []},
+                    {'type': 'assistant_message', 'item_id': 'sa0', 'status': 'ended', 'outcome': 'completed', 'text': 'sub done'},
+                ],
+            }
+            main_turn = {
+                'turn_id': 'turn-0',
+                'ordinal': 0,
+                'kind': 'agent',
+                'status': 'running',
+                'items': [
+                    {'type': 'user_message', 'item_id': 'u0', 'prompt_ids': [], 'placement': 'opener', 'origin': {'kind': 'user'}, 'text': 'go', 'attachments': [], 'skills': []},
+                    {
+                        'type': 'tool_call',
+                        'item_id': 'tc1',
+                        'name': 'Agent',
+                        'status': 'running',
+                        'input': {'subagent_type': 'coder', 'description': 'helper'},
+                        'output': '',
+                        'agent_refs': [{'agent_id': 'agent-sub-1', 'role': 'child'}],
+                    },
+                ],
+            }
+
+            def req_side_effect(method, path, body=None, binary=False):
+                if path == '/sessions/native':
+                    return {'id': 'native', 'metadata': {'cwd': root}, 'title': 't', 'agent_config': {'model': 'kimi-k2.5'}, 'main_turn_active': True}
+                if path == '/sessions/native/prompts':
+                    return {'active': None, 'queued': []}
+                if path.startswith('/sessions/native/transcript?'):
+                    raise KimiWebRejected(404, 'Not Found')
+                if path == '/sessions/native/agents/main/turns?page_size=200':
+                    return {'turns': [main_turn], 'has_more': False}
+                if path == '/sessions/native/agents/agent-sub-1/turns?page_size=200':
+                    return {'turns': [sub_turn], 'has_more': False}
+                raise AssertionError(f'Unexpected request: {method} {path}')
+
+            sess.api = mock.Mock()
+            sess.api.request.side_effect = req_side_effect
+
+            with mock.patch('luma_cli.kimi_web_transport.KimiWebSocket', side_effect=[fake_sock, fake_sock2]):
+                peer = KimiWebPeer(gw, sess, lambda f: None, lambda e: None)
+                self.assertFalse(peer.uses_turns_api)
+                sess.peer = peer
+                peer.start_read()
+
+                peer2 = KimiWebPeer(gw, mock.Mock(config={'id': 'local2', 'nativeId': 'native'}), lambda f: None, lambda e: None)
+                self.assertFalse(peer2.uses_turns_api)
+                peer2.start_read()
+                try:
+                    sess.refresh()
+                    self.assertTrue(gw.uses_turns_api)
+                    self.assertTrue(peer.uses_turns_api)
+                    sent = [c.args[0] for c in fake_sock.send.call_args_list]
+                    self.assertIn({
+                        'type': 'subscribe',
+                        'request_id': 'subscribe',
+                        'session_id': 'native',
+                        'agent_ids': ['main'],
+                    }, sent)
+                    self.assertIn({
+                        'type': 'subscribe',
+                        'request_id': 'sub:agent-sub-1',
+                        'session_id': 'native',
+                        'agent_ids': ['agent-sub-1'],
+                    }, sent)
+
+                    peer2.ensure_agent_subscriptions(['agent-sub-2'])
+                    self.assertTrue(peer2.uses_turns_api)
+                    sent2 = [c.args[0] for c in fake_sock2.send.call_args_list]
+                    self.assertEqual(sent2, [
+                        {
+                            'type': 'subscribe',
+                            'request_id': 'subscribe',
+                            'session_id': 'native',
+                            'agent_ids': ['main'],
+                        },
+                        {
+                            'type': 'subscribe',
+                            'request_id': 'sub:agent-sub-2',
+                            'session_id': 'native',
+                            'agent_ids': ['agent-sub-2'],
+                        },
+                    ])
+                finally:
+                    gate.set()
+                    gate2.set()
+                    peer.thread.join(2)
+                    peer2.thread.join(2)
+
+    def test_ws_notices_keep_unique_monotonic_ids_past_retention_cap(self):
+        with tempfile.TemporaryDirectory() as root:
+            sess = KimiWebSession({
+                'id': 'local',
+                'cli': 'Kimi Code',
+                'cwd': root,
+                'nativeId': 'native',
+                'nativeProtocol': PROTOCOL,
+                'receipts': {},
+                'deliveries': {},
+                'consumedSubmissions': {},
+            }, lambda: None)
+            for idx in range(40):
+                sess.event({
+                    'session_id': 'native',
+                    'agent_id': 'main',
+                    'type': 'notice',
+                    'notice': {'title': f'notice-{idx}', 'level': 'info'},
+                })
+            ids = [nid for nid, _, _ in sess.ws_notices]
+            self.assertEqual(len(ids), 32)
+            self.assertEqual(len(set(ids)), 32)
+            self.assertEqual(ids[0], 'ws-notice:8')
+            self.assertEqual(ids[-1], 'ws-notice:39')
 
 if __name__ == '__main__':
     unittest.main()

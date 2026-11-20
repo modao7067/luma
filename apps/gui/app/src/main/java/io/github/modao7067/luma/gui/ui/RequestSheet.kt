@@ -9,10 +9,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -63,6 +62,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -383,7 +383,7 @@ internal fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<S
                 val key = keys.next()
                 if (key !in ignoredKeys) rest.put(key, obj.opt(key))
             }
-            val restPretty = if (rest.length() > 0) rest.toString(2) else ""
+            val restPretty = if (rest.length() > 0) formatMultilineJsonObject(rest) ?: rest.toString(2) else ""
             val combinedExtra = listOf(restPretty, trailingDisplay).filter { it.isNotBlank() }.joinToString("\n\n")
             val primaryTarget = command.ifEmpty { filePath }
             val kindHint = when {
@@ -433,7 +433,7 @@ internal fun parseStructuredApprovalBody(title: String, rawBody: String): Pair<S
                     .joinToString("\n")
                 val baseCode = when {
                     restPretty.isNotEmpty() -> restPretty
-                    lead.isEmpty() -> obj.toString(2)
+                    lead.isEmpty() -> formatMultilineJsonObject(obj) ?: obj.toString(2)
                     else -> ""
                 }
                 val code = listOf(baseCode, trailingDisplay).filter { it.isNotBlank() }.joinToString("\n\n")
@@ -569,9 +569,9 @@ internal fun RequestSheet(
     val dismissVelocityPx = with(density) { 900.dp.toPx() }
     val baseScrimAlpha = if (palette.dark) 0.56f else 0.36f
 
-    suspend fun finishLocalDismiss() {
+    suspend fun finishLocalDismiss(initialVelocity: Float = 0f) {
         try {
-            sheetProgress.animateTo(0f, spatialSpring())
+            sheetProgress.animateTo(0f, PrismSprings.sheet(), initialVelocity = initialVelocity)
         } catch (cancelled: CancellationException) {
             throw cancelled
         }
@@ -579,11 +579,11 @@ internal fun RequestSheet(
         withFrameNanos {}
         if (!closing) {
             dismissing = false
-            sheetProgress.animateTo(1f, spatialSpring())
+            sheetProgress.animateTo(1f, PrismSprings.sheet())
         }
     }
 
-    fun animateDismiss() {
+    fun animateDismiss(velocityY: Float = 0f) {
         if (dismissing || closing) return
         dismissing = true
         focusManager.clearFocus()
@@ -594,7 +594,8 @@ internal fun RequestSheet(
                 sheetProgress.snapTo(remain)
                 dragOffsetPx.snapTo(0f)
             }
-            finishLocalDismiss()
+            val launchVelocity = if (velocityY > 0f) -(velocityY / h).coerceIn(0f, 12f) else 0f
+            finishLocalDismiss(launchVelocity)
         }
     }
 
@@ -602,16 +603,18 @@ internal fun RequestSheet(
         if (dismissing || closing) return
         val threshold = if (cardHeightPx > 0) maxOf(minDismissPx, cardHeightPx * 0.28f) else minDismissPx
         if (dragOffsetPx.value > threshold || (dragOffsetPx.value > minDismissPx * 0.35f && velocityY > dismissVelocityPx)) {
-            animateDismiss()
+            animateDismiss(velocityY)
         } else if (dragOffsetPx.value > 0f) {
-            scope.launch { dragOffsetPx.animateTo(0f, spatialSpring()) }
+            scope.launch {
+                dragOffsetPx.animateTo(0f, PrismSprings.sheetPx(), initialVelocity = velocityY.coerceIn(-4000f, 4000f))
+            }
         }
     }
 
     LaunchedEffect(closing) {
         if (!closing) {
             if (!dismissing) {
-                sheetProgress.animateTo(1f, spatialSpring())
+                sheetProgress.animateTo(1f, PrismSprings.sheet())
             }
         } else {
             dismissing = true
@@ -623,7 +626,7 @@ internal fun RequestSheet(
                 dragOffsetPx.snapTo(0f)
             }
             try {
-                sheetProgress.animateTo(0f, spatialSpring())
+                sheetProgress.animateTo(0f, PrismSprings.sheet())
             } catch (cancelled: CancellationException) {
                 throw cancelled
             }
@@ -642,7 +645,7 @@ internal fun RequestSheet(
             finishLocalDismiss()
         } catch (cancelled: CancellationException) {
             if (!closing && !dismissing) {
-                scope.launch { sheetProgress.animateTo(1f, spatialSpring()) }
+                scope.launch { sheetProgress.animateTo(1f, PrismSprings.sheet()) }
             }
             throw cancelled
         }
@@ -1241,7 +1244,7 @@ private fun ApprovalBodyBlock(
         ) {
             Box(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
                 CompositionLocalProvider(LocalContentColor provides palette.textPrimary) {
-                    NativeMarkdown(structuredBody.markdownFallback)
+                    NativeMarkdown(structuredBody.markdownFallback, editorial = false)
                 }
             }
         }
@@ -1603,9 +1606,11 @@ private fun ColumnScope.QuestionSheetContent(
             targetState = stepIndex,
             transitionSpec = {
                 if (targetState > initialState) {
-                    (slideInHorizontally { it / 5 } + fadeIn()) togetherWith (slideOutHorizontally { -it / 5 } + fadeOut())
+                    (slideInHorizontally(PrismSprings.pagePushOffset()) { it / 5 } + fadeIn(tween(220, easing = PrismCurves.EaseOutCubic))) togetherWith
+                        (slideOutHorizontally(PrismSprings.pagePushOffset()) { -it / 5 } + fadeOut(tween(180, easing = PrismCurves.EaseInCubic)))
                 } else {
-                    (slideInHorizontally { -it / 5 } + fadeIn()) togetherWith (slideOutHorizontally { it / 5 } + fadeOut())
+                    (slideInHorizontally(PrismSprings.pagePushOffset()) { -it / 5 } + fadeIn(tween(220, easing = PrismCurves.EaseOutCubic))) togetherWith
+                        (slideOutHorizontally(PrismSprings.pagePushOffset()) { it / 5 } + fadeOut(tween(180, easing = PrismCurves.EaseInCubic)))
                 }
             },
             label = "question-step",
@@ -1743,8 +1748,8 @@ private fun ColumnScope.QuestionSheetContent(
                                 }
                                 AnimatedVisibility(
                                     visible = otherActive,
-                                    enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-                                    exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+                                    enter = collapsibleEnter(),
+                                    exit = collapsibleExit(),
                                 ) {
                                     Column(Modifier.fillMaxWidth()) {
                                         LaunchedEffect(otherActive) {
@@ -1944,10 +1949,14 @@ private fun SheetCapsuleButton(
     onClick: () -> Unit,
 ) {
     val latestOnClick by rememberUpdatedState(onClick)
+    val haptic = LocalHapticFeedback.current
     val effectiveContainer = if (enabled) containerColor else containerColor.copy(alpha = 0.38f)
     val effectiveContent = if (enabled) contentColor else contentColor.copy(alpha = 0.48f)
     Surface(
-        onClick = onClick,
+        onClick = {
+            haptic.tick()
+            onClick()
+        },
         enabled = enabled,
         shape = CircleShape,
         color = effectiveContainer,
@@ -1956,6 +1965,7 @@ private fun SheetCapsuleButton(
         shadowElevation = 0.dp,
         modifier = modifier
             .heightIn(min = minHeight)
+            .elasticPress(enabled = enabled, stretch = false)
             .semantics {
                 if (enabled) onClick { latestOnClick(); true }
             },

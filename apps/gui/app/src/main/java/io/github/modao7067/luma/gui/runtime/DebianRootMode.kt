@@ -587,7 +587,7 @@ env = {
     'SSL_CERT_FILE': '/etc/ssl/certs/ca-certificates.crt',
     'NO_PROXY': '127.0.0.1,localhost,::1',
     'no_proxy': '127.0.0.1,localhost,::1',
-    'PATH': '/opt/luma/bin:/root/.local/share/pnpm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'PATH': '/opt/luma/bin:/root/.local/share/pnpm/bin:/root/.local/bin:/root/.kimi-code/bin:/root/.opencode/bin:/root/.grok/bin:/root/.qoder/bin:/root/.codebuddy/bin:/root/.cargo/bin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     'LUMA_ENV': 'debian-chroot',
     'LUMA_WORKSPACE': '/workspace',
     'LUMA_BG_ANDROID_SH': '/opt/luma/bin/android-sh',

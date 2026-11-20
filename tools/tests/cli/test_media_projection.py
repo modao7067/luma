@@ -8,7 +8,8 @@ import unittest
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'apps/gui/app/src/main/assets/cli_bridge'))
 from luma_cli.base import Session
-from luma_cli.media import media_blocks, display_content
+from luma_cli.media import media_blocks, display_content, display_tool_output
+from luma_cli.antigravity_cli import clean_agy_tool_output
 from luma_cli.acp import AcpSession
 from luma_cli.pi import PiSession
 from luma_cli.claude import ClaudeSession
@@ -139,5 +140,32 @@ class MediaProjectionTest(unittest.TestCase):
         s.row({'id':'sent','role':'user','text':''});s.row({'id':'other','role':'user','text':''})
         self.assertEqual(s.rows['sent']['media'][0]['source'],'/private/import.png')
         self.assertNotIn('media',s.rows['other'])
+
+    def test_tool_output_unwrapping_preserves_real_newlines_and_content_priority(self):
+        self.assertEqual(display_content({'output':'line1\nline2','exit_code':0}), 'line1\nline2')
+        self.assertEqual(display_content({'stdout':'out1\nout2','stderr':'err1'}), 'out1\nout2\nerr1')
+        self.assertEqual(display_content('{"message":"literal JSON","code":7}'), '{"message":"literal JSON","code":7}')
+        self.assertEqual(display_content({'type':'text','text':'{"message":"literal JSON","code":7}'}), '{"message":"literal JSON","code":7}')
+        self.assertEqual(display_content([{'type':'text','text':'{"message":"literal JSON","code":7}'}]), '{"message":"literal JSON","code":7}')
+        self.assertEqual(display_content('{"output":"a\\nb","exit_code":0}'), '{"output":"a\\nb","exit_code":0}')
+        self.assertEqual(display_content('"quoted literal"'), '"quoted literal"')
+        self.assertEqual(display_content('{"status":"posted","seq":3}'), '{"status":"posted","seq":3}')
+        diff_block = {'type':'diff','path':'a.py','oldText':'x = 1\n','newText':'x = 2\n'}
+        self.assertIn('-x = 1', display_content(diff_block))
+        self.assertIn('+x = 2', display_content(diff_block))
+        self.assertEqual(
+            display_tool_output([{'type':'content','content':{'type':'text','text':'clean\noutput'}}], {'applied': True}),
+            'clean\noutput',
+        )
+        self.assertEqual(clean_agy_tool_output('{"output":"first\\r\\nsecond","exit_code":0}'), 'first\nsecond')
+        self.assertEqual(clean_agy_tool_output('{"status":"posted","seq":3}'), '{"status":"posted","seq":3}')
+        s = AcpSession(config('Qoder CLI'), lambda: None)
+        s.chunk_kind = None; s.chunk_id = None; s.current_submission = None; s.preexisting_tool_ids = set()
+        s.event({'method':'session/update','params':{'update':{
+            'sessionUpdate':'tool_call_update','toolCallId':'c1','status':'completed',
+            'content':[{'type':'content','content':{'type':'text','text':'line1\nline2'}}],
+            'rawOutput':{'output':'line1\nline2','exit_code':0},
+        }}})
+        self.assertEqual(s.rows['tool-c1']['outcome'], 'line1\nline2')
 
 if __name__=='__main__': unittest.main()

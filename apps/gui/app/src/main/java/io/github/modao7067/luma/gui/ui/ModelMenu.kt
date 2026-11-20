@@ -3,10 +3,6 @@ package io.github.modao7067.luma.gui.ui
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,15 +11,15 @@ import androidx.compose.ui.unit.dp
 import io.github.modao7067.luma.gui.session.*
 
 @Composable
-internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitState, view: SessionView, actions: CockpitActions, preferAbove: Boolean = false) {
+internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitState, view: SessionView, actions: CockpitActions, preferAbove: Boolean = false, anchor: MorphAnchor? = null) {
     val model = state.models.find { it.id == view.summary.model }
     val idle = !view.sending && !view.uncertainSubmission && !view.configuring && view.connected && view.activeTurnId == null && view.queue.isEmpty()
-    OriginMenu(expanded, dismiss, width = 300.dp, preferAbove = preferAbove) {
+    MorphMenu(expanded, dismiss, anchor, width = 300.dp, placement = MorphPlacement.End, preferAbove = preferAbove) {
         var section by remember { mutableStateOf<String?>(null) }
         AnimatedVisibility(
             visible = !idle,
-            enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-            exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+            enter = menuUnfoldEnter(),
+            exit = menuFoldExit(),
         ) {
             Surface(
                 color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),

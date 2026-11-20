@@ -3,6 +3,7 @@ package io.github.modao7067.luma.gui.ui
 import io.github.modao7067.luma.gui.i18n.tr
 
 import io.github.modao7067.luma.gui.session.ConversationItem
+import org.json.JSONArray
 import org.json.JSONObject
 
 internal enum class ProcessCategory(private val zh: String, private val en: String) {
@@ -35,10 +36,57 @@ private val claudeToolCategories = mapOf(
 )
 private val antigravityToolCategories = mapOf(
     "run_command" to ProcessCategory.Terminal,
+    "send_command_input" to ProcessCategory.Terminal,
     "read_file" to ProcessCategory.Read,
+    "view_file" to ProcessCategory.Read,
+    "list_dir" to ProcessCategory.Read,
     "edit_file" to ProcessCategory.Edit,
     "write_file" to ProcessCategory.Edit,
+    "grep_search" to ProcessCategory.Search,
+    "find_by_name" to ProcessCategory.Search,
     "search_web" to ProcessCategory.WebSearch,
+    "read_url_content" to ProcessCategory.Browse,
+)
+private val kimiToolCategories = mapOf(
+    "Bash" to ProcessCategory.Terminal, "Shell" to ProcessCategory.Terminal,
+    "Read" to ProcessCategory.Read, "ListDir" to ProcessCategory.Read,
+    "Write" to ProcessCategory.Edit, "Edit" to ProcessCategory.Edit, "MultiEdit" to ProcessCategory.Edit, "NotebookEdit" to ProcessCategory.Edit,
+    "Glob" to ProcessCategory.Search, "Grep" to ProcessCategory.Search, "WebSearch" to ProcessCategory.WebSearch,
+    "WebFetch" to ProcessCategory.Browse,
+)
+private val deepSeekToolCategories = mapOf(
+    "bash" to ProcessCategory.Terminal, "pwsh" to ProcessCategory.Terminal, "shell" to ProcessCategory.Terminal, "run_code" to ProcessCategory.Terminal,
+    "read" to ProcessCategory.Read, "ls" to ProcessCategory.Read, "list_dir" to ProcessCategory.Read,
+    "edit" to ProcessCategory.Edit, "write" to ProcessCategory.Edit, "patch" to ProcessCategory.Edit, "multi_edit" to ProcessCategory.Edit,
+    "grep" to ProcessCategory.Search, "glob" to ProcessCategory.Search, "find" to ProcessCategory.Search,
+    "web_search" to ProcessCategory.WebSearch,
+    "web_fetch" to ProcessCategory.Browse,
+)
+private val grokToolCategories = mapOf(
+    "bash" to ProcessCategory.Terminal, "shell" to ProcessCategory.Terminal, "run_command" to ProcessCategory.Terminal,
+    "Bash" to ProcessCategory.Terminal, "Shell" to ProcessCategory.Terminal,
+    "read" to ProcessCategory.Read, "read_file" to ProcessCategory.Read, "Read" to ProcessCategory.Read, "ls" to ProcessCategory.Read, "list_dir" to ProcessCategory.Read,
+    "edit" to ProcessCategory.Edit, "edit_file" to ProcessCategory.Edit, "write" to ProcessCategory.Edit, "write_file" to ProcessCategory.Edit,
+    "Edit" to ProcessCategory.Edit, "Write" to ProcessCategory.Edit, "MultiEdit" to ProcessCategory.Edit,
+    "grep" to ProcessCategory.Search, "glob" to ProcessCategory.Search, "search" to ProcessCategory.Search, "Grep" to ProcessCategory.Search, "Glob" to ProcessCategory.Search,
+    "web_search" to ProcessCategory.WebSearch, "WebSearch" to ProcessCategory.WebSearch,
+    "web_fetch" to ProcessCategory.Browse, "WebFetch" to ProcessCategory.Browse,
+)
+private val codeBuddyToolCategories = mapOf(
+    "Bash" to ProcessCategory.Terminal, "Shell" to ProcessCategory.Terminal, "Terminal" to ProcessCategory.Terminal,
+    "Read" to ProcessCategory.Read, "ListDir" to ProcessCategory.Read,
+    "Write" to ProcessCategory.Edit, "Edit" to ProcessCategory.Edit, "MultiEdit" to ProcessCategory.Edit, "NotebookEdit" to ProcessCategory.Edit,
+    "Glob" to ProcessCategory.Search, "Grep" to ProcessCategory.Search, "WebSearch" to ProcessCategory.WebSearch,
+    "WebFetch" to ProcessCategory.Browse,
+)
+private val qoderToolCategories = mapOf(
+    "Bash" to ProcessCategory.Terminal, "Shell" to ProcessCategory.Terminal, "bash" to ProcessCategory.Terminal, "shell" to ProcessCategory.Terminal, "run_command" to ProcessCategory.Terminal,
+    "Read" to ProcessCategory.Read, "read" to ProcessCategory.Read, "read_file" to ProcessCategory.Read, "list_dir" to ProcessCategory.Read,
+    "Write" to ProcessCategory.Edit, "Edit" to ProcessCategory.Edit, "MultiEdit" to ProcessCategory.Edit,
+    "write" to ProcessCategory.Edit, "edit" to ProcessCategory.Edit, "edit_file" to ProcessCategory.Edit, "write_file" to ProcessCategory.Edit,
+    "Glob" to ProcessCategory.Search, "Grep" to ProcessCategory.Search, "glob" to ProcessCategory.Search, "grep" to ProcessCategory.Search, "search" to ProcessCategory.Search,
+    "WebSearch" to ProcessCategory.WebSearch, "web_search" to ProcessCategory.WebSearch,
+    "WebFetch" to ProcessCategory.Browse, "web_fetch" to ProcessCategory.Browse,
 )
 private val antigravitySwarmTools = setOf("swarm", "post_message", "read_board", "swarm_wait")
 
@@ -137,10 +185,15 @@ private fun nativeToolCategory(item: ConversationItem, cli: String): ProcessCate
     "OpenCode" -> openCodeToolCategories[item.toolName]
     "Claude Code" -> claudeToolCategories[item.toolName]
     "Antigravity" -> antigravityToolCategories[item.toolName]
+    "Kimi Code" -> kimiToolCategories[item.toolName]
+    "DeepSeek Harness" -> deepSeekToolCategories[item.toolName]
+    "Grok Build" -> grokToolCategories[item.toolName]
+    "CodeBuddy Code" -> codeBuddyToolCategories[item.toolName]
+    "Qoder CLI" -> qoderToolCategories[item.toolName]
     else -> null
 }
 
-private val invocationKinds = setOf(
+internal val processInvocationKinds = setOf(
     "tool", "commandExecution", "fileChange", "webSearch", "imageView", "imageGeneration",
     "mcpToolCall", "dynamicToolCall", "collabAgentToolCall",
 )
@@ -148,7 +201,7 @@ private val invocationKinds = setOf(
 internal fun processToolInvocations(entries: List<ConversationItem>): List<ConversationItem> {
     val calls = linkedMapOf<Triple<String, String, Int>, ConversationItem>()
     entries.forEachIndexed { index, item ->
-        if (item.role != "tool" || item.kind !in invocationKinds) return@forEachIndexed
+        if (item.role != "tool" || item.kind !in processInvocationKinds) return@forEachIndexed
         calls[Triple(item.turnId, item.id, if (item.id.isBlank()) index else -1)] = item
     }
     return calls.values.toList()
@@ -167,22 +220,34 @@ private val agySystemActionDirectiveRegex = Regex(
 private val agyBgMetaLineRegex = Regex(
     "^(?:(?:Created|Completed|Updated) At:\\s+\\d{4}-\\d{2}-\\d{2}T\\S+|Task Description:\\s+.*|Tool is running as a background task with task id:\\s*\\S+.*|Task logs are available at:\\s*file://\\S+.*)$",
 )
+private val agyLeadTimestampLineRegex = Regex(
+    "^(?:Created|Completed|Updated) At:\\s+\\d{4}-\\d{2}-\\d{2}T\\S+$",
+)
 private val agyCommandWrapperHeaderRegex = Regex(
-    "^Command exited with code\\s+(-?\\d+)\\s*\\nCommand output:\\s*\\n?",
+    "^Command exited with code\\s+(-?\\d+)\\.?\\s*\\n+Command output:\\s*\\n?",
 )
 
 internal fun sanitizeProcessToolDetail(detail: String): String {
     if (detail.isBlank()) return ""
-    val hasBgWrapper = detail.contains("Tool is running as a background task with task id:") ||
-        detail.contains("Task logs are available at: file://") ||
-        detail.contains("YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS:")
+    val normalized = detail.replace("\r\n", "\n").replace("\r", "\n")
+    val hasBgWrapper = normalized.contains("Tool is running as a background task with task id:") ||
+        normalized.contains("Task logs are available at: file://") ||
+        normalized.contains("YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS:")
     var cleaned = if (hasBgWrapper) {
-        val withoutDirective = agySystemActionDirectiveRegex.replace(detail, "")
+        val withoutDirective = agySystemActionDirectiveRegex.replace(normalized, "")
         withoutDirective.lines()
             .filterNot { line -> agyBgMetaLineRegex.matches(line.trim()) }
             .joinToString("\n")
     } else {
-        detail
+        normalized
+    }
+    val lines = cleaned.lines()
+    var leadIdx = 0
+    while (leadIdx < lines.size && (lines[leadIdx].isBlank() || agyLeadTimestampLineRegex.matches(lines[leadIdx].trim()))) {
+        leadIdx++
+    }
+    if (leadIdx > 0 && leadIdx < lines.size && agyCommandWrapperHeaderRegex.containsMatchIn(lines.drop(leadIdx).joinToString("\n"))) {
+        cleaned = lines.drop(leadIdx).joinToString("\n")
     }
     agyCommandWrapperHeaderRegex.find(cleaned)?.let { match ->
         val exitCode = match.groupValues[1]
@@ -294,13 +359,122 @@ private fun terminalJsonInput(input: String): TerminalJsonInput? {
         val key = keys.next()
         val value = obj.opt(key)
         when {
-            key == "command" -> if (value is String && value.isNotEmpty()) command = value
-            key == "description" -> Unit
+            key == "command" || key == "CommandLine" || key == "cmd" -> if (value is String && value.isNotEmpty()) command = value
+            key == "description" || key == "toolSummary" || key == "summary" || key == "WaitMsBeforeAsync" || key == "IsDaemon" -> Unit
             value == null || value == JSONObject.NULL || value is String && value.isEmpty() -> Unit
             else -> return TerminalJsonInput(null)
         }
     }
     return TerminalJsonInput(command)
+}
+
+private fun jsonValueHasMultilineString(value: Any?): Boolean = when (value) {
+    is String -> '\n' in value || '\r' in value
+    is JSONObject -> {
+        var found = false
+        val keys = value.keys()
+        while (keys.hasNext() && !found) {
+            found = jsonValueHasMultilineString(value.opt(keys.next()))
+        }
+        found
+    }
+    is JSONArray -> (0 until value.length()).any { jsonValueHasMultilineString(value.opt(it)) }
+    else -> false
+}
+
+private fun appendFormattedJsonValue(out: StringBuilder, value: Any?, indent: String) {
+    when (value) {
+        null, JSONObject.NULL -> out.append("null")
+        is String -> {
+            val normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+            if ('\n' in normalized) {
+                val childIndent = "$indent  "
+                normalized.split('\n').forEach { line ->
+                    out.append('\n').append(childIndent).append(line)
+                }
+            } else {
+                out.append(normalized)
+            }
+        }
+        is JSONObject -> {
+            if (value.length() == 0) {
+                out.append("{}")
+            } else if (!jsonValueHasMultilineString(value)) {
+                out.append(value.toString())
+            } else {
+                val childIndent = "$indent  "
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val child = value.opt(key)
+                    out.append('\n').append(childIndent).append(key).append(':')
+                    if (child is String && ('\n' in child || '\r' in child)) {
+                        appendFormattedJsonValue(out, child, childIndent)
+                    } else if ((child is JSONObject || child is JSONArray) && jsonValueHasMultilineString(child)) {
+                        appendFormattedJsonValue(out, child, childIndent)
+                    } else {
+                        out.append(' ')
+                        appendFormattedJsonValue(out, child, childIndent)
+                    }
+                }
+            }
+        }
+        is JSONArray -> {
+            if (value.length() == 0) {
+                out.append("[]")
+            } else if (!jsonValueHasMultilineString(value)) {
+                out.append(value.toString())
+            } else {
+                val childIndent = "$indent  "
+                for (i in 0 until value.length()) {
+                    val elem = value.opt(i)
+                    out.append('\n').append(childIndent).append('-')
+                    if (elem is String && ('\n' in elem || '\r' in elem)) {
+                        appendFormattedJsonValue(out, elem, childIndent)
+                    } else if ((elem is JSONObject || elem is JSONArray) && jsonValueHasMultilineString(elem)) {
+                        appendFormattedJsonValue(out, elem, childIndent)
+                    } else {
+                        out.append(' ')
+                        appendFormattedJsonValue(out, elem, childIndent)
+                    }
+                }
+            }
+        }
+        else -> out.append(value.toString())
+    }
+}
+
+internal fun formatMultilineJsonObject(obj: JSONObject, maxChars: Int = LIBRARY_HIGHLIGHT_LIMIT): String? {
+    if (obj.length() == 0 || !jsonValueHasMultilineString(obj)) return null
+    val rawCheck = obj.toString()
+    if (rawCheck.length > maxChars) return null
+    val out = StringBuilder(rawCheck.length)
+    val keys = obj.keys()
+    var first = true
+    while (keys.hasNext()) {
+        val key = keys.next()
+        val value = obj.opt(key)
+        if (!first) out.append('\n')
+        first = false
+        out.append(key).append(':')
+        if (value is String && ('\n' in value || '\r' in value)) {
+            appendFormattedJsonValue(out, value, "")
+        } else if ((value is JSONObject || value is JSONArray) && jsonValueHasMultilineString(value)) {
+            appendFormattedJsonValue(out, value, "")
+        } else {
+            out.append(' ')
+            appendFormattedJsonValue(out, value, "")
+        }
+    }
+    return out.toString()
+}
+
+internal fun formatMultilineJsonParameters(input: String): String? {
+    if (input.length > LIBRARY_HIGHLIGHT_LIMIT) return null
+    val trimmed = input.trim()
+    if (trimmed.length < 2 || trimmed.first() != '{' || trimmed.last() != '}') return null
+    val obj = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
+    return formatMultilineJsonObject(obj, LIBRARY_HIGHLIGHT_LIMIT)
 }
 
 internal data class ProcessInputPresentation(
@@ -312,6 +486,9 @@ internal data class ProcessInputPresentation(
 internal fun processInputPresentation(item: ConversationItem, cli: String): ProcessInputPresentation {
     val category = processCategory(item, cli)
     if (category != ProcessCategory.Terminal && (item.kind != "commandExecution" || category == ProcessCategory.Read)) {
+        formatMultilineJsonParameters(item.input)?.let { expanded ->
+            return ProcessInputPresentation(expanded, "config", "Parameters")
+        }
         return ProcessInputPresentation(item.input, tr("参数", "params"), "Parameters")
     }
     val trimmed = item.input.trim()
@@ -321,6 +498,9 @@ internal fun processInputPresentation(item: ConversationItem, cli: String): Proc
     }
     val json = terminalJsonInput(item.input)
     if (json != null && json.command == null) {
+        formatMultilineJsonParameters(item.input)?.let { expanded ->
+            return ProcessInputPresentation(expanded, "config", "Parameters")
+        }
         return ProcessInputPresentation(item.input, "json", "Parameters")
     }
     val command = json?.command ?: item.input
@@ -1037,8 +1217,24 @@ internal fun parseProcessEditPreview(item: ConversationItem, cli: String): Proce
                 val builtHunks = mutableListOf<List<DiffLine>>()
                 for (idx in 0 until editsArray.length()) {
                     val entry = editsArray.optJSONObject(idx) ?: continue
-                    if (entry.has("oldText") || entry.has("newText")) {
-                        builtHunks += computeLineDiffHunks(entry.optString("oldText", ""), entry.optString("newText", ""))
+                    val entryOld = when {
+                        entry.has("oldText") -> entry.optString("oldText", "")
+                        entry.has("old_string") -> entry.optString("old_string", "")
+                        entry.has("oldString") -> entry.optString("oldString", "")
+                        entry.has("old_str") -> entry.optString("old_str", "")
+                        entry.has("Target") -> entry.optString("Target", "")
+                        else -> null
+                    }
+                    val entryNew = when {
+                        entry.has("newText") -> entry.optString("newText", "")
+                        entry.has("new_string") -> entry.optString("new_string", "")
+                        entry.has("newString") -> entry.optString("newString", "")
+                        entry.has("new_str") -> entry.optString("new_str", "")
+                        entry.has("Replacement") -> entry.optString("Replacement", "")
+                        else -> null
+                    }
+                    if (entryOld != null || entryNew != null) {
+                        builtHunks += computeLineDiffHunks(entryOld.orEmpty(), entryNew.orEmpty())
                     }
                 }
                 hunks = builtHunks

@@ -32,7 +32,9 @@ object NativeCliProjection {
             delivery = if (optString("role") == "user") when (snapshot.optJSONObject("receipts")?.optString(optString("id"))) { "unknown" -> "pending"; "rejected" -> "rejected"; else -> "" } else "",
             turnId = optString("turnId"), toolName = stringOrNull("toolName").orEmpty(), toolKind = stringOrNull("toolKind").orEmpty(),
             nativeInputEvidence = snapshot.optInt("inputEvidenceProtocol") >= 1 && optString("origin") != "local" && snapshot.optJSONObject("receipts")?.optString(optString("id")) !in setOf("unknown", "pending", "rejected"),
-            outcome = when (status) { "completed" -> "succeeded"; "in_progress", "pending" -> "running"; "failed", "running", "cancelled" -> status; else -> "unknown" })
+            outcome = when (status) { "completed" -> "succeeded"; "in_progress", "pending" -> "running"; "failed", "running", "cancelled" -> status; else -> "unknown" },
+            timestampMs = optLong("timestampMs", 0L),
+            completedAtMs = optLong("completedAtMs", 0L))
     }
     fun streamedSubAgentDetail(agent: SubAgentState, previous: SubAgentDetailView, models: List<ModelOption>): SubAgentDetailView =
         previous.copy(agent = agent, messages = agent.messages, loading = false, effort = "",

@@ -54,9 +54,11 @@ fun CockpitScreen(state: CockpitState, actions: CockpitActions, previewDrawerOpe
                   currentSessionId: () -> String? = { state.selected?.summary?.id },
                   currentBlankKey: () -> String = { state.blank.key }) =
     SessionTypography {
-        val owner = state.selected?.summary?.id ?: "blank:${state.blank.key}"
-        MediaViewerHost(owner, actions, MediaContext(state.selected?.summary?.id, state.selected?.summary?.cwd ?: state.blank.cwd)) {
-            CockpitContent(state, actions, previewDrawerOpen, currentSessionId, currentBlankKey)
+        ProvideLumaHaptics {
+            val owner = state.selected?.summary?.id ?: "blank:${state.blank.key}"
+            MediaViewerHost(owner, actions, MediaContext(state.selected?.summary?.id, state.selected?.summary?.cwd ?: state.blank.cwd)) {
+                CockpitContent(state, actions, previewDrawerOpen, currentSessionId, currentBlankKey)
+            }
         }
     }
 
@@ -82,6 +84,8 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var usageOpen by rememberSaveable { mutableStateOf(false) }
     val drawer = rememberDrawerState(if (previewDrawerOpen) DrawerValue.Open else DrawerValue.Closed)
+    suspend fun openDrawer() = drawer.animateTo(DrawerValue.Open, PrismCurves.sideSheetEnter())
+    suspend fun closeDrawer() = drawer.animateTo(DrawerValue.Closed, PrismCurves.sideSheetExit())
     val scope = rememberCoroutineScope()
     var sidebarRenaming by remember { mutableStateOf<SessionSummary?>(null) }
     val activityWindow = remember(context) { context.actionActivityWindow() }
@@ -162,8 +166,8 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
     LaunchedEffect(browserActive, browserBackDragging) {
         if (!browserBackDragging) {
             keyboard?.hide()
-            if (browserActive && drawer.isOpen) drawer.close()
-            browserOffset.animateTo(if (browserActive) 1f else 0f, spatialSpring())
+            if (browserActive && drawer.isOpen) closeDrawer()
+            browserOffset.animatePagePush(if (browserActive) 1f else 0f)
             if (!browserActive) retainedBrowserSessionId = null
         }
     }
@@ -183,9 +187,9 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
         if (!secondaryBackDragging) {
             if (secondaryActive) {
                 keyboard?.hide()
-                if (drawer.isOpen) drawer.close()
+                if (drawer.isOpen) closeDrawer()
             }
-            secondaryOffset.animateTo(if (secondaryActive) 1f else 0f, spatialSpring())
+            secondaryOffset.animatePagePush(if (secondaryActive) 1f else 0f)
             if (!secondaryActive) retainedSecondaryPage = null
         }
     }
@@ -199,7 +203,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
     LaunchedEffect(previewActive, previewBackDragging) {
         if (!previewBackDragging) {
             if (previewActive) keyboard?.hide()
-            previewOffset.animateTo(if (previewActive) 1f else 0f, spatialSpring())
+            previewOffset.animatePagePush(if (previewActive) 1f else 0f)
             if (!previewActive) retainedInlinePreview = null
         }
     }
@@ -228,9 +232,9 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                     drawer.anchoredDraggableState.dispatchRawDelta(targetOffset - current)
                 }
             }
-            drawer.close()
+            closeDrawer()
         } catch (cancelled: CancellationException) {
-            scope.launch { drawer.open() }
+            scope.launch { openDrawer() }
             throw cancelled
         }
     }
@@ -244,12 +248,12 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
             browserBackDragging = false
             actions.closeBrowser()
             scope.launch {
-                browserOffset.animateTo(0f, spatialSpring())
+                browserOffset.animatePagePush(0f)
                 retainedBrowserSessionId = null
             }
         } catch (cancelled: CancellationException) {
             browserBackDragging = false
-            scope.launch { browserOffset.animateTo(1f, spatialSpring()) }
+            scope.launch { browserOffset.animateTo(1f, PrismSprings.dragBackRelease()) }
             throw cancelled
         }
     }
@@ -269,8 +273,9 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                         },
                     ),
             ) {
-                DismissibleNavigationDrawer(
-                    drawerState = drawer,
+                CompositionLocalProvider(LocalDrawerOpen provides drawerVisible) {
+                    DismissibleNavigationDrawer(
+                        drawerState = drawer,
                     gesturesEnabled = !browserActive && browserOffset.value < 0.01f && !tier0Covered,
                     drawerContent = {
                         DismissibleDrawerSheet(
@@ -284,14 +289,14 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                     SessionSidebar(
                                         state.sessions,
                                         selected?.summary?.id,
-                                        onOpen = { actions.openSession(it); scope.launch { drawer.close() } },
-                                        onNew = { cli -> actions.createDefaultCliSession(cli); scope.launch { drawer.close() } },
+                                        onOpen = { actions.openSession(it); scope.launch { closeDrawer() } },
+                                        onNew = { cli -> actions.createDefaultCliSession(cli); scope.launch { closeDrawer() } },
                                         enabledClis = enabledClis,
                                         onRename = { id, title -> actions.renameSession(id, title) },
                                         onArchive = { id -> actions.archiveSession(id) },
                                         onRenameRequested = { target ->
                                             sidebarRenaming = target
-                                            scope.launch { drawer.close() }
+                                            scope.launch { closeDrawer() }
                                         },
                                         freezeOrder = drawerVisible,
                                     )
@@ -309,7 +314,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                             color = MaterialTheme.colorScheme.background,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .graphicsLayer { translationX = -slideWidthPx * browserOffset.value }
+                                .graphicsLayer { translationX = -slideWidthPx * browserOffset.value.coerceIn(0f, 1f) }
                                 .then(
                                     if (!browserActive && browserOffset.value < 0.01f) Modifier
                                     else Modifier.clearAndSetSemantics {}.pointerInput(Unit) {
@@ -332,7 +337,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                         state, actions, currentSessionId, currentBlankKey,
                                         onPickImages = { pickerSessionId = "blank:${state.blank.key}"; picker?.launch("image/*") },
                                         onTakePhoto = capture.launch, takePhotoEnabled = capture.available && !capture.busy,
-                                        onDrawer = { scope.launch { drawer.open() } },
+                                        onDrawer = { scope.launch { openDrawer() } },
                                         onNew = { actions.createDefaultCliSession(state.blank.cli) },
                                         onSettings = { usageOpen = false; settingsOpen = true },
                                         onUsage = { settingsOpen = false; usageOpen = true },
@@ -345,7 +350,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                             actions,
                                             onPickImages = { pickerSessionId = "session:${activeView.summary.id}"; picker?.launch("image/*") },
                                             onTakePhoto = capture.launch, takePhotoEnabled = capture.available && !capture.busy,
-                                            onDrawer = { scope.launch { drawer.open() } },
+                                            onDrawer = { scope.launch { openDrawer() } },
                                             onNew = { actions.createDefaultCliSession(activeView.summary.cli) },
                                             onSettings = { usageOpen = false; settingsOpen = true },
                                             onUsage = { settingsOpen = false; usageOpen = true },
@@ -360,7 +365,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                             Row(
                                 Modifier
                                     .fillMaxSize()
-                                    .graphicsLayer { translationX = slideWidthPx * (1f - browserOffset.value) },
+                                    .graphicsLayer { translationX = slideWidthPx * (1f - browserOffset.value.coerceIn(0f, 1f)) },
                             ) {
                                 VerticalDivider(
                                     thickness = 0.5.dp,
@@ -384,10 +389,11 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                 Modifier
                                     .fillMaxSize()
                                     .pointerInput(drawer) {
-                                        detectTapGestures { scope.launch { drawer.close() } }
+                                        detectTapGestures { scope.launch { closeDrawer() } }
                                     },
                             )
                         }
+                    }
                     }
                 }
                 if (tier0Depth > 0.001f) {
@@ -410,12 +416,12 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                 secondaryBackDragging = false
                 dismissSecondaryPage()
                 scope.launch {
-                    secondaryOffset.animateTo(0f, spatialSpring())
+                    secondaryOffset.animatePagePush(0f)
                     retainedSecondaryPage = null
                 }
             } catch (cancelled: CancellationException) {
                 secondaryBackDragging = false
-                scope.launch { secondaryOffset.animateTo(1f, spatialSpring()) }
+                scope.launch { secondaryOffset.animateTo(1f, PrismSprings.dragBackRelease()) }
                 throw cancelled
             }
         }
@@ -490,12 +496,12 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                 previewBackDragging = false
                 actions.closePreview()
                 scope.launch {
-                    previewOffset.animateTo(0f, spatialSpring())
+                    previewOffset.animatePagePush(0f)
                     retainedInlinePreview = null
                 }
             } catch (cancelled: CancellationException) {
                 previewBackDragging = false
-                scope.launch { previewOffset.animateTo(1f, spatialSpring()) }
+                scope.launch { previewOffset.animateTo(1f, PrismSprings.dragBackRelease()) }
                 throw cancelled
             }
         }

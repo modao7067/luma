@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.foundation.background
@@ -20,7 +22,8 @@ import io.github.modao7067.luma.gui.runtime.*
 @Composable
 internal fun SettingsNavigationRow(title: String, symbol: MenuSymbol, detail: String = "", onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Surface(onClick = onClick, shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow,
+    val haptic = LocalHapticFeedback.current
+    Surface(onClick = { haptic.tick(); onClick() }, shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -39,7 +42,8 @@ internal fun SettingsNavigationRow(title: String, symbol: MenuSymbol, detail: St
 @Composable
 private fun SettingsToggleRow(title: String, symbol: MenuSymbol, detail: String, checked: Boolean, enabled: Boolean = true, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Surface(onClick = onToggle, enabled = enabled, shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow,
+    val haptic = LocalHapticFeedback.current
+    Surface(onClick = { haptic.tick(); onToggle() }, enabled = enabled, shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -58,6 +62,7 @@ private fun SettingsToggleRow(title: String, symbol: MenuSymbol, detail: String,
 @Composable
 private fun SettingsActionRow(title: String, symbol: MenuSymbol, detail: String, action: String?, enabled: Boolean, onAction: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val haptic = LocalHapticFeedback.current
     Surface(shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -68,7 +73,7 @@ private fun SettingsActionRow(title: String, symbol: MenuSymbol, detail: String,
                 Text(title, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                 if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             }
-            if (action != null) FilledTonalButton(onClick = onAction, enabled = enabled) { Text(action) }
+            if (action != null) FilledTonalButton(onClick = { haptic.tick(); onAction() }, enabled = enabled) { Text(action) }
         }
     }
 }

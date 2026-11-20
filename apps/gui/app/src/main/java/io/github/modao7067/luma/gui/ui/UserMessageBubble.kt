@@ -3,10 +3,6 @@ package io.github.modao7067.luma.gui.ui
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -77,8 +73,8 @@ private fun UserDeliveryCaption(item: ConversationItem, actions: CockpitActions)
     }
     AnimatedVisibility(
         visible = caption != null,
-        enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-        exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+        enter = collapsibleEnter(),
+        exit = collapsibleExit(),
     ) {
         val effectiveText = caption ?: if (retainedDelivery == "rejected") tr("未发送", "Not sent") else tr("发送中", "Sending")
         val isSending = effectiveText == "发送中" || effectiveText == "Sending"

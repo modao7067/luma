@@ -135,6 +135,32 @@
       "name": "Supplemental Mathematical Operators",
       "start": "2A00",
       "end": "2AFF"
+    },
+    {
+      "name": "Thai",
+      "start": "0E00",
+      "end": "0E7F"
+    },
+    {
+      "name": "Georgian",
+      "start": "10A0",
+      "end": "10FF"
+    },
+    {
+      "name": "Unified Canadian Aboriginal Syllabics",
+      "start": "1400",
+      "end": "167F"
+    },
+    {
+      "name": "Arabic Presentation Forms-B",
+      "start": "FE70",
+      "end": "FEFF"
+    }
+  ],
+  "codepoints": [
+    {
+      "name": "Kaomoji script symbols (Arabic, Kannada, Thai, Georgian, Canadian Syllabics)",
+      "values": ["0608", "0648", "0669", "06F6", "0CA0", "0CA5", "0E05", "0E07", "0E51", "10DA", "1557", "1559", "15B4", "15B7", "15DC", "15E2", "1630", "1633", "FECC"]
     }
   ]
 }

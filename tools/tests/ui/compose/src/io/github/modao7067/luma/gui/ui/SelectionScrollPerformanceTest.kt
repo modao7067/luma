@@ -140,6 +140,107 @@ class SelectionScrollPerformanceTest {
             assertEquals(1, previous.contentRects)
         } finally { activity.pause().stop().destroy() }
     }
+    @Test fun processTextCatalogCachesAcrossSelectionsRasterizesOversizedIconsAndPopulatesAsyncWithoutBlocking() {
+        val counts = Counts()
+        val queue = ArrayDeque<Runnable>()
+        val oversized = android.graphics.Bitmap.createBitmap(378, 378, android.graphics.Bitmap.Config.ARGB_8888)
+        val service = object : ResolveInfo() {
+            override fun loadLabel(pm: android.content.pm.PackageManager): CharSequence {
+                counts.labels++
+                return "Translate"
+            }
+            override fun loadIcon(pm: android.content.pm.PackageManager): android.graphics.drawable.Drawable {
+                counts.icons++
+                return android.graphics.drawable.BitmapDrawable(context.resources, oversized)
+            }
+        }.apply {
+            activityInfo = android.content.pm.ActivityInfo().apply {
+                packageName = "fixture.translate"
+                name = "fixture.translate.Translator"
+            }
+        }
+        val catalog = ProcessTextCatalog(
+            context,
+            executor = java.util.concurrent.Executor { queue.addLast(it) },
+            query = { counts.queries++; listOf(service) },
+            registerPackageReceiver = false,
+        )
+        lateinit var mode: RecordingMode
+        val toolbar = NativeSelectionToolbar(
+            View(context),
+            true,
+            {},
+            { _, _ -> },
+            start = { _, callback -> RecordingMode(context, callback).also { mode = it; callback.onCreateActionMode(it, it.menu) } },
+            catalog = catalog,
+        )
+        toolbar.showMenu(anchor, {}, null, null, {})
+        assertNotNull(mode.menu.findItem(android.R.id.copy))
+        assertNull(mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE))
+        assertEquals(0, counts.queries)
+        assertEquals(1, queue.size)
+
+        queue.removeFirst().run()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(1, counts.queries)
+        assertEquals(1, counts.labels)
+        assertEquals(1, counts.icons)
+        assertEquals(1, mode.prepares)
+        val firstItem = mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE)
+        assertNotNull(firstItem)
+        val iconDrawable = firstItem.icon as android.graphics.drawable.BitmapDrawable
+        val limit = processTextIconSizePx(context.resources)
+        assertTrue(iconDrawable.bitmap.width <= limit && iconDrawable.bitmap.height <= limit)
+
+        toolbar.hide()
+        toolbar.showMenu(anchor, {}, null, null, {})
+        assertEquals(1, counts.queries)
+        assertEquals(1, counts.labels)
+        assertEquals(1, counts.icons)
+        assertNotNull(mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE))
+
+        catalog.invalidate()
+        toolbar.hide()
+        toolbar.showMenu(anchor, {}, null, null, {})
+        assertEquals(1, queue.size)
+        queue.removeFirst().run()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(2, counts.queries)
+        assertNotNull(mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE))
+    }
+    @Test fun workerThreadCompletionDuringShowMenuStillPopulatesOnMainThreadAndCloseUnregisters() {
+        val counts = Counts()
+        val service = service(counts)
+        val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val catalog = ProcessTextCatalog(
+                context,
+                executor = worker,
+                query = { counts.queries++; listOf(service) },
+                registerPackageReceiver = true,
+            )
+            lateinit var mode: RecordingMode
+            val toolbar = NativeSelectionToolbar(
+                View(context),
+                false,
+                {},
+                { _, _ -> },
+                start = { _, callback -> RecordingMode(context, callback).also { mode = it; callback.onCreateActionMode(it, it.menu) } },
+                catalog = catalog,
+            )
+            toolbar.showMenu(anchor, {}, {}, null, {})
+            worker.submit {}.get()
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertNotNull(mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE))
+
+            toolbar.showMenu(anchor, null, {}, null, {})
+            assertNull(mode.menu.findItem(NativeSelectionToolbar.PROCESS_BASE))
+            assertFalse(mode.callback.onPrepareActionMode(mode, mode.menu))
+            catalog.close()
+        } finally {
+            worker.shutdownNow()
+        }
+    }
     private class RecordingMode(context: Context, val callback: ActionMode.Callback2) : ActionMode() {
         private val contents = PopupMenu(context, View(context)).menu
         private val context = context

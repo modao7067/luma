@@ -389,7 +389,7 @@ internal fun ComposerPluginsPreview() = LumaTheme(seedArgb = 0xFF6750A4.toInt(),
     }
 } }
 
-@Preview(name = "SukiSU glass · centered return control", widthDp = 393, heightDp = 852)
+@Preview(name = "Prism glass · centered return control", widthDp = 393, heightDp = 852)
 @Composable
 internal fun CenteredGlassConversationPreview(@PreviewParameter(NoticeThemeFixtureProvider::class) theme: ThemeFixture) =
     LumaTheme(seedArgb = theme.seed, darkTheme = theme.dark) { SessionTypography { ConversationTypography {

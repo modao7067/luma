@@ -21,13 +21,15 @@ internal fun DetailPageHeader(
     backLabel: String = tr("返回", "Back"),
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
+    val backElastic = rememberElasticPress()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically) {
         LiquidGlass(
             Modifier.size(FloatingChromeSize)
-                .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = onBack)
+                .liquidClickable(press = backElastic, onClick = onBack)
                 .semantics { contentDescription = backLabel },
             cornerRadius = FloatingChromeRadius,
+            press = backElastic,
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { ComposerGlyph("back") }
         }

@@ -1,4 +1,3 @@
-import difflib
 import json
 import re
 import threading
@@ -7,7 +6,7 @@ from .base import Session, item, text, image_blocks
 from .i18n import tr
 from .transport import Rejected
 from .metrics import acp_usage
-from .media import display_content, display_object
+from .media import display_content, display_object, display_tool_output, format_diff_block, is_json_fallback_output
 
 def _single_line_json_dict(value):
     if isinstance(value, dict):
@@ -24,16 +23,7 @@ def _single_line_json_dict(value):
     return "", None
 
 def _format_permission_diff(block):
-    path = block.get("path").strip() if isinstance(block.get("path"), str) else ""
-    old_raw = block.get("oldText")
-    old_text = old_raw if isinstance(old_raw, str) else ""
-    new_text = block.get("newText") if isinstance(block.get("newText"), str) else ""
-    from_label = "/dev/null" if old_raw is None and not old_text else (path or "a")
-    to_label = path or "b"
-    diff_lines = list(difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), fromfile=from_label, tofile=to_label, lineterm=""))
-    if diff_lines:
-        return "\n".join(diff_lines)
-    return new_text if new_text else path
+    return format_diff_block(block)
 
 class AcpSession(Session):
     input_evidence_protocol = 1
@@ -46,11 +36,16 @@ class AcpSession(Session):
     release_empty = False
 
     def release_mode(self):
-        if not self.replay_release or not getattr(self, "native_caps", {}).get("loadSession") or not self.data.get("historyReady"):
+        caps = getattr(self, "native_caps", {})
+        can_attach = caps.get("loadSession") or "resume" in caps.get("sessionCapabilities", {}) or "resume" in caps.get("session_capabilities", {})
+        if not self.replay_release or not can_attach or not self.data.get("historyReady"):
             return None
         if not self.release_empty and not any(r.get("role") == "user" and r.get("origin") != "local" for r in self.rows.values()):
             return None
         return "process"
+
+    def session_attach_method(self, native, caps):
+        return "session/load" if caps.get("loadSession") else "session/resume"
 
     def connect(self):
         self.update(historyReady=False)
@@ -77,8 +72,8 @@ class AcpSession(Session):
         native = self.config.get("nativeId")
         if native:
             args["sessionId"] = native
-            method = "session/load" if caps.get("loadSession") else "session/resume"
-            if method == "session/resume" and "resume" not in caps.get("sessionCapabilities", {}):
+            method = self.session_attach_method(native, caps)
+            if method == "session/resume" and "resume" not in caps.get("sessionCapabilities", {}) and "resume" not in caps.get("session_capabilities", {}):
                 raise Rejected(tr("此 CLI 未提供原生会话恢复", "This CLI does not support native session resume"))
         else:
             if self.config.get("creationUnknown"):
@@ -103,7 +98,8 @@ class AcpSession(Session):
                     "images": caps.get("promptCapabilities", {}).get("image", False), "skills": False,
                     "compact": any(c.get("name") == "compact" for c in self.commands)})
         self.apply_commands(self.commands)
-        self.update(historyReady=True)
+        if not getattr(self, "defer_connected", False):
+            self.update(historyReady=True)
 
     def authenticate(self, info):
         pass
@@ -260,7 +256,9 @@ class AcpSession(Session):
                             self.row(item(self.chunk_id, "user", "", origin="native"))
                             self.consumed(self.current_submission)
                         elif matched_echo:
-                            self.row(item(self.chunk_id, "user", "", origin="native"))
+                            old_echo = self.rows.pop(self.chunk_id, None)
+                            base_echo = old_echo if old_echo is not None else item(self.chunk_id, "user", "")
+                            self.row({**base_echo, "text": "", "status": "running", "origin": "native"})
                             self.receipt(matched_echo, "accepted")
                             self.consumed(matched_echo)
                 old = self.rows.get(self.chunk_id, item(self.chunk_id, role, kind="reasoning" if role == "reasoning" else ""))
@@ -282,12 +280,25 @@ class AcpSession(Session):
                 if u.get("kind") is not None: changes["toolKind"] = u["kind"]
                 if "rawInput" in u: changes["input"] = json.dumps(u["rawInput"], ensure_ascii=False)
                 if "status" in u: changes["status"] = u["status"]
-                if "content" in u:
-                    changes["outcome"] = display_content(u["content"])
-                    changes["media"] = self.media(u["content"])
-                if "rawOutput" in u:
-                    changes["outcome"] = json.dumps(display_object(u["rawOutput"]), ensure_ascii=False)
-                    changes["media"] = changes.get("media", []) + self.media(u["rawOutput"].get("content") if isinstance(u["rawOutput"], dict) else None)
+                if "content" in u or "rawOutput" in u:
+                    has_content = "content" in u
+                    has_raw = "rawOutput" in u
+                    media_items = []
+                    if has_content:
+                        media_items.extend(self.media(u["content"]))
+                    if has_raw:
+                        media_items.extend(self.media(u["rawOutput"].get("content") if isinstance(u["rawOutput"], dict) else None))
+                    if media_items or has_content:
+                        changes["media"] = media_items
+                    if has_content and has_raw:
+                        changes["outcome"] = display_tool_output(u["content"], u["rawOutput"])
+                    elif has_content:
+                        changes["outcome"] = display_tool_output(u["content"], None)
+                    else:
+                        raw_text = display_tool_output(None, u["rawOutput"])
+                        prev_out = old.get("outcome", "")
+                        if raw_text and (not prev_out or not is_json_fallback_output(u["rawOutput"], raw_text)):
+                            changes["outcome"] = raw_text
                 self.row({**old, **changes})
             elif kind == "config_option_update": self.apply_options(u.get("configOptions", []))
             elif kind == "current_mode_update":

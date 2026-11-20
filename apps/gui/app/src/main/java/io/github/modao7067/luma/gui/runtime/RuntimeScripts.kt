@@ -112,7 +112,7 @@ with (base/'server.lock').open('a') as lock:
     except (OSError,ValueError):previous={}
     if alive(previous):
         print(json.dumps({'url':previous['url']}));sys.exit(0)
-    codex=shutil.which('codex')
+    codex=shutil.which('codex') or shutil.which('codex',path=os.pathsep.join(str(pathlib.Path.home()/p) for p in ('.local/share/pnpm/bin','.local/bin','.cargo/bin','.bun/bin')))
     if not codex:raise SystemExit(('codex not found in Ubuntu; install and sign in to Codex in the Root terminal' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else 'Ubuntu 未找到 codex，请在 Root 终端安装并登录 Codex 后重试'))
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
@@ -215,7 +215,7 @@ with (base/(name+'.lock')).open('a') as lock:
     url=scheme+'://127.0.0.1:'+str(port)
     command=[a.replace('{port}',str(port)).replace('{url}',url) for a in template]
     runtime=base.parent.parent
-    shell='export PATH='+shlex.quote(str(runtime/'bin'))+':"${'$'}PATH":"${'$'}HOME/.opencode/bin"; '
+    shell='export PATH='+shlex.quote(str(runtime/'bin'))+':"${'$'}PATH":"${'$'}HOME/.local/bin":"${'$'}HOME/.kimi-code/bin":"${'$'}HOME/.opencode/bin":"${'$'}HOME/.grok/bin":"${'$'}HOME/.qoder/bin":"${'$'}HOME/.codebuddy/bin":"${'$'}HOME/.cargo/bin":"${'$'}HOME/.bun/bin"; '
     shell+='export LUMA_BROWSER_ROOT='+shlex.quote(str(base/'browser'))+'; '
     shell+='export LUMA_BROWSER_SKILL='+shlex.quote(str(base/'skills/luma-browser/SKILL.md'))+'; '
     shell+='exec '+shlex.join(command)

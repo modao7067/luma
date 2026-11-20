@@ -46,8 +46,25 @@ object OpenCodeProjection {
         }
         return patches.joinToString("\n\n")
     }
+    private fun normalizeEpochMs(raw: Long): Long = when {
+        raw < 1_000_000_000L -> 0L
+        raw < 10_000_000_000L -> raw * 1000L
+        raw > 10_000_000_000_000L -> raw / 1000L
+        else -> raw
+    }
+    private fun JSONObject?.epochMs(vararg keys: String): Long {
+        if (this == null) return 0L
+        for (k in keys) {
+            val v = normalizeEpochMs(optLong(k, 0L))
+            if (v > 0L) return v
+        }
+        return 0L
+    }
     fun message(m: JSONObject): List<ConversationItem> {
         val id = m.getString("id")
+        val mTime = m.optJSONObject("time")
+        val mCreated = mTime.epochMs("created")
+        val mCompleted = mTime.epochMs("completed")
         return when (m.optString("type")) {
             "user" -> {
                 val files = m.optJSONArray("files")?.objects().orEmpty()
@@ -57,31 +74,68 @@ object OpenCodeProjection {
                             val resolved = fileResource(it)
                             val kind = if (resolved?.mimeType?.startsWith("image/") == true) tr("图片", "Image") else tr("文件", "File")
                             SessionTitlePolicy.attachment(kind, resolved?.source, it.stringOrNull("name"))
-                        })))
+                        }),
+                    timestampMs = mCreated))
             }
             "assistant" -> m.optJSONArray("content")?.objects().orEmpty().mapIndexed { index, part ->
                 val key = "$id:$index"
                 val done = m.optJSONObject("time")?.has("completed") == true
+                val pTime = part.optJSONObject("time")
                 when (part.optString("type")) {
-                    "text" -> ConversationItem(key, "assistant", part.optString("text"))
-                    "reasoning" -> ConversationItem(key, "tool", tr("思考", "Thought"), part.optString("text"), kind = "reasoning", outcome = if (part.optJSONObject("time")?.has("completed") == true || done) "succeeded" else "running")
+                    "text" -> {
+                        val textTs = pTime.epochMs("start", "created").let { if (it > 0L) it else if (index == 0) mCreated else 0L }
+                        ConversationItem(key, "assistant", part.optString("text"), timestampMs = textTs)
+                    }
+                    "reasoning" -> {
+                        val rStart = pTime.epochMs("start", "created").let { if (it > 0L) it else mCreated }
+                        val rEnd = pTime.epochMs("end", "completed").let { if (it > 0L) it else if (done) mCompleted else 0L }
+                        val reasoningDone = done || (pTime != null && (
+                            (!pTime.isNull("end") && pTime.optLong("end", 0L) > 0L) ||
+                                (!pTime.isNull("completed") && (pTime.optLong("completed", 0L) > 0L || pTime.optBoolean("completed", false)))
+                            ))
+                        ConversationItem(key, "tool", tr("思考", "Thought"), part.optString("text"), kind = "reasoning",
+                            outcome = if (reasoningDone) "succeeded" else "running",
+                            timestampMs = rStart, completedAtMs = rEnd)
+                    }
                     "tool" -> {
                         val state = part.optJSONObject("state") ?: JSONObject()
                         val status = state.optString("status")
-                        val output = state.optJSONArray("content")?.objects().orEmpty().joinToString("\n") { it.stringOrNull("text") ?: MediaProjection.display(it) }
+                        val output = state.optJSONArray("content")?.objects().orEmpty()
+                            .map { it.stringOrNull("text") ?: MediaProjection.display(it) }
+                            .filter { it.isNotBlank() }
+                            .joinToString("\n")
+                            .ifBlank { state.stringOrNull("output").orEmpty() }
                         val metadataPatch = extractMetadataPatch(state.optJSONObject("metadata"))
                         val primaryDetail = metadataPatch.ifBlank { output }
+                        val sTime = state.optJSONObject("time")
+                        val tStart = pTime.epochMs("start", "created", "ran").let {
+                            if (it > 0L) it else sTime.epochMs("start", "created").let { s -> if (s > 0L) s else mCreated }
+                        }
+                        val settled = status == "completed" || status == "error"
+                        val tEnd = if (settled) pTime.epochMs("end", "completed").let {
+                            if (it > 0L) it else sTime.epochMs("end", "completed").let { s -> if (s > 0L) s else if (done) mCompleted else 0L }
+                        } else 0L
                         ConversationItem("$id:tool:${part.getString("id")}", "tool", part.optString("name"),
                             detail = listOf(primaryDetail, state.optJSONObject("error")?.optString("message").orEmpty()).filter { it.isNotBlank() }.joinToString("\n"),
                             status = status, media = MediaProjection.blocks(state.opt("content")), kind = "tool", input = state.optJSONObject("input")?.toString(2).orEmpty(),
                             toolName = part.stringOrNull("name").orEmpty(),
-                            outcome = when (status) { "completed" -> "succeeded"; "error" -> "failed"; else -> "running" })
+                            outcome = when (status) { "completed" -> "succeeded"; "error" -> "failed"; else -> "running" },
+                            timestampMs = tStart, completedAtMs = tEnd)
                     }
-                    else -> ConversationItem(key, "assistant", "", media = MediaProjection.blocks(part), detail = if (MediaProjection.blocks(part).isEmpty()) MediaProjection.display(part) else "", kind = "attachment")
+                    else -> ConversationItem(key, "assistant", "", media = MediaProjection.blocks(part),
+                        detail = if (MediaProjection.blocks(part).isEmpty()) MediaProjection.display(part) else "", kind = "attachment",
+                        timestampMs = pTime.epochMs("start", "created").let { if (it > 0L) it else mCreated })
                 }
-            } + listOfNotNull(m.optJSONObject("error")?.let { ConversationItem("$id:error", "tool", tr("执行失败", "Execution failed"), it.optString("message", it.toString()), outcome = "failed") })
-            "idle" -> listOfNotNull(m.optJSONObject("error")?.let { ConversationItem(id, "tool", tr("执行失败", "Execution failed"), it.optString("message", it.toString()), outcome = "failed") })
-            "compaction" -> listOf(ConversationItem(id, "tool", tr("上下文压缩", "Context compaction"), m.optString("summary"), kind = "compaction"))
+            } + listOfNotNull(m.optJSONObject("error")?.let {
+                ConversationItem("$id:error", "tool", tr("执行失败", "Execution failed"), it.optString("message", it.toString()), outcome = "failed",
+                    timestampMs = if (mCompleted > 0L) mCompleted else mCreated)
+            })
+            "idle" -> listOfNotNull(m.optJSONObject("error")?.let {
+                ConversationItem(id, "tool", tr("执行失败", "Execution failed"), it.optString("message", it.toString()), outcome = "failed",
+                    timestampMs = if (mCompleted > 0L) mCompleted else mCreated)
+            })
+            "compaction" -> listOf(ConversationItem(id, "tool", tr("上下文压缩", "Context compaction"), m.optString("summary"), kind = "compaction",
+                timestampMs = mCreated, completedAtMs = if (mCompleted > 0L) mCompleted else mCreated))
             else -> emptyList()
         }
     }

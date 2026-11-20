@@ -59,7 +59,7 @@ private fun ContentBlocksFixture(dark: Boolean) = LumaTheme(seedArgb = 0xFF6750A
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     CodeBlock("val spacing = 12.dp", "kotlin")
-                    Column(Modifier.padding(start = 26.dp)) {
+                    Column(Modifier.padding(start = 10.dp)) {
                         ProcessEditCardGroup(contentBlockEditFixture, cli = "OpenCode", entryState = rememberSaveableStateHolder(),
                             initiallyOpenItem = "edit-title", previewDetailClosing = false, previewDetailFraction = 1f)
                     }

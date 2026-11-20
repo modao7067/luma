@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -60,8 +62,12 @@ internal fun ProviderIcon(cli: String, selected: Boolean, size: Dp = 30.dp) {
 @Composable
 internal fun ProviderSettingsRow(cli: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val haptic = LocalHapticFeedback.current
     Surface(
-        onClick = { onCheckedChange(!checked) },
+        onClick = {
+            haptic.tick()
+            onCheckedChange(!checked)
+        },
         shape = LumaCardShape(18.dp),
         color = if (checked) colors.secondaryContainer else colors.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth(),
@@ -78,7 +84,10 @@ internal fun ProviderSettingsRow(cli: String, checked: Boolean, onCheckedChange:
                 style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                 color = if (checked) colors.onSecondaryContainer else colors.onSurfaceVariant,
             )
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            Switch(checked = checked, onCheckedChange = {
+                haptic.tick()
+                onCheckedChange(it)
+            })
         }
     }
 }

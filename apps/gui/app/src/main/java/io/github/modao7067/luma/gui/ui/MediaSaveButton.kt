@@ -30,10 +30,11 @@ private fun MediaSaveButtonContent(resource: MediaResource?, actions: CockpitAct
     var saving by remember(resource) { mutableStateOf(false) }
     var saved by remember(resource) { mutableStateOf(false) }
     val interactive = LocalSessionInteractive.current
+    val saveElastic = rememberElasticPress()
     LiquidGlass(
         Modifier.size(FloatingChromeSize)
             .liquidClickable(enabled = resource != null && actions != null && interactive && !saving && !saved,
-                cornerRadius = FloatingChromeRadius, onClick = {
+                press = saveElastic, onClick = {
                     if (!saving && !saved && resource != null && actions != null) {
                         saving = true
                         scope.launch {
@@ -52,11 +53,14 @@ private fun MediaSaveButtonContent(resource: MediaResource?, actions: CockpitAct
                 stateDescription = when { saving -> tr("正在保存", "Saving"); saved -> tr("已保存", "Saved"); else -> "" }
             },
         cornerRadius = FloatingChromeRadius,
+        press = saveElastic,
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            if (saving) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            else CompositionLocalProvider(LocalContentColor provides LocalContentColor.current.copy(alpha = if (resource == null || actions == null) .38f else 1f)) {
-                MenuIcon(if (saved) MenuSymbol.CHECK else MenuSymbol.DOWNLOAD, size = 20.dp)
+            Box(Modifier.glyphPulse(saving to saved), contentAlignment = Alignment.Center) {
+                if (saving) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                else CompositionLocalProvider(LocalContentColor provides LocalContentColor.current.copy(alpha = if (resource == null || actions == null) .38f else 1f)) {
+                    MenuIcon(if (saved) MenuSymbol.CHECK else MenuSymbol.DOWNLOAD, size = 20.dp)
+                }
             }
         }
     }

@@ -65,7 +65,7 @@ internal fun BlankConversation(
                     }
                 }) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 28.dp), contentAlignment = Alignment.CenterStart) {
-                    Text(tr("想做点什么？", "What are we building?"), style = MaterialTheme.typography.headlineMedium)
+                    Text(tr("想做点什么？", "What are we building?"), style = editorialGreetingStyle())
                 }
             }
         }

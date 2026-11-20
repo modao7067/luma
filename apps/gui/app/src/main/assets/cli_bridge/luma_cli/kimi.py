@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from .acp import AcpSession
 from .i18n import tr
-from .media import display_content
+from .kimi_web_transport import resolve_kimi_binary
+from .media import display_content, display_tool_output
 from .transport import Rejected
 
 _TERMINAL_AGENT_STATUSES = {"succeeded", "completed", "failed", "cancelled", "closed", "aborted"}
@@ -175,6 +176,14 @@ class KimiSession(AcpSession):
         super().connect()
         self._sync_subagents(force=True)
 
+    def start(self, argv, env_overrides=None):
+        if argv == self.argv and argv and argv[0] == "kimi":
+            binary = resolve_kimi_binary()
+            if not binary:
+                raise Rejected(tr("未找到 Kimi Code，请先在当前环境安装", "Kimi Code not found; install it in the current environment"))
+            argv = [binary, *argv[1:]]
+        super().start(argv, env_overrides)
+
     def apply_commands(self, commands):
         super().apply_commands(commands)
         skills = [{"id": c["name"], "name": c["name"], "path": ""}
@@ -333,6 +342,14 @@ class KimiSession(AcpSession):
                     if cur and not cur.get("toolName"):
                         self.row({**cur, "toolName": "Agent"})
                         row = dict(self.rows.get(row_id, row))
+            if not row.get("toolKind") and row.get("toolName"):
+                inferred_kind = _kimi_tool_kind(row["toolName"], None)
+                if inferred_kind:
+                    with self.lock:
+                        cur = self.rows.get(row_id)
+                        if cur and not cur.get("toolKind"):
+                            self.row({**cur, "toolKind": inferred_kind})
+                            row = dict(self.rows.get(row_id, row))
             args = _parse_json_dict(row.get("input"))
             if not args:
                 args = _parse_json_dict(row.get("outcome"))
@@ -645,7 +662,7 @@ class KimiSession(AcpSession):
                         if isinstance(tc_id, str) and tc_id:
                             res = ev.get("result") if isinstance(ev.get("result"), dict) else {}
                             out = res.get("output", "")
-                            out_str = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
+                            out_str = display_tool_output(None, out)
                             done_st = "failed" if res.get("isError") else "completed"
                             row_id = f"{aid}:tool-{tc_id}"
                             idx = next((i for i, m in enumerate(ws["messages"]) if m.get("id") == row_id), -1)

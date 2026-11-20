@@ -36,6 +36,30 @@
    "origin": "fetch:fonts",
    "sha256": "5982f8c6a10c50809f879a28911a214a066197871ee8caa544a86121d0452fd5"
   },
+  "runtime/noroot/src/main/assets/NotoSansArabic-Regular.ttf": {
+   "bytes": 240456,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "ceea25b464a656dc3b26849bab9356740401af62aedf1bfa8b7f0d9b75925b1b"
+  },
+  "runtime/noroot/src/main/assets/NotoSansCanadianAboriginal-Regular.ttf": {
+   "bytes": 113740,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "70735441641a0a90f9f1baa45c7340deea77f19c5829fc71162bb443acad2ca7"
+  },
+  "runtime/noroot/src/main/assets/NotoSansGeorgian-Regular.ttf": {
+   "bytes": 53948,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "b36ab61cbdd820ffd32f957f704f5bf0c53655e820b7a64001091058919a11a6"
+  },
+  "runtime/noroot/src/main/assets/NotoSansKannada-Regular.ttf": {
+   "bytes": 151940,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "5c804033c57f2c2844b1cd425f45b9a78d81d2f71bf358351b24258ebe168aea"
+  },
   "runtime/noroot/src/main/assets/NotoSansMath-Regular.ttf": {
    "bytes": 590904,
    "note": "notofonts/noto-fonts (pinned commit)",
@@ -60,6 +84,12 @@
    "origin": "fetch:fonts",
    "sha256": "630846d528dbe4c4981370a4d0a9475a1fd1491a129bb411f8e157cdb5de13c6"
   },
+  "runtime/noroot/src/main/assets/NotoSansThai-Regular.ttf": {
+   "bytes": 37752,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "404ddfb5ed0aaa6b6ec8a85700d682978992062d67da93903967b56cbd9a4acc"
+  },
   "runtime/noroot/src/main/assets/debian-arm64.zip.xz": {
    "bytes": 120906948,
    "note": "tools/build-basic-rootfs.py --xz <builder> <base> <assets>",
@@ -67,10 +97,10 @@
    "sha256": "6d3d64ff78226bc8f5de92caae49d2963e0f33111d9ae3fc3d417c9c87ae79ff"
   },
   "runtime/noroot/src/main/assets/native-sources/proot-sources.tgz": {
-   "bytes": 331990,
+   "bytes": 332026,
    "note": "tools/build-native-proot.py --package-sources-only",
    "origin": "build:native-src",
-   "sha256": "7e9ac03d3d3bd5ddf38469a4780d4f5c91f838811f25f490e4956850c1c4cfe3"
+   "sha256": "407ea41bf67e40534c00c310448ea9ee77ddda36f820e58c18e32df8b95a49a6"
   },
   "runtime/noroot/src/main/assets/native-sources/talloc.tgz": {
    "bytes": 684092,
@@ -2815,10 +2845,10 @@
    "sha256": "ae0c48df73714ed8004ce47fb326c3bdecc023fb2f921e1e2979c74c3405f7e2"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_exec.so": {
-   "bytes": 258216,
+   "bytes": 258344,
    "note": "tools/build-native-proot.py",
    "origin": "build:proot",
-   "sha256": "8635267d8e8de14b8b61d6fb0c183d1ff2af0d87a755d64970b46ad7950bee02"
+   "sha256": "0cfe0d5f67476a97aaa664b0ff94ed206d1160c362ce2a387d436d16c9fe9376"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_loader.so": {
    "bytes": 17800,
@@ -2856,6 +2886,30 @@
    "origin": "fetch:fonts",
    "sha256": "5982f8c6a10c50809f879a28911a214a066197871ee8caa544a86121d0452fd5"
   },
+  "runtime/root/src/main/assets/NotoSansArabic-Regular.ttf": {
+   "bytes": 240456,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "ceea25b464a656dc3b26849bab9356740401af62aedf1bfa8b7f0d9b75925b1b"
+  },
+  "runtime/root/src/main/assets/NotoSansCanadianAboriginal-Regular.ttf": {
+   "bytes": 113740,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "70735441641a0a90f9f1baa45c7340deea77f19c5829fc71162bb443acad2ca7"
+  },
+  "runtime/root/src/main/assets/NotoSansGeorgian-Regular.ttf": {
+   "bytes": 53948,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "b36ab61cbdd820ffd32f957f704f5bf0c53655e820b7a64001091058919a11a6"
+  },
+  "runtime/root/src/main/assets/NotoSansKannada-Regular.ttf": {
+   "bytes": 151940,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "5c804033c57f2c2844b1cd425f45b9a78d81d2f71bf358351b24258ebe168aea"
+  },
   "runtime/root/src/main/assets/NotoSansMath-Regular.ttf": {
    "bytes": 590904,
    "note": "notofonts/noto-fonts (pinned commit)",
@@ -2879,6 +2933,12 @@
    "note": "notofonts/noto-fonts (pinned commit)",
    "origin": "fetch:fonts",
    "sha256": "630846d528dbe4c4981370a4d0a9475a1fd1491a129bb411f8e157cdb5de13c6"
+  },
+  "runtime/root/src/main/assets/NotoSansThai-Regular.ttf": {
+   "bytes": 37752,
+   "note": "notofonts/noto-fonts (pinned commit)",
+   "origin": "fetch:fonts",
+   "sha256": "404ddfb5ed0aaa6b6ec8a85700d682978992062d67da93903967b56cbd9a4acc"
   },
   "shared/terminal-emulator/src/main/jniLibs/arm64-v8a/libtermux.so": {
    "bytes": 9592,

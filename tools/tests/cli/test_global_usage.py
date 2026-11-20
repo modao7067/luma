@@ -108,7 +108,7 @@ class GlobalUsageTest(unittest.TestCase):
             self.assertEqual(priced["costSource"], "providerReported")
             self.assertAlmostEqual(priced["costUsd"], 0.42)
 
-    def test_antigravity_dual_endpoint_merge_and_pooled_policy(self):
+    def test_antigravity_prefers_daily_endpoint_without_cross_host_merge(self):
         requested_at_ms = gu._parse_ts_ms("2026-11-07T01:36:14Z")
         assert requested_at_ms is not None
 
@@ -218,7 +218,7 @@ class GlobalUsageTest(unittest.TestCase):
 
         daily_wins = gu._parse_antigravity_summary_windows(daily_payload, requested_at_ms)
         prod_wins = gu._parse_antigravity_summary_windows(prod_payload, requested_at_ms)
-        merged = gu._merge_antigravity_host_windows([daily_wins, prod_wins])
+        merged = gu._select_antigravity_host_windows([daily_wins, prod_wins])
 
         by_id = {w["id"]: w for w in merged}
         self.assertEqual(
@@ -227,7 +227,7 @@ class GlobalUsageTest(unittest.TestCase):
         )
         self.assertAlmostEqual(by_id["gemini-5h"]["usedPercent"], 9.04, places=1)
         self.assertEqual(by_id["gemini-5h"]["label"], f"Gemini · {gu._tr('5h 窗口', '5h window')}")
-        self.assertAlmostEqual(by_id["gemini-weekly"]["usedPercent"], 10.76, places=1)
+        self.assertAlmostEqual(by_id["gemini-weekly"]["usedPercent"], 2.51, places=1)
         self.assertEqual(by_id["gemini-weekly"]["label"], f"Gemini · {gu._tr('7d 窗口', '7d window')}")
         self.assertEqual(by_id["gemini-argon-wtu-weekly"]["label"], f"Gemini 4 Argon · {gu._tr('7d 窗口', '7d window')}")
         self.assertAlmostEqual(by_id["gemini-argon-wtu-weekly"]["usedPercent"], 35.0, places=1)
@@ -235,6 +235,21 @@ class GlobalUsageTest(unittest.TestCase):
         self.assertIsNone(by_id["3p-5h"]["resetsAt"])
         self.assertAlmostEqual(by_id["3p-weekly"]["usedPercent"], 98.73, places=1)
         self.assertEqual(by_id["3p-weekly"]["resetsAt"], "2026-11-10T10:25:17Z")
+
+        stale_prod = gu._parse_antigravity_summary_windows({"groups": [{"displayName": "Claude and GPT models", "buckets": [
+            {"bucketId": "3p-weekly", "displayName": "Weekly Limit", "window": "weekly",
+             "remainingFraction": 0.0187, "resetTime": "2026-11-20T10:00:00Z"},
+        ]}]}, requested_at_ms)
+        fresh_daily = gu._parse_antigravity_summary_windows({"groups": [{"displayName": "Claude and GPT models", "buckets": [
+            {"bucketId": "3p-weekly", "displayName": "Weekly Limit", "window": "weekly",
+             "remainingFraction": 0.9046, "resetTime": "2026-11-25T10:00:00Z"},
+        ]}]}, requested_at_ms)
+        chosen = {w["id"]: w for w in gu._select_antigravity_host_windows([fresh_daily, stale_prod])}
+        self.assertAlmostEqual(chosen["3p-weekly"]["usedPercent"], 9.54, places=1)
+        self.assertEqual(chosen["3p-weekly"]["resetsAt"], "2026-11-25T10:00:00Z")
+        fallback = {w["id"]: w for w in gu._select_antigravity_host_windows([[], stale_prod])}
+        self.assertAlmostEqual(fallback["3p-weekly"]["usedPercent"], 98.13, places=1)
+        self.assertEqual(gu._select_antigravity_host_windows([[], []]), [])
 
     def test_oauth_gate_skips_unconfigured_and_apikey_only_providers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -612,6 +627,326 @@ sys.stdin.read()
             from luma_cli.metrics import agy_session_metrics
             orch_rows = agy_session_metrics("conv-orch", model="gemini-pro-orchestrator", home=home)
             self.assertIn({"label": gu._tr("CLI 累计估算 · USD", "CLI estimated cost · USD"), "value": "0.82"}, orch_rows)
+
+    def test_antigravity_orchestrator_neon_worker_compaction_and_archive_migration(self):
+        def pb_varint(val: int) -> bytes:
+            out = bytearray()
+            v = int(val)
+            while v >= 0x80:
+                out.append((v & 0x7F) | 0x80)
+                v >>= 7
+            out.append(v)
+            return bytes(out)
+
+        def pb_num(field: int, val: int) -> bytes:
+            return pb_varint((field << 3) | 0) + pb_varint(val)
+
+        def pb_bytes(field: int, raw: bytes) -> bytes:
+            return pb_varint((field << 3) | 2) + pb_varint(len(raw)) + raw
+
+        def pb_str(field: int, s: str) -> bytes:
+            return pb_bytes(field, s.encode("utf-8"))
+
+        def pb_ts(sec: int) -> bytes:
+            return pb_num(1, sec)
+
+        class _FrozenDt(dt.datetime):
+            fixed_utc = dt.datetime(2026, 11, 19, 12, 0, tzinfo=dt.timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fixed_utc.astimezone(tz) if tz is not None else cls.fixed_utc.replace(tzinfo=None)
+
+        now_sec = int(dt.datetime(2026, 11, 19, 11, 50, tzinfo=dt.timezone.utc).timestamp())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cache_dir = home / ".cache-neon"
+            cache_dir.mkdir(parents=True)
+            conv_dir = home / ".gemini" / "antigravity-cli" / "conversations"
+            conv_dir.mkdir(parents=True)
+            db_path = conv_dir / "conv-neon-orch.db"
+
+            con = sqlite3.connect(str(db_path))
+            con.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)")
+            con.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+
+            for s_idx in range(4):
+                con.execute("INSERT INTO steps VALUES (?, 15, ?)", (s_idx, pb_bytes(1, pb_ts(now_sec + s_idx * 10))))
+
+            neon_plan_u = (
+                pb_num(1, 1537)
+                + pb_num(2, 100_000)
+                + pb_num(5, 400_000)
+                + pb_num(9, 5_000)
+                + pb_num(10, 5_000)
+                + pb_str(11, "neon-plan-0")
+            )
+            neon_plan_c = (
+                pb_num(3, 1537)
+                + pb_str(19, "gemini-pro-orchestrator-neon")
+                + pb_str(21, "Orchestrator (Neon)")
+                + pb_bytes(4, neon_plan_u)
+            )
+            con.execute("INSERT INTO gen_metadata VALUES (0, ?)", (pb_bytes(1, neon_plan_c) + pb_num(2, 0),))
+
+            work0_u = (
+                pb_num(1, 1669)
+                + pb_num(2, 200_000)
+                + pb_num(5, 800_000)
+                + pb_num(9, 10_000)
+                + pb_num(10, 10_000)
+                + pb_str(11, "neon-work-0")
+            )
+            work0_c = (
+                pb_num(3, 1669)
+                + pb_str(19, "gemini-flash-worker-agy")
+                + pb_str(21, "Gemini 4 Hydrogen (Orchestrator)")
+                + pb_bytes(4, work0_u)
+            )
+            con.execute("INSERT INTO gen_metadata VALUES (1, ?)", (pb_bytes(1, work0_c) + pb_num(2, 1),))
+
+            work1_u = (
+                pb_num(1, 1669)
+                + pb_num(2, 100_000)
+                + pb_num(10, 10_000)
+                + pb_str(11, "neon-work-1")
+            )
+            work1_c = (
+                pb_num(3, 1669)
+                + pb_str(19, "gemini-flash-worker-agy")
+                + pb_str(21, "Gemini Flash")
+                + pb_bytes(4, work1_u)
+            )
+            con.execute("INSERT INTO gen_metadata VALUES (2, ?)", (pb_bytes(1, work1_c) + pb_num(2, 2),))
+
+            carb_u = (
+                pb_num(1, 1667)
+                + pb_num(2, 100_000)
+                + pb_num(5, 500_000)
+                + pb_num(10, 10_000)
+                + pb_str(11, "carb-plan-0")
+            )
+            carb_c = (
+                pb_num(3, 1667)
+                + pb_str(19, "gemini-pro-orchestrator")
+                + pb_str(21, "Orchestrator (Carbon)")
+                + pb_bytes(4, carb_u)
+            )
+            con.execute("INSERT INTO gen_metadata VALUES (3, ?)", (pb_bytes(1, carb_c) + pb_num(2, 3),))
+
+            comp1_u9 = pb_num(1, 1537) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "compact-1")
+            comp1_u28 = pb_num(1, 0) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "compact-1")
+            con.execute(
+                "INSERT INTO steps VALUES (4, 23, ?)",
+                (pb_bytes(1, pb_ts(now_sec + 40)) + pb_bytes(9, comp1_u9) + pb_bytes(28, pb_bytes(2, comp1_u28)),),
+            )
+
+            comp2_u28 = pb_num(1, 0) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "compact-2")
+            con.execute(
+                "INSERT INTO steps VALUES (5, 23, ?)",
+                (pb_bytes(1, pb_ts(now_sec + 50)) + pb_bytes(20, pb_num(3, 1)) + pb_bytes(28, pb_bytes(2, comp2_u28)),),
+            )
+
+            con.execute(
+                "INSERT INTO steps VALUES (6, 15, ?)",
+                (pb_bytes(1, pb_ts(now_sec + 60)) + pb_bytes(9, neon_plan_u),),
+            )
+            con.commit()
+            con.close()
+
+            with (
+                patch.object(gu.Path, "home", return_value=home),
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.object(gu.dt, "datetime", _FrozenDt),
+            ):
+                today_summary = gu.collect_summary(period="today", tz_name="UTC", refresh=True, sync_pricing=False)
+
+                today_models = {m["model"]: m for m in today_summary["byModel"]}
+                self.assertNotIn("gemini-flash-worker-agy", today_models)
+                self.assertNotIn("gemini-pro-orchestrator-neon", today_models)
+                self.assertNotIn("gemini-pro-orchestrator", today_models)
+                self.assertIn("gemini-4-neon", today_models)
+                self.assertIn("gemini-4-hydrogen", today_models)
+                self.assertIn("gemini-4-carbon", today_models)
+
+                m_neon = today_models["gemini-4-neon"]
+                self.assertEqual(m_neon["events"], 2)
+                self.assertEqual(m_neon["totalTokens"], 620_000)
+                self.assertAlmostEqual(m_neon["costUsd"], 0.96, places=6)
+                self.assertEqual(m_neon["costSource"], "modelPriced")
+
+                m_hyd = today_models["gemini-4-hydrogen"]
+                self.assertEqual(m_hyd["events"], 3)
+                self.assertEqual(m_hyd["totalTokens"], 1_240_000)
+                self.assertAlmostEqual(m_hyd["costUsd"], 0.96, places=6)
+                self.assertEqual(m_hyd["costSource"], "modelPriced")
+                self.assertEqual(m_hyd["uiLabels"], ["Gemini 4 Hydrogen (Orchestrator)"])
+
+                m_carb = today_models["gemini-4-carbon"]
+                self.assertEqual(m_carb["events"], 1)
+                self.assertEqual(m_carb["totalTokens"], 610_000)
+                self.assertAlmostEqual(m_carb["costUsd"], 0.35, places=6)
+
+                from luma_cli.metrics import agy_session_metrics
+                session_rows = agy_session_metrics("conv-neon-orch", model="gemini-pro-orchestrator-neon", home=home)
+                self.assertIn({"label": gu._tr("CLI 累计估算 · USD", "CLI estimated cost · USD"), "value": "2.27"}, session_rows)
+
+                old_archive = {
+                    "version": gu.ARCHIVE_VERSION,
+                    "scannerRev": 4,
+                    "seededTimezones": ["UTC"],
+                    "byTz": {
+                        "UTC": {
+                            "2026-11-19": {
+                                "Antigravity::gemini-flash-worker-agy": {
+                                    "cli": "Antigravity",
+                                    "model": "gemini-flash-worker-agy",
+                                    "events": 2,
+                                    "uncachedInputTokens": 300_000,
+                                    "cachedInputTokens": 800_000,
+                                    "cacheCreationTokens": 0,
+                                    "outputTokens": 20_000,
+                                    "reasoningTokens": 10_000,
+                                    "totalTokens": 1_130_000,
+                                    "costUsd": 0.0,
+                                    "providerReportedCostUsd": 0.0,
+                                    "modelPricedCostUsd": 0.0,
+                                    "unpricedEvents": 2,
+                                    "unpricedTokens": 1_130_000,
+                                    "uiLabels": ["Gemini Flash"],
+                                },
+                                "Antigravity::gemini-pro-orchestrator-neon": {
+                                    "cli": "Antigravity",
+                                    "model": "gemini-pro-orchestrator-neon",
+                                    "events": 1,
+                                    "uncachedInputTokens": 100_000,
+                                    "cachedInputTokens": 400_000,
+                                    "cacheCreationTokens": 0,
+                                    "outputTokens": 5_000,
+                                    "reasoningTokens": 5_000,
+                                    "totalTokens": 510_000,
+                                    "costUsd": 0.34,
+                                    "providerReportedCostUsd": 0.0,
+                                    "modelPricedCostUsd": 0.34,
+                                    "unpricedEvents": 0,
+                                    "unpricedTokens": 0,
+                                    "uiLabels": ["Orchestrator (Neon)"],
+                                },
+                            },
+                            "2026-11-18": {
+                                "Antigravity::gemini-flash-worker-agy": {
+                                    "cli": "Antigravity",
+                                    "model": "gemini-flash-worker-agy",
+                                    "events": 1,
+                                    "uncachedInputTokens": 100_000,
+                                    "cachedInputTokens": 0,
+                                    "cacheCreationTokens": 0,
+                                    "outputTokens": 10_000,
+                                    "reasoningTokens": 0,
+                                    "totalTokens": 110_000,
+                                    "costUsd": 0.0,
+                                    "providerReportedCostUsd": 0.0,
+                                    "modelPricedCostUsd": 0.0,
+                                    "unpricedEvents": 1,
+                                    "unpricedTokens": 110_000,
+                                    "uiLabels": ["Gemini Flash"],
+                                    "repriceBuckets": {
+                                        "|0|0": {
+                                            "speed": None,
+                                            "events": 1,
+                                            "uncachedInputTokens": 100_000,
+                                            "cachedInputTokens": 0,
+                                            "cacheCreationTokens": 0,
+                                            "outputTokens": 10_000,
+                                            "reasoningTokens": 0,
+                                        }
+                                    },
+                                },
+                                "Antigravity::gemini-4-hydrogen": {
+                                    "cli": "Antigravity",
+                                    "model": "gemini-4-hydrogen",
+                                    "events": 1,
+                                    "uncachedInputTokens": 200_000,
+                                    "cachedInputTokens": 0,
+                                    "cacheCreationTokens": 0,
+                                    "outputTokens": 0,
+                                    "reasoningTokens": 0,
+                                    "totalTokens": 200_000,
+                                    "costUsd": 0.30,
+                                    "providerReportedCostUsd": 0.0,
+                                    "modelPricedCostUsd": 0.30,
+                                    "unpricedEvents": 0,
+                                    "unpricedTokens": 0,
+                                    "uiLabels": ["Gemini 4 Hydrogen (High)"],
+                                    "repriceBuckets": {
+                                        "|0|0": {
+                                            "speed": None,
+                                            "events": 1,
+                                            "uncachedInputTokens": 200_000,
+                                            "cachedInputTokens": 0,
+                                            "cacheCreationTokens": 0,
+                                            "outputTokens": 0,
+                                            "reasoningTokens": 0,
+                                        }
+                                    },
+                                },
+                                "Antigravity::gemini-pro-orchestrator-neon": {
+                                    "cli": "Antigravity",
+                                    "model": "gemini-pro-orchestrator-neon",
+                                    "events": 1,
+                                    "uncachedInputTokens": 100_000,
+                                    "cachedInputTokens": 0,
+                                    "cacheCreationTokens": 0,
+                                    "outputTokens": 0,
+                                    "reasoningTokens": 0,
+                                    "totalTokens": 100_000,
+                                    "costUsd": 0.20,
+                                    "providerReportedCostUsd": 0.0,
+                                    "modelPricedCostUsd": 0.20,
+                                    "unpricedEvents": 0,
+                                    "unpricedTokens": 0,
+                                    "uiLabels": ["Orchestrator (Neon)"],
+                                    "repriceBuckets": {
+                                        "|0|0": {
+                                            "speed": None,
+                                            "events": 1,
+                                            "uncachedInputTokens": 100_000,
+                                            "cachedInputTokens": 0,
+                                            "cacheCreationTokens": 0,
+                                            "outputTokens": 0,
+                                            "reasoningTokens": 0,
+                                        }
+                                    },
+                                },
+                            },
+                        }
+                    },
+                }
+                gu._save_daily_archive(old_archive)
+
+                week_summary = gu.collect_summary(period="week", tz_name="UTC", refresh=False, sync_pricing=False)
+                week_models = {m["model"]: m for m in week_summary["byModel"]}
+                self.assertNotIn("gemini-flash-worker-agy", week_models)
+                self.assertNotIn("gemini-pro-orchestrator-neon", week_models)
+                self.assertEqual(week_models["gemini-4-hydrogen"]["totalTokens"], 1_550_000)
+                self.assertAlmostEqual(week_models["gemini-4-hydrogen"]["costUsd"], 1.485, places=6)
+                self.assertEqual(week_models["gemini-4-neon"]["totalTokens"], 720_000)
+                self.assertAlmostEqual(week_models["gemini-4-neon"]["costUsd"], 1.26, places=6)
+                self.assertEqual(week_models["gemini-4-carbon"]["totalTokens"], 610_000)
+                self.assertAlmostEqual(week_models["gemini-4-carbon"]["costUsd"], 0.35, places=6)
+
+                migrated_arch = gu._load_daily_archive()
+                self.assertEqual(migrated_arch.get("scannerRev"), 5)
+                utc_days = migrated_arch["byTz"]["UTC"]
+                self.assertNotIn("Antigravity::gemini-flash-worker-agy", utc_days["2026-11-19"])
+                self.assertNotIn("Antigravity::gemini-pro-orchestrator-neon", utc_days["2026-11-19"])
+                self.assertNotIn("Antigravity::gemini-flash-worker-agy", utc_days["2026-11-18"])
+                self.assertNotIn("Antigravity::gemini-pro-orchestrator-neon", utc_days["2026-11-18"])
+                self.assertEqual(
+                    utc_days["2026-11-18"]["Antigravity::gemini-4-hydrogen"]["uiLabels"],
+                    ["Gemini 4 Hydrogen (High)", "Gemini 4 Hydrogen (Orchestrator)"],
+                )
 
     def test_codex_rerouted_endpoint_and_daily_archive_retention(self):
         now_utc = dt.datetime.now(dt.timezone.utc)

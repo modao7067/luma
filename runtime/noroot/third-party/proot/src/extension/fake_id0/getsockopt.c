@@ -1,4 +1,5 @@
 #include <sys/socket.h>  /* SOL_SOCKET,SO_PEERCRED */
+#include <unistd.h>      /* getuid, getgid */
 
 #include "tracee/reg.h"
 #include "tracee/mem.h"
@@ -22,7 +23,7 @@ static Config *get_fake_id_for_pid(pid_t pid)
 	return talloc_get_type_abort(extension->config, Config);
 }
 
-int handle_getsockopt_exit_end(Tracee *tracee) {
+int handle_getsockopt_exit_end(Tracee *tracee, Config *config) {
 	if (
 	    peek_reg(tracee, ORIGINAL, SYSARG_2) == SOL_SOCKET &&
 	    peek_reg(tracee, ORIGINAL, SYSARG_3) == SO_PEERCRED &&
@@ -33,9 +34,15 @@ int handle_getsockopt_exit_end(Tracee *tracee) {
 		int status = read_data(tracee, &cred, cred_addr, sizeof(struct ucred));
 		if (status) return 0;
 		Config *peer_config = get_fake_id_for_pid(cred.pid);
-		if (peer_config == NULL) return 0;
-		cred.uid = peer_config->euid;
-		cred.gid = peer_config->egid;
+		if (peer_config != NULL) {
+			cred.uid = peer_config->euid;
+			cred.gid = peer_config->egid;
+		} else if (config != NULL && cred.uid == getuid() && cred.gid == getgid()) {
+			cred.uid = config->euid;
+			cred.gid = config->egid;
+		} else {
+			return 0;
+		}
 		write_data(tracee, cred_addr, &cred, sizeof(struct ucred));
 	}
 	return 0;

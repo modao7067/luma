@@ -27,6 +27,11 @@ for app in ['standard','root']:
   missing=expected-covered
   assert not missing,(app,name,[f'U+{cp:04X}' for cp in sorted(missing)])
   covered_codepoints.update(expected)
+ for group in policy.get('codepoints', []):
+  group_expected={int(v,16) for v in group['values']}
+  missing=group_expected-covered
+  assert not missing,(app,group['name'],[f'U+{cp:04X}' for cp in sorted(missing)])
+  covered_codepoints.update(group_expected)
  print('PASS',app,len(filenames),'verified fonts;',len(expected_by_block),'whole blocks;',len(covered_codepoints),'assigned characters; FF65 covered')
 work=REPO/'tools/tests/terminal/build';work.mkdir(parents=True,exist_ok=True)
 visible=[cp for cp in sorted(covered_codepoints) if unicodedata.category(chr(cp))[0] not in ['M','Z'] and cp not in [0x3164,0xffa0]]

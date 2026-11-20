@@ -34,14 +34,14 @@ class ProcessToolLabelsOffscreenBenchmark {
             bothLevelsShareLiteralFirstSeenNamesAndCountEachNativeCall()
             updatesAreOneCallAndNonCallsAreNotToolInvocations()
             structuredCommandLabelsPreserveNativeToolSummaryNames()
-            structuredSummaryBoldsLiteralLabelsButNeverCountPrefixesOrGroupSeparators()
+            summaryCountsStepsAndOnlyEmphasizesEdits()
             onlyKnownWebIdentityOverridesGenericSearch()
             duplicateLabelsDisappearButDistinctContextSurvives()
             codexDynamicIdentitySurvivesOnlyItsOwnUpdates()
         }
         val regular = toolLabelsFixture()
         assertEquals("调用 8 次 · commandExecution、read、glob、websearch · 2 次思考 · 1 次失败", baselineToolLabelsProcessGroupCaption(regular, "OpenCode"))
-        assertEquals("8 次 shell、read、glob、websearch · 2 次 思考 · 1 次 失败", processGroupCaption(regular, "OpenCode"))
+        assertEquals("10 步", processGroupCaption(regular, "OpenCode"))
         repeat(200) { baselineToolLabelsProcessGroupCaption(regular, "OpenCode"); processGroupCaption(regular, "OpenCode") }
         val timings = mutableListOf<String>()
         var checksum = 0
@@ -56,7 +56,9 @@ class ProcessToolLabelsOffscreenBenchmark {
         var width by mutableStateOf(320.dp)
         var scale by mutableFloatStateOf(1f)
         var entries by mutableStateOf(regular)
+        var expectedEmphasisColor = androidx.compose.ui.graphics.Color.Unspecified
         rule.setContent { CompositionLocalProvider(LocalDensity provides Density(1f, scale), LocalProcessDotsPhase provides 0f) { MaterialTheme {
+            expectedEmphasisColor = processRowPalette(MaterialTheme.colorScheme).emphasis
             Column(Modifier.width(width).testTag("process-fixture")) {
                 if (baseline) BaselineToolLabelsProcessGroup(entries, cli = "OpenCode")
                 else ProcessGroup(entries, cli = "OpenCode")
@@ -71,11 +73,11 @@ class ProcessToolLabelsOffscreenBenchmark {
         rule.onNodeWithText("调用 8 次 · commandExecution、read、glob、websearch · 2 次思考 · 1 次失败").performClick()
         snapshot("baseline-expanded")
         rule.runOnIdle { baseline = false }
-        val summary = "8 次 shell、read、glob、websearch · 2 次 思考 · 1 次 失败"
+        val summary = "10 步"
         rule.onNodeWithText(summary).assertExists()
         val renderedSummary = rule.onNodeWithText(summary, useUnmergedTree = true).fetchSemanticsNode()
             .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
-        assertEquals(processSummaryText(processGroupSummary(regular, "OpenCode")), renderedSummary)
+        assertEquals(processSummaryText(processGroupSummary(regular, "OpenCode"), expectedEmphasisColor), renderedSummary)
         evidence += "summarySpans=" + renderedSummary.spanStyles.joinToString { "${it.start}..${it.end}:${renderedSummary.text.substring(it.start, it.end)}" }
         rule.onNodeWithText(summary).performClick()
         rule.onAllNodesWithText("read").onFirst().assertExists()
@@ -93,7 +95,7 @@ class ProcessToolLabelsOffscreenBenchmark {
             val bounds = node.fetchSemanticsNode().boundsInRoot
             val root = rule.onNodeWithTag("process-fixture").fetchSemanticsNode().boundsInRoot
             assertTrue("long name must keep positive width", bounds.width > 0f)
-            assertTrue("name must reserve status and disclosure width", bounds.right <= root.right - 38f)
+            assertTrue("name must stay within right edge without reserving trailing icon width", bounds.right <= root.right + 0.5f && bounds.right >= root.right - 16f)
             evidence += "width=$w fontScale=$s name=$bounds root=$root"
             node.performTouchInput { click() }
             rule.onNodeWithText("long-name result").assertExists()
@@ -107,7 +109,7 @@ class ProcessToolLabelsOffscreenBenchmark {
         }
         val finalSummary = processGroupCaption(regular + long, "OpenCode")
         rule.onNodeWithText(finalSummary).performClick()
-        rule.onNodeWithText(longName, useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithText(longName).assertDoesNotExist()
         snapshot("collapsed-long-name")
         File(directory, "benchmark.txt").writeText("runtime=Ubuntu ARM64 JVM, Robolectric API35 LEGACY; summary CPU only, not ART/GPU frame timing\niterations=1000 per sample; checksum=$checksum\nsample,deliveredBaseline,elapsedMs\n" + timings.joinToString("\n") + "\n" + evidence.joinToString("\n"))
         println("TOOL_LABELS " + evidence.joinToString("; ") + "; timings=$timings")

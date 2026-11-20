@@ -74,10 +74,11 @@ class QueueAgentsInteractionTest {
         rule.mainClock.autoAdvance = false
         rule.runOnIdle { view = view.copy(queue = emptyList()) }
         repeat(3) { rule.mainClock.advanceTimeByFrame(); rule.waitForIdle() }
-        rule.onNodeWithText("插话").assertDoesNotExist()
+        rule.onNodeWithText("插话").assertIsNotEnabled().performClick()
         rule.runOnIdle { assertTrue(calls.isEmpty()) }
         rule.mainClock.autoAdvance = true
         rule.waitForIdle()
+        rule.onNodeWithText("插话").assertDoesNotExist()
         rule.onNodeWithText("待发消息 · 2").assertDoesNotExist()
         println("PASS disappearing queue disables exit actions immediately; stale editing dialog removed without save")
     }
@@ -88,14 +89,16 @@ class QueueAgentsInteractionTest {
         } } }
         rule.onNodeWithText("协议检查").performClick()
         rule.waitForIdle()
+        rule.waitUntil(3_000) { markdownParseCoordinator.usage().let { it.pending == 0 && it.active == 0 } }
+        rule.waitForIdle()
         fun height() = rule.onNodeWithTag("agents").fetchSemanticsNode().boundsInRoot.height
         val expanded = height()
         rule.mainClock.autoAdvance = false
-        rule.onNodeWithText("2 次 子代理").performClick()
+        rule.onNodeWithText("2 步").performClick()
         repeat(6) { rule.mainClock.advanceTimeByFrame(); rule.waitForIdle() }
         val closing = height()
         assertTrue("group must shrink: open=$expanded close96=$closing", closing < expanded)
-        rule.onNodeWithText("2 次 子代理").performClick()
+        rule.onNodeWithText("2 步").performClick()
         val reverseStart = height()
         assertTrue("reverse must retain intermediate geometry: $reverseStart", reverseStart > 40f && reverseStart < expanded)
         val reverseFrames = mutableListOf(reverseStart)
@@ -108,7 +111,7 @@ class QueueAgentsInteractionTest {
         rule.mainClock.autoAdvance = true
         rule.waitForIdle()
         assertEquals(expanded, height(), 1f)
-        rule.onNodeWithText("2 次 子代理").performClick()
+        rule.onNodeWithText("2 步").performClick()
         rule.waitForIdle()
         val collapsed = height()
         rule.runOnIdle { view = view.copy(subAgents = view.subAgents.map { it.copy(detail = it.detail + "流式追加") }) }
@@ -152,9 +155,19 @@ class QueueAgentsInteractionTest {
         rule.waitForIdle()
         rule.runOnIdle { assertTrue(follow.atTail); assertFalse(list.canScrollForward) }
         val afterJump = rule.runOnIdle { list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset }
-        rule.runOnIdle { view = view.copy(subAgents = view.subAgents + view.subAgents.first().copy(id = "new", name = "新增检查"), queue = emptyList()) }
+        val addedAgents = (1..4).map { view.subAgents.first().copy(id = "new-$it", name = "新增检查 $it", status = "running") }
+        rule.runOnIdle { view = view.copy(subAgents = view.subAgents + addedAgents) }
         rule.waitForIdle()
-        rule.runOnIdle { assertEquals(afterJump, list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset) }
+        rule.runOnIdle {
+            assertTrue(list.canScrollForward)
+            assertEquals(afterJump, list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset)
+            view = view.copy(queue = emptyList())
+        }
+        rule.waitForIdle()
+        rule.runOnIdle {
+            assertTrue(list.canScrollForward)
+            assertEquals(afterJump, list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset)
+        }
         println("PASS actual upward swipe anchor=$anchor retained over four mixed stream/queue/completion changes; jump is one-shot and appended agent retains position")
     }
 }

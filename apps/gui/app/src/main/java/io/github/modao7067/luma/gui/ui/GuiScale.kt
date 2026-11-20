@@ -40,8 +40,9 @@ internal fun GuiScale(content: @Composable () -> Unit) {
     }
     val environment = remember(density, viewConfiguration) { GuiEnvironment(density, viewConfiguration) }
     CompositionLocalProvider(LocalGuiEnvironment provides environment,
-        LocalDensity provides density, LocalViewConfiguration provides viewConfiguration,
-        content = content)
+        LocalDensity provides density, LocalViewConfiguration provides viewConfiguration) {
+        ProvideLumaHaptics(content)
+    }
 }
 
 private data class GuiEnvironment(val density: Density, val viewConfiguration: ViewConfiguration)
@@ -50,11 +51,12 @@ private val LocalGuiEnvironment = androidx.compose.runtime.staticCompositionLoca
 @Composable
 internal fun GuiWindowScale(content: @Composable () -> Unit) {
     val environment = LocalGuiEnvironment.current
-    if (environment == null) content() else CompositionLocalProvider(
+    if (environment == null) ProvideLumaHaptics(content) else CompositionLocalProvider(
         LocalDensity provides environment.density,
         LocalViewConfiguration provides environment.viewConfiguration,
-        content = content,
-    )
+    ) {
+        ProvideLumaHaptics(content)
+    }
 }
 
 @Composable

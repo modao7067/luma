@@ -46,7 +46,7 @@ object CodexProjection {
             "fileChange" -> ConversationItem(id, "tool", tr("文件变更", "File changes"), (item.optJSONArray("changes") ?: JSONArray()).objects().joinToString("\n\n") {
                 it.optString("path") + "\n" + it.optString("diff")
             }, item.optString("status"))
-            "mcpToolCall" -> ConversationItem(id, "tool", item.optString("server") + " · " + item.optString("tool"), MediaProjection.display(item), item.optString("status"))
+            "mcpToolCall" -> ConversationItem(id, "tool", item.optString("server") + " · " + item.optString("tool"), mcpToolDetail(item), item.optString("status"))
             "webSearch" -> ConversationItem(id, "tool", tr("搜索 · ", "Search · ") + item.optString("query"), item.optJSONObject("action")?.toString(2).orEmpty(), item.optString("status"))
             "collabAgentToolCall" -> ConversationItem(id, "tool", collabLabel(item.optString("tool")),
                 detail = item.optJSONObject("agentsStates")?.keys()?.asSequence()?.joinToString("\n") { target ->
@@ -55,7 +55,7 @@ object CodexProjection {
                 }.orEmpty(), status = item.optString("status"))
             "subAgentActivity" -> ConversationItem(id, "tool", tr("子代理活动", "Sub-agent activity"), item.optString("agentPath"), item.optString("kind"))
             "imageGeneration" -> ConversationItem(id, "tool", tr("生成图片", "Generate image"), status = item.optString("status"))
-            "dynamicToolCall" -> ConversationItem(id, "tool", item.optString("tool", tr("工具", "Tool")), MediaProjection.display(item), item.optString("status"))
+            "dynamicToolCall" -> ConversationItem(id, "tool", item.optString("tool", tr("工具", "Tool")), dynamicToolDetail(item), item.optString("status"))
             "imageView" -> ConversationItem(id, "tool", tr("查看图片", "View image"), item.optString("path"), item.optString("status"))
             else -> ConversationItem(id, "tool", type.ifEmpty { tr("工具事件", "Tool event") }, MediaProjection.display(item), item.optString("status"))
         }
@@ -68,7 +68,7 @@ object CodexProjection {
         }
         val input = when (type) {
             "commandExecution" -> command
-            "mcpToolCall" -> item.opt("arguments")?.toString().orEmpty()
+            "mcpToolCall", "dynamicToolCall" -> item.opt("arguments")?.toString().orEmpty()
             "webSearch" -> item.optString("query")
             "fileChange" -> item.optJSONArray("changes")?.objects()?.joinToString("\n") { it.optString("path") }.orEmpty()
             "collabAgentToolCall" -> item.stringOrNull("prompt").orEmpty()
@@ -84,6 +84,22 @@ object CodexProjection {
         return projected.copy(kind = type, input = input, outcome = outcome, toolName = toolName, media = MediaProjection.codex(item),
             commandActions = commandActions,
             commandCwd = if (type == "commandExecution") item.stringOrNull("cwd") ?: previousCommand?.commandCwd.orEmpty() else "")
+    }
+
+    private fun mcpToolDetail(item: JSONObject): String {
+        val textParts = item.optJSONObject("result")?.optJSONArray("content")?.objects().orEmpty()
+            .filter { it.optString("type") == "text" || (it.optString("type").isEmpty() && it.has("text")) }
+            .mapNotNull { it.stringOrNull("text")?.takeIf { value -> value.isNotEmpty() } }
+        val errorText = item.optJSONObject("error")?.stringOrNull("message")?.takeIf { it.isNotBlank() }
+        val joined = (textParts + listOfNotNull(errorText)).joinToString("\n")
+        return joined.ifBlank { MediaProjection.display(item) }
+    }
+
+    private fun dynamicToolDetail(item: JSONObject): String {
+        val contentItemTexts = item.optJSONArray("contentItems")?.objects().orEmpty()
+            .mapNotNull { block -> (block.stringOrNull("inputText") ?: block.stringOrNull("text"))?.takeIf { it.isNotEmpty() } }
+        if (contentItemTexts.isNotEmpty()) return contentItemTexts.joinToString("\n")
+        return mcpToolDetail(item)
     }
 
     private fun collabLabel(tool: String) = when (tool) {

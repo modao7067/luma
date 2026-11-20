@@ -87,7 +87,33 @@ object MediaProjection {
         if (!params.has("threadId")) params.put("threadId", threadId)
         return resource.copy(source = mcpReference(params))
     }
+    private fun extractDisplayText(v: Any?): String? = when (v) {
+        is JSONArray -> {
+            val parts = (0 until v.length()).mapNotNull { idx ->
+                val elem = v.opt(idx)
+                when (elem) {
+                    is JSONObject -> {
+                        if (blocks(elem).isNotEmpty()) null
+                        else elem.stringOrNull("text") ?: elem.stringOrNull("inputText") ?: elem.stringOrNull("output")
+                    }
+                    is String -> elem
+                    else -> null
+                }?.takeIf { it.isNotEmpty() }
+            }
+            if (parts.isNotEmpty()) parts.joinToString("\n") else null
+        }
+        is JSONObject -> {
+            if (blocks(v).isNotEmpty()) null
+            else v.optJSONObject("result")?.let { extractDisplayText(it.opt("content")) ?: it.stringOrNull("output") ?: it.stringOrNull("text") }
+                ?: extractDisplayText(v.opt("content"))
+                ?: extractDisplayText(v.opt("contentItems"))
+                ?: v.stringOrNull("output")?.takeIf { it.isNotEmpty() }
+                ?: v.stringOrNull("text")?.takeIf { it.isNotEmpty() }
+        }
+        else -> null
+    }
     fun display(value: Any?): String {
+        extractDisplayText(value)?.takeIf { it.isNotBlank() }?.let { return it }
         fun clean(v: Any?): Any? = when (v) {
             is JSONObject -> JSONObject().apply { v.keys().forEach { key ->
                 val x = v.opt(key)

@@ -45,6 +45,11 @@ SOURCES = [
     ('NotoMusic-Regular.ttf', NOTO_FONTS + 'NotoMusic/NotoMusic-Regular.ttf', None, None),
     ('NotoSansSymbols2-Regular.ttf', NOTO_FONTS + 'NotoSansSymbols2/NotoSansSymbols2-Regular.ttf', None, None),
     ('NotoColorEmoji.ttf', NOTO_EMOJI + 'NotoColorEmoji.ttf', None, None),
+    ('NotoSansArabic-Regular.ttf', NOTO_FONTS + 'NotoSansArabic/NotoSansArabic-Regular.ttf', None, None),
+    ('NotoSansThai-Regular.ttf', NOTO_FONTS + 'NotoSansThai/NotoSansThai-Regular.ttf', None, None),
+    ('NotoSansKannada-Regular.ttf', NOTO_FONTS + 'NotoSansKannada/NotoSansKannada-Regular.ttf', None, None),
+    ('NotoSansCanadianAboriginal-Regular.ttf', NOTO_FONTS + 'NotoSansCanadianAboriginal/NotoSansCanadianAboriginal-Regular.ttf', None, None),
+    ('NotoSansGeorgian-Regular.ttf', NOTO_FONTS + 'NotoSansGeorgian/NotoSansGeorgian-Regular.ttf', None, None),
 ]
 
 def sha256(data):
@@ -66,6 +71,10 @@ def main():
     pinned = {row['file']: row['sha256'] for row in json.loads(MANIFEST.read_text())}
     failed = False
     for name, url, member, archive_hash in SOURCES:
+        expected = pinned.get(name)
+        if expected and all((d / name).is_file() and sha256((d / name).read_bytes()) == expected for d in DIRS):
+            print('ok  ', name)
+            continue
         blob = download(url, args.cache)
         if archive_hash and sha256(blob) != archive_hash:
             print(f'FAIL archive hash mismatch for {url}', file=sys.stderr)

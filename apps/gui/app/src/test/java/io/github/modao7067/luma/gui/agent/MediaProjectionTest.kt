@@ -57,4 +57,33 @@ class MediaProjectionTest {
         val message=obj("id" to "a","type" to "assistant","content" to JSONArray().put(obj("type" to "tool","id" to "t","state" to obj("content" to JSONArray().put(obj("type" to "resource_link","uri" to "/child/file.zip","sizeBytes" to 123))))))
         assertEquals(123L,OpenCodeProjection.message(message).single().media.single().sizeBytes)
     }
+    @Test fun codexAndOpenCodeUnwrapMultilineTextToolPayloadsAndKeepDynamicArguments() {
+        val mcp = CodexProjection.item(obj(
+            "id" to "mcp-text",
+            "type" to "mcpToolCall",
+            "server" to "docs",
+            "tool" to "search",
+            "arguments" to obj("query" to "line1\nline2"),
+            "result" to obj("content" to JSONArray().put(obj("type" to "text", "text" to "row 1\nrow 2"))),
+            "status" to "completed",
+        ))
+        assertEquals("row 1\nrow 2", mcp.detail)
+        assertTrue(mcp.input.contains("query"))
+
+        val dyn = CodexProjection.item(obj(
+            "id" to "dyn-text",
+            "type" to "dynamicToolCall",
+            "tool" to "eval",
+            "arguments" to obj("code" to "a\nb"),
+            "contentItems" to JSONArray().put(obj("type" to "inputText", "inputText" to "out 1\nout 2")),
+            "status" to "completed",
+        ))
+        assertEquals("out 1\nout 2", dyn.detail)
+        assertTrue(dyn.input.contains("code"))
+
+        val ocMsg = obj("id" to "oc-out", "type" to "assistant", "content" to JSONArray().put(
+            obj("type" to "tool", "id" to "t2", "name" to "shell", "state" to obj("status" to "completed", "output" to "first\nsecond")),
+        ))
+        assertEquals("first\nsecond", OpenCodeProjection.message(ocMsg).single().detail)
+    }
 }

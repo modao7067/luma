@@ -7,13 +7,19 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--output',type=pathlib.Path,default=ROOT/'artifacts/test-runs/scroll-glass')
 parser.add_argument('--baseline-dir',type=pathlib.Path)
 parser.add_argument('--centered',action='store_true')
-parser.add_argument('--highlight',action='store_true')
 args=parser.parse_args()
 OUT=args.output.resolve();OUT.mkdir(parents=True,exist_ok=True)
 BASELINE=args.baseline_dir.resolve() if args.baseline_dir else OUT
 
 def block(source, token):
-    at=source.index(token)+len(token);start=source.index('{',at);depth=1;end=start+1
+    at=source.index(token)+len(token)
+    if token.endswith('('):
+        pdepth=1
+        while pdepth:
+            if source[at]=='(':pdepth+=1
+            elif source[at]==')':pdepth-=1
+            at+=1
+    start=source.index('{',at);depth=1;end=start+1
     while depth:
         if source[end]=='{':depth+=1
         if source[end]=='}':depth-=1
@@ -27,7 +33,7 @@ def check(chrome,detail):
     content=block(detail,') { padding ->')
     assert 'ConversationScrollOverlay(' not in content and 'LiquidGlass(' not in content, 'recorded scene must not consume itself'
 check((UI/'LiquidChrome.kt').read_text(),(UI/'SessionDetail.kt').read_text())
-old_chrome = (BASELINE/'LiquidChrome.before.kt').read_text() if (BASELINE/'LiquidChrome.before.kt').exists() else (UI/'LiquidChrome.kt').read_text().replace('LocalGlassScene provides null', 'LocalGlassScene provides GlassScene(backdrop, rootOffset)')
+old_chrome = (BASELINE/'LiquidChrome.before.kt').read_text() if (BASELINE/'LiquidChrome.before.kt').exists() else (UI/'LiquidChrome.kt').read_text().replace('LocalGlassScene provides null', 'LocalGlassScene provides glassScene')
 old_detail = (BASELINE/'SessionDetail.before.kt').read_text() if (BASELINE/'SessionDetail.before.kt').exists() else (UI/'SessionDetail.kt').read_text()
 try:check(old_chrome,old_detail)
 except (AssertionError,ValueError):print('PASS negative control: pre-fix layout fails the no-cycle boundary')
@@ -35,25 +41,17 @@ else:raise AssertionError('Old layout passed')
 print('PASS production scaffold capture boundary and scroll overlay placement')
 if args.centered:
     control=block((UI/'SessionDetail.kt').read_text(),'internal fun BoxScope.ConversationScrollOverlay(')
-    assert '.align(Alignment.BottomCenter)' in control, 'return-to-bottom must be horizontally centered'
+    assert '.align(Alignment.BottomCenter)' in control, 'return-to-bottom container must be bottom-centered'
     assert 'LiquidGlass(' in control, 'return-to-bottom must remain glass'
-    print('PASS centered glass return-to-bottom control')
+    print('PASS glass return-to-bottom control')
 work=OUT/'hwui';classes=work/'classes';dex=work/'dex'
 classes.mkdir(parents=True,exist_ok=True);dex.mkdir(parents=True,exist_ok=True)
-source=(UI/'LiquidChrome.kt').read_text();shader=re.search(r'RuntimeShader\(\s*"""(.*?)"""',source,re.S)[1]
+source=(UI/'PrismGlass.kt').read_text();shader=re.search(r'PRISM_GLASS_AGSL = """(.*?)"""',source,re.S)[1]
 (work/'lens.agsl').write_text(shader)
-extra=[]
-if args.highlight:
-    highlight=re.search(r'BLOOM_STROKE_DUAL = """(.*?)"""',(UI/'SukiGlassHighlight.kt').read_text(),re.S)[1]
-    (work/'highlight.agsl').write_text(highlight)
-    defaults=(UI/'SukiGlassDefaults.kt').read_text()
-    values={name:re.search(r'const val '+name+r' = ([0-9.]+)f',defaults)[1] for name in ['highlightAlpha','highlightStrokeAlpha','highlightInnerBlurDp','highlightWidthDp']}
-    (work/'highlight.properties').write_text('\n'.join(k+'='+v for k,v in values.items()))
-    extra=[work/'highlight.agsl',work/'highlight.properties']
 sdk=toolenv.ANDROID_JAR
 subprocess.run(['javac','--release','17','-cp',sdk,'-d',str(classes),str(ROOT/'tools/tests/ui/GlassClipCheck.java'),str(ROOT/'tools/tests/ui/ScrollGlassCheck.java')],check=True)
 jar=work/'checks.jar';subprocess.run(['jar','cf',str(jar),'-C',str(classes),'.'],check=True)
 subprocess.run([toolenv.JAVA,'-cp',toolenv.D8_JAR,'com.android.tools.r8.D8','--lib',sdk,'--min-api','33','--output',str(dex),str(jar)],check=True)
 def host(path):return toolenv.DEVICE_REPO+'/'+str(path.relative_to(ROOT))
-subprocess.run(['android-sh','sh',host(ROOT/'tools/tests/terminal/run-android.sh'),host(dex),host(jar),'ScrollGlassCheck',host(work),host(work/'lens.agsl'),*map(host,extra)],check=True,timeout=45)
+subprocess.run(['android-sh','sh',host(ROOT/'tools/tests/terminal/run-android.sh'),host(dex),host(jar),'ScrollGlassCheck',host(work),host(work/'lens.agsl')],check=True,timeout=45)
 log=(work/'scroll-gpu.txt').read_text();print(log);assert 'PASS:' in log and 'AssertionError' not in log

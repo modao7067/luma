@@ -43,7 +43,7 @@ def _tr(zh: str, en: str) -> str:
 
 CACHE_VERSION = 6
 ARCHIVE_VERSION = 2
-SCANNER_REV = 4
+SCANNER_REV = 5
 PRICING_CACHE_VERSION = 1
 GUARD_BYTES = 64
 MAX_RECORDS_PER_SOURCE = 25000
@@ -95,8 +95,11 @@ PRICING_SOURCE_CATALOG = (
     },
 )
 MODEL_PRICING_ALIASES: dict[str, str] = {
-    "gemini-pro-orchestrator": "gemini-4-carbon",
+    "gemini-pro-orchestrator-neon": "gemini-4-neon",
+    "gemini-pro-orchestrator-carbon": "gemini-4-carbon",
     "gemini-pro-orchestrator-argon": "gemini-4-argon",
+    "gemini-pro-orchestrator": "gemini-4-carbon",
+    "gemini-flash-worker-agy": "gemini-4-hydrogen",
     "gemini-4": "gemini-4-carbon",
     "deepseek-v4": "deepseek-v4-pro",
     "kimi-for-coding": "kimi-k2.7-code",
@@ -169,9 +172,12 @@ MODEL_RATES_PER_M: dict[str, RateTuple] = {
     "gemini-4-hydrogen": (1.50, 7.50, 0.075, 1.50, None),
     "gemini-4-carbon": (2.00, 10.00, 0.10, 2.00, None),
     "gemini-4-argon": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-4-neon": (3.00, 15.00, 0.15, 3.00, None),
     "gemini-4": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-pro-orchestrator-neon": (3.00, 15.00, 0.15, 3.00, None),
     "gemini-pro-orchestrator-argon": (2.00, 10.00, 0.10, 2.00, None),
     "gemini-pro-orchestrator": (2.00, 10.00, 0.10, 2.00, None),
+    "gemini-flash-worker-agy": (1.50, 7.50, 0.075, 1.50, None),
     "gemini-3.8-flash": (0.75, 3.75, 0.075, 0.75, None),
     "gemini-3.7-flash": (0.75, 3.75, 0.075, 0.75, None),
     "gemini-3.6-flash": (0.75, 3.75, 0.075, 0.75, None),
@@ -271,13 +277,27 @@ AGY_MODEL_ENUM: dict[int, str] = {
     1462: "gemini-4-hydrogen",
     1463: "gemini-4-hydrogen",
     1464: "gemini-4-hydrogen",
+    1525: "gemini-4-hydrogen",
+    1526: "gemini-4-hydrogen",
     1528: "gemini-4-hydrogen",
-    1667: "gemini-pro-orchestrator",
+    1535: "gemini-4-neon",
+    1537: "gemini-4-neon",
+    1667: "gemini-4-carbon",
+    1669: "gemini-4-hydrogen",
     2006: "gemini-2.5-pro",
     2007: "gemini-2.5-flash",
     2018: "gemini-3-pro",
     2019: "gemini-3-flash",
     2020: "gemini-3.1-pro",
+}
+
+AGY_ORCHESTRATOR_ENUMS: frozenset[int] = frozenset({1537, 1667})
+AGY_CANONICAL_MODELS: dict[str, str] = {
+    "gemini-pro-orchestrator": "gemini-4-carbon",
+    "gemini-pro-orchestrator-carbon": "gemini-4-carbon",
+    "gemini-pro-orchestrator-neon": "gemini-4-neon",
+    "gemini-pro-orchestrator-argon": "gemini-4-argon",
+    "gemini-flash-worker-agy": "gemini-4-hydrogen",
 }
 
 def _cache_dir() -> Path:
@@ -3326,15 +3346,21 @@ def _agy_model_name(name: str, enum_id: int, is_ui_label: bool = False) -> str:
         raw = name.strip()
         low_compact = " ".join(raw.lower().split())
         if low_compact == "orchestrator (carbon)":
-            return "gemini-pro-orchestrator"
+            return "gemini-4-carbon"
+        if low_compact == "orchestrator (neon)":
+            return "gemini-4-neon"
         if low_compact == "orchestrator (argon)":
-            return "gemini-pro-orchestrator-argon"
+            return "gemini-4-argon"
+        if enum_id == 1669 and low_compact == "gemini flash":
+            return "gemini-4-hydrogen"
         if not is_ui_label and " " not in raw and "(" not in raw:
-            return _normalize_model_id(raw)
+            norm_raw = _normalize_model_id(raw)
+            return AGY_CANONICAL_MODELS.get(norm_raw, norm_raw)
         norm = re.sub(r"\s*\([^)]*\)\s*$", "", raw.lower()).replace(" ", "-")
         if norm.startswith("claude-"):
             norm = re.sub(r"^claude-(4(?:\.\d+)?)-(sonnet|opus|haiku)", r"claude-\2-\1", norm).replace(".", "-")
-        return _normalize_model_id(norm)
+        norm_id = _normalize_model_id(norm)
+        return AGY_CANONICAL_MODELS.get(norm_id, norm_id)
     return AGY_MODEL_ENUM.get(enum_id) or (f"antigravity-model-{enum_id}" if enum_id > 0 else "")
 
 
@@ -3372,7 +3398,7 @@ def _extract_agy_db_session_checked(
             ts_by_step_idx: dict[int, int] = {}
             ts_by_resp_id: dict[str, int] = {}
             ts_by_gen_idx: dict[int, int] = {}
-            legacy_steps: list[tuple[int, str, int | None, list[dict[int, list[int | bytes]]]]] = []
+            legacy_steps: list[tuple[int, str, bool, int | None, int | None, list[dict[int, list[int | bytes]]]]] = []
 
             if "steps" in tables:
                 step_cols = {r[1] for r in con.execute("PRAGMA table_info(steps)")}
@@ -3387,6 +3413,8 @@ def _extract_agy_db_session_checked(
                     b = bytes(blob) if not isinstance(blob, bytes) else blob
                     s_fields = _proto_fields(b)
                     s_ts = _proto_timestamp(_proto_nested(s_fields, 8)) or _proto_timestamp(_proto_nested(s_fields, 1))
+                    g_link = _proto_nested(s_fields, 20)
+                    step_gidx: int | None = _proto_num(g_link, 3) if 3 in g_link else None
                     if s_ts is not None:
                         ts_by_step_idx[idx] = s_ts
                         if step_type == 15 or 9 in s_fields:
@@ -3394,18 +3422,18 @@ def _extract_agy_db_session_checked(
                             rid = _proto_text(s_usage, 11)
                             if rid:
                                 ts_by_resp_id.setdefault(rid, s_ts)
-                        g_link = _proto_nested(s_fields, 20)
-                        if 3 in g_link:
-                            ts_by_gen_idx.setdefault(_proto_num(g_link, 3), s_ts)
+                        if step_gidx is not None:
+                            ts_by_gen_idx.setdefault(step_gidx, s_ts)
                     s_usages = _extract_agy_usages(s_fields, 9, 28)
                     m_fields = _proto_nested(s_fields, 24)
                     s_raw = _proto_text(m_fields, 12) or _proto_text(m_fields, 8)
                     s_enum = _proto_num(m_fields, 1)
                     s_model = _agy_model_name(s_raw, s_enum)
+                    s_is_orch = s_raw.lower().startswith("gemini-pro-orchestrator") or s_enum in AGY_ORCHESTRATOR_ENUMS
                     if s_model and s_model != "antigravity-unknown":
                         latest_model = _normalize_model_id(s_model)
                     if s_usages:
-                        legacy_steps.append((idx, s_model, s_ts, s_usages))
+                        legacy_steps.append((idx, s_model, s_is_orch, s_ts, step_gidx, s_usages))
 
             gen_rows: list[tuple[int, bool, int, str, str, int, int | None, list[dict[int, list[int | bytes]]]]] = []
             if "gen_metadata" in tables:
@@ -3430,6 +3458,8 @@ def _extract_agy_db_session_checked(
                     resp_model = _proto_text(chat, 19).strip()
                     ui_label = _proto_text(chat, 21).strip()
                     enum_id = _proto_num(chat, 3)
+                    if enum_id == 1669 and ui_label.lower() == "gemini flash":
+                        ui_label = "Gemini 4 Hydrogen (Orchestrator)"
                     direct_ts = _proto_timestamp(_proto_nested(_proto_nested(chat, 9), 4))
                     usages = _extract_agy_usages(chat, 4, 17)
                     if usages:
@@ -3441,6 +3471,9 @@ def _extract_agy_db_session_checked(
 
             def _is_concrete_resp_model(m: str) -> bool:
                 return bool(m) and m.lower() != "gemini-default"
+
+            gen_model_by_idx: dict[int, str] = {}
+            gen_model_by_step: dict[int, str] = {}
 
             if gen_rows:
                 label_to_model: dict[str, str | None] = {}
@@ -3484,7 +3517,15 @@ def _extract_agy_db_session_checked(
                         m_prio = 0 if resolved_model == "antigravity-unknown" else 1
                     if resolved_model and resolved_model != "antigravity-unknown":
                         latest_model = resolved_model
+                        gen_model_by_idx[gen_idx] = resolved_model
+                        if has_step_ref:
+                            gen_model_by_step[step_idx_ref] = resolved_model
 
+                    is_orch_chat = (
+                        resp_m.lower().startswith("gemini-pro-orchestrator")
+                        or ui_lbl.lower().startswith("orchestrator")
+                        or enum_id in AGY_ORCHESTRATOR_ENUMS
+                    )
                     for u_idx, usage in enumerate(usages):
                         uncached = _proto_num(usage, 2)
                         c_read = _proto_num(usage, 5)
@@ -3504,11 +3545,11 @@ def _extract_agy_db_session_checked(
                         u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
                         usage_model = resolved_model or "antigravity-unknown"
                         usage_prio = m_prio
-                        if (
+                        if u_sub_model and (
                             not resolved_model
                             or resolved_model in ("antigravity-unknown", "orchestrator")
-                            or resolved_model.startswith("gemini-pro-orchestrator")
-                        ) and u_sub_model and not u_sub_model.startswith("gemini-pro-orchestrator"):
+                            or (is_orch_chat and u_enum_id not in AGY_ORCHESTRATOR_ENUMS)
+                        ):
                             usage_model = u_sub_model
                             usage_prio = max(m_prio, 2)
                         keys = []
@@ -3538,45 +3579,63 @@ def _extract_agy_db_session_checked(
                             "reportedCostUsd": None,
                             "keys": keys or [f"agy:{db_path.stem}:gen:{e_idx}:{u_idx}"],
                         })
-            else:
-                for e_idx, (idx, entry_model, entry_ts, usages) in enumerate(legacy_steps):
-                    for u_idx, usage in enumerate(usages):
-                        uncached = _proto_num(usage, 2)
-                        c_read = _proto_num(usage, 5)
-                        c_write = _proto_num(usage, 4)
-                        u9 = _proto_num(usage, 9)
-                        u10 = _proto_num(usage, 10)
-                        u3 = _proto_num(usage, 3)
-                        text_out = u10 if (u9 > 0 or u10 > 0) else u3
-                        reason_out = u9 if (u9 > 0 or u10 > 0) else 0
-                        if uncached + c_read + c_write + text_out + reason_out <= 0:
-                            continue
-                        keys = [f"agy:{k}:{_proto_text(usage, k)}" for k in (11, 12, 7) if _proto_text(usage, k)]
-                        model_id = _normalize_model_id(entry_model or "antigravity-unknown")
-                        u_enum_id = _proto_num(usage, 1)
-                        u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
-                        if (
-                            model_id in ("unknown", "antigravity-unknown", "orchestrator")
-                            or model_id.startswith("gemini-pro-orchestrator")
-                        ) and u_sub_model and not u_sub_model.startswith("gemini-pro-orchestrator"):
-                            model_id = u_sub_model
-                        if model_id != "antigravity-unknown":
-                            latest_model = model_id
-                        raw_candidates.append({
-                            "cli": "Antigravity",
-                            "model": model_id,
-                            "uiLabel": None,
-                            "modelPriority": 1 if model_id != "antigravity-unknown" else 0,
-                            "timestampMs": entry_ts or traj_ts or fallback_ts,
-                            "tsQuality": 2 if entry_ts is not None else (1 if traj_ts is not None else 0),
-                            "uncachedInputTokens": uncached,
-                            "cachedInputTokens": c_read,
-                            "cacheCreationTokens": c_write,
-                            "outputTokens": text_out,
-                            "reasoningTokens": reason_out,
-                            "reportedCostUsd": None,
-                            "keys": keys or [f"agy:{db_path.stem}:step:{e_idx}:{u_idx}"],
-                        })
+
+            sorted_gen_steps = sorted(gen_model_by_step.keys()) if gen_rows else []
+            for e_idx, (step_idx, entry_model, entry_is_orch, entry_ts, step_gidx, usages) in enumerate(legacy_steps):
+                for u_idx, usage in enumerate(usages):
+                    uncached = _proto_num(usage, 2)
+                    c_read = _proto_num(usage, 5)
+                    c_write = _proto_num(usage, 4)
+                    u9 = _proto_num(usage, 9)
+                    u10 = _proto_num(usage, 10)
+                    u3 = _proto_num(usage, 3)
+                    text_out = u10 if (u9 > 0 or u10 > 0) else u3
+                    reason_out = u9 if (u9 > 0 or u10 > 0) else 0
+                    if uncached + c_read + c_write + text_out + reason_out <= 0:
+                        continue
+                    keys = [f"agy:{k}:{_proto_text(usage, k)}" for k in (11, 12, 7) if _proto_text(usage, k)]
+                    if gen_rows and not keys:
+                        continue
+                    u_enum_id = _proto_num(usage, 1)
+                    u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
+                    model_id = entry_model or ""
+                    explicit_model = False
+                    if u_sub_model and (
+                        not model_id
+                        or model_id in ("unknown", "antigravity-unknown", "orchestrator")
+                        or (entry_is_orch and u_enum_id not in AGY_ORCHESTRATOR_ENUMS)
+                    ):
+                        model_id = u_sub_model
+                        explicit_model = True
+                    elif model_id and model_id not in ("unknown", "antigravity-unknown", "orchestrator"):
+                        explicit_model = True
+                    if not explicit_model:
+                        cand_m = gen_model_by_idx.get(step_gidx, "") if step_gidx is not None else ""
+                        if not cand_m:
+                            for gs in reversed(sorted_gen_steps):
+                                if gs < step_idx:
+                                    cand_m = gen_model_by_step[gs]
+                                    break
+                        if not cand_m and latest_model and latest_model != "antigravity-unknown":
+                            cand_m = latest_model
+                        model_id = cand_m or "antigravity-unknown"
+                    if not gen_rows and model_id != "antigravity-unknown":
+                        latest_model = model_id
+                    raw_candidates.append({
+                        "cli": "Antigravity",
+                        "model": model_id,
+                        "uiLabel": None,
+                        "modelPriority": 1 if explicit_model else 0,
+                        "timestampMs": entry_ts or traj_ts or fallback_ts,
+                        "tsQuality": 2 if entry_ts is not None else (1 if traj_ts is not None else 0),
+                        "uncachedInputTokens": uncached,
+                        "cachedInputTokens": c_read,
+                        "cacheCreationTokens": c_write,
+                        "outputTokens": text_out,
+                        "reasoningTokens": reason_out,
+                        "reportedCostUsd": None,
+                        "keys": keys or [f"agy:{db_path.stem}:step:{e_idx}:{u_idx}"],
+                    })
         scan_ok = True
     except Exception:
         scan_ok = False
@@ -3663,7 +3722,7 @@ def _scan_antigravity(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -
         if db_stat is None or sig_body is None:
             continue
         fallback_ts = db_stat[1] // 1_000_000
-        fp_sig = f"v4:{sig_body}"
+        fp_sig = f"v5:{sig_body}"
 
         cached_entry = cache_files.get(db_str)
         if isinstance(cached_entry, dict) and cached_entry.get("fp_sig") == fp_sig and isinstance(cached_entry.get("records"), list):
@@ -3886,6 +3945,139 @@ def _reprice_archived_entry(entry: dict[str, Any], catalog: dict[str, Any]) -> N
         entry["unpricedTokens"] = tot_tok
 
 
+def _merge_archived_daily_entry(target: dict[str, Any], source: dict[str, Any]) -> None:
+    t_fixed = target.get("fixedReported")
+    s_fixed = source.get("fixedReported")
+    if isinstance(t_fixed, dict) or isinstance(s_fixed, dict):
+        tf = t_fixed if isinstance(t_fixed, dict) else {
+            "events": 0,
+            "tokens": 0,
+            "costUsd": 0.0,
+            "cacheSavingsUsd": 0.0,
+            "categoryCostUsd": {"input": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.0},
+        }
+        sf = s_fixed if isinstance(s_fixed, dict) else {}
+        tf["events"] = _safe_int(tf.get("events")) + _safe_int(sf.get("events"))
+        tf["tokens"] = _safe_int(tf.get("tokens")) + _safe_int(sf.get("tokens"))
+        tf["costUsd"] = float(_safe_float(tf.get("costUsd")) or 0.0) + float(_safe_float(sf.get("costUsd")) or 0.0)
+        tf["cacheSavingsUsd"] = float(_safe_float(tf.get("cacheSavingsUsd")) or 0.0) + float(_safe_float(sf.get("cacheSavingsUsd")) or 0.0)
+        tf_cat = tf.get("categoryCostUsd")
+        if not isinstance(tf_cat, dict):
+            tf_cat = {"input": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.0}
+            tf["categoryCostUsd"] = tf_cat
+        sf_cat = sf.get("categoryCostUsd") if isinstance(sf.get("categoryCostUsd"), dict) else {}
+        for ck in ("input", "cacheRead", "cacheWrite", "output"):
+            tf_cat[ck] = float(_safe_float(tf_cat.get(ck)) or 0.0) + float(_safe_float(sf_cat.get(ck)) or 0.0)
+        target["fixedReported"] = tf
+
+    t_rb = target.get("repriceBuckets")
+    s_rb = source.get("repriceBuckets")
+    if isinstance(t_rb, dict) or isinstance(s_rb, dict):
+        out_rb: dict[str, dict[str, Any]] = {}
+        for src_entry, src_map in ((target, t_rb), (source, s_rb)):
+            if isinstance(src_map, dict):
+                bucket_items = src_map.items()
+            elif float(_safe_float(src_entry.get("providerReportedCostUsd")) or 0.0) <= 0.0:
+                bucket_items = [(
+                    "|0|0",
+                    {
+                        "speed": None,
+                        "events": _safe_int(src_entry.get("events")),
+                        "uncachedInputTokens": _safe_int(src_entry.get("uncachedInputTokens")),
+                        "cachedInputTokens": _safe_int(src_entry.get("cachedInputTokens")),
+                        "cacheCreationTokens": _safe_int(src_entry.get("cacheCreationTokens")),
+                        "outputTokens": _safe_int(src_entry.get("outputTokens")),
+                        "reasoningTokens": _safe_int(src_entry.get("reasoningTokens")),
+                    },
+                )]
+            else:
+                bucket_items = ()
+            for rb_key, rb_val in bucket_items:
+                if not isinstance(rb_val, dict):
+                    continue
+                dst = out_rb.setdefault(
+                    rb_key,
+                    {
+                        "speed": rb_val.get("speed"),
+                        "events": 0,
+                        "uncachedInputTokens": 0,
+                        "cachedInputTokens": 0,
+                        "cacheCreationTokens": 0,
+                        "outputTokens": 0,
+                        "reasoningTokens": 0,
+                    },
+                )
+                for bk in ("events", "uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens", "reasoningTokens"):
+                    dst[bk] = _safe_int(dst.get(bk)) + _safe_int(rb_val.get(bk))
+        target["repriceBuckets"] = out_rb
+
+    for int_k in (
+        "events",
+        "uncachedInputTokens",
+        "cachedInputTokens",
+        "cacheCreationTokens",
+        "outputTokens",
+        "reasoningTokens",
+        "totalTokens",
+        "unpricedEvents",
+        "unpricedTokens",
+    ):
+        target[int_k] = _safe_int(target.get(int_k)) + _safe_int(source.get(int_k))
+    for float_k in ("costUsd", "providerReportedCostUsd", "modelPricedCostUsd", "cacheSavingsUsd"):
+        target[float_k] = float(_safe_float(target.get(float_k)) or 0.0) + float(_safe_float(source.get(float_k)) or 0.0)
+    t_cat = target.get("categoryCostUsd")
+    if not isinstance(t_cat, dict):
+        t_cat = {"input": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.0}
+        target["categoryCostUsd"] = t_cat
+    s_cat = source.get("categoryCostUsd") if isinstance(source.get("categoryCostUsd"), dict) else {}
+    for ck in ("input", "cacheRead", "cacheWrite", "output"):
+        t_cat[ck] = float(_safe_float(t_cat.get(ck)) or 0.0) + float(_safe_float(s_cat.get(ck)) or 0.0)
+
+    t_labels = target.get("uiLabels")
+    if not isinstance(t_labels, list):
+        t_labels = []
+        target["uiLabels"] = t_labels
+    s_labels = source.get("uiLabels") if isinstance(source.get("uiLabels"), list) else []
+    for lbl in s_labels:
+        if isinstance(lbl, str) and lbl and lbl not in t_labels and len(t_labels) < 4:
+            t_labels.append(lbl)
+
+
+def _migrate_archived_agy_aliases(by_tz_all: dict[str, Any]) -> None:
+    for tz_days in by_tz_all.values():
+        if not isinstance(tz_days, dict):
+            continue
+        for day_models in tz_days.values():
+            if not isinstance(day_models, dict):
+                continue
+            for m_key in list(day_models.keys()):
+                if not m_key.startswith("Antigravity::"):
+                    continue
+                old_model = m_key[len("Antigravity::"):]
+                new_model = AGY_CANONICAL_MODELS.get(old_model)
+                if not new_model:
+                    continue
+                old_entry = day_models.pop(m_key)
+                if not isinstance(old_entry, dict):
+                    continue
+                if old_model == "gemini-flash-worker-agy" and isinstance(old_entry.get("uiLabels"), list):
+                    clean_labels: list[str] = []
+                    for lbl in old_entry["uiLabels"]:
+                        if not isinstance(lbl, str) or not lbl:
+                            continue
+                        norm_lbl = "Gemini 4 Hydrogen (Orchestrator)" if lbl.strip().lower() == "gemini flash" else lbl
+                        if norm_lbl not in clean_labels and len(clean_labels) < 4:
+                            clean_labels.append(norm_lbl)
+                    old_entry["uiLabels"] = clean_labels
+                old_entry["model"] = new_model
+                new_key = f"Antigravity::{new_model}"
+                target = day_models.get(new_key)
+                if isinstance(target, dict):
+                    _merge_archived_daily_entry(target, old_entry)
+                else:
+                    day_models[new_key] = old_entry
+
+
 def collect_summary(
     days: int = 30,
     tz_name: str = "UTC",
@@ -3971,7 +4163,10 @@ def collect_summary(
     pricing_changed = bool(pricing_digest) and archive.get("pricingDigest") != pricing_digest
     scanner_changed = archive.get("scannerRev") != SCANNER_REV
 
-    if pricing_changed:
+    if scanner_changed:
+        _migrate_archived_agy_aliases(by_tz_all)
+
+    if pricing_changed or scanner_changed:
         for tz_days in by_tz_all.values():
             if not isinstance(tz_days, dict):
                 continue
@@ -5057,20 +5252,20 @@ def _parse_antigravity_model_windows(payload: dict[str, Any]) -> list[dict[str, 
                     seen_groups[wid] = cand
     return list(seen_groups.values())
 
-def _merge_antigravity_host_windows(
+def _select_antigravity_host_windows(
     host_windows_list: list[list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
+    windows = next((ws for ws in host_windows_list if ws), [])
     merged: dict[str, dict[str, Any]] = {}
-    for windows in host_windows_list:
-        for win in windows:
-            wid = str(win.get("id") or "")
-            if not wid:
-                continue
-            prev = merged.get(wid)
-            if prev is None or win["usedPercent"] > prev["usedPercent"]:
-                merged[wid] = win
-            elif win["usedPercent"] == prev["usedPercent"] and win.get("resetsAt") and not prev.get("resetsAt"):
-                merged[wid] = win
+    for win in windows:
+        wid = str(win.get("id") or "")
+        if not wid:
+            continue
+        prev = merged.get(wid)
+        if prev is None or win["usedPercent"] > prev["usedPercent"]:
+            merged[wid] = win
+        elif win["usedPercent"] == prev["usedPercent"] and win.get("resetsAt") and not prev.get("resetsAt"):
+            merged[wid] = win
 
     def _sort_key(w: dict[str, Any]) -> tuple[int, int, str]:
         wid = str(w.get("id") or "")
@@ -5269,7 +5464,7 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
         _parse_antigravity_summary_windows,
         max_wait=min(3.0, deadline - time.monotonic()),
     )
-    merged_windows = _merge_antigravity_host_windows(summary_host_windows)
+    merged_windows = _select_antigravity_host_windows(summary_host_windows)
 
     rem_budget = deadline - time.monotonic()
     if not merged_windows and rem_budget > 0.6:
@@ -5278,7 +5473,7 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
             lambda data, _req_ms: _parse_antigravity_model_windows(data),
             max_wait=min(2.5, rem_budget),
         )
-        merged_windows = _merge_antigravity_host_windows(model_host_windows)
+        merged_windows = _select_antigravity_host_windows(model_host_windows)
 
     if merged_windows:
         return {

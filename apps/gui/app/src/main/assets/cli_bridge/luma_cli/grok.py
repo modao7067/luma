@@ -9,10 +9,10 @@ from pathlib import Path
 import threading
 import uuid
 from .acp import AcpSession
-from .base import item, text, image_blocks
+from .base import item, parse_ts_ms, text, image_blocks
 from .i18n import lang_code, tr
 from .metrics import grok_context, grok_usage
-from .media import display_content, display_object
+from .media import display_content, display_object, display_tool_output, is_json_fallback_output
 from .transport import Rejected, RpcRejected, spawn_process
 from .native_owner import NativeOwner, grok_lock_leader, non_mcp_background_child_alive, process_start
 
@@ -753,7 +753,7 @@ class GrokSession(AcpSession):
                 self.fail(Rejected(safe_reason(result.get("agent_result") or result.get("agentResult") or tr("Grok 执行失败", "Grok execution failed"))))
         threading.Thread(target=self.refresh_metrics, daemon=True, name="LumaGrokUsage").start()
 
-    def fold_user_echo(self, prompt, body, content, replay):
+    def fold_user_echo(self, prompt, body, content, replay, ts=0):
         ident = prompt or self.current_submission
         if not ident or ident not in self.config.get("receipts", {}): return False
         old = self.rows.get(ident)
@@ -767,6 +767,7 @@ class GrokSession(AcpSession):
         self.chunk_kind = "user_message_chunk"
         self.chunk_prompt = prompt or ident
         shown = {**old, "text": merged, "media": old.get("media", []) + self.media(content), "turnId": old.get("turnId") or ident}
+        if ts and not old.get("timestampMs"): shown["timestampMs"] = ts
         if replay: shown["status"] = "completed"
         self.row(shown)
         if prompt and (prompt == self.current_submission or (replay and prompt in self.config.get("receipts", {}))):
@@ -795,7 +796,8 @@ class GrokSession(AcpSession):
                     if event_id in self.seen_events: return
                     self.seen_events.add(event_id)
                 if method in EXT_UPDATES or method == "session/update":
-                    self.project_child(child, params.get("update", {}))
+                    child_ts = parse_ts_ms((meta.get("agentTimestampMs") if isinstance(meta, dict) else None) or frame.get("timestamp"))
+                    self.project_child(child, params.get("update", {}), ts=child_ts)
                 return
         if self.loading and not self.processing_replay and params.get("_meta", {}).get("isReplay") and (method == "session/update" or method in EXT_UPDATES):
             if not self.replay_started:
@@ -805,6 +807,7 @@ class GrokSession(AcpSession):
             if params.get("update", {}).get("sessionUpdate") == "turn_completed": self.flush_replay()
             return
         meta = params.get("_meta", {})
+        ts = parse_ts_ms((meta.get("agentTimestampMs") if isinstance(meta, dict) else None) or frame.get("timestamp"))
         event_id = meta.get("eventId")
         if event_id:
             if event_id in self.seen_events: return
@@ -818,6 +821,15 @@ class GrokSession(AcpSession):
                 if meta.get("isReplay"):
                     self.finish_chunk()
                     self.chunk_id = self.chunk_kind = None
+                if ts:
+                    turn_prompt_id = update.get("prompt_id") or update.get("promptId")
+                    for row in reversed(list(self.rows.values())):
+                        if turn_prompt_id and row.get("turnId") != turn_prompt_id:
+                            continue
+                        if row.get("role") in ("tool", "reasoning") or row.get("kind") == "reasoning":
+                            if (row.get("completedAtMs") or 0) < ts:
+                                self.row({**row, "completedAtMs": ts})
+                        break
                 if isinstance(update.get("usage"), dict): self.grok_last_usage = update["usage"]
                 self.complete_turn(update.get("prompt_id") or update.get("promptId"), update, replay=bool(meta.get("isReplay")))
                 return
@@ -870,7 +882,7 @@ class GrokSession(AcpSession):
                 content = update.get("content", {})
                 body = content.get("_meta", {}).get("displayText") or text(content)
                 if not body and not self.media(content): return
-                if kind == "user_message_chunk" and self.fold_user_echo(prompt, body, content, bool(meta.get("isReplay"))):
+                if kind == "user_message_chunk" and self.fold_user_echo(prompt, body, content, bool(meta.get("isReplay")), ts=ts):
                     return
                 if kind != "user_message_chunk" and not meta.get("isReplay"):
                     if isinstance(prompt, str) and prompt.startswith("interject-fallback-") and not self.current_submission:
@@ -892,9 +904,14 @@ class GrokSession(AcpSession):
                     self.chunk_id = prompt if reuse_prompt else "grok:" + (str(event_id) if event_id else str(uuid.uuid4()))
                     self.chunk_kind = kind
                     self.chunk_prompt = prompt
-                    self.row(item(self.chunk_id, CONTENT[kind], "", turnId=prompt or "", kind="reasoning" if kind == "agent_thought_chunk" else ""))
+                    self.row(item(self.chunk_id, CONTENT[kind], "", turnId=prompt or "", kind="reasoning" if kind == "agent_thought_chunk" else "", timestampMs=ts))
                 old = self.rows[self.chunk_id]
-                self.row({**old, "text": old["text"] + body, "media": old.get("media", []) + self.media(content), "status": "completed" if meta.get("isReplay") else "running"})
+                chunk_updates = {"text": old["text"] + body, "media": old.get("media", []) + self.media(content), "status": "completed" if meta.get("isReplay") else "running"}
+                if not old.get("timestampMs") and ts:
+                    chunk_updates["timestampMs"] = ts
+                if kind == "agent_thought_chunk" and ts:
+                    chunk_updates["completedAtMs"] = ts
+                self.row({**old, **chunk_updates})
                 if prompt and (prompt == self.current_submission or (meta.get("isReplay") and prompt in self.config.get("receipts", {}))) and (kind != "user_message_chunk" or self.chunk_id == prompt):
                     self.receipt(prompt, "accepted")
                     self.consumed(prompt)
@@ -922,13 +939,28 @@ class GrokSession(AcpSession):
                 if fields.get("status") == "completed" and old.get("status") == "running" and ident in self.background_tools.values():
                     fields.pop("status")
                 if "rawInput" in update: fields["input"] = json.dumps(update["rawInput"], ensure_ascii=False)
-                if "content" in update:
-                    fields["outcome"] = display_content(update["content"])
-                    fields["media"] = self.media(update["content"])
-                if "rawOutput" in update: fields["outcome"] = json.dumps(display_object(update["rawOutput"]), ensure_ascii=False)
+                if "content" in update or "rawOutput" in update:
+                    has_content = "content" in update
+                    has_raw = "rawOutput" in update
+                    if has_content:
+                        fields["media"] = self.media(update["content"])
+                    if has_content and has_raw:
+                        fields["outcome"] = display_tool_output(update["content"], update["rawOutput"])
+                    elif has_content:
+                        fields["outcome"] = display_tool_output(update["content"], None)
+                    else:
+                        raw_text = display_tool_output(None, update["rawOutput"])
+                        prev_out = old.get("outcome", "")
+                        if raw_text and (not prev_out or not is_json_fallback_output(update["rawOutput"], raw_text)):
+                            fields["outcome"] = raw_text
                 adjust = self.native_tool(update, old)
                 if adjust.pop("dropKind", False): fields.pop("toolKind", None)
                 fields.update(adjust)
+                if not old.get("timestampMs") and ts:
+                    fields["timestampMs"] = ts
+                effective_status = fields.get("status", old.get("status", ""))
+                if ts and effective_status not in ("running", "in_progress", "pending", ""):
+                    fields["completedAtMs"] = ts
                 self.row({**old, **fields})
                 self.note_spawn(update)
             elif kind == "current_mode_update":
@@ -1115,15 +1147,15 @@ class GrokSession(AcpSession):
         meta = content.get("_meta") if isinstance(content.get("_meta"), dict) else {}
         return meta.get("displayText") or text(content)
 
-    def project_child(self, ident, update):
+    def project_child(self, ident, update, ts=0):
         if not isinstance(update, dict): return
         kind = update.get("sessionUpdate")
         if kind in ("user_message_chunk", "agent_thought_chunk", "agent_message_chunk"):
-            self.child_text(ident, kind, update)
+            self.child_text(ident, kind, update, ts=ts)
         elif kind in ("tool_call", "tool_call_update"):
-            self.child_tool(ident, update)
+            self.child_tool(ident, update, ts=ts)
 
-    def child_text(self, ident, kind, update):
+    def child_text(self, ident, kind, update, ts=0):
         body = self.chunk_body(update)
         if not body: return
         messages = self.child_messages(ident)
@@ -1131,21 +1163,24 @@ class GrokSession(AcpSession):
         if kind == "user_message_chunk":
             if body == (agent.get("task") or ""): return
             if any(m.get("role") == "user" and m.get("text") == body for m in messages): return
-            messages.append({"id": ident + ":user:" + str(len(messages)), "role": "user", "text": body})
+            messages.append(item(ident + ":user:" + str(len(messages)), "user", body, timestampMs=ts))
         elif kind == "agent_thought_chunk":
             if messages and messages[-1].get("kind") == "reasoning":
                 if messages[-1].get("text") == body: return
                 messages[-1]["text"] = (messages[-1].get("text") or "") + body
+                if ts and not messages[-1].get("timestampMs"): messages[-1]["timestampMs"] = ts
+                if ts: messages[-1]["completedAtMs"] = ts
             else:
-                messages.append({"id": ident + ":thought:" + str(len(messages)), "role": "tool", "text": body, "kind": "reasoning"})
+                messages.append(item(ident + ":thought:" + str(len(messages)), "tool", body, kind="reasoning", timestampMs=ts, completedAtMs=ts))
         elif messages and messages[-1].get("role") == "assistant":
             if messages[-1].get("text") == body: return
             messages[-1]["text"] = (messages[-1].get("text") or "") + body
+            if ts and not messages[-1].get("timestampMs"): messages[-1]["timestampMs"] = ts
         else:
-            messages.append({"id": ident + ":assistant:" + str(len(messages)), "role": "assistant", "text": body})
+            messages.append(item(ident + ":assistant:" + str(len(messages)), "assistant", body, timestampMs=ts))
         self.subagent(ident, messages=messages)
 
-    def child_tool(self, ident, update):
+    def child_tool(self, ident, update, ts=0):
         call = update.get("toolCallId")
         if not isinstance(call, str) or not call: return
         messages = self.child_messages(ident)
@@ -1159,8 +1194,21 @@ class GrokSession(AcpSession):
         if adjust.pop("dropKind", False): fields.pop("toolKind", None)
         fields.update(adjust)
         if "rawInput" in update: fields["input"] = json.dumps(update["rawInput"], ensure_ascii=False)
-        if "content" in update: fields["outcome"] = display_content(update["content"])
-        if "rawOutput" in update: fields["outcome"] = json.dumps(display_object(update["rawOutput"]), ensure_ascii=False)
+        if "content" in update or "rawOutput" in update:
+            has_content = "content" in update
+            has_raw = "rawOutput" in update
+            if has_content and has_raw:
+                fields["outcome"] = display_tool_output(update["content"], update["rawOutput"])
+            elif has_content:
+                fields["outcome"] = display_tool_output(update["content"], None)
+            else:
+                raw_text = display_tool_output(None, update["rawOutput"])
+                prev_out = old.get("outcome", "")
+                if raw_text and (not prev_out or not is_json_fallback_output(update["rawOutput"], raw_text)):
+                    fields["outcome"] = raw_text
+        if ts and not old.get("timestampMs"): fields["timestampMs"] = ts
+        effective_status = fields.get("status", old.get("status", ""))
+        if ts and effective_status not in ("running", "in_progress", "pending", ""): fields["completedAtMs"] = ts
         nxt = {**old, **fields}
         if idx >= 0: messages[idx] = nxt
         else: messages.append(nxt)

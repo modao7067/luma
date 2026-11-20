@@ -26,3 +26,14 @@
 
 -keep class moe.shizuku.api.BinderContainer { *; }
 -keep public class rikka.shizuku.ShizukuProvider { *; }
+
+-keep interface androidx.compose.ui.text.Paragraph { *; }
+
+-keepclassmembers class androidx.compose.ui.text.MultiParagraph {
+    private final androidx.compose.ui.text.MultiParagraphIntrinsics intrinsics;
+    private final float width;
+    private final float height;
+    private final int lineCount;
+    private final java.util.List placeholderRects;
+    private final java.util.List paragraphInfoList;
+}

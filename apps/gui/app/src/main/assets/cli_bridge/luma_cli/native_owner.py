@@ -261,6 +261,22 @@ def process_has_children(pid):
 def _is_pi_host_cmdline(pid):
     return "pi-host.mjs" in " ".join(_cmdline_non_inline_args(_read_proc_cmdline_args(pid)))
 
+def _tmux_host_kind(handle):
+    if isinstance(handle, dict) and isinstance(handle.get("hostKind"), str) and handle["hostKind"]:
+        return handle["hostKind"]
+    return "pi-sdk"
+
+def _is_expected_tmux_pane(pid, handle):
+    if _tmux_host_kind(handle) == "pi-sdk":
+        return _is_pi_host_cmdline(pid)
+    args = _cmdline_non_inline_args(_read_proc_cmdline_args(pid))
+    if not args:
+        return False
+    binary_name = handle.get("binaryName") if isinstance(handle, dict) else ""
+    if isinstance(binary_name, str) and binary_name:
+        return any(os.path.basename(arg.rstrip("/")) == binary_name or binary_name in arg for arg in args)
+    return True
+
 def _query_tmux_pane_pid(command, socket_path):
     pane = subprocess.run([*command, "-S", socket_path, "-f", "/dev/null", "display-message", "-p", "-t", "owner", "#{pane_dead}\t#{pane_pid}"],
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
@@ -286,7 +302,7 @@ def _verified_tmux_pane_pid(command, socket_path, handle):
         return None, None
     if isinstance(expected_pid, int) and expected_pid != pane_pid:
         return None, None
-    if not _is_pi_host_cmdline(pane_pid):
+    if not _is_expected_tmux_pane(pane_pid, handle):
         return None, None
     return pane_pid, start
 
@@ -346,6 +362,45 @@ def tmux_pi_has_live_subprocesses(command, socket_path):
         return False
     return pi_process_has_live_subprocesses(pane_pid)
 
+def tmux_pty_has_live_subprocesses(command, socket_path, handle):
+    if not command or not socket_path:
+        return False
+    try:
+        pane_pid, _ = _query_tmux_pane_pid(command, socket_path)
+    except subprocess.TimeoutExpired:
+        return True
+    except (OSError, ValueError):
+        return False
+    if not pane_pid or not _is_expected_tmux_pane(pane_pid, handle):
+        return False
+    return non_mcp_background_child_alive(pane_pid)
+
+def pty_owner_settled(directory, startup_grace_sec=5):
+    if directory is None:
+        return True
+    state_file = directory / "runtime-state.json"
+    if not state_file.is_file():
+        if directory.exists():
+            try:
+                if time.time() - directory.stat().st_mtime < startup_grace_sec:
+                    return False
+            except OSError:
+                return False
+        return True
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("busy") or data.get("waitingForStartup"):
+        return False
+    for key in ("pendingRequests", "sessionCrons", "backgroundTasks"):
+        count = data.get(key)
+        if isinstance(count, int) and count > 0:
+            return False
+    return True
+
 def grok_socket_has_client(socket_path, leader_pid):
     needle = socket_path.encode("utf-8", "ignore") if socket_path else b""
     if not needle:
@@ -382,6 +437,40 @@ def grok_lock_leader(socket_path):
     except OSError: return None
     return (pid, start) if "grok" in cmdline and "leader" in cmdline else None
 
+def _owner_directory(handle):
+    if not isinstance(handle, dict):
+        return None
+    recorded = handle.get("directory")
+    if isinstance(recorded, str) and recorded:
+        return Path(recorded)
+    instance_id = handle.get("instanceId")
+    if isinstance(instance_id, str) and instance_id:
+        legacy = Path("/tmp") / ("luma-native-" + instance_id)
+        if legacy.exists():
+            return legacy
+        return Path("/tmp") / ("ln-" + instance_id[:16])
+    return None
+
+def _owner_control_socket(handle, directory=None):
+    if isinstance(handle, dict) and isinstance(handle.get("socket"), str) and handle["socket"]:
+        return handle["socket"]
+    target = directory if directory is not None else _owner_directory(handle)
+    if target is None:
+        return ""
+    if (target / "control.sock").exists():
+        return str(target / "control.sock")
+    return str(target / "c.sock")
+
+def _owner_terminal_socket(handle, directory=None):
+    if isinstance(handle, dict) and isinstance(handle.get("terminalSocket"), str) and handle["terminalSocket"]:
+        return handle["terminalSocket"]
+    target = directory if directory is not None else _owner_directory(handle)
+    if target is None:
+        return ""
+    if (target / "terminal.sock").exists():
+        return str(target / "terminal.sock")
+    return str(target / "t.sock")
+
 def recorded_owner_alive(config):
     handle = config.get("nativeOwner", {})
     if handle.get("kind") in ("grok-leader", "codebuddy-server"):
@@ -389,8 +478,8 @@ def recorded_owner_alive(config):
         if pid and start and process_start(pid) == start:
             return True
         if handle.get("kind") == "grok-leader" and handle.get("instanceId"):
-            sock = Path("/tmp") / ("luma-native-" + handle["instanceId"]) / "control.sock"
-            if grok_lock_leader(sock): return True
+            sock = _owner_control_socket(handle)
+            if sock and grok_lock_leader(sock): return True
         return False
     if handle.get("kind") != "tmux": return False
     command, socket_path = handle.get("tmuxCommand"), handle.get("terminalSocket")
@@ -431,8 +520,7 @@ def stop_recorded_owner(config):
     handle = config.get("nativeOwner")
     if not isinstance(handle, dict): return
     kind = handle.get("kind")
-    instance_id = handle.get("instanceId")
-    directory = Path("/tmp") / ("luma-native-" + instance_id) if isinstance(instance_id, str) and instance_id else None
+    directory = _owner_directory(handle)
     if kind == "tmux":
         command, socket_path = handle.get("tmuxCommand"), handle.get("terminalSocket")
         if command and socket_path:
@@ -440,7 +528,7 @@ def stop_recorded_owner(config):
     elif kind in ("grok-leader", "codebuddy-server"):
         pid, start = handle.get("pid"), handle.get("processStart")
         if kind == "grok-leader" and (not pid or not start or process_start(pid) != start) and directory:
-            locked = grok_lock_leader(str(directory / "control.sock"))
+            locked = grok_lock_leader(_owner_control_socket(handle, directory))
             if locked: pid, start = locked
         if pid and start and process_start(pid) == start:
             try: os.kill(pid, signal.SIGTERM)
@@ -634,8 +722,8 @@ def reap_recorded_owner(config, max_client_idle_sec, idle_tracker=None):
             idle_tracker.pop(instance_id, None)
         return False
     if alive is True and kind == "grok-leader":
-        directory = Path("/tmp") / ("luma-native-" + instance_id) if isinstance(instance_id, str) and instance_id else None
-        sock_path = str(directory / "control.sock") if directory else ""
+        directory = _owner_directory(handle)
+        sock_path = _owner_control_socket(handle, directory)
         pid, start = handle.get("pid"), handle.get("processStart")
         if (not pid or not start or process_start(pid) != start) and sock_path:
             locked = grok_lock_leader(sock_path)
@@ -678,7 +766,8 @@ def reap_recorded_owner(config, max_client_idle_sec, idle_tracker=None):
     command, term_sock = handle.get("tmuxCommand"), handle.get("terminalSocket")
     if not command or not term_sock:
         return False
-    ctrl_sock = handle.get("socket")
+    host_kind = _tmux_host_kind(handle)
+    ctrl_sock = handle.get("socket") if host_kind == "pi-sdk" else None
     if ctrl_sock and unix_socket_has_connected_client(ctrl_sock):
         if idle_tracker is not None and isinstance(instance_id, str) and instance_id:
             idle_tracker.pop(instance_id, None)
@@ -694,13 +783,23 @@ def reap_recorded_owner(config, max_client_idle_sec, idle_tracker=None):
         since = idle_tracker.setdefault(instance_id, time.monotonic())
         if time.monotonic() - since < max_client_idle_sec:
             return False
-    if tmux_pi_has_live_subprocesses(command, term_sock):
+    has_subprocesses = (
+        tmux_pi_has_live_subprocesses(command, term_sock)
+        if host_kind == "pi-sdk"
+        else tmux_pty_has_live_subprocesses(command, term_sock, handle)
+    )
+    if has_subprocesses:
         if idle_tracker is not None and isinstance(instance_id, str) and instance_id:
             idle_tracker.pop(instance_id, None)
         return False
-    directory = Path("/tmp") / ("luma-native-" + instance_id) if isinstance(instance_id, str) and instance_id else None
-    grace = min(30, max(1, max_client_idle_sec)) if config.get("nativeProtocol") == "pi-native-sdk-v1" else 0
-    if not control_socket_settled(ctrl_sock, directory, grace):
+    directory = _owner_directory(handle)
+    if host_kind == "pi-sdk":
+        grace = min(30, max(1, max_client_idle_sec)) if config.get("nativeProtocol") == "pi-native-sdk-v1" else 0
+        settled = control_socket_settled(ctrl_sock, directory, grace)
+    else:
+        grace = min(30, max(1, max_client_idle_sec)) if max_client_idle_sec > 0 else 0
+        settled = pty_owner_settled(directory, grace)
+    if not settled:
         if idle_tracker is not None and isinstance(instance_id, str) and instance_id:
             idle_tracker.pop(instance_id, None)
         return False
@@ -717,7 +816,12 @@ def reap_recorded_owner(config, max_client_idle_sec, idle_tracker=None):
         if idle_tracker is not None and isinstance(instance_id, str) and instance_id:
             idle_tracker.pop(instance_id, None)
         return False
-    if tmux_pi_has_live_subprocesses(command, term_sock):
+    recheck_subprocesses = (
+        tmux_pi_has_live_subprocesses(command, term_sock)
+        if host_kind == "pi-sdk"
+        else tmux_pty_has_live_subprocesses(command, term_sock, handle)
+    )
+    if recheck_subprocesses:
         if idle_tracker is not None and isinstance(instance_id, str) and instance_id:
             idle_tracker.pop(instance_id, None)
         return False
@@ -737,17 +841,18 @@ class NativeOwner:
         self.session = session
         owner = session.config.get("nativeOwner")
         if not owner:
-            owner = {"instanceId": uuid.uuid4().hex}
+            instance_id = uuid.uuid4().hex
+            owner = {"instanceId": instance_id, "directory": str(Path("/tmp") / ("ln-" + instance_id[:16]))}
             session.config["nativeOwner"] = owner
             session.save()
         self.handle = owner
-        self.directory = Path("/tmp") / ("luma-native-" + owner["instanceId"])
+        self.directory = _owner_directory(owner)
         self.directory.mkdir(mode=0o700, exist_ok=True)
         if self.directory.is_symlink() or self.directory.stat().st_uid != os.getuid():
             raise Rejected(tr("原生宿主目录归属不符", "Native host directory ownership mismatch"))
         os.chmod(self.directory, 0o700)
-        self.socket = str(self.directory / "control.sock")
-        self.tmux_socket = str(self.directory / "terminal.sock")
+        self.socket = _owner_control_socket(owner, self.directory)
+        self.tmux_socket = _owner_terminal_socket(owner, self.directory)
         if owner.get("kind") and not self.alive():
             if not session.config.get("nativeId"):
                 raise Rejected(tr("原生创建结果未知，不能自动再建会话", "Native session creation result is unknown; cannot recreate automatically"))
@@ -759,7 +864,8 @@ class NativeOwner:
             if owner.get("kind") == "tmux":
                 self.tmux("kill-server", check=False)
             shutil.rmtree(self.directory, ignore_errors=True)
-            session.config["nativeOwner"] = {"instanceId": uuid.uuid4().hex}
+            next_id = uuid.uuid4().hex
+            session.config["nativeOwner"] = {"instanceId": next_id, "directory": str(Path("/tmp") / ("ln-" + next_id[:16]))}
             session.save()
             self.__init__(session)
 
@@ -773,9 +879,9 @@ class NativeOwner:
             os.chmod(dest, 0o600)
         return target_dir / entry_name
 
-    def tmux(self, *args, check=True):
+    def tmux(self, *args, check=True, input_bytes=None):
         result = subprocess.run([*self.tmux_command(), "-S", self.tmux_socket, "-f", "/dev/null", *args],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                                input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         if check and result.returncode: raise Rejected(tr("原生终端宿主操作失败（tmux）", "Native terminal host operation failed (tmux)"))
         return result
 
@@ -807,18 +913,23 @@ class NativeOwner:
                 return True
         return False
 
-    def launch_tui(self, argv, env=None):
+    def launch_tui(self, argv, env=None, *, host_kind="pi-sdk", binary_name=""):
         if self.handle.get("kind"):
             if self.alive(): return False
             raise Rejected(tr("原生宿主已退出，请重新连接核对保存的身份", "Native host has exited; please reconnect to verify saved identity"))
-        if Path(self.socket).exists(): raise Rejected(tr("原生控制端点已存在，拒绝覆盖", "Native control endpoint already exists; refusing to overwrite"))
+        if host_kind == "pi-sdk" and Path(self.socket).exists():
+            raise Rejected(tr("原生控制端点已存在，拒绝覆盖", "Native control endpoint already exists; refusing to overwrite"))
         Path(self.socket + ".error").unlink(missing_ok=True)
         merged_env = {"LUMA_LANG": lang_code(), **(env or {})}
         command = ["env", *[f"{k}={v}" for k, v in merged_env.items()], *argv]
         self.tmux("new-session", "-d", "-s", "owner", "-x", "110", "-y", "40", "-c", self.session.config["cwd"], shlex.join(command),
                   ";", "set-option", "-t", "owner", "remain-on-exit", "failed")
         tmux_cmd = self.tmux_command()
-        handle_data = {"kind": "tmux", "socket": self.socket, "terminalSocket": self.tmux_socket, "tmuxCommand": tmux_cmd}
+        handle_data = {"kind": "tmux", "hostKind": host_kind, "terminalSocket": self.tmux_socket, "tmuxCommand": tmux_cmd}
+        if host_kind == "pi-sdk":
+            handle_data["socket"] = self.socket
+        if binary_name:
+            handle_data["binaryName"] = binary_name
         try:
             pane_pid, pane_start = _query_tmux_pane_pid(tmux_cmd, self.tmux_socket)
         except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -833,6 +944,79 @@ class NativeOwner:
         self.tmux("unbind-key", "-a")
         self.tmux("set-option", "-g", "history-limit", "2000")
         return True
+
+    def write_private_file(self, name, content, mode=0o600):
+        target = self.directory / name
+        tmp = self.directory / f".{name}.{uuid.uuid4().hex}.tmp"
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+        return target
+
+    def write_runtime_state(self, **state):
+        try:
+            self.write_private_file("runtime-state.json", json.dumps(state, ensure_ascii=False))
+        except OSError:
+            pass
+
+    def pane_pid(self):
+        if self.handle.get("kind") != "tmux":
+            return self.handle.get("pid")
+        cmd = self.handle.get("tmuxCommand")
+        sock = self.handle.get("terminalSocket")
+        if not cmd or not sock:
+            return None
+        pid, _ = _verified_tmux_pane_pid(cmd, sock, self.handle)
+        if pid:
+            return pid
+        try:
+            pid, _ = _query_tmux_pane_pid(cmd, sock)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        return pid if pid and _is_expected_tmux_pane(pid, self.handle) else None
+
+    def inject_text(self, body, submit=True, submit_delay=0.12):
+        if not self.alive():
+            raise Rejected(tr("原生执行宿主已退出", "Native execution host has exited"))
+        buf = "luma-" + uuid.uuid4().hex[:12]
+        self.tmux("load-buffer", "-b", buf, "-", input_bytes=body.encode("utf-8"))
+        self.tmux("paste-buffer", "-b", buf, "-p", "-d", "-t", "owner")
+        if submit:
+            if submit_delay > 0:
+                time.sleep(submit_delay)
+            self.tmux("send-keys", "-t", "owner", "Enter")
+
+    def send_keys(self, *keys, literal=False):
+        if not self.alive():
+            raise Rejected(tr("原生执行宿主已退出", "Native execution host has exited"))
+        flags = ("-l",) if literal else ()
+        self.tmux("send-keys", "-t", "owner", *flags, *keys)
+
+    def capture_pane(self, lines=60):
+        if self.handle.get("kind") != "tmux":
+            return ""
+        try:
+            result = self.tmux("capture-pane", "-p", "-t", "owner", "-S", f"-{int(lines)}", check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return result.stdout.decode("utf-8", "replace")
+
+    def client_idle_seconds(self):
+        if self.handle.get("kind") != "tmux":
+            return float("inf")
+        cmd = self.handle.get("tmuxCommand")
+        sock = self.handle.get("terminalSocket")
+        if not cmd or not sock:
+            return float("inf")
+        idle = tmux_client_idle_seconds(cmd, sock)
+        return float("inf") if idle is None else idle
 
     def terminal(self):
         if not self.alive(): raise Rejected(tr("原生执行宿主已退出", "Native execution host has exited"))

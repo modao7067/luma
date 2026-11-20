@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -7,7 +9,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -15,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
@@ -43,6 +49,7 @@ internal fun MenuIcon(
         MenuSymbol.PLUGINS -> R.drawable.ic_menu_widgets_rounded
         MenuSymbol.MCP -> R.drawable.ic_menu_hub_rounded
         MenuSymbol.EXTENSION -> R.drawable.ic_menu_extension
+        MenuSymbol.TOOLBOX -> R.drawable.ic_menu_home_repair_service
         MenuSymbol.NEW_CHAT -> R.drawable.ic_menu_add_comment
         MenuSymbol.CAMERA -> R.drawable.ic_menu_photo_camera
         MenuSymbol.IMAGE -> R.drawable.ic_menu_image
@@ -66,9 +73,11 @@ internal fun MenuIcon(
         MenuSymbol.STOP -> R.drawable.ic_menu_stop
         MenuSymbol.REFRESH -> R.drawable.ic_menu_refresh
         MenuSymbol.EDIT -> R.drawable.ic_menu_edit
+        MenuSymbol.EDIT_DOCUMENT -> R.drawable.ic_menu_edit_document
         MenuSymbol.DELETE -> R.drawable.ic_menu_delete
         MenuSymbol.MODEL -> R.drawable.ic_menu_smart_toy
         MenuSymbol.THINKING -> R.drawable.ic_menu_psychology
+        MenuSymbol.LIGHTBULB -> R.drawable.ic_menu_lightbulb
         MenuSymbol.SPEED -> R.drawable.ic_menu_speed
         MenuSymbol.LOCK -> R.drawable.ic_menu_lock
         MenuSymbol.WARNING -> R.drawable.ic_menu_warning_amber
@@ -168,12 +177,31 @@ internal fun ActionMenuItem(
                 Spacer(Modifier.width(19.dp))
             }
     }) else null
+    val haptic = LocalHapticFeedback.current
+    val morphRows = LocalMorphRows.current
+    val morphRow = remember(morphRows) { morphRows?.let { MorphRows.Row(active && enabled, onClick) } }
+    if (morphRows != null && morphRow != null) {
+        DisposableEffect(morphRows, morphRow) {
+            morphRows.rows.add(morphRow)
+            onDispose { morphRows.rows.remove(morphRow) }
+        }
+        SideEffect {
+            morphRow.enabled = active && enabled
+            morphRow.onClick = onClick
+        }
+    }
+    val held = morphRows != null && morphRows.held === morphRow
     DropdownMenuItem(
-        onClick = onClick,
+        onClick = {
+            haptic.tick()
+            onClick()
+        },
         enabled = active && enabled,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 1.dp)
+            .then(if (morphRow != null) Modifier.onGloballyPositioned { morphRow.coordinates = it } else Modifier)
             .clip(rowShape)
             .then(if (selected) Modifier.background(rowContainer, rowShape) else Modifier)
+            .then(if (held) Modifier.background(colors.onSurface.copy(alpha = 0.1f), rowShape) else Modifier)
             .semantics(mergeDescendants = true) {
                 this.selected = selected
                 this.role = Role.Button

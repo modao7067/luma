@@ -905,13 +905,16 @@ internal fun GlobalUsageScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val backElastic = rememberElasticPress()
+                    val refreshElastic = rememberElasticPress()
                     LiquidGlass(
                         Modifier
                             .size(44.dp)
                             .testTag("usage-back")
                             .semantics { contentDescription = tr("关闭用量", "Close usage") }
-                            .liquidClickable(cornerRadius = 22.dp, onClick = onDismiss),
+                            .liquidClickable(press = backElastic, onClick = onDismiss),
                         cornerRadius = 22.dp,
+                        press = backElastic,
                     ) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             ComposerGlyph("back")
@@ -946,13 +949,16 @@ internal fun GlobalUsageScreen(
                             .size(44.dp)
                             .testTag("usage-refresh")
                             .semantics { contentDescription = tr("刷新用量", "Refresh usage") }
-                            .liquidClickable(cornerRadius = 22.dp) {
+                            .liquidClickable(press = refreshElastic) {
                                 if (!manualRefreshing) refreshData(forceRefresh = true)
                             },
                         cornerRadius = 22.dp,
+                        press = refreshElastic,
                     ) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            MenuIcon(MenuSymbol.REFRESH, size = 19.dp)
+                            Box(Modifier.glyphPulse(manualRefreshing)) {
+                                MenuIcon(MenuSymbol.REFRESH, size = 19.dp)
+                            }
                         }
                     }
                 }

@@ -1,9 +1,12 @@
 import base64
 import copy
+import datetime as dt
 import fcntl
 import json
+import math
 import mimetypes
 import os
+import re
 import threading
 import uuid
 import time
@@ -82,7 +85,44 @@ def user_text(value):
         return "\n".join(text(v) for v in value if isinstance(v, str) or isinstance(v, dict) and v.get("type") == "text")
     return text(value)
 
+_TS_MICRO_LIMIT = 10_000_000_000_000
+
+def parse_ts_ms(val):
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
+        if val < 1_000_000_000:
+            return 0
+        if val < 10_000_000_000:
+            return int(val * 1000)
+        n = int(val)
+        return n // 1000 if n > _TS_MICRO_LIMIT else n
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return 0
+        if s.isdigit():
+            return parse_ts_ms(int(s))
+        if re.fullmatch(r"\d+\.\d+", s):
+            try:
+                return parse_ts_ms(float(s))
+            except ValueError:
+                return 0
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            s = re.sub(r"\.(\d{6})\d+", r".\1", s)
+            parsed = dt.datetime.fromisoformat(s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return max(0, int(parsed.timestamp() * 1000))
+        except Exception:
+            return 0
+    return 0
+
 def item(ident, role, body="", **extra):
+    if not extra.get("timestampMs"):
+        extra.pop("timestampMs", None)
+    if not extra.get("completedAtMs"):
+        extra.pop("completedAtMs", None)
     return {"id": str(ident), "role": role, "text": body, **extra}
 
 def image_blocks(paths):

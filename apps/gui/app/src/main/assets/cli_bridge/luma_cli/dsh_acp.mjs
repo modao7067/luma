@@ -1067,7 +1067,15 @@ export function projectHistory(events, api) {
   let title = ''; let turn = ''; let planMode; let goal;
   let totalInput = 0, totalCacheRead = 0, totalCacheWrite = 0, totalOutput = 0, hasUsage = false, lastUsed = null, lastSize = null;
   const add = row => rows.set(row.id, row);
-  const body = blocks => blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+  const body = blocks => (Array.isArray(blocks) ? blocks : []).map(b => {
+    if (typeof b === 'string') return b;
+    if (!b || typeof b !== 'object') return '';
+    if (b.type === 'text' && typeof b.text === 'string') return b.text;
+    if (b.type === 'content') return body(Array.isArray(b.content) ? b.content : [b.content]);
+    if (typeof b.text === 'string') return b.text;
+    if (typeof b.output === 'string') return b.output;
+    return '';
+  }).filter(Boolean).join('\n');
   for (const event of events) {
     const data = event.data; if (event.type === 'turn/start') turn = String(data.turn);
     if (event.type === 'plan/mode' && typeof data?.enabled === 'boolean') planMode = data.enabled;

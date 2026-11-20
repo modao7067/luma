@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.animation.AnimatedVisibility
@@ -39,7 +41,7 @@ internal fun QueuedMessages(
     val visibilityState = remember(view.summary.id) { MutableTransitionState(hasItems) }
     visibilityState.targetState = hasItems
     val isCollapsing = remember(visibilityState) {
-        derivedStateOf { !visibilityState.targetState && visibilityState.currentState }
+        derivedStateOf { !visibilityState.targetState && !visibilityState.isIdle }
     }.value
     SideEffect {
         onCollapsingChanged?.invoke(isCollapsing)
@@ -86,6 +88,9 @@ internal fun QueuedMessages(
                     val actionable = entry.canEdit || entry.canSteer || entry.canRemove || entry.canDismiss
                     val current = view.queue.any { it.id == entry.id }
                     val active = hasItems && current
+                    val itemAnchor = rememberMorphAnchor()
+                    val itemElastic = rememberElasticPress()
+                    val dockStyle = PrismGlassStyle.dock(MaterialTheme.colorScheme)
                     Box(
                         Modifier.graphicsLayer {
                             scaleX = dockScale
@@ -94,42 +99,59 @@ internal fun QueuedMessages(
                             transformOrigin = TransformOrigin(0.5f, 1f)
                         },
                     ) {
-                        LiquidGlass(
+                        Box(
                             Modifier
                                 .fillMaxWidth()
-                                .liquidClickable(enabled = actionable && active, cornerRadius = 20.dp, pressScale = 0.98f) {
-                                    expanded = !expanded
-                                },
-                            cornerRadius = 20.dp,
+                                .morphAnchor(
+                                    anchor = itemAnchor,
+                                    enabled = actionable && active,
+                                    elastic = itemElastic,
+                                    onOpen = { expanded = !expanded },
+                                ),
                         ) {
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            LiquidGlass(
+                                Modifier.fillMaxWidth(),
+                                cornerRadius = 20.dp,
+                                style = dockStyle,
+                                shadow = GlassShadow.Dock,
+                                press = itemElastic,
                             ) {
-                                Box(
+                                Row(
                                     Modifier
-                                        .size(7.dp)
-                                        .background(MaterialTheme.colorScheme.primary, CircleShape),
-                                )
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(
-                                        entry.text,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(7.dp)
+                                            .background(MaterialTheme.colorScheme.primary, CircleShape),
                                     )
-                                    Text(
-                                        entry.status,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            entry.text,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                        )
+                                        Text(
+                                            entry.status,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
                         }
-                        OriginMenu(expanded && active, { expanded = false }) {
+                        MorphMenu(
+                            expanded = expanded && active,
+                            onDismiss = { expanded = false },
+                            anchor = itemAnchor,
+                            width = 228.dp,
+                            placement = MorphPlacement.Start,
+                            preferAbove = true,
+                        ) {
                             val enabled = active && (entry.localSubmission || entry.localRecovery || (entry.hostOwned && !view.loading && !view.queueBusy) || (view.connected && !view.queueBusy && view.queueRecovery == null))
                             if (entry.canSteer) {
                                 ActionMenuItem(
@@ -167,7 +189,13 @@ internal fun QueuedMessages(
                 }
             }
             displayed.queueRecovery?.let { recovery ->
-                LiquidGlass(Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+                val recoveryHaptic = LocalHapticFeedback.current
+                LiquidGlass(
+                    Modifier.fillMaxWidth().blockHorizontalPageSwipe(),
+                    cornerRadius = 20.dp,
+                    style = PrismGlassStyle.dock(MaterialTheme.colorScheme),
+                    shadow = GlassShadow.Dock,
+                ) {
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             if (recovery.phase == "removed") tr("未能追加，原消息已保留", "Could not append; original message kept") else tr("转发结果待确认，请核对会话和队列", "Forwarding unconfirmed; verify session and queue"),
@@ -178,21 +206,30 @@ internal fun QueuedMessages(
                             if (recovery.phase == "removed") {
                                 FilledTonalButton(
                                     enabled = hasItems && !view.queueBusy,
-                                    onClick = { actions.resolveQueueRecovery(true) },
+                                    onClick = {
+                                        recoveryHaptic.tick()
+                                        actions.resolveQueueRecovery(true)
+                                    },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                     modifier = Modifier.height(32.dp),
                                 ) { Text(tr("恢复到草稿", "Restore to draft"), style = MaterialTheme.typography.labelMedium) }
                             } else {
                                 FilledTonalButton(
                                     enabled = hasItems && !view.queueBusy,
-                                    onClick = actions::reconnect,
+                                    onClick = {
+                                        recoveryHaptic.tick()
+                                        actions.reconnect()
+                                    },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                     modifier = Modifier.height(32.dp),
                                 ) { Text(tr("重新同步", "Resync"), style = MaterialTheme.typography.labelMedium) }
                             }
                             TextButton(
                                 enabled = hasItems && !view.queueBusy,
-                                onClick = { discard = true },
+                                onClick = {
+                                    recoveryHaptic.tick()
+                                    discard = true
+                                },
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                 modifier = Modifier.height(32.dp),
                             ) { Text(tr("已核对", "Dismiss"), style = MaterialTheme.typography.labelMedium) }
@@ -207,14 +244,15 @@ internal fun QueuedMessages(
         val editable = current?.canEdit == true && (current.localSubmission || (view.connected && !view.queueBusy && view.queueRecovery == null))
         LaunchedEffect(current?.id) { if (current == null) editing = null }
         var text by rememberSaveable(entry.id) { mutableStateOf(entry.editableText) }
+        val editHaptic = LocalHapticFeedback.current
         LiquidModalDialog(
             title = tr("编辑待发消息", "Edit queued message"),
             onDismiss = { editing = null },
             confirmButton = {
-                Button(onClick = { actions.editQueued(entry.id, text); editing = null }, enabled = editable) { Text(tr("保存", "Save")) }
+                Button(onClick = { editHaptic.tick(); actions.editQueued(entry.id, text); editing = null }, enabled = editable) { Text(tr("保存", "Save")) }
             },
             dismissButton = {
-                TextButton(onClick = { editing = null }) { Text(tr("取消", "Cancel")) }
+                TextButton(onClick = { editHaptic.tick(); editing = null }) { Text(tr("取消", "Cancel")) }
             },
         ) {
             OutlinedTextField(
@@ -228,14 +266,15 @@ internal fun QueuedMessages(
         }
     }
     if (discard) {
+        val discardHaptic = LocalHapticFeedback.current
         LiquidModalDialog(
             title = tr("清除转发记录？", "Clear forwarding record?"),
             onDismiss = { discard = false },
             confirmButton = {
-                Button(onClick = { discard = false; actions.resolveQueueRecovery(false) }) { Text(tr("确认清除", "Clear")) }
+                Button(onClick = { discardHaptic.tick(); discard = false; actions.resolveQueueRecovery(false) }) { Text(tr("确认清除", "Clear")) }
             },
             dismissButton = {
-                TextButton(onClick = { discard = false }) { Text(tr("保留", "Keep")) }
+                TextButton(onClick = { discardHaptic.tick(); discard = false }) { Text(tr("保留", "Keep")) }
             },
         ) {
             Text(

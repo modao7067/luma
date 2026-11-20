@@ -4,7 +4,7 @@ import re
 import threading
 import uuid
 from pathlib import Path
-from .base import Session, item, text, user_text, image_blocks
+from .base import Session, item, parse_ts_ms, text, user_text, image_blocks
 from .i18n import tr
 from .transport import Peer, Rejected
 from .metrics import pi_usage
@@ -288,6 +288,7 @@ class PiSession(Session):
 
     def project(self, m, fallback, done=True):
         ident = str(m.get("id") or m.get("timestamp") or fallback)
+        ts = parse_ts_ms(m.get("timestamp"))
         role = m.get("role", "system")
         projected = set()
         if role == "system" and ("sections" in m or not str(m.get("content") or "").strip()):
@@ -299,7 +300,7 @@ class PiSession(Session):
         if role in ("compactionSummary", "branchSummary"):
             summary = str(m.get("summary") or "")
             self.row(item(ident, "tool", tr("上下文压缩", "Context compaction") if role == "compactionSummary" else tr("分支摘要", "Branch summary"),
-                          detail=summary, outcome=summary, kind="compaction", status="completed"))
+                          detail=summary, outcome=summary, kind="compaction", status="completed", timestampMs=ts, completedAtMs=ts))
             projected.add(ident)
             return projected
         if role == "bashExecution":
@@ -309,7 +310,7 @@ class PiSession(Session):
             row_id = "bash-" + ident
             self.row(item(row_id, "tool", _pi_tool_title("bash", {"command": cmd}), kind="tool",
                           toolName="bash", input=json.dumps({"command": cmd}, ensure_ascii=False),
-                          detail=out, outcome=out, status=status))
+                          detail=out, outcome=out, status=status, timestampMs=ts, completedAtMs=ts))
             projected.add(row_id)
             return projected
         if role in ("toolResult", "tool"):
@@ -322,7 +323,8 @@ class PiSession(Session):
             self.row(item(tool_id, "tool", label,
                           detail=out, outcome=out, media=self.media(m.get("content")),
                           input=resolved_input, toolName=resolved_name,
-                          status="failed" if m.get("isError") else "completed", kind="tool"))
+                          status="failed" if m.get("isError") else "completed", kind="tool",
+                          timestampMs=old.get("timestampMs") or ts, completedAtMs=ts))
         elif role == "user":
             skill = m.get("_skillBlock") if isinstance(m.get("_skillBlock"), dict) else None
             if not skill and m.get("customType") == "skill-prompt" and isinstance(m.get("details"), dict) and m["details"].get("name"):
@@ -332,11 +334,11 @@ class PiSession(Session):
                 body = f"/{skill['name']} {u_msg}".strip()
             else:
                 body = strip_pi_image_hints(user_text(m.get("content")))
-            self.row(item(ident, "user", body, media=self.media(m.get("content"))))
+            self.row(item(ident, "user", body, media=self.media(m.get("content")), timestampMs=ts))
             projected.add(ident)
         elif isinstance(m.get("content"), str):
             if m["content"].strip() or role == "user":
-                self.row(item(ident, role, m["content"]))
+                self.row(item(ident, role, m["content"], timestampMs=ts))
                 projected.add(ident)
         else:
             for n, block in enumerate(m.get("content") or []):
@@ -351,7 +353,13 @@ class PiSession(Session):
                                 self.rows.pop(bid, None)
                                 self.seq += 1
                         continue
-                    self.row(item(bid, "reasoning" if kind == "thinking" else role, body_val, kind="reasoning" if kind == "thinking" else "", status="completed" if block_done else "running"))
+                    old_b = self.rows.get(bid, {})
+                    b_start = old_b.get("timestampMs") or ts
+                    self.row(item(bid, "reasoning" if kind == "thinking" else role, body_val,
+                                  kind="reasoning" if kind == "thinking" else "",
+                                  status="completed" if block_done else "running",
+                                  timestampMs=b_start,
+                                  completedAtMs=ts if kind == "thinking" and block_done else 0))
                     projected.add(bid)
                 elif kind in ("toolCall", "tool_use"):
                     tool_id = "tool-" + str(block.get("id", bid))
@@ -362,13 +370,14 @@ class PiSession(Session):
                     self.row(item(tool_id, "tool", _pi_tool_title(resolved_name, raw_args if raw_args is not None else encoded_input), kind="tool",
                                   toolName=resolved_name,
                                   input=encoded_input,
-                                  status=old.get("status", "running"), outcome=old.get("outcome", ""), media=old.get("media", [])))
+                                  status=old.get("status", "running"), outcome=old.get("outcome", ""), media=old.get("media", []),
+                                  timestampMs=old.get("timestampMs") or ts, completedAtMs=old.get("completedAtMs", 0)))
                 elif kind in ("image", "audio", "document", "file", "attachment", "resource", "resource_link", "image_url"):
-                    self.row(item(bid, role, "", media=self.media(block), status="completed" if done else "running"))
+                    self.row(item(bid, role, "", media=self.media(block), status="completed" if done else "running", timestampMs=ts))
                     projected.add(bid)
             if m.get("errorMessage"):
                 err_id = ident + "-error"
-                self.row(item(err_id, "system", m["errorMessage"], status="failed"))
+                self.row(item(err_id, "system", m["errorMessage"], status="failed", timestampMs=ts))
                 projected.add(err_id)
         return projected
 

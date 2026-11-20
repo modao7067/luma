@@ -26,6 +26,7 @@ from .kimi_web_transport import (
     reap_idle_kimi_gateway,
 )
 from .claude import ClaudeSession
+from .claude_pty import CLAUDE_PTY_PROTOCOL, CLAUDE_STREAM_PROTOCOL, ClaudePtySession, probe_claude_pty
 from .antigravity import AntigravitySession
 from .antigravity_agy_acp import AntigravityAgyAcpSession, AGY_ACP_PROTOCOL
 from .antigravity_cli import AntigravityCliSession, PROTOCOL as AGY_PROTOCOL
@@ -38,6 +39,7 @@ ADAPTERS = {"pi": PiSession, "DeepSeek Harness": DshSession,
             "Kimi Code": KimiSession, "Claude Code": ClaudeSession, "Antigravity": AntigravitySession,
             "Qoder CLI": QoderSession, "Grok Build": GrokSession, "CodeBuddy Code": CodeBuddySession}
 NATIVE_PROTOCOLS = {"CodeBuddy Code": ["codebuddy-http-acp"], "Antigravity": [AGY_ACP_PROTOCOL, AGY_PROTOCOL, "antigravity-acp"],
+    "Claude Code": [CLAUDE_STREAM_PROTOCOL, CLAUDE_PTY_PROTOCOL],
     "Kimi Code": [KIMI_WEB_PROTOCOL, "kimi-acp"],
     "pi": ["pi-rpc", "pi-native-sdk-v1"],
     "Grok Build": ["grok-acp", "grok-private-leader-v1"]}
@@ -49,6 +51,11 @@ def carrier_revision():
 def default_new_protocol(cli):
     if cli == "Grok Build":
         return "grok-private-leader-v1", ""
+    if cli == "Claude Code":
+        found, compatible, reason, _ = probe_claude_pty()
+        if found and not compatible:
+            return CLAUDE_STREAM_PROTOCOL, reason
+        return CLAUDE_PTY_PROTOCOL, ""
     if cli == "pi":
         found, compatible, _, _ = probe_pi_native()
         if found and not compatible:
@@ -87,6 +94,9 @@ class Manager:
         self.detached_owner_idle = {}
         self.observer_locks = {}
         self.shutting_down = False
+        self.hook_base_url = None
+        self._hook_routes = {}
+        self._fallback_hook_server = None
 
     def __enter__(self):
         return self
@@ -119,14 +129,93 @@ class Manager:
             sessions = list(self.sessions.items())
             self.sessions.clear()
             lock_keys = list(self.observer_locks)
+            self._hook_routes.clear()
+            fallback_server = self._fallback_hook_server
+            self._fallback_hook_server = None
         for _, sess in sessions:
             try:
                 sess.retire_observer()
             except Exception:
                 pass
+        if fallback_server is not None:
+            try:
+                fallback_server.shutdown()
+                fallback_server.server_close()
+            except Exception:
+                pass
         with self.lock:
             for key in set(lock_keys) | set(self.observer_locks):
                 self._release_observer_lock(key)
+
+    def _ensure_hook_base_url(self):
+        with self.lock:
+            if self.hook_base_url:
+                return self.hook_base_url
+            manager_ref = self
+            class HookOnlyHandler(BaseHTTPRequestHandler):
+                protocol_version = "HTTP/1.1"
+                def log_message(self, *args): pass
+                def do_POST(self):
+                    path = urlparse(self.path).path
+                    if self.headers.get("Origin") or not path.startswith("/hooks/"):
+                        body = b'{"message":"Forbidden"}'
+                        self.send_response(403)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    hook_key = path[len("/hooks/"):].strip("/")
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        raw = self.rfile.read(length) if 0 < length <= 4 * 1024 * 1024 else b"{}"
+                        payload = json.loads(raw) if raw.strip() else {}
+                    except (ValueError, OSError):
+                        payload = {}
+                    status, result = manager_ref.dispatch_hook(hook_key, self.headers.get("Authorization", ""), payload)
+                    data = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    try: self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError): pass
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), HookOnlyHandler)
+            srv.daemon_threads = True
+            self._fallback_hook_server = srv
+            self.hook_base_url = f"http://127.0.0.1:{srv.server_address[1]}"
+            threading.Thread(target=srv.serve_forever, daemon=True, name="LumaHookFallback").start()
+            return self.hook_base_url
+
+    def register_hook(self, key, token, callback):
+        base_url = self._ensure_hook_base_url()
+        with self.lock:
+            self._hook_routes[key] = (token, callback)
+        return f"{base_url}/hooks/{key}"
+
+    def unregister_hook(self, key, token=None):
+        with self.lock:
+            entry = self._hook_routes.get(key)
+            if entry is not None and (token is None or entry[0] == token):
+                self._hook_routes.pop(key, None)
+
+    def dispatch_hook(self, key, auth_header, payload):
+        with self.lock:
+            if self.shutting_down:
+                return 200, {}
+            entry = self._hook_routes.get(key)
+        if entry is None:
+            return 404, {"message": "Unknown hook session"}
+        expected_token, callback = entry
+        got = (auth_header or "").encode("utf-8", "surrogateescape")
+        want = ("Bearer " + expected_token).encode("utf-8")
+        if not hmac.compare_digest(got, want):
+            return 401, {"message": "Authentication required"}
+        try:
+            result = callback(payload if isinstance(payload, dict) else {})
+        except Exception:
+            return 200, {}
+        return 200, result if isinstance(result, dict) else {}
 
     def _open_and_flock(self, key, mode, retries=1, delay=0.002):
         lock_path = self.directory / f".{key}.observer"
@@ -240,7 +329,7 @@ class Manager:
         native = p.get("nativeId")
         if native and not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", native): raise Rejected(tr("无效原生会话标识", "Invalid native session ID"))
         probed = None
-        if (cli in ("pi", "Grok Build")
+        if (cli in ("pi", "Grok Build", "Claude Code")
                 and not native and not p.get("nativeProtocol")
                 and not (self.directory / (key + ".json")).exists()):
             probed = default_new_protocol(cli)
@@ -266,7 +355,7 @@ class Manager:
             had_saved_protocol = bool(config.get("nativeProtocol"))
             if path.exists() and p.get("nativeProtocol") and p["nativeProtocol"] != config.get("nativeProtocol"):
                 raise Rejected(tr("已有会话原生协议不可变更", "Existing session native protocol cannot be changed"))
-            if not path.exists() and not native and not config.get("nativeProtocol") and cli in ("pi", "Grok Build"):
+            if not path.exists() and not native and not config.get("nativeProtocol") and cli in ("pi", "Grok Build", "Claude Code"):
                 protocol, fallback_notice = probed or default_new_protocol(cli)
                 config["nativeProtocol"] = protocol
                 if fallback_notice:
@@ -278,6 +367,7 @@ class Manager:
             adapter = ADAPTERS[cli]
             if cli == "Kimi Code" and config.get("nativeProtocol") in (None, KIMI_WEB_PROTOCOL): adapter = KimiWebSession
             if cli == "pi" and config.get("nativeProtocol") == "pi-native-sdk-v1": adapter = PiNativeSession
+            if cli == "Claude Code" and config.get("nativeProtocol") == CLAUDE_PTY_PROTOCOL: adapter = ClaudePtySession
             if cli == "Antigravity":
                 protocol = config.get("nativeProtocol") or ("antigravity-acp" if path.exists() or old or native else AGY_ACP_PROTOCOL)
                 if protocol not in ("antigravity-acp", AGY_PROTOCOL, AGY_ACP_PROTOCOL): raise Rejected(tr("未知 Antigravity 原生协议", "Unknown Antigravity native protocol"))
@@ -316,6 +406,8 @@ class Manager:
             try:
                 save()
                 session = adapter(config, save)
+                if hasattr(session, "attach_hook_manager"):
+                    session.attach_hook_manager(self)
                 session.touch()
                 session.update(connecting=True, **({"nativeProtocol": config["nativeProtocol"]} if config.get("nativeProtocol") else {}))
                 self.sessions[key] = session
@@ -597,7 +689,28 @@ class Manager:
                 self.destroying.discard(key)
                 self.touch()
 
+_USER_CLI_BIN_DIRS = (
+    ".local/share/pnpm/bin",
+    ".local/bin",
+    ".kimi-code/bin",
+    ".opencode/bin",
+    ".grok/bin",
+    ".qoder/bin",
+    ".codebuddy/bin",
+    ".cargo/bin",
+    ".bun/bin",
+)
+
+def _ensure_user_cli_path():
+    home = Path.home()
+    entries = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    seen = set(entries)
+    added = [str(home / rel) for rel in _USER_CLI_BIN_DIRS if str(home / rel) not in seen]
+    if added:
+        os.environ["PATH"] = os.pathsep.join([*entries, *added])
+
 def serve(port, password_file, directory):
+    _ensure_user_cli_path()
     token = Path(password_file).read_text().strip()
     if len(token) < 32: raise ValueError("private capability token is missing")
     manager = Manager(directory)
@@ -614,12 +727,29 @@ def serve(port, password_file, directory):
             try: self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError): pass
         def handle_request(self):
+            path = urlparse(self.path).path
+            if self.command == "POST" and path.startswith("/hooks/"):
+                if self.headers.get("Origin"):
+                    self.close_connection = True; self.reply(403, {"message": "Origin rejected"}); return
+                hook_key = path[len("/hooks/"):].strip("/")
+                if "/" in hook_key or not hook_key:
+                    self.reply(404, {"message": "Unknown hook endpoint"}); return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 <= length <= 4 * 1024 * 1024:
+                        self.close_connection = True; self.reply(413, {"message": "Hook payload too large"}); return
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    body = json.loads(raw) if raw.strip() else {}
+                except (ValueError, OSError):
+                    self.reply(400, {"message": "Invalid hook payload"}); return
+                status, result = manager.dispatch_hook(hook_key, self.headers.get("Authorization", ""), body)
+                self.reply(status, result)
+                return
             auth_header = self.headers.get("Authorization", "").encode("utf-8", "surrogateescape")
             expected_header = ("Bearer " + token).encode("utf-8")
             if self.headers.get("Origin") or not hmac.compare_digest(auth_header, expected_header):
                 self.close_connection = True; self.reply(401, {"message": "Authentication required"}); return
             set_lang(self.headers.get("X-Luma-Lang"))
-            path = urlparse(self.path).path
             watch_peek = self.command == "GET" and self.headers.get("X-Luma-Watch") == "1"
             if not watch_peek:
                 with manager.lock:
@@ -670,6 +800,7 @@ def serve(port, password_file, directory):
         do_POST = handle_request
     server = ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
     server.daemon_threads = True
+    manager.hook_base_url = f"http://127.0.0.1:{server.server_address[1]}"
     idle_exit_sec = int(os.environ.get("LUMA_BRIDGE_IDLE_EXIT_SEC", "300"))
     if idle_exit_sec > 0:
         def idle_reaper():

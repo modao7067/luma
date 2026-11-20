@@ -1,11 +1,14 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import android.graphics.Bitmap
 import android.util.LruCache
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
@@ -16,7 +19,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material3.*
@@ -27,12 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -52,8 +54,11 @@ import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.Hyphens
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -75,6 +80,12 @@ import ru.noties.jlatexmath.JLatexMathDrawable
 internal val LocalMarkdownNestingDepth = compositionLocalOf { 0 }
 internal val LocalMarkdownCardInitiallyExpanded = compositionLocalOf { false }
 private val LocalMarkdownPluginAuthUrl = compositionLocalOf<String?> { null }
+private val LocalEditorialMarkdown = compositionLocalOf { true }
+private val LocalMarkdownTextColor = compositionLocalOf { Color.Unspecified }
+private val LocalListNestingDepth = compositionLocalOf { 0 }
+private val LocalQuoteNestingDepth = compositionLocalOf { 0 }
+private val LocalMarkdownIndentDp = compositionLocalOf { 0.dp }
+private val LocalMarkdownStreamingTail = compositionLocalOf { false }
 
 internal const val MAX_CARD_MARKDOWN_CHARS = 128 * 1024
 internal const val MAX_INLINE_MATH_CHARS = 512
@@ -88,11 +99,12 @@ private data class FormulaCacheKey(
 )
 
 @Immutable
-private data class RenderedFormula(
+internal data class RenderedFormula(
     val bitmap: ImageBitmap,
     val widthPx: Int,
     val heightPx: Int,
     val verticalAlign: PlaceholderVerticalAlign = PlaceholderVerticalAlign.Center,
+    val baselineFraction: Float = 0.78f,
 )
 
 private val formulaRenderLock = Any()
@@ -140,7 +152,9 @@ private fun renderAndCacheFormula(
             val canvas = android.graphics.Canvas(bmp)
             drawable.setBounds(0, 0, w, h)
             drawable.draw(canvas)
-            RenderedFormula(bmp.asImageBitmap(), w, h, PlaceholderVerticalAlign.Center)
+            val baseline = runCatching { drawable.icon().baseLine }.getOrDefault(0.78f)
+                .let { if (it.isFinite()) it.coerceIn(0.25f, 0.95f) else 0.78f }
+            RenderedFormula(bmp.asImageBitmap(), w, h, PlaceholderVerticalAlign.Center, baseline)
         }
     }.getOrNull() ?: return null
     synchronized(formulaBitmapCache) { formulaBitmapCache.put(key, rendered) }
@@ -301,7 +315,12 @@ private fun Node.children(): List<Node> = buildList {
 }
 
 @Composable
-internal fun NativeMarkdown(source: String, onFileLink: ((String) -> Unit)? = null, presentation: MarkdownPresentation? = null) {
+internal fun NativeMarkdown(
+    source: String,
+    onFileLink: ((String) -> Unit)? = null,
+    presentation: MarkdownPresentation? = null,
+    editorial: Boolean = true,
+) {
     val context = LocalContext.current
     val mediaContext = LocalMediaContext.current
     val mediaActions = LocalMediaActions.current
@@ -321,66 +340,187 @@ internal fun NativeMarkdown(source: String, onFileLink: ((String) -> Unit)? = nu
     val nodes = remember(shown.document) { shown.document.blocks.map { it.node } }
     val offsets = remember(shown.document) { shown.document.blocks.map { it.offset } }
     val pluginAuthUrl = remember(nodes) { findPluginAuthUrl(nodes) }
-    CompositionLocalProvider(LocalMarkdownPluginAuthUrl provides pluginAuthUrl) {
+    CompositionLocalProvider(
+        LocalMarkdownPluginAuthUrl provides pluginAuthUrl,
+        LocalEditorialMarkdown provides editorial,
+        LocalListNestingDepth provides 0,
+        LocalQuoteNestingDepth provides 0,
+        LocalMarkdownIndentDp provides 0.dp,
+        LocalMarkdownStreamingTail provides !shown.document.complete,
+    ) {
         LumaSelectionContainer {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                MarkdownChildren(nodes, shown.visibleUnits, fileLink, keys = offsets)
+            Column(verticalArrangement = Arrangement.spacedBy(11.dp), modifier = Modifier.fillMaxWidth()) {
+                MarkdownChildren(
+                    nodes = nodes,
+                    budget = shown.visibleUnits,
+                    onFileLink = fileLink,
+                    keys = offsets,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MarkdownChildren(nodes: List<MarkdownAst>, budget: Int, onFileLink: ((String) -> Unit)?, keys: List<Int>? = null) {
+private fun MarkdownChildren(
+    nodes: List<MarkdownAst>,
+    budget: Int,
+    onFileLink: ((String) -> Unit)?,
+    keys: List<Int>? = null,
+) {
+    val parentStreamingTail = LocalMarkdownStreamingTail.current
     var remaining = budget
     nodes.forEachIndexed { index, child ->
         if (remaining > 0) {
             val full = remaining >= child.revealUnits
+            val childStreamingTail = parentStreamingTail && index == nodes.lastIndex
             key(keys?.get(index) ?: index) {
-                MarkdownBlock(
-                    node = child,
-                    onFileLink = onFileLink,
-                    budget = if (full) Int.MAX_VALUE else remaining,
-                    isFirstBlock = index == 0,
-                )
+                CompositionLocalProvider(LocalMarkdownStreamingTail provides childStreamingTail) {
+                    MarkdownBlock(
+                        node = child,
+                        onFileLink = onFileLink,
+                        budget = if (full) Int.MAX_VALUE else remaining,
+                        isFirstBlock = index == 0,
+                    )
+                }
             }
             remaining = (remaining - child.revealUnits).coerceAtLeast(0)
         }
     }
 }
 
+private data class ListIndentSpec(val markerStart: Dp, val slotWidth: Dp, val childIndent: Dp)
+
+private fun listIndentSpec(
+    ordered: Boolean,
+    listDepth: Int,
+    parentIndent: Dp,
+    maxNumber: Int,
+): ListIndentSpec {
+    val slot = if (ordered) {
+        when {
+            maxNumber >= 100 -> 30.dp
+            maxNumber >= 10 -> 24.dp
+            else -> 18.dp
+        }
+    } else {
+        when (listDepth) {
+            0 -> 14.dp
+            1 -> 12.dp
+            else -> 10.dp
+        }
+    }
+    val maxMarkerStart = if (ordered) {
+        when (listDepth) {
+            0 -> 0.dp
+            1 -> 14.dp
+            else -> 18.dp
+        }
+    } else {
+        when (listDepth) {
+            0 -> 0.dp
+            1 -> 14.dp
+            else -> 22.dp
+        }
+    }
+    val markerStart = minOf(parentIndent, maxMarkerStart)
+    val childIndent = markerStart + slot
+    return ListIndentSpec(markerStart, slot, childIndent)
+}
+
+private fun bulletMarkerForDepth(depth: Int): String = when (depth) {
+    0 -> "•"
+    1 -> "◦"
+    else -> "▪"
+}
+
+private fun markerAlphaForDepth(depth: Int): Float = when (depth) {
+    0 -> 0.78f
+    1 -> 0.66f
+    else -> 0.56f
+}
+
 @Composable
-private fun MarkdownBlock(node: MarkdownAst, onFileLink: ((String) -> Unit)?, budget: Int, isFirstBlock: Boolean = false) {
+private fun MarkdownBlock(
+    node: MarkdownAst,
+    onFileLink: ((String) -> Unit)?,
+    budget: Int,
+    isFirstBlock: Boolean = false,
+) {
     val colors = MaterialTheme.colorScheme
     val standaloneCatalogId = remember(node) { extractStandalonePluginCatalogId(node) }
     if (standaloneCatalogId != null) {
         MarkdownPluginCard(standaloneCatalogId, LocalMarkdownPluginAuthUrl.current)
         return
     }
+    val indent = LocalMarkdownIndentDp.current
+    val indentModifier = if (indent > 0.dp) Modifier.padding(start = indent) else Modifier
+    val useEditorial = LocalEditorialMarkdown.current
     when (node.kind) {
         MarkdownKind.PARAGRAPH -> {
+            val bodyStyle = if (useEditorial) {
+                editorialBodyStyle()
+            } else {
+                MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
+            }
             val inlineCatalogIds = remember(node) { extractInlinePluginCatalogIds(node) }
-            if (inlineCatalogIds.isEmpty()) {
-                RichText(node, MaterialTheme.typography.bodyLarge, onFileLink, budget)
+            val media = remember(node) { markdownImages(node, resourceLinks = true) }
+            val mediaBudget = if (budget == Int.MAX_VALUE) media.size else (budget - node.inlineUnits).coerceIn(0, media.size)
+            if (indent > 0.dp && (mediaBudget > 0 || inlineCatalogIds.isNotEmpty())) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(indentModifier) {
+                        RichText(node, bodyStyle, onFileLink, budget, emitMedia = false)
+                    }
+                    if (mediaBudget > 0) {
+                        DisableSelection { MessageMedia(media.take(mediaBudget)) }
+                    }
+                    inlineCatalogIds.forEach { id ->
+                        MarkdownPluginCard(id, LocalMarkdownPluginAuthUrl.current)
+                    }
+                }
+            } else if (inlineCatalogIds.isEmpty()) {
+                Box(indentModifier) {
+                    RichText(node, bodyStyle, onFileLink, budget)
+                }
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    RichText(node, MaterialTheme.typography.bodyLarge, onFileLink, budget)
+                    Box(indentModifier) {
+                        RichText(node, bodyStyle, onFileLink, budget)
+                    }
                     inlineCatalogIds.forEach { id ->
                         MarkdownPluginCard(id, LocalMarkdownPluginAuthUrl.current)
                     }
                 }
             }
         }
-        MarkdownKind.HEADING -> Column(
-            modifier = if (isFirstBlock) Modifier else Modifier.padding(top = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            RichText(node, when (node.number) {
-                1 -> MaterialTheme.typography.headlineMedium
-                2 -> MaterialTheme.typography.titleLarge
-                3 -> MaterialTheme.typography.titleMedium
-                else -> MaterialTheme.typography.titleSmall
-            }, onFileLink, budget)
+        MarkdownKind.HEADING -> {
+            val topPad = if (isFirstBlock) 0.dp else when (node.number) {
+                1 -> 12.dp
+                2 -> 10.dp
+                3 -> 6.dp
+                else -> 4.dp
+            }
+            val headingStyle = if (useEditorial) {
+                editorialHeadingStyle(node.number)
+            } else {
+                when (node.number) {
+                    1 -> MaterialTheme.typography.headlineMedium
+                    2 -> MaterialTheme.typography.titleLarge
+                    3 -> MaterialTheme.typography.titleMedium
+                    else -> MaterialTheme.typography.titleSmall
+                }.copy(lineBreak = LineBreak.Simple)
+            }
+            val headingMode = if (budget < node.inlineUnits || LocalMarkdownStreamingTail.current) {
+                TypesetMode.STREAMING
+            } else {
+                TypesetMode.BALANCED_LEFT
+            }
+            Column(
+                modifier = indentModifier.padding(top = topPad),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                RichText(node, headingStyle, onFileLink, budget, typesetMode = headingMode)
+            }
         }
         MarkdownKind.CODE_BLOCK -> {
             if (LocalMarkdownNestingDepth.current == 0 && isMarkdownContainerLanguage(node.info)) {
@@ -395,38 +535,79 @@ private fun MarkdownBlock(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
                     code = node.literal,
                     language = node.info,
                     visibleCharacters = budget,
-                    softWrap = isMarkdownContainerLanguage(node.info),
                 )
             }
         }
         MarkdownKind.MATH -> if (budget >= node.revealUnits) FormulaBlock(node.literal)
         MarkdownKind.QUOTE -> {
             val quoteBudget = if (budget >= node.revealUnits) Int.MAX_VALUE else budget
+            val quoteDepth = LocalQuoteNestingDepth.current
+            val outerStart = minOf(indent, 14.dp)
+            val innerStart = if (quoteDepth >= 1) 8.dp else 10.dp
             Box(
-                Modifier.fillMaxWidth().clip(LumaCardShape(12.dp))
-                    .background(contentBlockColors(colors).surface)
-                    .drawBehind { drawRoundRect(colors.primary.copy(alpha = 0.55f), Offset.Zero, Size(2.5.dp.toPx(), size.height), CornerRadius(2.dp.toPx())) }
-                    .padding(start = 14.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
-            ) { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { MarkdownChildren(node.children, quoteBudget, onFileLink) } }
-        }
-        MarkdownKind.BULLET_LIST, MarkdownKind.ORDERED_LIST -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            var remaining = budget
-            node.children.forEachIndexed { index, child ->
-                val marker = if (node.kind == MarkdownKind.ORDERED_LIST) "${node.number + index}." else "•"
-                if (remaining > 0) {
-                    val itemFull = remaining >= marker.length + child.revealUnits
-                    val shownMarker = if (itemFull) marker else marker.substring(0, markdownVisibleEnd(marker, remaining))
-                    val bodyBudget = if (itemFull) Int.MAX_VALUE else (remaining - marker.length).coerceAtLeast(0)
-                    key(index) {
-                        MarkdownListItem(shownMarker, child.children, bodyBudget, onFileLink)
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = outerStart)
+                    .drawBehind {
+                        drawRoundRect(
+                            colors.outline.copy(alpha = 0.48f),
+                            Offset.Zero,
+                            Size(2.dp.toPx(), size.height),
+                            CornerRadius(1.dp.toPx()),
+                        )
+                    }
+                    .padding(start = innerStart, top = 2.dp, bottom = 2.dp),
+            ) {
+                CompositionLocalProvider(
+                    LocalMarkdownTextColor provides colors.onSurface.copy(alpha = 0.82f),
+                    LocalQuoteNestingDepth provides quoteDepth + 1,
+                    LocalMarkdownIndentDp provides 0.dp,
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MarkdownChildren(node.children, quoteBudget, onFileLink)
                     }
                 }
-                remaining = if (remaining == Int.MAX_VALUE) Int.MAX_VALUE else (remaining - marker.length - child.revealUnits).coerceAtLeast(0)
+            }
+        }
+        MarkdownKind.BULLET_LIST, MarkdownKind.ORDERED_LIST -> {
+            val listDepth = LocalListNestingDepth.current
+            val ordered = node.kind == MarkdownKind.ORDERED_LIST
+            val maxNum = if (ordered) node.number + (node.children.size - 1).coerceAtLeast(0) else 0
+            val indentSpec = listIndentSpec(ordered, listDepth, indent, maxNum)
+            val listStreamingTail = LocalMarkdownStreamingTail.current
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                var remaining = budget
+                node.children.forEachIndexed { index, child ->
+                    val marker = if (ordered) "${node.number + index}." else bulletMarkerForDepth(listDepth)
+                    if (remaining > 0) {
+                        val itemFull = remaining >= marker.length + child.revealUnits
+                        val shownMarker = if (itemFull) marker else marker.substring(0, markdownVisibleEnd(marker, remaining))
+                        val bodyBudget = if (itemFull) Int.MAX_VALUE else (remaining - marker.length).coerceAtLeast(0)
+                        val itemStreamingTail = listStreamingTail && index == node.children.lastIndex
+                        key(index) {
+                            CompositionLocalProvider(LocalMarkdownStreamingTail provides itemStreamingTail) {
+                                MarkdownListItem(shownMarker, listDepth, indentSpec, child.children, bodyBudget, onFileLink)
+                            }
+                        }
+                    }
+                    remaining = if (remaining == Int.MAX_VALUE) Int.MAX_VALUE else (remaining - marker.length - child.revealUnits).coerceAtLeast(0)
+                }
             }
         }
         MarkdownKind.TABLE -> MarkdownTable(node, onFileLink, budget)
-        MarkdownKind.RULE -> HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.45f))
-        MarkdownKind.HTML_BLOCK -> Text(node.literal.substring(0, markdownVisibleEnd(node.literal, budget)), style = MaterialTheme.typography.bodyLarge)
+        MarkdownKind.RULE -> HorizontalDivider(
+            Modifier.padding(vertical = 4.dp),
+            thickness = 0.5.dp,
+            color = colors.outlineVariant.copy(alpha = 0.45f),
+        )
+        MarkdownKind.HTML_BLOCK -> {
+            val bodyStyle = if (useEditorial) {
+                editorialBodyStyle()
+            } else {
+                MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
+            }
+            Text(node.literal.substring(0, markdownVisibleEnd(node.literal, budget)), modifier = indentModifier, style = bodyStyle)
+        }
         else -> MarkdownChildren(node.children, budget, onFileLink)
     }
 }
@@ -434,20 +615,85 @@ private fun MarkdownBlock(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
 @Composable
 private fun MarkdownListItem(
     marker: String,
+    listDepth: Int,
+    indentSpec: ListIndentSpec,
     children: List<MarkdownAst>,
     bodyBudget: Int,
     onFileLink: ((String) -> Unit)?,
 ) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth()) {
-        Text(
-            marker,
-            Modifier.widthIn(min = 24.dp),
-            color = colors.primary,
-            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
-        )
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            MarkdownChildren(children, bodyBudget, onFileLink)
+    val useEditorial = LocalEditorialMarkdown.current
+    val bodyStyle = if (useEditorial) {
+        editorialBodyStyle()
+    } else {
+        MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
+    }
+    val markerStyle = bodyStyle.copy(
+        fontWeight = FontWeight.Medium,
+        fontFeatureSettings = TABULAR_NUMS_FEATURE,
+    )
+    val markerColor = colors.onSurfaceVariant.copy(alpha = markerAlphaForDepth(listDepth))
+    if (children.isEmpty()) {
+        Row(Modifier.fillMaxWidth().padding(start = indentSpec.markerStart)) {
+            Text(marker, Modifier.widthIn(min = indentSpec.slotWidth), color = markerColor, style = markerStyle)
+        }
+        return
+    }
+    val first = children.first()
+    val firstFull = bodyBudget >= first.revealUnits
+    val firstBudget = if (firstFull) Int.MAX_VALUE else bodyBudget
+    val restBudget = if (bodyBudget == Int.MAX_VALUE) Int.MAX_VALUE else (bodyBudget - first.revealUnits).coerceAtLeast(0)
+    val rest = if (children.size > 1) children.subList(1, children.size) else emptyList()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (first.kind == MarkdownKind.PARAGRAPH && extractStandalonePluginCatalogId(first) == null) {
+            val inlineCatalogIds = remember(first) { extractInlinePluginCatalogIds(first) }
+            val media = remember(first) { markdownImages(first, resourceLinks = true) }
+            val mediaBudget = if (firstBudget == Int.MAX_VALUE) media.size else (firstBudget - first.inlineUnits).coerceIn(0, media.size)
+            val firstStreamingTail = LocalMarkdownStreamingTail.current && rest.isEmpty()
+            Row(Modifier.fillMaxWidth().padding(start = indentSpec.markerStart)) {
+                Text(
+                    marker,
+                    Modifier.widthIn(min = indentSpec.slotWidth).alignByBaseline(),
+                    color = markerColor,
+                    style = markerStyle,
+                )
+                Box(Modifier.weight(1f).alignByBaseline()) {
+                    CompositionLocalProvider(LocalMarkdownStreamingTail provides firstStreamingTail) {
+                        RichText(first, bodyStyle, onFileLink, firstBudget, emitMedia = false)
+                    }
+                }
+            }
+            if (mediaBudget > 0) {
+                DisableSelection { MessageMedia(media.take(mediaBudget)) }
+            }
+            inlineCatalogIds.forEach { id ->
+                MarkdownPluginCard(id, LocalMarkdownPluginAuthUrl.current)
+            }
+        } else {
+            Row(Modifier.fillMaxWidth().padding(start = indentSpec.markerStart)) {
+                Text(
+                    marker,
+                    Modifier.widthIn(min = indentSpec.slotWidth),
+                    color = markerColor,
+                    style = markerStyle,
+                )
+                Box(Modifier.weight(1f)) {
+                    CompositionLocalProvider(
+                        LocalListNestingDepth provides listDepth + 1,
+                        LocalMarkdownIndentDp provides 0.dp,
+                    ) {
+                        MarkdownBlock(first, onFileLink, firstBudget, isFirstBlock = true)
+                    }
+                }
+            }
+        }
+        if (rest.isNotEmpty() && restBudget > 0) {
+            CompositionLocalProvider(
+                LocalListNestingDepth provides listDepth + 1,
+                LocalMarkdownIndentDp provides indentSpec.childIndent,
+            ) {
+                MarkdownChildren(rest, restBudget, onFileLink)
+            }
         }
     }
 }
@@ -483,93 +729,41 @@ private fun RichText(
     onFileLink: ((String) -> Unit)?,
     budget: Int = Int.MAX_VALUE,
     resourceCards: Boolean = true,
+    emitMedia: Boolean = true,
+    typesetMode: TypesetMode? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val isDark = codePaletteDark(colors)
-    val color = colors.onSurface
-    val inlineCodeColor = if (isDark) Color(0xFFE8A874) else Color(0xFF924418)
-    val codeBackground = contentBlockColors(colors).header
+    val color = LocalMarkdownTextColor.current.let { if (it == Color.Unspecified) colors.onSurface else it }
+    val linkColor = if (isDark) Color(0xFF6DA7EC) else Color(0xFF184F95)
+    val inlineCodeColor = if (isDark) Color(0xFFE29E74) else Color(0xFFA64622)
     val mono = terminalFont()
     val context = LocalContext.current
     val density = LocalDensity.current
+    val useEditorial = LocalEditorialMarkdown.current
+    val streamingTail = LocalMarkdownStreamingTail.current
     val sizePx = with(density) { (if (style.fontSize.isUnspecified) 16.sp else style.fontSize).toPx() }
     val signature = node
-    val rich = remember(signature, color, inlineCodeColor, mono, sizePx, onFileLink, context) {
-        buildRichText(context, node, color, inlineCodeColor, mono, sizePx, onFileLink)
-    }
-    val inline = remember(rich, density) {
-        if (rich.second.isEmpty()) emptyMap()
-        else rich.second.mapValues { (_, formula) ->
-            InlineTextContent(
-                Placeholder(
-                    with(density) { formula.widthPx.toSp() },
-                    with(density) { formula.heightPx.toSp() },
-                    formula.verticalAlign,
-                ),
-            ) {
-                Image(
-                    bitmap = formula.bitmap,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        }
+    val rich = remember(signature, color, linkColor, inlineCodeColor, mono, sizePx, onFileLink, context) {
+        buildRichText(context, node, color, linkColor, inlineCodeColor, mono, sizePx, onFileLink)
     }
     val visible = remember(rich.first, budget) { visibleMarkdownText(rich.first, budget) }
-    val codeRanges = remember(visible) { visible.getStringAnnotations(INLINE_CODE_BACKGROUND, 0, visible.length) }
-    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
-    val backing = if (codeRanges.isEmpty()) Modifier else Modifier.drawWithCache {
-        val corner = CornerRadius(5.dp.toPx(), 5.dp.toPx())
-        val vInset = 1.5.dp.toPx()
-        val hPad = 3.dp.toPx()
-        val rects = buildList {
-            val result = layout.value ?: return@buildList
-            val raw = result.layoutInput.text.text
-            for (range in codeRanges) {
-                val start = range.start.coerceIn(0, raw.length)
-                val end = range.end.coerceIn(start, raw.length)
-                if (start >= end) continue
-                val firstLine = result.getLineForOffset(start)
-                val lastLine = result.getLineForOffset((end - 1).coerceAtLeast(start))
-                for (line in firstLine..lastLine) {
-                    var s = maxOf(start, result.getLineStart(line))
-                    var e = minOf(end, result.getLineEnd(line, visibleEnd = true))
-                    while (s < e && raw[s].isWhitespace()) s++
-                    while (e > s && raw[e - 1].isWhitespace()) e--
-                    if (s >= e) continue
-                    val bounds = result.getPathForRange(s, e).getBounds()
-                    if (!bounds.isEmpty) {
-                        val top = result.getLineTop(line) + vInset
-                        val bottom = (result.getLineBottom(line) - vInset).coerceAtLeast(top + 1f)
-                        val left = (bounds.left - hPad).coerceAtLeast(0f)
-                        val right = (bounds.right + hPad).coerceAtMost(result.size.width.toFloat())
-                        add(androidx.compose.ui.geometry.Rect(left, top, right, bottom))
-                    }
-                }
-            }
-        }
-        onDrawBehind {
-            rects.forEach { rect ->
-                drawRoundRect(
-                    color = codeBackground,
-                    topLeft = rect.topLeft,
-                    size = rect.size,
-                    cornerRadius = corner,
-                )
-            }
-        }
+    val media = remember(signature, resourceCards, emitMedia) {
+        if (emitMedia) markdownImages(node, resourceCards) else emptyList()
     }
-    val media = remember(signature, resourceCards) { markdownImages(node, resourceCards) }
-    val mediaBudget = if (budget == Int.MAX_VALUE) media.size else (budget - node.inlineUnits).coerceIn(0, media.size)
+    val mediaBudget = if (!emitMedia) 0 else if (budget == Int.MAX_VALUE) media.size else (budget - node.inlineUnits).coerceIn(0, media.size)
+    val resolvedMode = typesetMode ?: when {
+        budget < node.inlineUnits || streamingTail -> TypesetMode.STREAMING
+        useEditorial -> TypesetMode.JUSTIFY
+        else -> TypesetMode.BALANCED_LEFT
+    }
     if (visible.isNotBlank() && mediaBudget > 0) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(visible, modifier = backing, style = style, color = color, inlineContent = inline,
-                onTextLayout = { if (codeRanges.isNotEmpty()) layout.value = it })
+            TypesetText(visible, style, color, resolvedMode, mono, rich.second)
             DisableSelection { MessageMedia(media.take(mediaBudget)) }
         }
     } else {
-        if (visible.isNotBlank()) Text(visible, modifier = backing, style = style, color = color, inlineContent = inline,
-            onTextLayout = { if (codeRanges.isNotEmpty()) layout.value = it })
+        if (visible.isNotBlank()) TypesetText(visible, style, color, resolvedMode, mono, rich.second)
         if (mediaBudget > 0) DisableSelection { MessageMedia(media.take(mediaBudget)) }
     }
 }
@@ -629,12 +823,12 @@ internal fun markdownImages(node: MarkdownAst, resourceLinks: Boolean = true): L
     visit(node)
 }
 
-internal const val INLINE_CODE_BACKGROUND = "luma.inline-code-background"
 private val inlineMath = Regex("\\\\\\((.+?)\\\\\\)|(?<!\\\\)\\$([^$\\n]+?)\\$")
 private fun buildRichText(
     context: android.content.Context,
     node: MarkdownAst,
     color: Color,
+    linkColor: Color,
     accent: Color,
     mono: FontFamily,
     sizePx: Float,
@@ -642,21 +836,15 @@ private fun buildRichText(
 ): Pair<AnnotatedString, Map<String, RenderedFormula>> {
     val images = linkedMapOf<String, RenderedFormula>()
     val argb = color.toArgb()
+    val codeStyle = SpanStyle(
+        fontFamily = mono,
+        fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
+        fontSize = 0.88.em,
+        letterSpacing = 0.sp,
+        fontWeight = FontWeight.Medium,
+        color = accent,
+    )
     val result = buildAnnotatedString {
-        fun appendCodeFallback(literal: String) {
-            pushStringAnnotation(INLINE_CODE_BACKGROUND, "")
-            withStyle(
-                SpanStyle(
-                    fontFamily = mono,
-                    fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
-                    fontSize = 0.88.em,
-                    letterSpacing = 0.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = accent,
-                ),
-            ) { append(" $literal ") }
-            pop()
-        }
         fun renderText(rawText: String) {
             val text = if ("plugin-card" in rawText) pluginCardStripInlineRegex.replace(rawText, "") else rawText
             if (text.indexOf('$') < 0 && text.indexOf("\\(") < 0) {
@@ -668,7 +856,7 @@ private fun buildRichText(
                 append(text.substring(cursor, match.range.first))
                 val expression = match.groups[1]?.value ?: match.groups[2]!!.value
                 if (expression.length > MAX_INLINE_MATH_CHARS) {
-                    appendCodeFallback(expression)
+                    withStyle(codeStyle) { append(expression) }
                 } else {
                     val rendered = renderAndCacheFormula(context, expression, sizePx, argb, padding = 0)
                     if (rendered == null) {
@@ -688,26 +876,13 @@ private fun buildRichText(
                 MarkdownKind.TEXT -> renderText(current.literal)
                 MarkdownKind.SOFT_BREAK -> append(" ")
                 MarkdownKind.HARD_BREAK -> append("\n")
-                MarkdownKind.CODE -> {
-                    pushStringAnnotation(INLINE_CODE_BACKGROUND, "")
-                    withStyle(
-                        SpanStyle(
-                            fontFamily = mono,
-                            fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
-                            fontSize = 0.88.em,
-                            letterSpacing = 0.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = accent,
-                        ),
-                    ) { append(" ${current.literal} ") }
-                    pop()
-                }
+                MarkdownKind.CODE -> withStyle(codeStyle) { append(current.literal) }
                 MarkdownKind.STRONG -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { current.children.forEach(::visit) }
                 MarkdownKind.EMPHASIS -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { current.children.forEach(::visit) }
                 MarkdownKind.STRIKE -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { current.children.forEach(::visit) }
                 MarkdownKind.LINK -> {
                     val destination = current.destination
-                    val linkStyle = TextLinkStyles(SpanStyle(color = color, textDecoration = TextDecoration.Underline))
+                    val linkStyle = TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
                     when {
                         destination.startsWith("https://") || destination.startsWith("http://") -> withLink(LinkAnnotation.Url(destination, linkStyle)) {
                             current.children.forEach(::visit)
@@ -752,11 +927,11 @@ private fun MarkdownTable(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
     val headerBg = contentBlockColors(colors).header
     val stripeBg = contentBlockColors(colors).header.copy(alpha = 0.45f)
     val density = LocalDensity.current
-    val hPadPx = with(density) { 12.dp.roundToPx() }
-    val vPadPx = with(density) { 8.dp.roundToPx() }
-    val minColPx = with(density) { 72.dp.roundToPx() }
-    val maxColPx = with(density) { 260.dp.roundToPx() }
-    val strokePx = with(density) { 1.dp.toPx() }
+    val hPadPx = with(density) { 10.dp.roundToPx() }
+    val vPadPx = with(density) { 7.dp.roundToPx() }
+    val minColPx = with(density) { 44.dp.roundToPx() }
+    val maxColPx = with(density) { 248.dp.roundToPx() }
+    val strokePx = with(density) { 0.5.dp.toPx() }
     val gridOffsets = remember { mutableStateOf(intArrayOf() to intArrayOf()) }
     Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
         LiquidSurface(
@@ -779,7 +954,7 @@ private fun MarkdownTable(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
                                 borderColor,
                                 Offset(0f, top),
                                 Offset(size.width, top),
-                                strokeWidth = if (r == 1) strokePx * 1.3f else strokePx,
+                                strokeWidth = if (r == 1) strokePx * 1.6f else strokePx,
                             )
                         }
                         for (c in 1 until colOffsets.size) {
@@ -802,12 +977,18 @@ private fun MarkdownTable(node: MarkdownAst, onFileLink: ((String) -> Unit)?, bu
                                 if (cell != null && remaining > 0) {
                                     RichText(
                                         cell,
-                                        MaterialTheme.typography.bodyMedium.copy(
-                                            fontWeight = if (cell.header) FontWeight.Bold else FontWeight.Normal,
-                                        ),
+                                        if (LocalEditorialMarkdown.current) {
+                                            editorialTableStyle(cell.header)
+                                        } else {
+                                            MaterialTheme.typography.bodyMedium.copy(
+                                                fontFeatureSettings = TABULAR_NUMS_FEATURE,
+                                                fontWeight = if (cell.header) FontWeight.SemiBold else FontWeight.Normal,
+                                            )
+                                        },
                                         onFileLink,
                                         if (remaining >= cell.revealUnits) Int.MAX_VALUE else remaining,
                                         resourceCards = false,
+                                        typesetMode = TypesetMode.BALANCED_LEFT,
                                     )
                                 }
                             }
@@ -903,15 +1084,19 @@ internal fun MarkdownDocumentCard(
     val thumbBg = contentBlockColors(colors).selected
     val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
     val headerCaption = language.trim().substringBefore(' ').lowercase().ifBlank { "markdown" }
-    val copyMarkdown = {
-        runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }
-        copied = true
+    val haptic = LocalHapticFeedback.current
+    val copyMarkdown: () -> Unit = {
+        haptic.tick()
+        runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }.onSuccess {
+            copied = true
+        }
     }
     val effectiveShowSource = showSource || exceedsPreviewCap
     val retainedPresentationState = remember { mutableStateOf<MarkdownPresentation?>(null) }
     Surface(
         shape = LumaCardShape(12.dp),
         color = outerBodyBg,
+        border = BorderStroke(0.5.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFF0B0B0B).copy(alpha = 0.09f)),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("markdown-document-card")
@@ -973,6 +1158,7 @@ internal fun MarkdownDocumentCard(
                                 Modifier
                                     .size(28.dp)
                                     .clip(LumaCardShape(8.dp))
+                                    .blockHorizontalPageSwipe(allowVerticalScroll = true)
                                     .clickable(onClick = copyMarkdown)
                                     .semantics { contentDescription = tr("复制", "Copy") },
                                 contentAlignment = Alignment.Center,
@@ -1092,6 +1278,7 @@ internal fun MarkdownDocumentCard(
                             Modifier
                                 .size(28.dp)
                                 .clip(LumaCardShape(8.dp))
+                                .blockHorizontalPageSwipe(allowVerticalScroll = true)
                                 .clickable(onClick = copyMarkdown)
                                 .semantics { contentDescription = tr("复制", "Copy") },
                             contentAlignment = Alignment.Center,
@@ -1116,6 +1303,7 @@ internal fun MarkdownDocumentCard(
                                         source = visibleCode,
                                         onFileLink = onFileLink,
                                         presentation = innerPresentation,
+                                        editorial = LocalEditorialMarkdown.current,
                                     )
                                 }
                             }
@@ -1239,7 +1427,7 @@ internal fun CodeBlock(
     bodyHorizontalScrollState: ScrollState = rememberScrollState(),
     visibleCharacters: Int = Int.MAX_VALUE,
     caption: String = language.ifBlank { tr("代码", "Code") },
-    softWrap: Boolean = false,
+    softWrap: Boolean = true,
 ) {
     val visibleEnd = markdownVisibleEnd(code, visibleCharacters)
     val clipboard = LocalClipboardManager.current
@@ -1255,16 +1443,20 @@ internal fun CodeBlock(
     val blockColors = contentBlockColors(colors)
     val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
     val headerCaption = if (caption == language && language.isNotBlank()) caption.lowercase() else caption
+    val wrapIndicatorColor = colors.onSurfaceVariant.copy(alpha = if (dark) 0.46f else 0.40f)
+    val wrapPath = remember { Path() }
+    var codeLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     Surface(
         shape = LumaCardShape(12.dp),
         color = blockColors.surface,
+        border = BorderStroke(0.5.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFF0B0B0B).copy(alpha = 0.09f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth()) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(30.dp)
+                    .height(32.dp)
                     .padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
@@ -1280,8 +1472,9 @@ internal fun CodeBlock(
                         .size(28.dp)
                         .clip(LumaCardShape(8.dp))
                         .clickable {
-                            runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }
-                            copied = true
+                            runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }.onSuccess {
+                                copied = true
+                            }
                         }
                         .semantics { contentDescription = tr("复制", "Copy") },
                     contentAlignment = Alignment.Center,
@@ -1291,29 +1484,56 @@ internal fun CodeBlock(
                     }
                 }
             }
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = if (dark) Color.White.copy(alpha = 0.08f) else Color(0xFF0B0B0B).copy(alpha = 0.07f),
+            )
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                    .then(if (softWrap) Modifier.padding(vertical = 9.dp) else Modifier.padding(horizontal = 12.dp, vertical = 9.dp))
                     .heightIn(max = 242.dp)
                     .clipToBounds()
-                    .codeBlockScrollBoundary(bodyVerticalScrollState, bodyHorizontalScrollState)
+                    .codeBlockScrollBoundary(bodyVerticalScrollState, if (softWrap) null else bodyHorizontalScrollState)
                     .verticalScroll(bodyVerticalScrollState),
             ) {
-                LumaSelectionContainer {
-                    Text(
-                        rememberHighlightedCode(code, language, colors).let { if (visibleEnd == code.length) it else it.subSequence(0, visibleEnd) },
-                        Modifier
-                            .fillMaxWidth()
-                            .then(if (softWrap) Modifier else Modifier.horizontalScroll(bodyHorizontalScrollState)),
-                        fontFamily = terminalFont(),
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
-                            letterSpacing = 0.sp,
-                            lineHeight = 19.sp,
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (softWrap) {
+                                Modifier
+                                    .drawBehind {
+                                        val margin = 260.dp.toPx()
+                                        val visTop = (bodyVerticalScrollState.value.toFloat() - margin).coerceAtLeast(0f)
+                                        val visBottom = bodyVerticalScrollState.value.toFloat() + margin * 2f
+                                        drawSoftWrapIndicators(codeLayout, wrapIndicatorColor, wrapPath, visTop, visBottom)
+                                    }
+                                    .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END)
+                            } else {
+                                Modifier
+                            },
                         ),
-                        softWrap = softWrap,
-                    )
+                ) {
+                    LumaSelectionContainer {
+                        Text(
+                            rememberHighlightedCode(code, language, colors).let { if (visibleEnd == code.length) it else it.subSequence(0, visibleEnd) },
+                            Modifier
+                                .fillMaxWidth()
+                                .then(if (softWrap) Modifier else Modifier.horizontalScroll(bodyHorizontalScrollState)),
+                            fontFamily = terminalFont(),
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
+                                fontSize = 12.5.sp,
+                                letterSpacing = 0.sp,
+                                lineHeight = 19.5.sp,
+                                lineBreak = LineBreak.Simple,
+                                hyphens = Hyphens.None,
+                            ),
+                            softWrap = softWrap,
+                            onTextLayout = { codeLayout = it },
+                        )
+                    }
                 }
             }
         }
@@ -1340,6 +1560,37 @@ internal fun rememberHighlightedCode(code: String, language: String, colors: Col
         }
     }
     return result.value ?: remember(code) { AnnotatedString(code) }
+}
+
+@Composable
+internal fun rememberHighlightedDiffHunk(
+    lines: List<DiffLine>,
+    language: String,
+    colors: ColorScheme,
+): AnnotatedString {
+    val dark = codePaletteDark(colors)
+    val totalChars = remember(lines) { lines.sumOf { it.text.length + 3 } }
+    val immediate = remember(lines, language, dark) {
+        if (totalChars <= IMMEDIATE_HIGHLIGHT_LIMIT) highlightedDiffHunk(lines, language, dark) else null
+    }
+    val result = remember(lines, language, dark) { mutableStateOf(immediate) }
+    LaunchedEffect(result) {
+        if (result.value != null) return@LaunchedEffect
+        result.value = withContext(Dispatchers.Default) {
+            val context = coroutineContext
+            highlightedDiffHunk(lines, language, dark) { context.ensureActive() }
+        }
+    }
+    return result.value ?: remember(lines) {
+        AnnotatedString(lines.joinToString("\n") { line ->
+            val prefix = when (line.kind) {
+                DiffLineKind.ADDITION -> "+ "
+                DiffLineKind.DELETION -> "- "
+                DiffLineKind.CONTEXT -> "  "
+            }
+            prefix + line.text
+        })
+    }
 }
 
 private sealed interface FormulaBlockState {

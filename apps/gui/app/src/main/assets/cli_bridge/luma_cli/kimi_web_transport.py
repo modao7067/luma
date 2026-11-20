@@ -23,6 +23,10 @@ _GATEWAYS = {}
 _GATEWAYS_LOCK = threading.Lock()
 MAX_RESPONSE = 64 * 1024 * 1024
 
+def _server_version_tuple(raw):
+    parts = re.findall(r"\d+", str(raw or "").split("-", 1)[0])
+    return tuple(int(p) for p in parts[:3]) if parts else ()
+
 class KimiWebRejected(Rejected):
     def __init__(self, code, message):
         self.code = code
@@ -179,6 +183,14 @@ class KimiWebSocket:
         self.sock.close()
         self.reader.close()
 
+def resolve_kimi_binary():
+    found = shutil.which("kimi")
+    if found:
+        return found
+    home = Path.home()
+    fallback = os.pathsep.join(str(home / rel) for rel in (".kimi-code/bin", ".local/bin"))
+    return shutil.which("kimi", path=fallback)
+
 class GatewayProcess:
     def __init__(self, gateway):
         self.gateway = gateway
@@ -195,6 +207,7 @@ class KimiWebGateway:
         self.lock = threading.RLock()
         self.observers = set()
         self.idle_timer = None
+        self.uses_turns_api = False
 
     def alive(self):
         return bool(self.handle.get("pid") and process_start(self.handle["pid"]) == self.handle.get("processStart"))
@@ -243,9 +256,13 @@ class KimiWebGateway:
             raise Rejected(tr("Kimi Web 必须启用认证", "Kimi Web authentication must be enabled"))
         if meta.get("backend") != "v2" or not meta.get("capabilities", {}).get("websocket"):
             raise KimiWebIncompatible(tr("Kimi Web 协议能力不匹配", "Kimi Web protocol capabilities do not match"))
+        ver = _server_version_tuple(meta.get("server_version"))
+        if ver and ver >= (3, 0):
+            raise KimiWebIncompatible(tr("Kimi Web 服务版本不兼容", "Incompatible Kimi Web server version"))
+        self.uses_turns_api = bool(ver and ver >= (2, 6))
 
     def launch(self, session):
-        binary = shutil.which("kimi")
+        binary = resolve_kimi_binary()
         if not binary:
             raise Rejected(tr("未找到 Kimi Code，请先在当前环境安装", "Kimi Code not found; install it in the current environment"))
         with socket.socket() as reserved:
@@ -411,6 +428,9 @@ class KimiWebPeer:
         self.gateway, self.session = gateway, session
         self.closed = False
         self.ready = threading.Event()
+        self.uses_turns_api = getattr(gateway, "uses_turns_api", False) is True
+        self.subscribed_agents = set()
+        self.sub_lock = threading.Lock()
         self.proc = GatewayProcess(gateway)
         self.socket = KimiWebSocket(gateway.api)
         self.changed, self.exited = changed, exited
@@ -419,8 +439,66 @@ class KimiWebPeer:
     def start_read(self):
         self.thread.start()
 
+    def enable_turns_api(self):
+        with self.sub_lock:
+            if self.closed:
+                return
+            self.uses_turns_api = True
+            need_main = "main" not in self.subscribed_agents
+            if need_main:
+                self.subscribed_agents.add("main")
+        if need_main:
+            try:
+                self.socket.send({
+                    "type": "subscribe",
+                    "request_id": "subscribe",
+                    "session_id": self.session.config["nativeId"],
+                    "agent_ids": ["main"],
+                })
+            except OSError:
+                with self.sub_lock:
+                    self.subscribed_agents.discard("main")
+
+    def ensure_agent_subscriptions(self, agent_ids):
+        if self.closed:
+            return
+        if not self.uses_turns_api:
+            if getattr(self.gateway, "uses_turns_api", False) is not True:
+                return
+            self.enable_turns_api()
+        new_ids = []
+        with self.sub_lock:
+            for aid in agent_ids:
+                if aid and aid not in self.subscribed_agents:
+                    self.subscribed_agents.add(aid)
+                    new_ids.append(aid)
+        if new_ids:
+            try:
+                self.socket.send({
+                    "type": "subscribe",
+                    "request_id": "sub:" + ",".join(new_ids),
+                    "session_id": self.session.config["nativeId"],
+                    "agent_ids": new_ids,
+                })
+            except OSError:
+                with self.sub_lock:
+                    for aid in new_ids:
+                        self.subscribed_agents.discard(aid)
+
     def read(self):
         try:
+            if self.uses_turns_api:
+                with self.sub_lock:
+                    need_main = "main" not in self.subscribed_agents
+                    if need_main:
+                        self.subscribed_agents.add("main")
+                if need_main:
+                    self.socket.send({
+                        "type": "subscribe",
+                        "request_id": "subscribe",
+                        "session_id": self.session.config["nativeId"],
+                        "agent_ids": ["main"],
+                    })
             while not self.closed:
                 frame = self.socket.receive()
                 kind = frame.get("type")
@@ -431,7 +509,14 @@ class KimiWebPeer:
                     self.socket.send({"type": "subscribe_v2", "id": "subscribe", "payload":
                         {"session_id": self.session.config["nativeId"], "transcript": {"*": "delta"}}})
                 elif kind == "ping":
-                    self.socket.send({"type": "pong", "payload": frame["payload"]})
+                    self.socket.send({"type": "pong", "payload": frame["payload"]} if "payload" in frame else {"type": "pong"})
+                elif kind == "response":
+                    if frame.get("request_id") == "subscribe":
+                        if frame.get("code"):
+                            raise Rejected(frame.get("msg") or tr("Kimi Web 订阅失败", "Kimi Web subscription failed"))
+                        self.ready.set()
+                    elif frame.get("code") and not self.ready.is_set():
+                        raise KimiWebIncompatible(frame.get("msg") or tr("Kimi Web 事件版本不兼容", "Incompatible Kimi Web event version"))
                 elif kind == "ack":
                     if frame.get("code"):
                         raise Rejected(tr("Kimi Web 订阅失败", "Kimi Web subscription failed"))

@@ -8,10 +8,10 @@ class ProcessCategoryTest {
     private fun native(kind: String) = ConversationItem(kind, "tool", kind = kind, outcome = "succeeded")
     private fun named(name: String) = native("tool").copy(id = name, toolName = name)
 
-    @Test fun categoriesCountNativeInvocationsNotFilesOrCommandGuesses() {
+    @Test fun categoriesCountNativeInvocationsAndSurfaceEdits() {
         val rows = listOf(native("commandExecution"), native("commandExecution").copy(id = "cat", text = "cat file", input = "cat file"),
             native("fileChange").copy(input = "a.kt\nb.kt")) + (1..3).map { named("read").copy(id = "read$it") } + native("reasoning")
-        assertEquals("6 次 shell、fileChange、read · 1 次 思考", processGroupCaption(rows, "pi"))
+        assertEquals("7 步 · 修改 1 处", processGroupCaption(rows, "pi"))
     }
     @Test fun codexKindsPreserveTheirNativeMeanings() {
         assertEquals(ProcessCategory.Terminal, processCategory(native("commandExecution")))
@@ -57,9 +57,9 @@ class ProcessCategoryTest {
         assertEquals("执行过程", processGroupCaption(listOf(native("futureEvent"))))
     }
     @Test fun singleEntriesUseTheSameTruthfulSummary() {
-        assertEquals("1 次 思考", processGroupCaption(listOf(native("reasoning"))))
-        assertEquals("1 次 shell", processGroupCaption(listOf(native("commandExecution"))))
-        assertEquals("1 次 思考", processGroupCaption(listOf(native("reasoning").copy(outcome = "running"))))
+        assertEquals("已思考", processGroupCaption(listOf(native("reasoning"))))
+        assertEquals("1 步", processGroupCaption(listOf(native("commandExecution"))))
+        assertEquals("正在思考…", processGroupCaption(listOf(native("reasoning").copy(outcome = "running"))))
     }
     @Test fun shellAndOutputLabelsDoNotRelabelNonShellParametersOrDiffs() {
         assertEquals("shell", processEntryLabel(native("commandExecution"), "Codex"))
@@ -384,5 +384,55 @@ class ProcessCategoryTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test fun cliToolUnwrappingCategoriesMultilineParametersAndCrlfSanitizationWorkAcrossClis() {
+        assertEquals(ProcessCategory.Terminal, processCategory(named("run_command"), "Antigravity"))
+        assertEquals(ProcessCategory.Search, processCategory(named("grep_search"), "Antigravity"))
+        assertEquals(ProcessCategory.Read, processCategory(named("list_dir"), "Antigravity"))
+        assertEquals(ProcessCategory.Browse, processCategory(named("read_url_content"), "Antigravity"))
+        assertEquals(ProcessCategory.Terminal, processCategory(named("Shell"), "Kimi Code"))
+        assertEquals(ProcessCategory.Terminal, processCategory(named("bash"), "DeepSeek Harness"))
+        assertEquals(ProcessCategory.Edit, processCategory(named("edit_file"), "Grok Build"))
+        assertEquals(ProcessCategory.Edit, processCategory(named("MultiEdit"), "CodeBuddy Code"))
+        assertEquals(ProcessCategory.Search, processCategory(named("grep"), "Qoder CLI"))
+
+        val agyRun = named("run_command").copy(
+            input = """{"CommandLine":"echo line1\necho line2","WaitMsBeforeAsync":5000,"IsDaemon":false,"toolSummary":"Run echo"}""",
+        )
+        assertEquals(
+            ProcessInputPresentation("echo line1\necho line2", "shell", "shell"),
+            processInputPresentation(agyRun, "Antigravity"),
+        )
+
+        val multilineParams = named("Bash").copy(
+            input = """{"command":"echo a\necho b","timeout":30}""",
+        )
+        val presented = processInputPresentation(multilineParams, "Claude Code")
+        assertEquals("Parameters", presented.caption)
+        assertEquals("config", presented.language)
+        assertTrue(presented.code.contains("echo a\n  echo b"))
+        assertFalse(presented.code.contains("\\n"))
+
+        val multilineWrite = named("write_file").copy(
+            input = """{"Path":"/tmp/a.c","Content":"printf(\"a\\nb\");\nreturn 0;"}""",
+        )
+        val presentedWrite = processInputPresentation(multilineWrite, "Antigravity")
+        assertEquals("config", presentedWrite.language)
+        assertTrue(presentedWrite.code.contains("printf(\"a\\nb\");\n  return 0;"))
+
+        val hugeMultiline = """{"Content":"${"a\n".repeat(LIBRARY_HIGHLIGHT_LIMIT)}"}"""
+        val hugePresented = processInputPresentation(named("write_file").copy(input = hugeMultiline), "Antigravity")
+        assertEquals(hugeMultiline, hugePresented.code)
+
+        val crlfDetail = "Created At: 2026-11-19T11:00:00+08:00\r\nCompleted At: 2026-11-19T11:00:01+08:00\r\nCommand exited with code 0.\r\n\r\nCommand output:\r\nfirst\r\nsecond\r\n"
+        assertEquals("first\nsecond", sanitizeProcessToolDetail(crlfDetail))
+
+        val multiEditItem = named("MultiEdit").copy(
+            input = """{"file_path":"/w/App.kt","edits":[{"old_string":"val x = 1","new_string":"val x = 2"},{"old_str":"val y = 3","new_str":"val y = 4"}]}""",
+        )
+        val multiEditPreview = parseProcessEditPreview(multiEditItem, "Claude Code")
+        assertEquals(2, multiEditPreview.addedCount)
+        assertEquals(2, multiEditPreview.removedCount)
     }
 }

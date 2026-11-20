@@ -68,6 +68,22 @@ private val nestedDocumentFixture = buildString {
 @Composable
 internal fun MarkdownPipelineFullPreview() = PipelineFrame(pipelineFixture, Int.MAX_VALUE)
 
+private val typesetEditorialFixture = """
+    ### 三、Luma 场景下最值得先想透的 4 个发散点
+
+    相比 Telari（macOS 宽屏、静态文章），Luma 是**手机窄屏 + 流式生成 + 代码密集**，有几个特别有意思的设计空间：
+
+    1. **窄屏下的「两端对齐悖论」与坏度熔断**
+       - 手机每行 20~24 字，进入嵌套列表后只有 17~19 字。强行每段都两端对齐，遇到代码密集段一定会丑（连宽屏的 Telari 都专门做了「高代码密度段落自动退回左对齐」）。
+       - 一个很爽的组合拳是「Knuth–Plass 全局平衡 + 自适应对齐」：正常文字段两端齐边；一旦某段算出的 `badness` 超过阈值（长代码/URL/窄列表），自动降级为平衡左对齐，既消灭孤词和锯齿阶梯，又绝不拉出大裂缝。
+    2. **行内代码与公式混排**
+       - 核心入口在 `apps/gui/app/src/main/java/io/github/modao7067/luma/gui/ui/NativeMarkdown.kt`，行内公式如 ${'$'}x_i + \frac{a}{b}$ 与正文基线对齐，同时 ~~删除线~~ 仍需双波浪号才生效。
+""".trimIndent()
+
+@Preview(name = "Markdown Typeset · Dark", widthDp = 393, heightDp = 820)
+@Composable
+internal fun MarkdownTypesetDarkPreview() = PipelineFrame(typesetEditorialFixture, Int.MAX_VALUE)
+
 @Preview(name = "Markdown actual text prefix", widthDp = 320, heightDp = 220)
 @Composable
 internal fun MarkdownPipelinePrefixPreview() = PipelineFrame("已显示文字 SECRET_FUTURE", 6)

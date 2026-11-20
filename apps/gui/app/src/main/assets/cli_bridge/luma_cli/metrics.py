@@ -45,7 +45,10 @@ MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("claude-", 200_000),
     ("gemini-4-", 256_000),
     ("gemini-pro-orchestrator", 256_000),
+    ("gemini-flash-worker", 256_000),
     ("gemini-", 1_048_576),
+    ("deepseek-flash", 1_000_000),
+    ("deepseek-v4", 1_000_000),
     ("deepseek-", 128_000),
     ("grok-4", 256_000),
     ("grok-code", 256_000),
@@ -110,7 +113,7 @@ def model_context_window(model: Any) -> int | None:
         return None
     if m.endswith(':fast'):
         m = m[:-5]
-    if '1m' in m.split('-') or m.endswith('-1m'):
+    if '[1m]' in m or '1m' in m.split('-') or m.endswith('-1m'):
         return 1_000_000
     for prefix, win in MODEL_CONTEXT_WINDOWS:
         if m == prefix or m.startswith(prefix):
@@ -282,12 +285,18 @@ def claude_result(result, model=None):
         )
     return rows + cost_rows
 
-def claude_context(message, model_usage=None):
+def claude_context(message, model_usage=None, fallback_model=None):
     model = message.get('model')
     model_usage = model_usage or {}
     window = (model_usage.get(model) or {}).get('contextWindow') if model else None
     if number(window) in (None, 0):
-        window = model_context_window(model)
+        fallback_clean = _clean_model_name(fallback_model).lower() if fallback_model else ''
+        if '[1m]' in fallback_clean:
+            window = 1_000_000
+        else:
+            window = model_context_window(model)
+            if number(window) in (None, 0) and fallback_model:
+                window = model_context_window(fallback_model)
     usage = message.get('usage') or {}
     parts = [number(usage.get(k)) for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')]
     if any(v is None for v in parts) or not any(parts) or number(window) in (None, 0):
@@ -618,7 +627,7 @@ def kimi_web_metrics(record, main_snapshot, child_snapshots=None, models=None, w
     def scan_items(items, is_main):
         nonlocal tot_uncached, tot_read, tot_write, tot_out, turn_cost, last_main_ctx
         for entry in items or []:
-            if not isinstance(entry, dict) or entry.get('kind') != 'turn':
+            if not isinstance(entry, dict) or entry.get('kind') not in ('turn', 'agent', 'system'):
                 continue
             tu = entry.get('usage') if isinstance(entry.get('usage'), dict) else {}
             tc = number(tu.get('cost'))
@@ -629,9 +638,9 @@ def kimi_web_metrics(record, main_snapshot, child_snapshots=None, models=None, w
                 su = step.get('usage') if isinstance(step, dict) and isinstance(step.get('usage'), dict) else None
                 if not su:
                     continue
-                inp = int(number(su.get('inputOther')) or 0)
-                c_read = int(number(su.get('inputCacheRead')) or 0)
-                c_write = int(number(su.get('inputCacheCreation')) or 0)
+                inp = int(number(su.get('inputOther') if 'inputOther' in su else su.get('input_other')) or 0)
+                c_read = int(number(su.get('inputCacheRead') if 'inputCacheRead' in su else su.get('input_cache_read')) or 0)
+                c_write = int(number(su.get('inputCacheCreation') if 'inputCacheCreation' in su else su.get('input_cache_creation')) or 0)
                 out = int(number(su.get('output')) or 0)
                 if inp + c_read + c_write + out <= 0:
                     continue
@@ -643,21 +652,35 @@ def kimi_web_metrics(record, main_snapshot, child_snapshots=None, models=None, w
                 tot_write += c_write
                 tot_out += out
             if not had_step and tu:
-                t_in = int(number(tu.get('inputTokens')) or 0)
-                t_cached = int(number(tu.get('cachedTokens')) or 0)
-                t_out = int(number(tu.get('outputTokens')) or 0)
-                if t_in + t_cached + t_out > 0:
+                if 'input_other' in tu or 'input_cache_read' in tu or 'input_cache_creation' in tu:
+                    unc = int(number(tu.get('input_other')) or 0)
+                    t_cached = int(number(tu.get('input_cache_read')) or 0)
+                    t_write = int(number(tu.get('input_cache_creation')) or 0)
+                    t_out = int(number(tu.get('output')) or 0)
+                else:
+                    t_in = int(number(tu.get('inputTokens')) or 0)
+                    t_cached = int(number(tu.get('cachedTokens')) or 0)
+                    t_write = 0
+                    t_out = int(number(tu.get('outputTokens')) or 0)
                     unc = max(0, t_in - t_cached) if t_in >= t_cached else t_in
+                if unc + t_cached + t_write + t_out > 0:
                     if is_main:
-                        last_main_ctx = unc + t_cached + t_out
+                        last_main_ctx = unc + t_cached + t_write + t_out
                     tot_uncached += unc
                     tot_read += t_cached
+                    tot_write += t_write
                     tot_out += t_out
 
-    scan_items((main_snapshot or {}).get('items'), True)
+    main_items = (main_snapshot or {}).get('items')
+    if not isinstance(main_items, list):
+        main_items = (main_snapshot or {}).get('turns')
+    scan_items(main_items, True)
     for child in child_snapshots or []:
         if isinstance(child, dict):
-            scan_items(child.get('items'), False)
+            child_items = child.get('items')
+            if not isinstance(child_items, list):
+                child_items = child.get('turns')
+            scan_items(child_items, False)
 
     rec_usage = (record or {}).get('usage') if isinstance((record or {}).get('usage'), dict) else {}
     if tot_uncached + tot_read + tot_write + tot_out == 0:

@@ -3,6 +3,9 @@ package io.github.modao7067.luma.gui.ui
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -26,6 +29,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.AnnotatedString
@@ -55,10 +59,22 @@ internal fun LiquidModalDialog(
     val dark = scheme.surface.luminance() < 0.5f
     val baseTint = if (dark) scheme.surfaceContainerHigh.copy(alpha = 0.96f) else scheme.surfaceContainerLowest.copy(alpha = 0.97f)
     GuiDialog(onDismissRequest = onDismiss) {
+        val inspecting = LocalInspectionMode.current
+        val entry = remember { Animatable(if (inspecting) 1f else 0f) }
+        LaunchedEffect(inspecting) {
+            if (!inspecting) entry.animateTo(1f, PrismSprings.alert())
+        }
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 420.dp),
+                .widthIn(max = 420.dp)
+                .graphicsLayer {
+                    val p = entry.value.coerceIn(0f, 1f)
+                    val s = PrismSprings.ALERT_ENTRY_SCALE + (1f - PrismSprings.ALERT_ENTRY_SCALE) * p
+                    scaleX = s
+                    scaleY = s
+                    alpha = p
+                },
             shape = LumaCardShape(28.dp),
             color = Color.Transparent,
             contentColor = scheme.onSurface,
@@ -331,7 +347,7 @@ internal fun SettingsScreen(
             go("main")
             subPageBackProgress.snapTo(0f)
         } catch (cancelled: CancellationException) {
-            scope.launch { subPageBackProgress.animateTo(0f, spatialSpring()) }
+            scope.launch { subPageBackProgress.animateTo(0f, PrismSprings.dragBackRelease()) }
             throw cancelled
         }
     }
@@ -348,18 +364,22 @@ internal fun SettingsScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val backElastic = rememberElasticPress()
                     LiquidGlass(
                         Modifier
                             .size(44.dp)
                             .testTag("settings-back")
                             .semantics { contentDescription = if (subPage == "main") tr("关闭设置", "Close settings") else tr("返回设置", "Back to settings") }
-                            .liquidClickable(cornerRadius = 22.dp) {
+                            .liquidClickable(press = backElastic) {
                                 if (subPage != "main") go("main") else onDismiss()
                             },
                         cornerRadius = 22.dp,
+                        press = backElastic,
                     ) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            ComposerGlyph("back")
+                            Box(Modifier.glyphPulse(subPage)) {
+                                ComposerGlyph("back")
+                            }
                         }
                     }
                     LiquidGlass(
@@ -389,11 +409,11 @@ internal fun SettingsScreen(
                 transitionSpec = {
                     val pushing = initialState == "main" && targetState != "main"
                     if (pushing) {
-                        (slideInHorizontally { it / 4 } + androidx.compose.animation.fadeIn(menuMotionSpec(true))) togetherWith
-                            (slideOutHorizontally { -it / 6 } + androidx.compose.animation.fadeOut(menuMotionSpec(false)))
+                        (slideInHorizontally(PrismSprings.pagePushOffset()) { it / 4 } + fadeIn(tween(220, easing = PrismCurves.EaseOutCubic))) togetherWith
+                            (slideOutHorizontally(PrismSprings.pagePushOffset()) { -it / 6 } + fadeOut(tween(180, easing = PrismCurves.EaseInCubic)))
                     } else {
-                        (slideInHorizontally { -it / 6 } + androidx.compose.animation.fadeIn(menuMotionSpec(true))) togetherWith
-                            (slideOutHorizontally { it / 4 } + androidx.compose.animation.fadeOut(menuMotionSpec(false)))
+                        (slideInHorizontally(PrismSprings.pagePushOffset()) { -it / 6 } + fadeIn(tween(220, easing = PrismCurves.EaseOutCubic))) togetherWith
+                            (slideOutHorizontally(PrismSprings.pagePushOffset()) { it / 4 } + fadeOut(tween(180, easing = PrismCurves.EaseInCubic)))
                     }
                 },
                 label = "settings-page-transition",
@@ -405,7 +425,7 @@ internal fun SettingsScreen(
                         .graphicsLayer {
                             if (backShift > 0f) {
                                 translationX = backShift * 42.dp.toPx()
-                                alpha = 1f - backShift * 0.28f
+                                alpha = (1f - backShift.coerceAtLeast(0f) * 0.28f).coerceIn(0f, 1f)
                             }
                         }
                         .verticalScroll(rememberScrollState())

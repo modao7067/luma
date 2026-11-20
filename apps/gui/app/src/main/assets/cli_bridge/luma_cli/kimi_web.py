@@ -67,6 +67,9 @@ class KimiWebSession(Session):
         self._last_agent_anchors = {}
         self.agent_state = {}
         self.usage_state = {}
+        self.ws_interactions = {}
+        self.ws_notices = []
+        self.ws_notice_seq = 0
 
     def connect(self):
         self.update(historyReady=False, **({"nativeProtocol": PROTOCOL} if self.config.get("nativeProtocol") == PROTOCOL else {}))
@@ -110,7 +113,13 @@ class KimiWebSession(Session):
                 model = self.config.get("model") or self.api.request("GET", "/config").get("default_model")
             if model and model != native_model:
                 configured = self.api.request("POST", self.path + "/profile", {"agent_config": {"model": model}})
-                if configured.get("agent_config", {}).get("model") != model:
+                configured_model = configured.get("agent_config", {}).get("model")
+                equiv = {model}
+                for m in self.models:
+                    names = {m.get("alias"), m.get("id"), m.get("model")} - {None, ""}
+                    if model in names:
+                        equiv |= names
+                if configured_model not in equiv:
                     raise Rejected(tr("Kimi Web 未确认请求的模型", "Kimi Web did not confirm the requested model"))
             self.peer = KimiWebPeer(self.gateway, self, self.event, self.exited)
             if type(self.peer) is KimiWebPeer and "cli-sessions" in self.config.get("ownerDirectory", ""):
@@ -154,14 +163,105 @@ class KimiWebSession(Session):
     def event(self, frame):
         if frame.get("session_id") != self.config.get("nativeId"):
             return
+        ftype = frame.get("type")
+        if ftype == "interaction":
+            iid = frame.get("interaction_id")
+            if iid:
+                with self.lock:
+                    if frame.get("status") == "pending":
+                        self.ws_interactions[iid] = {
+                            "interactionId": iid,
+                            "interactionKind": frame.get("kind", ""),
+                            "agentId": frame.get("agent_id", "main"),
+                            "state": "pending",
+                            "toolCallId": frame.get("tool_call_id", ""),
+                            "request": frame.get("request") or {},
+                        }
+                    else:
+                        self.ws_interactions.pop(iid, None)
+            self.refresh_wake.set()
+            return
         if frame.get("agent_id") == "main":
-            if frame.get("type") == "agent":
+            if ftype == "agent":
                 with self.lock:
                     self.agent_state = dict(frame)
-            elif frame.get("type") == "usage":
+            elif ftype == "usage":
                 with self.lock:
                     self.usage_state = dict(frame)
+            elif ftype == "notice":
+                notice_obj = frame.get("notice") if isinstance(frame.get("notice"), dict) else frame
+                title = notice_obj.get("title") or notice_obj.get("message") or ""
+                detail = notice_obj.get("detail") or ""
+                msg = (title + ("\n" + detail if detail else "")).strip()
+                lvl = notice_obj.get("level", "info")
+                if msg:
+                    with self.lock:
+                        if not self.ws_notices or self.ws_notices[-1][1] != msg:
+                            nid = "ws-notice:" + str(self.ws_notice_seq)
+                            self.ws_notice_seq += 1
+                            self.ws_notices.append((nid, msg, lvl))
+                            del self.ws_notices[:-32]
         self.refresh_wake.set()
+
+    def turns_transcript(self, agent="main"):
+        query = {"page_size": 200}
+        turns = []
+        while True:
+            page = self.api.request("GET", self.path + "/agents/" + encoded(agent) + "/turns?" + urlencode(query))
+            page_turns = page.get("turns", [])
+            turns = page_turns + turns
+            if not page.get("has_more"):
+                break
+            first_ord = page_turns[0].get("ordinal") if page_turns else None
+            if first_ord is None or query.get("before_ordinal") == first_ord:
+                raise ValueError(tr("Kimi 历史分页未前进", "Kimi history pagination did not advance"))
+            query["before_ordinal"] = first_ord
+        return {"turns": turns}
+
+    def fetch_snapshot(self, agent="main"):
+        gateway = getattr(self, "gateway", None)
+        peer = getattr(self, "peer", None)
+        if getattr(gateway, "uses_turns_api", False) is True:
+            if peer is not None and getattr(peer, "uses_turns_api", None) is False:
+                enable = getattr(peer, "enable_turns_api", None)
+                if callable(enable):
+                    enable()
+                elif hasattr(peer, "uses_turns_api"):
+                    peer.uses_turns_api = True
+            return self.turns_transcript(agent)
+        try:
+            return self.transcript(agent)
+        except KimiWebRejected as error:
+            if error.code != 404:
+                raise
+            if gateway is not None:
+                gateway.uses_turns_api = True
+            if peer is not None:
+                enable = getattr(peer, "enable_turns_api", None)
+                if callable(enable):
+                    enable()
+                elif hasattr(peer, "uses_turns_api"):
+                    peer.uses_turns_api = True
+            return self.turns_transcript(agent)
+
+    def _resolve_turn_attachment(self, att):
+        fid = att.get("file_id")
+        if fid:
+            key = ("turn_file", fid)
+            if key in self.attachment_cache:
+                return self.attachment_cache[key]
+            try:
+                content, mime = self.api.request("GET", "/files/" + encoded(fid), binary=True)
+            except KimiWebRejected:
+                content, mime = self.api.request("GET", self.path + "/media/" + encoded(fid), binary=True)
+            result = self.media({"type": "resource", "resource": {"uri": att.get("name", ""),
+                "mimeType": mime or att.get("media_type", ""), "blob": base64.b64encode(content).decode()}})
+            self.attachment_cache[key] = result
+            return result
+        if att.get("url"):
+            return self.attachment({"source": {"kind": "url", "url": att["url"]},
+                "name": att.get("name", ""), "mediaType": att.get("media_type", "")})
+        return []
 
     def transcript(self, agent="main"):
         query = {"agent_id": agent, "page_size": 100}
@@ -205,6 +305,8 @@ class KimiWebSession(Session):
         return result
 
     def project(self, snapshot, prefix=""):
+        if "turns" in snapshot and "items" not in snapshot:
+            return self.project_turns(snapshot, prefix)
         rows = {}
         tool_frames = {}
         agent_anchors = {}
@@ -300,13 +402,120 @@ class KimiWebSession(Session):
             self._last_agent_anchors = agent_anchors
         return rows
 
+    @staticmethod
+    def _turn_state(turn):
+        if turn.get("status") == "running":
+            return "running"
+        if turn.get("end_reason") in ("user_cancelled", "aborted"):
+            return "cancelled"
+        outcome = turn.get("outcome")
+        if outcome == "failed":
+            return "failed"
+        if outcome == "interrupted":
+            return "cancelled"
+        return "completed"
+
+    @staticmethod
+    def _item_state(it, turn_state):
+        if it.get("status") == "running":
+            return "running"
+        outcome = it.get("outcome")
+        if outcome == "failed":
+            return "failed"
+        if outcome == "interrupted":
+            return "cancelled"
+        return turn_state if turn_state != "running" else "completed"
+
+    def project_turns(self, snapshot, prefix=""):
+        rows = {}
+        tool_frames = {}
+        agent_anchors = {}
+        for turn in snapshot.get("turns", []):
+            turn_id = prefix + turn["turn_id"]
+            turn_state = self._turn_state(turn)
+            for it in turn.get("items", []):
+                itype = it.get("type")
+                state = self._item_state(it, turn_state)
+                if itype == "user_message":
+                    origin_kind = (it.get("origin") or {}).get("kind", "user")
+                    if origin_kind not in ("user", "skill", "plugin_command", "skill_activation"):
+                        continue
+                    pids = it.get("prompt_ids") or []
+                    ident = prefix + (pids[0] if pids else it["item_id"])
+                    resources = []
+                    for att in it.get("attachments") or []:
+                        resources.extend(self._resolve_turn_attachment(att))
+                    rows[ident] = item(ident, "user", it.get("text", ""), origin="native",
+                        media=resources, status="completed", turnId=turn_id)
+                elif itype == "assistant_message":
+                    ident = prefix + it["item_id"]
+                    rows[ident] = item(ident, "assistant", it.get("text", ""), status=state, turnId=turn_id)
+                elif itype == "reasoning":
+                    ident = prefix + it["item_id"]
+                    rows[ident] = item(ident, "tool", it.get("text", ""), kind="reasoning",
+                        status=state, turnId=turn_id)
+                elif itype == "tool_call":
+                    ident = prefix + it["item_id"]
+                    tname = it.get("name", "")
+                    raw_input = it.get("input")
+                    inp = raw_input if isinstance(raw_input, dict) else {}
+                    disp = it.get("display")
+                    out_text = display_content(it.get("output"))
+                    rows[ident] = item(ident, "tool", _web_tool_label(tname, inp, disp), kind="tool",
+                        toolName=tname, toolKind=_web_tool_kind(tname, disp),
+                        input=json.dumps(raw_input, ensure_ascii=False) if raw_input is not None else it.get("input_text", ""),
+                        detail=it.get("error") or out_text,
+                        status=state, turnId=turn_id)
+                    if not prefix:
+                        tool_frames[it["item_id"]] = {"itemId": ident, "turnId": turn_id, "input": inp}
+                        out_meta = _parse_agent_output(out_text) if tname in ("Agent", "Task", "AgentSwarm") and out_text else {}
+                        ref_ids = [
+                            r.get("agent_id") or r.get("agentId")
+                            for r in (it.get("agent_refs") or [])
+                            if isinstance(r, dict) and (r.get("agent_id") or r.get("agentId"))
+                        ]
+                        if out_meta.get("agent_id") and out_meta["agent_id"] not in ref_ids:
+                            ref_ids.append(out_meta["agent_id"])
+                        for aid in ref_ids:
+                            agent_anchors[aid] = {
+                                "itemId": ident,
+                                "turnId": turn_id,
+                                "role": out_meta.get("actual_subagent_type") or inp.get("subagent_type", ""),
+                                "task": inp.get("description") or inp.get("prompt", ""),
+                                "detail": out_meta.get("summary", ""),
+                            }
+                elif itype == "notification":
+                    msg = "\n".join(p for p in (it.get("title", ""), it.get("body", "")) if p).strip()
+                    if msg:
+                        ident = prefix + it["item_id"]
+                        rows[ident] = item(ident, "tool", msg, kind="notice",
+                            status="failed" if it.get("severity") == "error" else "completed", turnId=turn_id)
+                elif itype == "system" and it.get("kind") == "compaction" and it.get("summary"):
+                    ident = prefix + it["item_id"]
+                    rows[ident] = item(ident, "tool", it["summary"], kind="notice",
+                        status="completed", turnId=turn_id)
+            err = turn.get("error")
+            err_msg = err.get("message", "") if isinstance(err, dict) else (err if isinstance(err, str) else "")
+            if err_msg:
+                ident = turn_id + ":error"
+                rows[ident] = item(ident, "tool", err_msg, kind="notice", status="failed", turnId=turn_id)
+        if not prefix:
+            with self.lock:
+                ws_notices = list(self.ws_notices)
+            for nid, msg, lvl in ws_notices:
+                rows[nid] = item(nid, "tool", msg, kind="notice",
+                    status="failed" if lvl == "error" else "completed")
+            self._last_tool_frames = tool_frames
+            self._last_agent_anchors = agent_anchors
+        return rows
+
     def refresh(self):
         with self.refresh_lock:
             record = self.api.request("GET", self.path)
             if record["id"] != self.config["nativeId"]:
                 raise Rejected(tr("Kimi Web 会话身份改变", "Kimi Web session identity changed"))
             native_queue = self.api.request("GET", self.path + "/prompts")
-            snapshot = self.transcript()
+            snapshot = self.fetch_snapshot()
             rows = self.project(snapshot)
             known = self.config.get("deliveries", {}).keys() | self.config.get("receipts", {}).keys()
             for prompt in ([native_queue["active"]] if native_queue.get("active") else []) + native_queue.get("queued", []):
@@ -319,7 +528,7 @@ class KimiWebSession(Session):
                 if ident in known and row["role"] == "user":
                     self.receipt(ident, "accepted")
                     self.consumed(ident)
-            for turn in snapshot["items"]:
+            for turn in snapshot.get("items", []):
                 for step in turn.get("steps", []):
                     for frame in step["frames"]:
                         if frame.get("kind") == "text" and frame.get("role") == "user":
@@ -327,53 +536,103 @@ class KimiWebSession(Session):
                                 if ident in known:
                                     self.receipt(ident, "accepted")
                                     self.consumed(ident)
+            for turn in snapshot.get("turns", []):
+                for it in turn.get("items", []):
+                    if it.get("type") == "user_message":
+                        for ident in it.get("prompt_ids", []):
+                            if ident in known:
+                                self.receipt(ident, "accepted")
+                                self.consumed(ident)
             with self.lock:
                 if not _same_json(list(self.rows.values()), list(rows.values())):
                     self.rows = rows
                     self.seq += 1
+                ws_ints = list(self.ws_interactions.values())
             interactions = list(snapshot.get("interactions", []))
             children = {}
             child_snapshots = []
-            for agent in snapshot.get("agents", []):
-                aid = agent["agentId"]
-                if aid == "main" or agent.get("type") == "independent":
-                    continue
+            if "agents" in snapshot:
+                agent_entries = [
+                    (a["agentId"], a.get("label"), a.get("profile"), bool(a.get("busy")))
+                    for a in snapshot["agents"]
+                    if a.get("agentId") not in (None, "main") and a.get("type") != "independent"
+                ]
+            else:
+                agent_entries = [
+                    (aid, None, None, None)
+                    for aid in self._last_agent_anchors
+                    if aid != "main"
+                ]
+                ensure_sub = getattr(getattr(self, "peer", None), "ensure_agent_subscriptions", None)
+                if ensure_sub and agent_entries:
+                    ensure_sub([aid for aid, _, _, _ in agent_entries])
+            for aid, agent_label, agent_profile, agent_busy in agent_entries:
                 cached = self.subagent_cache.get(aid)
-                if cached is not None and not agent.get("busy"):
+                if cached is not None and agent_busy is False:
                     child = cached
+                elif cached is not None and agent_busy is None:
+                    c_turns = cached.get("turns", [])
+                    has_pending = any(i.get("agentId") == aid and i.get("state") == "pending" for i in ws_ints)
+                    if c_turns and all(t.get("status") == "ended" for t in c_turns) and not has_pending:
+                        child = cached
+                    else:
+                        child = self.fetch_snapshot(aid)
                 else:
-                    child = self.transcript(aid)
-                    child_turns = [t for t in child["items"] if t.get("kind") == "turn"]
-                    child_state = child_turns[-1]["state"] if child_turns else "unknown"
+                    child = self.fetch_snapshot(aid)
+                if "turns" in child and "items" not in child:
+                    c_turns = child.get("turns", [])
+                    child_state = self._turn_state(c_turns[-1]) if c_turns else "unknown"
+                    has_pending = any(i.get("agentId") == aid and i.get("state") == "pending" for i in ws_ints)
+                    if c_turns and all(t.get("status") == "ended" for t in c_turns) and not has_pending:
+                        self.subagent_cache[aid] = child
+                    else:
+                        self.subagent_cache.pop(aid, None)
+                else:
+                    c_items_turns = [t for t in child.get("items", []) if t.get("kind") == "turn"]
+                    child_state = c_items_turns[-1]["state"] if c_items_turns else "unknown"
                     if child_state in ("completed", "failed", "cancelled") and not any(i.get("state") == "pending" for i in child.get("interactions", [])):
                         self.subagent_cache[aid] = child
                     else:
                         self.subagent_cache.pop(aid, None)
+                    c_turns = c_items_turns
                 child_snapshots.append(child)
-                turns = [t for t in child["items"] if t.get("kind") == "turn"]
-                state = turns[-1]["state"] if turns else "unknown"
+                state = child_state
                 child_messages = list(self.project(child, aid + ":").values())
                 anchor = self._last_agent_anchors.get(aid, {})
-                children[aid] = {"id": aid, "name": agent.get("label") or anchor.get("role") or aid,
-                    "role": anchor.get("role") or agent.get("profile", ""),
+                if "turns" in child and "items" not in child:
+                    child_task = next(
+                        (it.get("text", "") for t in c_turns for it in t.get("items", []) if it.get("type") == "user_message" and it.get("text")),
+                        "",
+                    ) or anchor.get("task", "")
+                else:
+                    child_task = next((t.get("prompt", "") for t in c_turns if t.get("prompt")), "") or anchor.get("task", "")
+                children[aid] = {"id": aid, "name": agent_label or anchor.get("role") or aid,
+                    "role": anchor.get("role") or agent_profile or "",
                     "itemId": anchor.get("itemId", ""), "turnId": anchor.get("turnId", ""),
-                    "task": next((t.get("prompt", "") for t in turns if t.get("prompt")), "") or anchor.get("task", ""),
+                    "task": child_task,
                     "detail": anchor.get("detail") or next((m["text"] for m in reversed(child_messages) if m.get("role") == "assistant" and m.get("text")), ""),
                     "status": {"completed": "succeeded", "running": "running", "failed": "failed", "cancelled": "cancelled"}.get(state, "unknown"),
                     "nativeStatus": state, "messages": child_messages}
                 interactions.extend(child.get("interactions", []))
+            if ws_ints:
+                by_id = {i["interactionId"]: i for i in interactions if i.get("interactionId")}
+                for i in ws_ints:
+                    by_id[i["interactionId"]] = i
+                interactions = list(by_id.values())
             self.project_requests({"interactions": interactions})
             with self.lock:
                 if not _same_json(self.subagents, children):
                     self.subagents = children
                     self.seq += 1
                 ws_usage = dict(self.usage_state)
-            settings = {**record.get("agent_config", {}), **self.agent_state}
-            active_model = settings.get("model", "")
+                ws_agent = dict(self.agent_state)
+            settings = {**record.get("agent_config", {}), **ws_agent}
+            active_model = settings.get("model") or ""
             metrics = kimi_web_metrics(record, snapshot, child_snapshots, self.models, ws_usage, active_model)
+            running = bool(record.get("main_turn_active", record.get("busy")) or ws_agent.get("status") == "running" or ws_agent.get("compacting"))
             self.update(title=record.get("title", ""), model=active_model,
-                effort=settings.get("thinking", ""), permission=settings.get("permission_mode", "manual"),
-                planModeSupported=True, planMode=settings.get("plan_mode", False),
+                effort=settings.get("thinking") or "", permission=settings.get("permission_mode", "manual"),
+                planModeSupported=True, planMode=bool(settings.get("plan_mode", False)),
                 permissions=[{"id": ident, "label": label, "approval": approval}
                     for ident, label, approval in (
                         ("manual", "Always Ask", "always"),
@@ -383,7 +642,7 @@ class KimiWebSession(Session):
                     "label": m.get("display_name") or m.get("alias") or m.get("model", ""),
                     "efforts": m.get("support_efforts", []), "supportsImages": "image_in" in m.get("capabilities", [])}
                     for m in self.models],
-                running=bool(record.get("main_turn_active", record.get("busy"))),
+                running=running,
                 nativeQueuePending=bool(native_queue.get("queued")),
                 queue=[{"id": p["prompt_id"], "text": display_content(p["content"]),
                     "clientUserMessageId": p["prompt_id"], "status": tr("待发", "Queued"),
@@ -524,6 +783,8 @@ class KimiWebSession(Session):
         else:
             raise Rejected(tr("无效提问选项", "Invalid question choice"))
         self.api.request("POST", self.path + "/interactions/" + encoded(payload["id"]), body)
+        with self.lock:
+            self.ws_interactions.pop(payload["id"], None)
         self.answered(payload["id"])
         self.refresh_wake.set()
         return {}

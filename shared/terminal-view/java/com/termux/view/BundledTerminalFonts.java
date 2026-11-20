@@ -28,7 +28,10 @@ public final class BundledTerminalFonts {
         "NotoSansMono-Regular.ttf", "NotoSansSymbols-Regular.ttf",
         "NotoSansMath-Regular.ttf", "NotoMusic-Regular.ttf",
         "NotoColorEmoji.ttf", "NotoSansSymbols2-Regular.ttf",
-        "LumaCjkForms-Regular.otf"
+        "LumaCjkForms-Regular.otf",
+        "NotoSansArabic-Regular.ttf", "NotoSansThai-Regular.ttf",
+        "NotoSansKannada-Regular.ttf", "NotoSansCanadianAboriginal-Regular.ttf",
+        "NotoSansGeorgian-Regular.ttf"
     };
 
     public static synchronized void initialize(AssetManager assets){

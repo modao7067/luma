@@ -16,6 +16,8 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
 import io.github.modao7067.luma.gui.session.ConversationItem
+import io.github.modao7067.luma.gui.session.SessionSummary
+import io.github.modao7067.luma.gui.session.SessionView
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -67,7 +69,7 @@ class ProcessStatusInteractionTest {
         rule.onAllNodesWithText("进行中", useUnmergedTree = true).assertCountEquals(0)
         rule.onAllNodes(SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.ProgressBarRangeInfo)).assertCountEquals(0)
         val label = rule.onNodeWithText("shell · printf ready", useUnmergedTree = true)
-        val command = rule.onNodeWithText("shell · printf ready", useUnmergedTree = true)
+        val command = rule.onNodeWithText("shell · printf ready")
         val labelBounds = label.fetchSemanticsNode().boundsInRoot
         val commandBounds = command.fetchSemanticsNode().boundsInRoot
         for (sample in listOf(.25f, .5f, .75f, 1f)) {
@@ -75,25 +77,58 @@ class ProcessStatusInteractionTest {
             assertEquals(labelBounds, label.fetchSemanticsNode().boundsInRoot)
             assertEquals(commandBounds, command.fetchSemanticsNode().boundsInRoot)
         }
-        rule.onNodeWithText("1 次 shell").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick) { it() }
+        rule.onNodeWithText("正在执行命令…").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick) { it() }
         command.assertExists()
         rule.runOnIdle { outcome = "succeeded" }
-        rule.onAllNodesWithText("进行中", useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithText("正在执行命令…", useUnmergedTree = true).assertCountEquals(0)
         command.assertDoesNotExist()
-        rule.onNodeWithText("1 次 shell").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick) { it() }
+        rule.onNodeWithText("1 步 · ", substring = true).performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick) { it() }
         command.assertExists()
     }
 
-    @Test fun summaryOnlyBoldsCategoriesNeverCountsOrSeparators() {
-        val parts = listOf(ProcessSummaryPart("3 次 ", "shell、read"), ProcessSummaryPart("5 次 ", "思考"))
-        val text = processSummaryText(parts)
-        assertEquals(listOf("shell、read", "思考"), text.spanStyles.map { text.text.substring(it.start, it.end) })
-        assertEquals("3 次 shell、read · 5 次 思考", text.text)
-        assertEquals(listOf(4 to 14, 21 to 23), text.spanStyles.map { it.start to it.end })
+    @Test fun summaryStaysUnweightedAndOnlyTintsLiveVerbsAndEdits() {
+        val settled = processSummaryText(listOf(ProcessSummaryPart("12 步"), ProcessSummaryPart("修改 3 处", emphasized = true), ProcessSummaryPart("2m3s")), androidx.compose.ui.graphics.Color.Red)
+        assertEquals("12 步 · 修改 3 处 · 2m3s", settled.text)
+        assertEquals(listOf(7 to 12), settled.spanStyles.map { it.start to it.end })
+        val live = processSummaryText(listOf(ProcessSummaryPart("正在执行命令…", emphasized = true)), androidx.compose.ui.graphics.Color.Red)
+        assertEquals(listOf(0 to 7), live.spanStyles.map { it.start to it.end })
+        assertTrue(live.spanStyles.all { it.item.fontWeight == null && it.item.color == androidx.compose.ui.graphics.Color.Red })
         for (phase in listOf(0f, .15f, .3f, .45f, .65f, 1f)) {
             for (dot in 0..2) assertTrue(processDotLift(phase, dot) in 0f..1f)
         }
         assertTrue(processDotLift(.15f, 0) > processDotLift(.15f, 1))
+    }
+
+    @Test fun completedDotIsNeutralAndDistinctFromRunning() {
+        val light = processRowPalette(androidx.compose.material3.lightColorScheme())
+        val dark = processRowPalette(androidx.compose.material3.darkColorScheme())
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFB4B2AB), light.completedDot)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF5E5D58), dark.completedDot)
+        assertNotEquals(light.activeDot, light.completedDot)
+        assertNotEquals(dark.activeDot, dark.completedDot)
+    }
+
+    @Test fun shimmerClockStopsWhenDisabledOrMotionOffWithoutRecomposition() {
+        var enabled by mutableStateOf(true)
+        lateinit var phase: State<Float>
+        var compositions = 0
+        rule.mainClock.autoAdvance = false
+        rule.setContent { phase = rememberProcessShimmerPhase(enabled); SideEffect { compositions++ } }
+        rule.mainClock.advanceTimeBy(1700)
+        rule.runOnIdle { assertTrue(phase.value > 0f); assertEquals(1, compositions) }
+        rule.runOnIdle { enabled = false }
+        rule.mainClock.advanceTimeBy(100)
+        rule.runOnIdle { assertEquals(0f, phase.value) }
+        rule.mainClock.advanceTimeBy(5000)
+        rule.runOnIdle { assertEquals(0f, phase.value); enabled = true }
+        rule.mainClock.advanceTimeByFrame()
+        rule.waitForIdle()
+        rule.mainClock.advanceTimeBy(1700)
+        rule.runOnIdle { assertTrue("restart phase=${phase.value}, compositions=$compositions", phase.value > 0f); scale.scaleFactor = 0f }
+        rule.mainClock.advanceTimeBy(100)
+        rule.runOnIdle { assertEquals(0f, phase.value) }
+        rule.mainClock.advanceTimeBy(5000)
+        rule.runOnIdle { assertEquals(0f, phase.value) }
     }
 
     @Test fun actualViewportGateStartsAfterInitialClippingAndRestartsAfterBackground() {
@@ -174,19 +209,20 @@ class ProcessStatusInteractionTest {
         val editBaseCollapsed = editBaseNode.fetchSemanticsNode().boundsInRoot
         val editKtCollapsed = editKtNode.fetchSemanticsNode().boundsInRoot
 
+        val groupRow = rule.onNodeWithText("6 步 · 修改 3 处").fetchSemanticsNode().boundsInRoot
+        val groupSummary = rule.onNodeWithText("6 步 · 修改 3 处", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertEquals(0f, groupRow.left, 0.5f)
+        assertTrue(groupSummary.left > groupRow.left + 14f)
         assertEquals(grepTitle.left, readTitle.left, 0.5f)
         assertEquals(grepTitle.left, editBaseCollapsed.left, 0.5f)
         assertEquals(grepTitle.left, editKtCollapsed.left, 0.5f)
-        val statusNodes = rule.onAllNodes(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "已完成"), useUnmergedTree = true).fetchSemanticsNodes()
-        assertEquals(4, statusNodes.size)
-        val firstStatusRight = statusNodes.first().boundsInRoot.right
-        statusNodes.forEach { node ->
-            assertEquals("right status column must align across grep, read batch, and edit rows", firstStatusRight, node.boundsInRoot.right, 0.5f)
-        }
+        assertTrue(grepTitle.left > groupSummary.left + 8f)
+        rule.onAllNodes(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "已完成"), useUnmergedTree = true).assertCountEquals(0)
         rule.onNodeWithText("2 处", useUnmergedTree = true).assertExists()
 
         editBaseNode.performClick()
         var prevKtTop = editKtCollapsed.top
+        val sampledTops = mutableListOf<Float>()
         repeat(18) {
             rule.mainClock.advanceTimeBy(16)
             rule.waitForIdle()
@@ -195,11 +231,17 @@ class ProcessStatusInteractionTest {
             assertEquals("header X must not shift during frame appear", editBaseCollapsed.left, curBase.left, 0.5f)
             assertEquals("header Y must not shift during frame appear", editBaseCollapsed.top, curBase.top, 0.5f)
             assertTrue("neighbor below must move monotonically downward: $prevKtTop -> ${curKt.top}", curKt.top >= prevKtTop - 0.5f)
+            sampledTops += curKt.top
             prevKtTop = curKt.top
         }
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
-        assertTrue("diff body must expand", prevKtTop > editKtCollapsed.top + 40f)
+        val editKtExpandedTop = editKtNode.fetchSemanticsNode().boundsInRoot.top
+        assertTrue("diff body must expand", editKtExpandedTop > editKtCollapsed.top + 40f)
+        assertTrue(
+            "edit card must animate smoothly across frames instead of snapping on frame 1: $sampledTops -> $editKtExpandedTop",
+            sampledTops.any { it > editKtCollapsed.top + 4f && it < editKtExpandedTop - 4f },
+        )
         rule.onNodeWithText("⋯  L403–404 · 第 2/2 处", useUnmergedTree = true).assertExists()
 
         val seamKtTopBeforeDock = editKtNode.fetchSemanticsNode().boundsInRoot.top
@@ -226,6 +268,203 @@ class ProcessStatusInteractionTest {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
         assertEquals(editKtCollapsed.top, editKtNode.fetchSemanticsNode().boundsInRoot.top, 0.5f)
+    }
+
+    @Test fun activeTurnShowsWorkingBeforeFirstStepAndDuringInterStepGapUntilSealedOrEof() {
+        var view by mutableStateOf(
+            SessionView(
+                summary = SessionSummary("open-turn-session", "测试会话", "noroot", "/workspace", cli = "Codex"),
+                connected = true,
+                loading = false,
+                activeTurnId = "turn-1",
+                messages = listOf(ConversationItem("u1", "user", "开始干活", delivery = "pending")),
+            ),
+        )
+        rule.setContent {
+            MaterialTheme {
+                SessionDetail(io.github.modao7067.luma.gui.session.CockpitState(selected = view), view, previewActions, onPickImages = {})
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("发送中").assertIsDisplayed()
+        rule.onNodeWithText("工作中…").assertDoesNotExist()
+
+        rule.runOnIdle {
+            view = view.copy(
+                messages = listOf(ConversationItem("u1", "user", "开始干活", delivery = "")),
+            )
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("发送中").assertDoesNotExist()
+        rule.onNodeWithText("工作中…").assertIsDisplayed()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "进行中 · 已折叠执行过程")).assertExists()
+
+        rule.runOnIdle {
+            view = view.copy(
+                messages = view.messages + ConversationItem("t1", "tool", text = "ls", kind = "commandExecution", input = "ls", outcome = "running"),
+            )
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("正在执行命令…").assertIsDisplayed()
+        rule.onNodeWithText("工作中…").assertDoesNotExist()
+
+        rule.runOnIdle {
+            view = view.copy(
+                messages = listOf(
+                    ConversationItem("u1", "user", "开始干活"),
+                    ConversationItem("t1", "tool", text = "ls", kind = "commandExecution", input = "ls", outcome = "succeeded"),
+                ),
+            )
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("工作中…").assertIsDisplayed()
+        rule.onNodeWithText("1 步", substring = true).assertDoesNotExist()
+
+        rule.runOnIdle {
+            view = view.copy(
+                messages = view.messages + ConversationItem("a1", "assistant", "正在输出正文"),
+            )
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("1 步 · ", substring = true).assertIsDisplayed()
+        rule.onNodeWithText("工作中…").assertDoesNotExist()
+
+        rule.runOnIdle {
+            view = view.copy(
+                messages = view.messages + ConversationItem("t2", "tool", text = "cat b", kind = "commandExecution", input = "cat b", outcome = "succeeded"),
+            )
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("工作中…").assertIsDisplayed()
+
+        rule.runOnIdle {
+            view = view.copy(activeTurnId = null)
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("工作中…").assertDoesNotExist()
+        rule.onAllNodesWithText("1 步 · ", substring = true).assertCountEquals(2)
+    }
+
+    @Test fun manualExpandedRunningToolStaysOpenAfterCompletionUntilUserCollapses() {
+        var entries by mutableStateOf(
+            listOf(
+                ConversationItem(
+                    "cmd-1",
+                    "tool",
+                    text = "ls -la",
+                    kind = "commandExecution",
+                    input = "ls -la",
+                    detail = "total 8\nREADME.md",
+                    outcome = "running",
+                ),
+            ),
+        )
+        rule.mainClock.autoAdvance = false
+        rule.setContent {
+            MaterialTheme {
+                Box(Modifier.width(360.dp)) {
+                    ProcessGroup(entries, cli = "Codex", initiallyExpanded = false)
+                }
+            }
+        }
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+
+        rule.onNodeWithText("shell · ls -la").performClick()
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "进行中 · 收起shell")).assertExists()
+
+        rule.runOnIdle {
+            entries = listOf(entries.first().copy(outcome = "succeeded"))
+        }
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "收起shell")).assertExists()
+
+        rule.onNodeWithText("shell · ls -la").performClick()
+        rule.mainClock.advanceTimeByFrame()
+        rule.waitForIdle()
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        rule.onNodeWithText("shell · ls -la").assertDoesNotExist()
+    }
+
+    @Test fun manualExpandedReadStaysOpenAcrossSequentialMultiFileReads() {
+        val r1 = ConversationItem(
+            "r1",
+            "tool",
+            text = "Alpha.kt",
+            kind = "tool",
+            toolName = "read",
+            input = """{"path":"/w/Alpha.kt"}""",
+            detail = "1: class Alpha",
+            outcome = "running",
+        )
+        val r2 = ConversationItem(
+            "r2",
+            "tool",
+            text = "Beta.kt",
+            kind = "tool",
+            toolName = "read",
+            input = """{"path":"/w/Beta.kt"}""",
+            detail = "1: class Beta",
+            outcome = "running",
+        )
+        val r3 = ConversationItem(
+            "r3",
+            "tool",
+            text = "Gamma.kt",
+            kind = "tool",
+            toolName = "read",
+            input = """{"path":"/w/Gamma.kt"}""",
+            detail = "1: class Gamma",
+            outcome = "running",
+        )
+        var entries by mutableStateOf(listOf(r1))
+        rule.mainClock.autoAdvance = false
+        rule.setContent {
+            MaterialTheme {
+                Box(Modifier.width(360.dp)) {
+                    ProcessGroup(entries, cli = "OpenCode", initiallyExpanded = false)
+                }
+            }
+        }
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+
+        rule.onNodeWithText("read · Alpha.kt").performClick()
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "进行中 · 收起read")).assertExists()
+
+        rule.runOnIdle {
+            entries = listOf(r1.copy(outcome = "succeeded"), r2)
+        }
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "进行中 · 收起批量读取")).assertExists()
+
+        rule.onNodeWithText("Beta.kt", useUnmergedTree = true).performClick()
+        rule.mainClock.advanceTimeBy(200)
+        rule.waitForIdle()
+
+        rule.runOnIdle {
+            entries = listOf(r1.copy(outcome = "succeeded"), r2.copy(outcome = "succeeded"), r3)
+        }
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "进行中 · 收起批量读取")).assertExists()
+
+        rule.runOnIdle {
+            entries = listOf(r1.copy(outcome = "succeeded"), r2.copy(outcome = "succeeded"), r3.copy(outcome = "succeeded"))
+        }
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        rule.onNode(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "收起批量读取")).assertExists()
+        rule.onNodeWithText("Beta.kt").assertIsSelected()
     }
 
 }

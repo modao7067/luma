@@ -52,6 +52,12 @@ internal fun ConversationHeader(
         SideEffect { bridgeUpdateConfirm = false }
     }
     val colors = MaterialTheme.colorScheme
+    val drawerElastic = rememberElasticPress()
+    val dashboardAnchor = rememberMorphAnchor()
+    val dashboardElastic = rememberElasticPress()
+    val moreAnchor = rememberMorphAnchor()
+    val moreElastic = rememberElasticPress()
+    val drawerOpen = LocalDrawerOpen.current
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -60,25 +66,33 @@ internal fun ConversationHeader(
         LiquidGlass(
             Modifier
                 .size(chromeHeight)
-                .liquidClickable(cornerRadius = chromeRadius, onClick = onDrawer)
+                .liquidClickable(blockDrawerSwipe = false, press = drawerElastic, onClick = onDrawer)
                 .semantics { contentDescription = tr("打开会话侧边栏", "Open session sidebar") },
             cornerRadius = chromeRadius,
+            press = drawerElastic,
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                HeaderGlyph(false)
+                Box(Modifier.glyphPulse(drawerOpen)) {
+                    HeaderGlyph(false)
+                }
             }
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .morphAnchor(dashboardAnchor, enabled = true, elastic = dashboardElastic, onOpen = {
+                        dashboard = true
+                        if (view?.connected == true) actions.refreshDashboard()
+                    })
+                    .semantics { contentDescription = tr("会话 Dashboard", "Session dashboard") },
+            ) {
             LiquidGlass(
                 Modifier
                     .fillMaxWidth()
-                    .height(chromeHeight)
-                    .liquidClickable(cornerRadius = chromeRadius, pressScale = 0.98f) {
-                        dashboard = true
-                        if (view?.connected == true) actions.refreshDashboard()
-                    }
-                    .semantics { contentDescription = tr("会话 Dashboard", "Session dashboard") },
+                    .height(chromeHeight),
                 cornerRadius = chromeRadius,
+                press = dashboardElastic,
             ) {
                 Row(
                     Modifier
@@ -107,15 +121,22 @@ internal fun ConversationHeader(
                         )
                     }
                     if (view != null || hasError) {
-                        val dotColor = when {
-                            hasError -> colors.error
-                            view?.activeTurnId != null -> colors.primary
-                            view?.connected == true -> colors.tertiary
+                        val dotState = when {
+                            hasError -> 3
+                            view?.activeTurnId != null -> 2
+                            view?.connected == true -> 1
+                            else -> 0
+                        }
+                        val dotColor = when (dotState) {
+                            3 -> colors.error
+                            2 -> colors.primary
+                            1 -> colors.tertiary
                             else -> colors.outline
                         }
                         Box(
                             Modifier
                                 .padding(start = 8.dp)
+                                .glyphPulse(dotState)
                                 .size(7.dp)
                                 .background(dotColor, CircleShape)
                                 .semantics { stateDescription = if (hasError) tr("连接异常", "Connection error") else if (view?.connected == true) tr("已连接", "Connected") else tr("连接中", "Connecting") },
@@ -123,7 +144,8 @@ internal fun ConversationHeader(
                     }
                 }
             }
-            OriginMenu(dashboard, { dashboard = false }, width = 300.dp, horizontalAlignment = Alignment.CenterHorizontally) {
+            }
+            MorphMenu(dashboard, { dashboard = false }, dashboardAnchor, width = 300.dp, placement = MorphPlacement.Center) {
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -178,18 +200,26 @@ internal fun ConversationHeader(
             }
         }
         Box {
-            LiquidGlass(
+            Box(
                 Modifier
-                    .size(chromeHeight)
-                    .liquidClickable(cornerRadius = chromeRadius, onClick = { more = true })
+                    .morphAnchor(moreAnchor, enabled = true, elastic = moreElastic, onOpen = { more = true })
                     .semantics { contentDescription = tr("更多", "More") },
-                cornerRadius = chromeRadius,
             ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    HeaderGlyph(true)
+                LiquidGlass(Modifier.size(chromeHeight), cornerRadius = chromeRadius, press = moreElastic) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(Modifier.glyphPulse(bridgeUpdateOffered)) {
+                            HeaderGlyph(true)
+                        }
+                    }
                 }
             }
-            OriginMenu(more, { more = false }) {
+            MorphMenu(
+                more,
+                { more = false },
+                moreAnchor,
+                width = if (bridgeUpdateOffered) 224.dp else 180.dp,
+                placement = MorphPlacement.End,
+            ) {
                 if (bridgeUpdateOffered) {
                     ActionMenuItem(tr("更新CLI桥服务", "Update CLI bridge"), MenuSymbol.REFRESH, warning = true, iconContainer = true,
                         description = if (view?.cliServiceUpdateRequired == true) tr("CLI 桥需要更新", "CLI bridge update required") else tr("可选 · 新版 CLI 桥可用", "Optional · Newer CLI bridge available"),

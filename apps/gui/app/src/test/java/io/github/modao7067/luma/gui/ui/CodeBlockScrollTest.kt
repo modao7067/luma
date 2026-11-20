@@ -5,6 +5,8 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.unit.Velocity
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CodeBlockScrollTest {
@@ -56,5 +58,28 @@ class CodeBlockScrollTest {
         assertEquals(Offset.Zero, boundary.onPostScroll(Offset.Zero, Offset(0f, -48f), NestedScrollSource.UserInput))
         assertEquals(Offset.Zero, boundary.onPostScroll(Offset.Zero, Offset(0f, -12f), NestedScrollSource.SideEffect))
         assertEquals(Velocity.Zero, boundary.onPostFling(Velocity.Zero, Velocity(0f, -1400f)))
+    }
+
+    @Test fun `isSoftWrappedLineStart distinguishes soft wraps from real newlines`() {
+        assertFalse(isSoftWrappedLineStart("alpha beta", 0, 0))
+
+        val newlineText = "alpha\nbeta"
+        assertFalse(isSoftWrappedLineStart(newlineText, 1, "alpha\n".length))
+
+        val crlfText = "alpha\r\nbeta"
+        assertFalse(isSoftWrappedLineStart(crlfText, 1, "alpha\r\n".length))
+
+        val blankLineText = "alpha\n\nbeta"
+        assertFalse(isSoftWrappedLineStart(blankLineText, 1, "alpha\n".length))
+        assertFalse(isSoftWrappedLineStart(blankLineText, 2, "alpha\n\n".length))
+
+        val trailingNewlineText = "alpha\n"
+        assertFalse(isSoftWrappedLineStart(trailingNewlineText, 1, trailingNewlineText.length))
+
+        val spaceWrappedText = "alpha beta"
+        assertTrue(isSoftWrappedLineStart(spaceWrappedText, 1, "alpha ".length))
+
+        val tokenWrappedText = "/workspace/app/module/file.kt"
+        assertTrue(isSoftWrappedLineStart(tokenWrappedText, 1, "/workspace/app/".length))
     }
 }

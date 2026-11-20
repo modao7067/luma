@@ -43,7 +43,7 @@ internal fun GuiPageDialog(onDismissRequest: () -> Unit, content: @Composable ()
                 }
                 latestDismiss()
             } catch (cancelled: CancellationException) {
-                scope.launch { backProgress.animateTo(0f, spatialSpring()) }
+                scope.launch { backProgress.animateTo(0f, PrismSprings.dragBackRelease()) }
                 throw cancelled
             }
         }
@@ -64,7 +64,7 @@ internal fun GuiPageDialog(onDismissRequest: () -> Unit, content: @Composable ()
                 }
             }
         }
-        val currentProgress = backProgress.value
+        val currentProgress = backProgress.value.coerceIn(0f, 1f)
         val corner = (currentProgress * 28f).dp
         Box(
             Modifier

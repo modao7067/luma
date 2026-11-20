@@ -325,7 +325,7 @@ class StreamTailFollowTest {
             }
         }
         rule.waitForIdle()
-        rule.onNodeWithText("1 次 shell", substring = true).performClick()
+        rule.onNodeWithText("1 步", substring = true).performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("conversation-list").performTouchInput {
             swipe(center, center - Offset(0f, 240f), 140)
@@ -394,7 +394,7 @@ class StreamTailFollowTest {
         }
         rule.waitForIdle()
 
-        rule.onNodeWithText("TodoList", substring = true).performClick()
+        rule.onNodeWithText("正在执行命令…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("TodoList").performClick()
         rule.waitForIdle()

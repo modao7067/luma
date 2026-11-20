@@ -7,7 +7,7 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from .base import Session, item, text, user_text
+from .base import Session, item, parse_ts_ms, text, user_text
 from .i18n import tr
 from .transport import Rejected
 from .metrics import cache_ratio, claude_result, claude_context, estimate_cost, number
@@ -36,13 +36,559 @@ def permission_options(help_output, is_root):
 def canonical_permission(value):
     return "default" if value == "manual" else value
 
-class ClaudeSession(Session):
+def strip_raw_answer(value):
+    return value[5:] if isinstance(value, str) and value.startswith("\u0000raw:") else value
+
+_LOCAL_CMD_STDOUT_RE = re.compile(
+    r"^\s*<(?:local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*</(?:local-command-stdout|local-command-stderr|local-command-caveat)>\s*$"
+)
+_LOCAL_CMD_INVOCATION_RE = re.compile(
+    r"^\s*<command-name>/[^<\n]+</command-name>\s*<command-message>[\s\S]*</command-message>(?:\s*<command-args>[\s\S]*</command-args>)?\s*$"
+)
+_AGENT_ID_RESULT_RE = re.compile(r"\bagentId\s*[:=]\s*([A-Za-z0-9_-]{3,64})\b")
+_TASK_NOTIF_PAIR_RE = re.compile(
+    r"<task-id>\s*([A-Za-z0-9_-]{3,64})\s*</task-id>[\s\S]*?<tool-use-id>\s*([^<\s]+)\s*</tool-use-id>"
+)
+
+def _raw_user_text(entry):
+    msg = entry.get("message")
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") != "text" for b in content):
+            return ""
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+def _is_local_command_wrapper(body_text):
+    return bool(_LOCAL_CMD_STDOUT_RE.match(body_text) or _LOCAL_CMD_INVOCATION_RE.match(body_text))
+
+def _collect_local_command_uuids(entries):
+    caveat_uuids = set()
+    caveat_prompts = set()
+    for e in entries:
+        if not isinstance(e, dict) or e.get("type") != "user" or not e.get("isMeta"):
+            continue
+        raw = _raw_user_text(e)
+        if "<local-command-caveat>" in raw:
+            if e.get("uuid"):
+                caveat_uuids.add(e["uuid"])
+            if e.get("promptId"):
+                caveat_prompts.add(e["promptId"])
+    filtered = set(caveat_uuids)
+    changed = True
+    while changed:
+        changed = False
+        for e in entries:
+            if not isinstance(e, dict) or e.get("type") != "user":
+                continue
+            uid = e.get("uuid")
+            if not uid or uid in filtered:
+                continue
+            raw = _raw_user_text(e)
+            if not raw:
+                continue
+            if _is_local_command_wrapper(raw):
+                filtered.add(uid)
+                changed = True
+            elif (e.get("parentUuid") in filtered or (e.get("promptId") and e.get("promptId") in caveat_prompts)) and (
+                "<command-name>" in raw or "<local-command-" in raw
+            ):
+                filtered.add(uid)
+                changed = True
+    return filtered
+
+class ClaudeProjectionMixin:
+    permission_modes, allow_bypass = permission_options("", False)
+    permission_revision = 0
+
+    def detect_permissions(self):
+        try:
+            result = subprocess.run(["claude", "--help"], cwd=self.config["cwd"], capture_output=True,
+                                    encoding="utf-8", errors="replace", timeout=10)
+            help_output = result.stdout if result.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            help_output = ""
+        self.permission_modes, self.allow_bypass = permission_options(help_output, os.geteuid() == 0)
+
+    def validate_permission(self, value):
+        if value == "bypassPermissions" and os.geteuid() == 0:
+            raise Rejected(tr("Claude Code 原生禁止 Root/sudo 使用“跳过审批”（bypassPermissions）",
+                              "Claude Code natively forbids `bypassPermissions` when running as root/sudo"))
+        if value not in {v["id"] for v in self.permission_modes}:
+            raise Rejected(tr("当前 Claude Code 未提供此原生权限模式：", "Current Claude Code does not offer this native permission mode: ") + value)
+
+    def model_id(self, actual):
+        catalog = getattr(self, "native_models", [])
+        for wanted in (self.config.get("selectedModel"), self.data["model"], actual):
+            if wanted and any(m.get("value") == wanted and actual in (wanted, m.get("resolvedModel")) for m in catalog):
+                return wanted
+        return next((m["value"] for m in catalog if m.get("resolvedModel") == actual), actual)
+
+    def validate_effort(self, value, model):
+        entry = next((m for m in self.data["models"] if m["id"] == model), {})
+        if value not in entry.get("efforts", []):
+            raise Rejected(tr("当前 Claude Code 模型未提供此思考强度：", "Current Claude Code model does not support this effort level: ") + value)
+
+    def history_path(self):
+        home = Path(unicodedata.normalize("NFC", os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))))
+        return home / "projects" / _sanitize_path(str(Path(self.config["cwd"]).resolve())) / (self.data["nativeId"] + ".jsonl")
+
+    def _mapped_user_row_prefix(self, entry, body_text):
+        uid = entry.get("uuid")
+        if not uid:
+            return None
+        mapping = self.config.get("ptyUserMessages")
+        if isinstance(mapping, dict) and uid in mapping:
+            return mapping[uid]
+        return None
+
+    def _restore_unflushed_accepted_rows(self, prev_rows, transcript_uuids):
+        receipts = self.config.get("receipts", {})
+        submitted_texts = getattr(self, "submitted_user_text", {})
+        deliveries = self.config.get("deliveries", {})
+        mapped = self.config.get("ptyUserMessages", {})
+        flushed_submissions = {
+            sub_id for native_uid, sub_id in mapped.items()
+            if native_uid in transcript_uuids
+        } if isinstance(mapped, dict) else set()
+        for uid, state in receipts.items():
+            if state != "accepted" or uid in transcript_uuids or uid in flushed_submissions:
+                continue
+            user_row_id = f"{uid}:0"
+            if user_row_id in prev_rows:
+                started = False
+                for rk, rv in prev_rows.items():
+                    if rk == user_row_id:
+                        started = True
+                    if started and rk not in self.rows:
+                        self.row(rv)
+            else:
+                body = submitted_texts.get(uid)
+                payload = deliveries.get(uid, {}).get("payload", {})
+                images = payload.get("images", []) if isinstance(payload, dict) else []
+                if body is None and isinstance(payload, dict) and isinstance(payload.get("text"), str):
+                    body = payload["text"]
+                    skills = payload.get("skills") or []
+                    if skills:
+                        body = f"/{skills[0]} {body}".strip()
+                if (body is not None or images) and user_row_id not in self.rows:
+                    media = [{"source": p, "mimeType": mimetypes.guess_type(p)[0] or "image/*"} for p in images] if images else []
+                    self.row(item(user_row_id, "user", body or "", media=media, status="completed", origin="native"))
+
+    def load_history(self):
+        path = self.history_path()
+        if not path.is_file():
+            with self.lock:
+                self._restore_unflushed_accepted_rows(dict(self.rows), set())
+            return
+        if path.stat().st_size > 64 * 1024 * 1024: raise Rejected(tr("Claude 原生历史超过 64 MiB，请在原生 CLI 查看", "Claude native history exceeds 64 MiB; view it in the native CLI"))
+        content = path.read_text(encoding="utf-8", errors="replace")
+        entries = _parse_transcript_entries(content)
+        local_cmd_uuids = _collect_local_command_uuids(entries)
+        transcript_uuids = {e.get("uuid") for e in entries if isinstance(e, dict) and e.get("uuid")}
+        chain = _build_conversation_chain(entries)
+        with self.lock:
+            prev_rows = dict(self.rows)
+            self.rows.clear()
+            self.usage_message = {}
+            for e in chain:
+                if _is_visible_message(e) and e.get("uuid") not in local_cmd_uuids:
+                    self.project(e)
+            self._restore_unflushed_accepted_rows(prev_rows, transcript_uuids)
+            last_perm = None
+            for line in content.splitlines():
+                try: e = json.loads(line)
+                except (ValueError, TypeError): continue
+                if not isinstance(e, dict): continue
+                if e.get("sessionId") not in (None, self.data["nativeId"]): continue
+                if e.get("type") == "custom-title" and isinstance(e.get("customTitle"), str): self.update(title=e["customTitle"])
+                elif e.get("type") == "system" and e.get("subtype", "").startswith("task_"): self.task_event(e, from_history=True)
+                elif e.get("type") == "summary" and not self.data["title"]: self.update(title=e.get("summary", ""))
+                elif e.get("type") == "permission-mode" and isinstance(e.get("permissionMode"), str):
+                    last_perm = canonical_permission(e["permissionMode"])
+            if last_perm and getattr(self, "sync_permission_from_history", False):
+                self.update(permission=last_perm)
+            if not self.data["running"]: self.settle_incomplete_rows("unknown")
+            for tool_key in getattr(self, "background_tasks", {}).values():
+                if tool_key and tool_key in self.rows and self.rows[tool_key].get("status") in ("unknown", "in_progress", "pending", "completed"):
+                    self.row({**self.rows[tool_key], "status": "running"})
+            if not getattr(self, "result_usage_authoritative", False) or not getattr(self, "usage_rows", None):
+                by_msg = {}
+                for e in chain:
+                    msg = e.get("message") if isinstance(e, dict) else None
+                    if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("usage"), dict):
+                        mid = msg.get("id") or e.get("uuid")
+                        if mid:
+                            by_msg[mid] = (msg.get("model"), msg["usage"])
+                if by_msg:
+                    tot_in = sum(number(u.get("input_tokens")) or 0 for _, u in by_msg.values())
+                    tot_read = sum(number(u.get("cache_read_input_tokens")) or 0 for _, u in by_msg.values())
+                    tot_write = sum(number(u.get("cache_creation_input_tokens")) or 0 for _, u in by_msg.values())
+                    tot_out = sum(number(u.get("output_tokens")) or 0 for _, u in by_msg.values())
+                    last_m = next((m for m, _ in reversed(list(by_msg.values())) if m), self.data.get("model"))
+                    self.usage_rows = (
+                        cache_ratio(tot_read, tot_in + tot_read + tot_write, tr("累计输入缓存命中", "Total input cache hit"))
+                        + estimate_cost(last_m, uncached_input=tot_in, cache_read=tot_read, cache_write=tot_write, output=tot_out)
+                    )
+            self.publish_usage()
+        self._discover_history_subagents(content)
+        self._sync_subagent_transcripts()
+        if chain:
+            if not self.config.get("hasNativeHistory"):
+                self.config["hasNativeHistory"] = True
+                self.save()
+
+    def _subagent_transcript_path(self, agent_id):
+        if not agent_id or not isinstance(agent_id, str):
+            return None
+        mapped = getattr(self, "_subagent_transcript_paths", {}).get(agent_id)
+        if mapped:
+            return Path(mapped)
+        base = self.history_path()
+        if not base:
+            return None
+        return base.with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl"
+
+    def _discover_history_subagents(self, content):
+        base = self.history_path()
+        if not base:
+            return
+        sub_dir = base.with_suffix("") / "subagents"
+        if not sub_dir.is_dir():
+            return
+        links = {}
+        with self.lock:
+            tool_rows = {k: dict(v) for k, v in self.rows.items() if k.startswith("tool-") and v.get("toolName") in ("Agent", "Task")}
+        if not tool_rows:
+            return
+        for rk, rv in tool_rows.items():
+            outcome = rv.get("outcome") or ""
+            m = _AGENT_ID_RESULT_RE.search(outcome)
+            if m:
+                links[m.group(1)] = rk
+        for m in _TASK_NOTIF_PAIR_RE.finditer(content):
+            aid, tid = m.group(1), m.group(2)
+            tkey = "tool-" + tid
+            if tkey in tool_rows and aid not in links:
+                links[aid] = tkey
+        for aid, tkey in links.items():
+            if aid in self.subagents:
+                continue
+            path = sub_dir / f"agent-{aid}.jsonl"
+            if not path.is_file():
+                continue
+            rv = tool_rows.get(tkey, {})
+            try:
+                args = json.loads(rv.get("input", "{}"))
+            except (ValueError, TypeError):
+                args = {}
+            t_status = rv.get("status", "completed")
+            st = "running" if t_status in ("running", "in_progress", "pending") else ("failed" if t_status == "failed" else "succeeded")
+            self.subagent(
+                aid,
+                itemId=tkey,
+                name=args.get("name", "") if isinstance(args, dict) else "",
+                role=args.get("subagent_type", "") if isinstance(args, dict) else "",
+                task=(args.get("description") or args.get("prompt", "")) if isinstance(args, dict) else "",
+                status=st,
+                nativeStatus="running" if st == "running" else "completed",
+            )
+
+    def _project_subagent_jsonl(self, path, agent_id):
+        try:
+            st = path.stat()
+        except OSError:
+            return None, ""
+        cache = getattr(self, "_subagent_jsonl_cache", None)
+        if cache is None:
+            cache = {}
+            self._subagent_jsonl_cache = cache
+        cached = cache.get(agent_id)
+        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2], cached[3]
+        if st.st_size > 16 * 1024 * 1024:
+            return None, ""
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None, ""
+        rows = {}
+        handback_ids = set()
+        sub_model = ""
+        for idx, line in enumerate(raw.splitlines()):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(e, dict) or e.get("isMeta"):
+                continue
+            etype = e.get("type")
+            if etype not in ("user", "assistant"):
+                continue
+            msg = e.get("message")
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", etype)
+            if role == "assistant" and isinstance(msg.get("model"), str) and msg["model"]:
+                sub_model = msg["model"]
+            body = msg.get("content", [])
+            if isinstance(body, str):
+                body = [{"type": "text", "text": body}]
+            if not isinstance(body, list):
+                continue
+            prefix = e.get("uuid") or msg.get("id") or f"{agent_id}:{idx}"
+            ts = parse_ts_ms(e.get("timestamp"))
+            if role == "user" and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in body):
+                body_text = user_text(body)
+                if not body_text.strip() or _is_local_command_wrapper(body_text):
+                    continue
+                rows[f"{prefix}:0"] = item(f"{prefix}:0", "user", body_text, status="completed", timestampMs=ts)
+                continue
+            for bidx, b in enumerate(body):
+                if not isinstance(b, dict):
+                    continue
+                kind = b.get("type")
+                if kind in ("text", "thinking"):
+                    body_text = text(b)
+                    if not body_text.strip():
+                        continue
+                    key = f"{prefix}:{bidx}"
+                    rows[key] = item(
+                        key,
+                        "reasoning" if kind == "thinking" else role,
+                        body_text,
+                        kind="reasoning" if kind == "thinking" else "",
+                        status="completed",
+                        timestampMs=ts,
+                        completedAtMs=ts if kind == "thinking" else 0,
+                    )
+                elif kind == "tool_use" and b.get("id"):
+                    tname = b.get("name", "")
+                    tinput = b.get("input", {}) if isinstance(b.get("input"), dict) else {}
+                    if tname == "SubagentHandback" and isinstance(tinput.get("message"), str) and tinput["message"].strip():
+                        handback_ids.add(b["id"])
+                        key = f"{prefix}:{bidx}"
+                        rows[key] = item(key, "assistant", tinput["message"].strip(), status="completed", timestampMs=ts)
+                        continue
+                    key = "tool-" + b["id"]
+                    old = rows.get(key, {})
+                    rows[key] = item(
+                        key,
+                        "tool",
+                        tname or tr("工具", "Tool"),
+                        kind="tool",
+                        toolName=tname,
+                        input=json.dumps(tinput, ensure_ascii=False),
+                        status=old.get("status", "running"),
+                        outcome=old.get("outcome", ""),
+                        timestampMs=old.get("timestampMs") or ts,
+                        completedAtMs=old.get("completedAtMs", 0),
+                    )
+                elif kind == "tool_result" and b.get("tool_use_id"):
+                    if b["tool_use_id"] in handback_ids:
+                        continue
+                    key = "tool-" + b["tool_use_id"]
+                    old = rows.get(key, item(key, "tool", tr("工具", "Tool"), kind="tool"))
+                    next_status = "failed" if b.get("is_error") else "completed"
+                    updates = {"outcome": text(b.get("content", "")), "status": next_status}
+                    if not old.get("timestampMs") and ts:
+                        updates["timestampMs"] = ts
+                    if ts:
+                        updates["completedAtMs"] = ts
+                    rows[key] = {**old, **updates}
+        msgs = list(rows.values())
+        cache[agent_id] = (st.st_mtime_ns, st.st_size, msgs, sub_model)
+        return msgs, sub_model
+
+    def _sync_subagent_transcripts(self):
+        with self.lock:
+            agent_ids = list(self.subagents.keys())
+        hook_tools_map = getattr(self, "_subagent_hook_tools", {})
+        for aid in agent_ids:
+            path = self._subagent_transcript_path(aid)
+            disk_msgs, sub_model = self._project_subagent_jsonl(path, aid) if (path and path.is_file()) else (None, "")
+            with self.lock:
+                live_tools = dict(hook_tools_map.get(aid) or {})
+                agent = self.subagents.get(aid)
+                if agent is None:
+                    continue
+                is_done = agent.get("status") in ("succeeded", "completed", "failed", "cancelled")
+            merged = {}
+            if disk_msgs:
+                for m in disk_msgs:
+                    entry = dict(m)
+                    if is_done and entry.get("role") == "tool" and entry.get("status") in ("running", "in_progress", "pending"):
+                        entry["status"] = "completed" if entry.get("outcome") else "unknown"
+                    merged[entry["id"]] = entry
+            for tk, tv in live_tools.items():
+                if tk not in merged:
+                    entry = dict(tv)
+                    if is_done and entry.get("status") in ("running", "in_progress", "pending"):
+                        entry["status"] = "unknown"
+                    merged[tk] = entry
+                elif merged[tk].get("status") == "running" and tv.get("status") in ("completed", "failed", "cancelled"):
+                    merged[tk] = {**merged[tk], "status": tv["status"]}
+            fields = {}
+            if merged:
+                msgs_list = list(merged.values())
+                if agent.get("messages") != msgs_list:
+                    fields["messages"] = msgs_list
+            if sub_model and agent.get("model") != sub_model:
+                fields["model"] = sub_model
+            if fields:
+                self.subagent(aid, **fields)
+
+    def project(self, e):
+        if _is_internal_message(e): return
+        message = e.get("message", {})
+        if not isinstance(message, dict): return
+        role = message.get("role", e.get("type", "assistant"))
+        if role == "assistant" and isinstance(message.get("usage"), dict) and message.get("model"):
+            self.usage_message = message
+            self.publish_usage()
+        body = message.get("content", [])
+        if isinstance(body, str): body = [{"type": "text", "text": body}]
+        prefix = e.get("uuid", message.get("id", str(uuid.uuid4())))
+        ts = parse_ts_ms(e.get("timestamp"))
+        if role == "user" and _is_human_turn(e) and not any(b.get("type") == "tool_result" for b in body):
+            body_text = user_text(body)
+            if _is_local_command_wrapper(body_text):
+                return
+            mapped_prefix = self._mapped_user_row_prefix(e, body_text)
+            self.row(item(f"{mapped_prefix or prefix}:0", "user", body_text, media=self.media(body), status="completed", timestampMs=ts))
+            return
+        for index, b in enumerate(body):
+            kind = b.get("type")
+            if kind in ("text", "thinking"):
+                if role == "user" and not _is_human_turn(e): continue
+                body_text = text(b)
+                if kind == "thinking" and not body_text.strip(): continue
+                key = f"{prefix}:{index}"
+                self.row(item(key, "reasoning" if kind == "thinking" else role, body_text,
+                              kind="reasoning" if kind == "thinking" else "", status="completed",
+                              timestampMs=ts, completedAtMs=ts if kind == "thinking" else 0))
+            elif kind == "tool_use":
+                key = "tool-" + b["id"]
+                old = self.rows.get(key, {})
+                self.row(item(key, "tool", b.get("name", tr("工具", "Tool")), kind="tool", toolName=b.get("name", ""),
+                              input=json.dumps(b.get("input", {}), ensure_ascii=False),
+                              status=old.get("status", "running"), outcome=old.get("outcome", ""), media=old.get("media", []),
+                              timestampMs=old.get("timestampMs") or ts, completedAtMs=old.get("completedAtMs", 0)))
+            elif kind == "tool_result":
+                key = "tool-" + b["tool_use_id"]
+                old = self.rows.get(key, item(key, "tool", tr("工具", "Tool"), kind="tool"))
+                keep_bg = not b.get("is_error") and key in getattr(self, "background_tasks", {}).values()
+                next_status = "failed" if b.get("is_error") else ("running" if keep_bg else "completed")
+                updates = {
+                    "outcome": text(b.get("content", "")),
+                    "media": self.media(b.get("content")),
+                    "status": next_status,
+                }
+                if not old.get("timestampMs") and ts:
+                    updates["timestampMs"] = ts
+                if ts and next_status != "running":
+                    updates["completedAtMs"] = ts
+                self.row({**old, **updates})
+
+            elif kind in ("image", "document"):
+                if role != "user" or _is_human_turn(e):
+                    self.row(item(f"{prefix}:{index}", role, "", media=self.media(b), status="completed", timestampMs=ts))
+
+    def publish_usage(self):
+        fallback_model = getattr(self, "_session_model", None) or self.data.get("model")
+        self.update(metrics=claude_context(getattr(self, "usage_message", {}), getattr(self, "usage_models", {}), fallback_model=fallback_model) + getattr(self, "usage_rows", []))
+
+    def task_event(self, e, from_history=False):
+        ident = e.get("task_id")
+        if not ident: return
+        subtype = e.get("subtype")
+        old = self.subagents.get(ident, {})
+        if subtype == "task_started":
+            if e.get("task_type") != "local_agent":
+                tool_key = "tool-" + e["tool_use_id"] if e.get("tool_use_id") else ""
+                bg = getattr(self, "background_tasks", None)
+                if bg is None:
+                    bg = {}
+                    self.background_tasks = bg
+                bg[ident] = tool_key
+                if tool_key and tool_key in self.rows:
+                    if not from_history or self.rows[tool_key].get("status") != "failed":
+                        self.row({**self.rows[tool_key], "status": "running"})
+                elif not from_history:
+                    self.seq += 1
+                return
+            tool = e.get("tool_use_id", "")
+            row = self.rows.get("tool-" + tool, {})
+            try: args = json.loads(row.get("input", "{}"))
+            except (ValueError, TypeError): args = {}
+            self.subagent(ident, itemId="tool-" + tool if tool else "", task=e.get("prompt", e.get("description", "")),
+                          name=args.get("name", ""), role=e.get("subagent_type", args.get("subagent_type", "")), status="running", nativeStatus="started")
+        elif not old and ident in getattr(self, "background_tasks", {}) and subtype in ("task_progress", "task_notification", "task_updated"):
+            patch = e.get("patch") if isinstance(e.get("patch"), dict) else {}
+            native = e.get("status") if subtype == "task_notification" else patch.get("status")
+            if native in ("completed", "failed", "stopped", "killed"):
+                tool_key = self.background_tasks.pop(ident, "")
+                if not from_history:
+                    self.last_task_completed_at = time.monotonic()
+                if tool_key and tool_key in self.rows:
+                    done_status = "completed" if native == "completed" else ("failed" if native == "failed" else "cancelled")
+                    updates = {"status": done_status}
+                    if e.get("summary") and not self.rows[tool_key].get("outcome"):
+                        updates["outcome"] = e["summary"]
+                    self.row({**self.rows[tool_key], **updates})
+                else:
+                    self.seq += 1
+            return
+        elif old and subtype in ("task_progress", "task_notification", "task_updated"):
+            patch = e.get("patch") if isinstance(e.get("patch"), dict) else {}
+            native = e.get("status") if subtype == "task_notification" else patch.get("status")
+            fields = {}
+            if native is not None:
+                fields.update(nativeStatus=native, status={"pending":"pending", "running":"running", "completed":"succeeded",
+                              "failed":"failed", "stopped":"cancelled", "killed":"cancelled"}.get(native, "unknown"))
+            if e.get("summary") is not None: fields["detail"] = e["summary"]
+            elif patch.get("error") is not None: fields["detail"] = str(patch["error"])
+            if e.get("description") is not None: fields["task"] = e["description"]
+            self.subagent(ident, **fields)
+
+    def _permission_request_spec(self, tool_name, args, title="", description=""):
+        args = args if isinstance(args, dict) else {}
+        if tool_name == "AskUserQuestion":
+            questions = [{"id": str(i), "header": q.get("header", ""), "prompt": q["question"],
+                          "options": [o["label"] for o in q.get("options", [])], "multiple": q.get("multiSelect", False)}
+                         for i, q in enumerate(args.get("questions", [])) if isinstance(q, dict) and q.get("question")]
+            return ("Answer", description,
+                    [{"id": "allow", "label": tr("提交", "Submit")}, {"id": "deny", "label": tr("取消", "Cancel")}],
+                    questions, "allow", "deny")
+        return (title or tool_name or tr("工具授权", "Tool permission"),
+                json.dumps(args, ensure_ascii=False),
+                [{"id": "allow", "label": tr("允许一次", "Allow once")}, {"id": "deny", "label": tr("拒绝", "Deny")}],
+                None, None, None)
+
+    def _resolve_question_answers(self, args, payload):
+        answers = {}
+        for i, q in enumerate(args.get("questions", [])):
+            raw_values = payload.get("answers", {}).get(str(i), [])
+            values = [strip_raw_answer(v) for v in raw_values if isinstance(v, str) and strip_raw_answer(v)]
+            if not values: raise Rejected(tr("请回答：", "Please answer: ") + q["question"])
+            if not q.get("multiSelect") and len(values) != 1: raise Rejected(tr("此问题只允许一个回答", "Only one answer is allowed for this question"))
+            answers[q["question"]] = ", ".join(values)
+        return {**args, "answers": answers}
+
+class ClaudeSession(ClaudeProjectionMixin, Session):
     def __init__(self, config, save):
         super().__init__(config, save)
         self.permission_modes, self.allow_bypass = permission_options("", False)
         self.background_tasks = {}
         self.autonomous_running = False
         self.last_task_completed_at = None
+        self.result_usage_authoritative = False
 
     def release_mode(self):
         return "process" if self.data.get("nativeId") and self.history_path().is_file() else None
@@ -81,24 +627,6 @@ class ClaudeSession(Session):
 
     input_evidence_protocol = 1
     dialect = "claude"
-    permission_modes, allow_bypass = permission_options("", False)
-    permission_revision = 0
-
-    def detect_permissions(self):
-        try:
-            result = subprocess.run(["claude", "--help"], cwd=self.config["cwd"], capture_output=True,
-                                    encoding="utf-8", errors="replace", timeout=10)
-            help_output = result.stdout if result.returncode == 0 else ""
-        except (OSError, subprocess.TimeoutExpired):
-            help_output = ""
-        self.permission_modes, self.allow_bypass = permission_options(help_output, os.geteuid() == 0)
-
-    def validate_permission(self, value):
-        if value == "bypassPermissions" and os.geteuid() == 0:
-            raise Rejected(tr("Claude Code 原生禁止 Root/sudo 使用“跳过审批”（bypassPermissions）",
-                              "Claude Code natively forbids `bypassPermissions` when running as root/sudo"))
-        if value not in {v["id"] for v in self.permission_modes}:
-            raise Rejected(tr("当前 Claude Code 未提供此原生权限模式：", "Current Claude Code does not offer this native permission mode: ") + value)
 
     def set_native_permission(self, value):
         result = self.call("set_permission_mode", {"mode": value})
@@ -107,13 +635,6 @@ class ClaudeSession(Session):
             self.update(permission=actual)
             raise Rejected(tr("Claude Code 未切换到所选权限模式；原生当前值：", "Claude Code did not switch to the selected permission mode; native value: ") + str(actual))
         return actual
-
-    def model_id(self, actual):
-        catalog = getattr(self, "native_models", [])
-        for wanted in (self.config.get("selectedModel"), self.data["model"], actual):
-            if wanted and any(m.get("value") == wanted and actual in (wanted, m.get("resolvedModel")) for m in catalog):
-                return wanted
-        return next((m["value"] for m in catalog if m.get("resolvedModel") == actual), actual)
 
     def read_settings(self, optional=False):
         try:
@@ -130,24 +651,16 @@ class ClaudeSession(Session):
         self.update(**fields)
         return "effort" in applied
 
-    def validate_effort(self, value, model):
-        entry = next((m for m in self.data["models"] if m["id"] == model), {})
-        if value not in entry.get("efforts", []):
-            raise Rejected(tr("当前 Claude Code 模型未提供此思考强度：", "Current Claude Code model does not support this effort level: ") + value)
-
     def set_native_effort(self, value):
         self.call("apply_flag_settings", {"settings": {"effortLevel": value}})
         if not self.read_settings() or self.data["effort"] != value:
             raise Rejected(tr("Claude Code 未应用所选思考强度；原生当前值：", "Claude Code did not apply the selected effort level; native value: ") + self.data["effort"])
 
-    def history_path(self):
-        home = Path(unicodedata.normalize("NFC", os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))))
-        return home / "projects" / _sanitize_path(str(Path(self.config["cwd"]).resolve())) / (self.data["nativeId"] + ".jsonl")
-
     def connect(self):
         self.usage_message = {}
         self.usage_models = {}
         self.usage_rows = []
+        self.result_usage_authoritative = False
         self.current_submission = None
         self.stream_id = None
         self.stream_blocks = {}
@@ -198,129 +711,9 @@ class ClaudeSession(Session):
         self.update(connected=True, models=models, permission=current_permission,
                     permissions=self.permission_modes, capabilities={"queue": False, "steer": False, "stop": True,
                     "images": False, "skills": bool(self.data["skills"]), "maxSkills": 1,
-                    "compact": "compact" in self.commands})
+                    "compact": "compact" in self.commands},
+                    **({"permissionNotice": self.config["protocolFallbackNotice"]} if self.config.get("protocolFallbackNotice") else {}))
         self.refresh_mcp()
-
-    def _restore_unflushed_accepted_rows(self, prev_rows, transcript_uuids):
-        receipts = self.config.get("receipts", {})
-        submitted_texts = getattr(self, "submitted_user_text", {})
-        deliveries = self.config.get("deliveries", {})
-        for uid, state in receipts.items():
-            if state != "accepted" or uid in transcript_uuids:
-                continue
-            user_row_id = f"{uid}:0"
-            if user_row_id in prev_rows:
-                started = False
-                for rk, rv in prev_rows.items():
-                    if rk == user_row_id:
-                        started = True
-                    if started and rk not in self.rows:
-                        self.row(rv)
-            else:
-                body = submitted_texts.get(uid)
-                payload = deliveries.get(uid, {}).get("payload", {})
-                images = payload.get("images", []) if isinstance(payload, dict) else []
-                if body is None and isinstance(payload, dict) and isinstance(payload.get("text"), str):
-                    body = payload["text"]
-                    skills = payload.get("skills") or []
-                    if skills:
-                        body = f"/{skills[0]} {body}".strip()
-                if (body is not None or images) and user_row_id not in self.rows:
-                    media = [{"source": p, "mimeType": mimetypes.guess_type(p)[0] or "image/*"} for p in images] if images else []
-                    self.row(item(user_row_id, "user", body or "", media=media, status="completed", origin="native"))
-
-    def load_history(self):
-        path = self.history_path()
-        if not path.is_file():
-            with self.lock:
-                self._restore_unflushed_accepted_rows(dict(self.rows), set())
-            return
-        if path.stat().st_size > 64 * 1024 * 1024: raise Rejected(tr("Claude 原生历史超过 64 MiB，请在原生 CLI 查看", "Claude native history exceeds 64 MiB; view it in the native CLI"))
-        content = path.read_text(encoding="utf-8")
-        entries = _parse_transcript_entries(content)
-        transcript_uuids = {e.get("uuid") for e in entries if isinstance(e, dict) and e.get("uuid")}
-        chain = _build_conversation_chain(entries)
-        with self.lock:
-            prev_rows = dict(self.rows)
-            self.rows.clear()
-            self.usage_message = {}
-            for e in chain:
-                if _is_visible_message(e): self.project(e)
-            self._restore_unflushed_accepted_rows(prev_rows, transcript_uuids)
-            for line in content.splitlines():
-                try: e = json.loads(line)
-                except (ValueError, TypeError): continue
-                if e.get("sessionId") not in (None, self.data["nativeId"]): continue
-                if e.get("type") == "custom-title" and isinstance(e.get("customTitle"), str): self.update(title=e["customTitle"])
-                elif e.get("type") == "system" and e.get("subtype", "").startswith("task_"): self.task_event(e, from_history=True)
-                elif e.get("type") == "summary" and not self.data["title"]: self.update(title=e.get("summary", ""))
-            if not self.data["running"]: self.settle_incomplete_rows("unknown")
-            for tool_key in getattr(self, "background_tasks", {}).values():
-                if tool_key and tool_key in self.rows and self.rows[tool_key].get("status") in ("unknown", "in_progress", "pending", "completed"):
-                    self.row({**self.rows[tool_key], "status": "running"})
-            if not getattr(self, "usage_rows", None):
-                by_msg = {}
-                for e in chain:
-                    msg = e.get("message") if isinstance(e, dict) else None
-                    if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("usage"), dict):
-                        mid = msg.get("id") or e.get("uuid")
-                        if mid:
-                            by_msg[mid] = (msg.get("model"), msg["usage"])
-                if by_msg:
-                    tot_in = sum(number(u.get("input_tokens")) or 0 for _, u in by_msg.values())
-                    tot_read = sum(number(u.get("cache_read_input_tokens")) or 0 for _, u in by_msg.values())
-                    tot_write = sum(number(u.get("cache_creation_input_tokens")) or 0 for _, u in by_msg.values())
-                    tot_out = sum(number(u.get("output_tokens")) or 0 for _, u in by_msg.values())
-                    last_m = next((m for m, _ in reversed(list(by_msg.values())) if m), self.data.get("model"))
-                    self.usage_rows = (
-                        cache_ratio(tot_read, tot_in + tot_read + tot_write, tr("累计输入缓存命中", "Total input cache hit"))
-                        + estimate_cost(last_m, uncached_input=tot_in, cache_read=tot_read, cache_write=tot_write, output=tot_out)
-                    )
-            self.publish_usage()
-        if chain:
-            self.config["hasNativeHistory"] = True
-            self.save()
-
-    def project(self, e):
-        if _is_internal_message(e): return
-        message = e.get("message", {})
-        if not isinstance(message, dict): return
-        role = message.get("role", e.get("type", "assistant"))
-        if role == "assistant" and isinstance(message.get("usage"), dict) and message.get("model"):
-            self.usage_message = message
-            self.publish_usage()
-        body = message.get("content", [])
-        if isinstance(body, str): body = [{"type": "text", "text": body}]
-        prefix = e.get("uuid", message.get("id", str(uuid.uuid4())))
-        if role == "user" and _is_human_turn(e) and not any(b.get("type") == "tool_result" for b in body):
-            self.row(item(f"{prefix}:0", "user", user_text(body), media=self.media(body), status="completed"))
-            return
-        for index, b in enumerate(body):
-            kind = b.get("type")
-            if kind in ("text", "thinking"):
-                if role == "user" and not _is_human_turn(e): continue
-                key = f"{prefix}:{index}"
-                self.row(item(key, "reasoning" if kind == "thinking" else role, text(b),
-                              kind="reasoning" if kind == "thinking" else "", status="completed"))
-            elif kind == "tool_use":
-                key = "tool-" + b["id"]
-                old = self.rows.get(key, {})
-                self.row(item(key, "tool", b.get("name", tr("工具", "Tool")), kind="tool", toolName=b.get("name", ""),
-                              input=json.dumps(b.get("input", {}), ensure_ascii=False),
-                              status=old.get("status", "running"), outcome=old.get("outcome", ""), media=old.get("media", [])))
-            elif kind == "tool_result":
-                key = "tool-" + b["tool_use_id"]
-                old = self.rows.get(key, item(key, "tool", tr("工具", "Tool"), kind="tool"))
-                keep_bg = not b.get("is_error") and key in getattr(self, "background_tasks", {}).values()
-                self.row({**old, "outcome": text(b.get("content", "")), "media": self.media(b.get("content")),
-                          "status": "failed" if b.get("is_error") else ("running" if keep_bg else "completed")})
-
-            elif kind in ("image", "document"):
-                if role != "user" or _is_human_turn(e):
-                    self.row(item(f"{prefix}:{index}", role, "", media=self.media(b), status="completed"))
-
-    def publish_usage(self):
-        self.update(metrics=claude_context(getattr(self, "usage_message", {}), getattr(self, "usage_models", {})) + getattr(self, "usage_rows", []))
 
     def result_usage(self, result):
         usage = result.get("usage") or {}
@@ -328,6 +721,7 @@ class ClaudeSession(Session):
                        not any((number(v) or 0) > 0 for v in usage.values()) and
                        not (number(result.get("total_cost_usd")) or 0) and not result.get("modelUsage"))
         if not placeholder:
+            self.result_usage_authoritative = True
             self.usage_models = result.get("modelUsage") or {}
             self.usage_rows = claude_result(result)
         self.publish_usage()
@@ -446,71 +840,13 @@ class ClaudeSession(Session):
             finally:
                 if e.get("is_error"): self.settle_incomplete_rows("unknown")
 
-    def task_event(self, e, from_history=False):
-        ident = e.get("task_id")
-        if not ident: return
-        subtype = e.get("subtype")
-        old = self.subagents.get(ident, {})
-        if subtype == "task_started":
-            if e.get("task_type") != "local_agent":
-                tool_key = "tool-" + e["tool_use_id"] if e.get("tool_use_id") else ""
-                bg = getattr(self, "background_tasks", None)
-                if bg is None:
-                    bg = {}
-                    self.background_tasks = bg
-                bg[ident] = tool_key
-                if tool_key and tool_key in self.rows:
-                    if not from_history or self.rows[tool_key].get("status") != "failed":
-                        self.row({**self.rows[tool_key], "status": "running"})
-                elif not from_history:
-                    self.seq += 1
-                return
-            tool = e.get("tool_use_id", "")
-            row = self.rows.get("tool-" + tool, {})
-            try: args = json.loads(row.get("input", "{}"))
-            except (ValueError, TypeError): args = {}
-            self.subagent(ident, itemId="tool-" + tool if tool else "", task=e.get("prompt", e.get("description", "")),
-                          name=args.get("name", ""), role=e.get("subagent_type", args.get("subagent_type", "")), status="running", nativeStatus="started")
-        elif not old and ident in getattr(self, "background_tasks", {}) and subtype in ("task_progress", "task_notification", "task_updated"):
-            patch = e.get("patch") if isinstance(e.get("patch"), dict) else {}
-            native = e.get("status") if subtype == "task_notification" else patch.get("status")
-            if native in ("completed", "failed", "stopped", "killed"):
-                tool_key = self.background_tasks.pop(ident, "")
-                if not from_history:
-                    self.last_task_completed_at = time.monotonic()
-                if tool_key and tool_key in self.rows:
-                    done_status = "completed" if native == "completed" else ("failed" if native == "failed" else "cancelled")
-                    updates = {"status": done_status}
-                    if e.get("summary") and not self.rows[tool_key].get("outcome"):
-                        updates["outcome"] = e["summary"]
-                    self.row({**self.rows[tool_key], **updates})
-                else:
-                    self.seq += 1
-            return
-        elif old and subtype in ("task_progress", "task_notification", "task_updated"):
-            patch = e.get("patch") if isinstance(e.get("patch"), dict) else {}
-            native = e.get("status") if subtype == "task_notification" else patch.get("status")
-            fields = {}
-            if native is not None:
-                fields.update(nativeStatus=native, status={"pending":"pending", "running":"running", "completed":"succeeded",
-                              "failed":"failed", "stopped":"cancelled", "killed":"cancelled"}.get(native, "unknown"))
-            if e.get("summary") is not None: fields["detail"] = e["summary"]
-            elif patch.get("error") is not None: fields["detail"] = str(patch["error"])
-            if e.get("description") is not None: fields["task"] = e["description"]
-            self.subagent(ident, **fields)
-
     def permission_request(self, e):
         p = e["request"]; args = p.get("input", {})
-        if p.get("tool_name") == "AskUserQuestion":
-            questions = [{"id": str(i), "header": q.get("header", ""), "prompt": q["question"],
-                          "options": [o["label"] for o in q.get("options", [])], "multiple": q.get("multiSelect", False)}
-                         for i, q in enumerate(args.get("questions", []))]
-            self.request(e["request_id"], e, "Answer", p.get("description", ""),
-                         [{"id": "allow", "label": tr("提交", "Submit")}, {"id": "deny", "label": tr("取消", "Cancel")}], questions,
-                         submit_choice="allow", skip_choice="deny")
-        else:
-            self.request(e["request_id"], e, p.get("title", p.get("tool_name", tr("工具授权", "Tool permission"))),
-                         json.dumps(args, ensure_ascii=False), [{"id": "allow", "label": tr("允许一次", "Allow once")}, {"id": "deny", "label": tr("拒绝", "Deny")}])
+        title, body, choices, questions, submit_choice, skip_choice = self._permission_request_spec(
+            p.get("tool_name", ""), args, p.get("title", ""), p.get("description", ""),
+        )
+        self.request(e["request_id"], e, title, body, choices, questions,
+                     submit_choice=submit_choice, skip_choice=skip_choice)
 
     def answer(self, p):
         raw = self.pending_requests.get(p["id"])
@@ -520,13 +856,7 @@ class ClaudeSession(Session):
         request = raw["request"]; args = request.get("input", {})
         if choice == "allow":
             if request.get("tool_name") == "AskUserQuestion":
-                answers = {}
-                for i, q in enumerate(args.get("questions", [])):
-                    values = p.get("answers", {}).get(str(i), [])
-                    if not values: raise Rejected(tr("请回答：", "Please answer: ") + q["question"])
-                    if not q.get("multiSelect") and len(values) != 1: raise Rejected(tr("此问题只允许一个回答", "Only one answer is allowed for this question"))
-                    answers[q["question"]] = ", ".join(values)
-                args = {**args, "answers": answers}
+                args = self._resolve_question_answers(args, p)
             response = {"behavior": "allow", "updatedInput": args}
         else: response = {"behavior": "deny", "message": "User denied this request"}
         self.peer.send({"type": "control_response", "response": {"subtype": "success", "request_id": raw["request_id"], "response": response}})

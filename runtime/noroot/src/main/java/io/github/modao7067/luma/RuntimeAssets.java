@@ -158,7 +158,7 @@ final class RuntimeAssets {
         String tzExport=(!tz.isEmpty() && new File(root,"usr/share/zoneinfo/"+tz).isFile()) ? "export TZ="+tz+"\n" : "";
         String profileScript=
             "export PNPM_HOME=/root/.local/share/pnpm\n"+
-            "export PATH=/opt/luma/bin:$PNPM_HOME/bin:$PATH\n"+
+            "export PATH=/opt/luma/bin:$PNPM_HOME/bin:$HOME/.local/bin:$HOME/.kimi-code/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.qoder/bin:$HOME/.codebuddy/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH\n"+
             "export LUMA_NATIVE_SOCKET="+LinuxEnvironment.socketName(c)+"\n"+
             tzExport+
             "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n"+

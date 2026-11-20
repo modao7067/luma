@@ -6,6 +6,14 @@ Luma's first-party application code is licensed under GPL-3.0-only. The complete
 
 GUI VectorDrawables use Lobe Icons, official pi artwork and the CodeBuddy mark under MIT, plus Google Material Design Icons under Apache-2.0. Exact revisions, resource mappings and bundled licenses are listed in [`PROVIDER-ICONS.md`](PROVIDER-ICONS.md). Brand trademarks remain with their respective owners.
 
+## Liquid glass, press and menu motion
+
+`PrismGlass.kt`, `LiquidChrome.kt`, `ElasticPress.kt`, `MorphMenu.kt`, `PrismMotion.kt` and the opening/dismissal motion in `OriginMenu.kt` adapt the liquid glass shader/optics, downscaled backdrop, dock/menu shadows, elastic press, popup morph, droplet return, carried popup press and glyph pulse from chen08209/prism_ui, revision `6c47901cc80b5325bdb9650579ca2e000a60b39e` (the `plugins/prism_ui` submodule of chen08209/FlClash `be84736605527034689c95bf27828ff27d912c5e`).
+
+Source: https://github.com/chen08209/prism_ui/tree/6c47901cc80b5325bdb9650579ca2e000a60b39e
+
+prism_ui is licensed under GPL-3.0; its license text is retained in `third-party/prism-ui/LICENSE-GPL-3.0.txt`.
+
 ## Native CLI PTY dependencies
 
 `cli_bridge/native/tmux-debian-arm64.zip` contains Debian ARM64 tmux 3.5a-3, libevent-core 2.1.12-stable-10+b1 and jemalloc 5.3.0-3. Debian copyright and license files remain in the archive. Package pins and the reproducible builder are in `tools/native/tmux/packages.json` and `tools/build-native-tmux.py`.
@@ -67,7 +75,5 @@ libghostty-vt is pinned to `0e6afb2600d4` under MIT, Copyright (c) 2024 Mitchell
 AndroidX, Jetpack Compose, OkHttp, Okio, Kotlin Coroutines, AndroidSVG and Material Color Utilities are Apache-2.0. CommonMark Java is BSD-2-Clause. JLaTeXMath Android is GPL-2.0-or-later with its linking exception; its fonts retain the licenses bundled in the upstream AAR. Exact versions and license locations are in `THIRD_PARTY_NOTICES.md` and the Gradle version catalog.
 
 `ui/shapes/MiuixSquirclePath.kt`, `ui/thirdparty/miuix/Overscroll.kt` and `SpringUtils.kt` adapt compose-miuix-ui 0.9.4, revision `39c40f99844227b853f0049a0933b1f3ae6c00ba`, under Apache-2.0. Their original copyright notices and packaged licenses are retained.
-
-The glass implementation adapts only Apache-2.0 lens, vibrancy, highlight and shader algorithms from Miuix and parameters found in SukiSU-Ultra revision `e67b14e6bbbbd3e67f24df658a01d3e73a64159c`. No SukiSU business, navigation or icon assets are copied. Source identities and integration constraints are recorded in `THIRD_PARTY_NOTICES.md`.
 
 `ui/OriginMenu.kt` adapts AndroidX Material3 1.4.0's DropdownMenu shell, MenuContent and standard motion tokens under Apache-2.0, Copyright 2021 The Android Open Source Project. The source artifact and maintenance constraints are recorded in `THIRD_PARTY_NOTICES.md`; the full license is in `third-party/androidx-material-menu/LICENSE-Apache-2.0.txt`.

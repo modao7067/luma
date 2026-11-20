@@ -17,60 +17,56 @@ class ProcessToolLabelsTest {
 
     @Test fun bothLevelsShareLiteralFirstSeenNamesAndCountEachNativeCall() {
         val entries = toolLabelsFixture()
-        assertEquals("8 次 shell、read、glob、websearch · 2 次 思考 · 1 次 失败", processGroupCaption(entries, "OpenCode"))
+        assertEquals("10 步", processGroupCaption(entries, "OpenCode"))
+        assertEquals("10 步 · 2m3s", processGroupCaption(entries, "OpenCode", durationMs = 123_000L))
         assertEquals(listOf("shell", "read", "glob", "websearch", "read", "glob", "websearch", "read", "thought", "thought"), entries.map { processEntryLabel(it, "OpenCode") })
-        assertEquals("3 次 Read、read、mcp__server__WebSearch", processGroupCaption(listOf(call("Read"), call("read"), call("mcp__server__WebSearch")), "Claude Code"))
+        assertEquals("3 步", processGroupCaption(listOf(call("Read"), call("read"), call("mcp__server__WebSearch")), "Claude Code"))
     }
     @Test fun updatesAreOneCallAndNonCallsAreNotToolInvocations() {
         val first = call("read").copy(outcome = "running", turnId = "t1")
         val done = first.copy(outcome = "failed")
         val otherTurn = first.copy(turnId = "t2", outcome = "succeeded")
         val events = listOf("reasoning", "compaction", "subAgentActivity", "futureEvent").map { first.copy(id = it, kind = it, outcome = "succeeded") }
-        assertEquals("2 次 read · 1 次 思考 · 1 次 失败 · 1 次 子代理", processGroupCaption(listOf(first, done, otherTurn) + events, "pi"))
+        assertEquals("5 步", processGroupCaption(listOf(first, done, otherTurn) + events, "pi"))
         assertEquals(listOf(done, otherTurn), processToolInvocations(listOf(first, done, otherTurn) + events))
     }
     @Test fun structuredCommandLabelsPreserveNativeToolSummaryNames() {
         val entries = listOf("commandExecution", "fileChange", "webSearch", "imageView").mapIndexed { i, kind -> call("").copy(id = "$i", kind = kind, text = "cat file", input = "cat file") }
-        assertEquals("4 次 shell、fileChange、webSearch、imageView", processGroupCaption(entries))
+        assertEquals("4 步 · 修改 1 处", processGroupCaption(entries))
         assertEquals(listOf("read", "fileChange", "webSearch", "imageView"), entries.map { processEntryLabel(it, "Codex") })
         assertEquals("read", processEntryLabel(entries.first().copy(toolName = "Bash"), "Codex"))
-        assertEquals("1 次 Bash", processGroupCaption(listOf(entries.first().copy(toolName = "Bash"))))
+        assertEquals("1 步", processGroupCaption(listOf(entries.first().copy(toolName = "Bash"))))
         val shell = entries.first().copy(toolName = "Bash", text = "printf synthetic", input = "printf synthetic")
         assertEquals("Bash", processEntryLabel(shell, "Codex"))
-        assertEquals("1 次 Bash", processGroupCaption(listOf(shell)))
+        assertEquals("1 步", processGroupCaption(listOf(shell)))
         assertEquals("search", processEntryLabel(call("", toolKind = "search"), "Kimi Code"))
         assertEquals("Tool call", processEntryLabel(call(""), "unknown"))
     }
-    @Test fun structuredSummaryBoldsLiteralLabelsButNeverCountPrefixesOrGroupSeparators() {
+    @Test fun summaryCountsStepsAndOnlyEmphasizesEdits() {
         val actual = processGroupSummary(toolLabelsFixture(), "OpenCode")
-        assertEquals(listOf(ProcessSummaryPart("8 次 ", "shell、read、glob、websearch"), ProcessSummaryPart("2 次 ", "思考"), ProcessSummaryPart("1 次 ", "失败")), actual)
+        assertEquals(listOf(ProcessSummaryPart("10 步")), actual)
+        val edits = listOf(call("").copy(kind = "fileChange"), call("").copy(id = "x", kind = "commandExecution", input = "printf x", text = "printf x"))
+        assertEquals(listOf(ProcessSummaryPart("2 步"), ProcessSummaryPart("修改 1 处", emphasized = true)), processGroupSummary(edits))
         fun check(parts: List<ProcessSummaryPart>) {
-            val text = processSummaryText(parts)
+            val text = processSummaryText(parts, androidx.compose.ui.graphics.Color.Red)
             assertEquals(parts.joinToString(" · ") { it.text }, text.text)
-            assertEquals(parts.map { it.label }, text.spanStyles.map { text.text.substring(it.start, it.end) })
-            var cursor = 0
-            parts.forEachIndexed { index, part ->
-                if (index > 0) {
-                    assertTrue(text.spanStyles.none { it.start < cursor + 3 && it.end > cursor })
-                    cursor += 3
-                }
-                assertTrue(text.spanStyles.none { it.start < cursor + part.prefix.length && it.end > cursor })
-                cursor += part.prefix.length + part.label.length
-            }
-            assertTrue(text.spanStyles.all { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.SemiBold })
+            assertEquals(parts.filter { it.emphasized }.map { it.text }, text.spanStyles.map { text.text.substring(it.start, it.end) })
+            assertTrue(text.spanStyles.all { it.item.fontWeight == null })
         }
         check(actual)
+        check(processGroupSummary(edits))
         val literal = "v2.1 · 8 次 思考/read"
         check(processGroupSummary(listOf(call(literal))))
-        assertEquals("1 次 $literal", processGroupCaption(listOf(call(literal))))
+        assertEquals("1 步", processGroupCaption(listOf(call(literal))))
         val reasoning = (0..1).map { call("").copy(id = "r$it", kind = "reasoning") }
         val agents = (0..1).map { call("").copy(id = "a$it", kind = "subAgent") }
         val states = listOf(
-            reasoning to "2 次 思考",
-            listOf(reasoning.first().copy(outcome = "running")) to "1 次 思考",
-            listOf(reasoning.first().copy(outcome = "failed")) to "1 次 思考",
-            agents to "2 次 子代理",
-            (reasoning + agents) to "2 次 思考 · 2 次 子代理",
+            reasoning to "已思考",
+            listOf(reasoning.first().copy(outcome = "running")) to "正在思考…",
+            listOf(reasoning.first().copy(outcome = "failed")) to "已思考",
+            agents to "2 步",
+            listOf(agents.first().copy(outcome = "pending")) to "正在召唤子代理…",
+            (reasoning + agents) to "4 步",
             listOf(call("").copy(kind = "futureEvent")) to "执行过程",
             emptyList<ConversationItem>() to "",
         )

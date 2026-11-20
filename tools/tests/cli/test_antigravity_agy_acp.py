@@ -16,8 +16,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "apps/gui/app/src/main/assets/cli_bridge"))
 from luma_cli.antigravity import AntigravitySession
 from luma_cli.antigravity_agy_acp import AntigravityAgyAcpSession, AGY_ACP_PROTOCOL
-from luma_cli.antigravity_cli import AntigravityCliSession, PROTOCOL as STREAM_JSON_PROTOCOL
+from luma_cli.antigravity_cli import AntigravityCliSession, PROTOCOL as STREAM_JSON_PROTOCOL, project_child_transcript
+from luma_cli.base import parse_ts_ms
+from luma_cli.claude import ClaudeSession
+from luma_cli.grok import GrokSession
 from luma_cli.i18n import tr
+from luma_cli.pi import PiSession
 from luma_cli.server import Manager, NATIVE_PROTOCOLS
 from luma_cli.transport import Conflict, Rejected
 
@@ -87,12 +91,18 @@ for raw in sys.stdin:
     method = frame.get("method")
     ident = frame.get("id")
     params = frame.get("params", {})
+    if method:
+        with (store / "rpc_methods.jsonl").open("a", encoding="utf-8") as rpc_out:
+            rpc_out.write(json.dumps({"method": method, "params": params}, ensure_ascii=False) + "\n")
     if method == "initialize":
         assert params.get("clientCapabilities", {}).get("elicitation") == {"form": {}}
+        agent_caps = {"loadSession": True, "promptCapabilities": {"image": True, "embeddedContext": True}}
+        if os.environ.get("LUMA_FIXTURE_RESUME_CAP") == "1":
+            agent_caps["sessionCapabilities"] = {"resume": {}}
         send({"jsonrpc": "2.0", "id": ident, "result": {
             "protocolVersion": 1,
             "agentInfo": {"name": "Antigravity ACP Server", "version": "1.5.2"},
-            "agentCapabilities": {"loadSession": True, "promptCapabilities": {"image": True, "embeddedContext": True}},
+            "agentCapabilities": agent_caps,
             "authMethods": [{"id": "oauth-personal", "name": "Log in with Google"}],
         }})
     elif method == "authenticate":
@@ -112,6 +122,12 @@ for raw in sys.stdin:
         sid = "agy-acp-session-1"
         session_options = copy.deepcopy(default_options)
         (store / f"{sid}.json").write_text(json.dumps({"turns": []}))
+        send({"jsonrpc": "2.0", "id": ident, "result": {"sessionId": sid, "configOptions": session_options}})
+    elif method == "session/resume":
+        sid = params["sessionId"]
+        session_options = copy.deepcopy(default_options)
+        if not (store / f"{sid}.json").exists():
+            (store / f"{sid}.json").write_text(json.dumps({"turns": []}))
         send({"jsonrpc": "2.0", "id": ident, "result": {"sessionId": sid, "configOptions": session_options}})
     elif method == "session/load":
         sid = params["sessionId"]
@@ -422,6 +438,159 @@ for raw in sys.stdin:
                 "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Replanned with approach B"}},
             }})
             send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
+        elif prompt_text == "real_agy_steer_flow":
+            gemini = pathlib.Path(os.environ["GEMINI_HOME"]) / "antigravity-cli" / "brain"
+            parent_log = gemini / sid / ".system_generated" / "logs" / "transcript.jsonl"
+            parent_log.parent.mkdir(parents=True, exist_ok=True)
+            with parent_log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "step_index": 0,
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>",
+                }) + "\n")
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_real_1",
+                    "name": "read_file",
+                    "title": "/tmp/before.txt",
+                    "kind": "read",
+                    "status": "in_progress",
+                },
+            }})
+            steer_frame = json.loads(sys.stdin.readline())
+            assert steer_frame["method"] == "session/prompt"
+            steer_text = steer_frame["params"]["prompt"][0]["text"]
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_real_1",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "before body"}}],
+                },
+            }})
+            with parent_log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [{"name": "read_file", "args": {"Path": '"/tmp/before.txt"'}}],
+                }) + "\n")
+                f.write(json.dumps({
+                    "step_index": 2,
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "content": "before body",
+                }) + "\n")
+                f.write(json.dumps({
+                    "step_index": 3,
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": f"<USER_REQUEST>\n{steer_text}\n</USER_REQUEST>",
+                }) + "\n")
+            send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_real_2",
+                    "name": "read_file",
+                    "title": "/tmp/after.txt",
+                    "kind": "read",
+                    "status": "in_progress",
+                },
+            }})
+            gate = store / "finish-real-agy-steer"
+            while not gate.exists():
+                time.sleep(0.01)
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_real_2",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "after body"}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "id": steer_frame["id"], "result": {"stopReason": "end_turn"}})
+        elif prompt_text == "chained_steer_flow":
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_chain_1",
+                    "name": "read_file",
+                    "title": "/tmp/chain1.txt",
+                    "kind": "read",
+                    "status": "in_progress",
+                },
+            }})
+            steer_b = json.loads(sys.stdin.readline())
+            assert steer_b["method"] == "session/prompt"
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_chain_1",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "chain 1 done"}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_chain_2",
+                    "name": "read_file",
+                    "title": "/tmp/chain2.txt",
+                    "kind": "read",
+                    "status": "in_progress",
+                },
+            }})
+            steer_c = json.loads(sys.stdin.readline())
+            assert steer_c["method"] == "session/prompt"
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_chain_2",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "chain 2 done"}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "id": steer_b["id"], "result": {"stopReason": "end_turn"}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_chain_3",
+                    "name": "read_file",
+                    "title": "/tmp/chain3.txt",
+                    "kind": "read",
+                    "status": "in_progress",
+                },
+            }})
+            gate = store / "finish-chained-steer"
+            while not gate.exists():
+                time.sleep(0.01)
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_chain_3",
+                    "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "chain 3 done"}}],
+                },
+            }})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "reply:chained_steer_done"}},
+            }})
+            send({"jsonrpc": "2.0", "id": steer_c["id"], "result": {"stopReason": "end_turn"}})
         else:
             state = json.loads((store / f"{sid}.json").read_text())
             turn = {"user": prompt_text, "thought": "thinking:" + prompt_text, "reply": "reply:" + prompt_text}
@@ -1098,6 +1267,88 @@ class AntigravityAgyAcpTests(unittest.TestCase):
             self.assertEqual(enter_row["outcome"], "User steered execution toward approach B")
             self.assertEqual(s.config.get("receipts", {}).get("main-orch"), "accepted")
 
+    def test_real_agy_mid_turn_steer_handoff_via_transcript_without_user_chunk(self):
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(self.root / "state-real-steer")
+            s = manager.connect({"id": "real-steer", "cli": "Antigravity", "cwd": str(self.root)})
+            self.sessions.append(s)
+            s.action("submit", {"submissionId": "sub-main", "text": "real_agy_steer_flow"})
+            self.wait(lambda: (
+                s.config.get("receipts", {}).get("sub-main") == "accepted"
+                and s.config.get("consumedSubmissions", {}).get("sub-main") is True
+                and "tool-call_real_1" in s.rows
+            ))
+            s.action("submit", {"submissionId": "sub-steer", "text": "steer while working"})
+            self.wait(lambda: (
+                s.config.get("receipts", {}).get("sub-steer") == "accepted"
+                and s.config.get("consumedSubmissions", {}).get("sub-steer") is True
+                and "tool-call_real_2" in s.rows
+            ))
+            snap = s.snapshot()
+            self.assertTrue(snap["running"])
+            self.assertEqual(snap["hostQueue"], [])
+            self.assertEqual(
+                [(m["id"], m["role"], m["text"]) for m in snap["messages"]],
+                [
+                    ("sub-main", "user", "real_agy_steer_flow"),
+                    ("tool-call_real_1", "tool", "/tmp/before.txt"),
+                    ("sub-steer", "user", "steer while working"),
+                    ("tool-call_real_2", "tool", "/tmp/after.txt"),
+                ],
+            )
+            self.assertEqual(snap["messages"][0]["origin"], "native")
+            self.assertEqual(snap["messages"][2]["origin"], "native")
+            self.assertEqual(s.current_submission, "sub-steer")
+            self.assertIsNotNone(s.fast_release_blocker())
+
+            (self.store / "finish-real-agy-steer").write_text("ok", encoding="utf-8")
+            self.wait(lambda: not s.data["running"])
+            final_snap = s.snapshot()
+            self.assertFalse(final_snap["running"])
+            self.assertEqual(s.rows["tool-call_real_2"]["status"], "completed")
+            self.assertIsNone(s.fast_release_blocker())
+            self.assertTrue(final_snap["releasable"])
+
+    def test_chained_steer_clears_running_and_allows_subsequent_slash_command(self):
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(self.root / "state-chained-steer")
+            s = manager.connect({"id": "chained-steer", "cli": "Antigravity", "cwd": str(self.root)})
+            self.sessions.append(s)
+            s.action("submit", {"submissionId": "sub-a", "text": "chained_steer_flow"})
+            self.wait(lambda: (
+                s.config.get("receipts", {}).get("sub-a") == "accepted"
+                and "tool-call_chain_1" in s.rows
+            ))
+            s.action("submit", {"submissionId": "sub-b", "text": "steer b"})
+            self.wait(lambda: (
+                s.current_submission == "sub-b"
+                and s.steer_submission is None
+                and "tool-call_chain_2" in s.rows
+            ))
+            s.action("submit", {"submissionId": "sub-c", "text": "steer c"})
+            self.wait(lambda: (
+                s.current_submission == "sub-c"
+                and s.steer_submission is None
+                and "tool-call_chain_3" in s.rows
+            ))
+            self.assertTrue(s.data["running"])
+            (self.store / "finish-chained-steer").write_text("ok", encoding="utf-8")
+            self.wait(lambda: not s.data["running"])
+            self.assertIsNone(s.current_submission)
+            self.assertIsNone(s.steer_submission)
+            self.assertEqual(s.active_prompts, [])
+            self.assertIsNone(s.fast_release_blocker())
+            self.assertTrue(s.snapshot()["releasable"])
+
+            s.action("submit", {"submissionId": "sub-slash", "text": "/help"})
+            self.wait(lambda: (
+                s.config.get("receipts", {}).get("sub-slash") == "accepted"
+                and not s.data["running"]
+            ))
+            snap = s.snapshot()
+            self.assertEqual(snap["hostQueue"], [])
+            self.assertIn("reply:/help", [r["text"] for r in snap["messages"] if r["role"] == "assistant"])
+
 class SwarmProjectionAcpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="luma-agy-swarm-")
@@ -1466,6 +1717,110 @@ class SwarmProjectionAcpTests(unittest.TestCase):
         self.assertEqual(s.config.get("receipts", {}).get("steer-rej"), "rejected")
         self.assertIn("Steer rejected by ACP", s.data.get("error") or "")
 
+    def test_promoted_steer_rejected_promotes_next_active_steer_and_settles(self):
+        with patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_home)}):
+            s = self._make_session("parent-chained-reject", current_submission=None)
+            s.update(connected=True, capabilities={"steer": True})
+            gate_a = threading.Event()
+            gate_b = threading.Event()
+            gate_c = threading.Event()
+            entered = {}
+
+            def fake_call(method, params, timeout=45, on_uncertain=None):
+                txt = params["prompt"][0]["text"]
+                entered[txt] = True
+                if txt == "turn a":
+                    gate_a.wait(3.0)
+                    return {"stopReason": "end_turn"}
+                if txt == "steer b":
+                    gate_b.wait(3.0)
+                    raise Rejected("B rejected")
+                if txt == "steer c":
+                    gate_c.wait(3.0)
+                    return {"stopReason": "end_turn"}
+                raise AssertionError(f"Unexpected prompt {txt}")
+
+            s.call = fake_call
+            s.prompt({"submissionId": "sub-a", "text": "turn a"})
+            s.prompt({"submissionId": "sub-b", "text": "steer b", "steer": True})
+            deadline = time.monotonic() + 2.0
+            while not (entered.get("turn a") and entered.get("steer b")) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            gate_a.set()
+
+            deadline = time.monotonic() + 2.0
+            while not (s.current_submission == "sub-b" and s.steer_submission is None) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(s.current_submission, "sub-b")
+            self.assertIsNone(s.steer_submission)
+            self.assertTrue(s.data["running"])
+
+            s.prompt({"submissionId": "sub-c", "text": "steer c", "steer": True})
+            deadline = time.monotonic() + 2.0
+            while not (entered.get("steer c") and "sub-c" in s.active_prompts) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            gate_b.set()
+
+            deadline = time.monotonic() + 2.0
+            while not (s.current_submission == "sub-c" and s.steer_submission is None) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(s.current_submission, "sub-c")
+            self.assertIsNone(s.steer_submission)
+            self.assertTrue(s.data["running"])
+            self.assertEqual(s.config.get("receipts", {}).get("sub-b"), "accepted")
+            self.assertIn("sub-b", s.rows)
+            self.assertIn("B rejected", s.data.get("error") or "")
+
+            gate_c.set()
+            deadline = time.monotonic() + 2.0
+            while s.data["running"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(s.data["running"])
+            self.assertIsNone(s.current_submission)
+            self.assertIsNone(s.steer_submission)
+            self.assertEqual(s.active_prompts, [])
+            self.assertEqual(s.config.get("receipts", {}).get("sub-c"), "accepted")
+
+            s2 = self._make_session("parent-main-reject", current_submission=None)
+            s2.update(connected=True, capabilities={"steer": True})
+            gate_1 = threading.Event()
+            gate_2 = threading.Event()
+            entered2 = {}
+
+            def fake_call2(method, params, timeout=45, on_uncertain=None):
+                txt = params["prompt"][0]["text"]
+                entered2[txt] = True
+                if txt == "main turn":
+                    gate_1.wait(3.0)
+                    raise Rejected("Main rejected")
+                if txt == "steer follow":
+                    gate_2.wait(3.0)
+                    return {"stopReason": "end_turn"}
+                raise AssertionError(f"Unexpected prompt {txt}")
+
+            s2.call = fake_call2
+            s2.prompt({"submissionId": "m-1", "text": "main turn"})
+            s2.prompt({"submissionId": "s-2", "text": "steer follow", "steer": True})
+            deadline = time.monotonic() + 2.0
+            while not (entered2.get("main turn") and entered2.get("steer follow")) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            gate_1.set()
+            deadline = time.monotonic() + 2.0
+            while not (s2.current_submission == "s-2" and s2.steer_submission is None) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(s2.data["running"])
+            self.assertEqual(s2.config.get("receipts", {}).get("m-1"), "rejected")
+            self.assertIn("Main rejected", s2.data.get("error") or "")
+            gate_2.set()
+            deadline = time.monotonic() + 2.0
+            while s2.data["running"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(s2.data["running"])
+            self.assertIsNone(s2.current_submission)
+            self.assertIsNone(s2.steer_submission)
+            self.assertEqual(s2.active_prompts, [])
+            self.assertEqual(s2.config.get("receipts", {}).get("s-2"), "accepted")
+
     def test_finish_observer_close_joins_tail_and_blocks_post_close_sync(self):
         parent_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
         w1 = "ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -1723,6 +2078,204 @@ class SwarmProjectionAcpTests(unittest.TestCase):
                 self.assertIsNone(s.fast_release_blocker())
             finally:
                 s.peer = None
+
+    def test_session_resume_hydrates_ordered_transcript_and_skips_session_load(self):
+        sid = "77777777-7777-4777-8777-777777777777"
+        child_id = "88888888-8888-4888-8888-888888888888"
+        log_dir = self.gemini_home / "antigravity-cli" / "brain" / sid / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        child_log_dir = self.gemini_home / "antigravity-cli" / "brain" / child_id / ".system_generated" / "logs"
+        child_log_dir.mkdir(parents=True, exist_ok=True)
+        child_log_path_obj = child_log_dir / "transcript.jsonl"
+        img_path = self.root / "uploaded_shot.png"
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc```\xf8\x0f\x00\x01\x04\x01\x00"
+            b"\x80\x1d\x1e\x1f\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        img_path.write_bytes(png_bytes)
+
+        compact_steps = [
+            {
+                "step_index": 0,
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-11-18T10:00:00Z",
+                "content": "<USER_REQUEST>\nfirst prompt\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-18.\n</ADDITIONAL_METADATA>",
+                "media": [{"mime_type": "image/png", "uri": str(img_path)}],
+            },
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-11-18T10:00:03Z",
+                "thinking": "truncated...",
+                "truncated_fields": ["thinking"],
+                "tool_calls": [
+                    {"name": "read_file", "args": {"Path": '"/tmp/notes.md"'}},
+                    {"name": "exit_plan_mode", "args": {"plan": '"## Plan\\nStep 1"'}},
+                ],
+            },
+            {"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-18T10:00:05Z", "content": "notes body"},
+            {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-18T10:00:06Z", "content": "Plan mode is off."},
+            {"step_index": 4, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-18T10:00:06Z", "content": '<SYSTEM_MESSAGE>\nsender=system content=plan_mode_handoff\n</SYSTEM_MESSAGE>'},
+            {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-18T10:00:10Z", "thinking": "ready reply", "content": "handover written"},
+            {
+                "step_index": 6,
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "content": "<USER_REQUEST>\nsecond prompt\n</USER_REQUEST>",
+            },
+            {
+                "step_index": 7,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {"name": "invoke_subagent", "args": {"TypeName": '"research"', "Role": '"Inspector"', "Prompt": '"Check logs"'}},
+                ],
+            },
+            {
+                "step_index": 8,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": "Created the following subagent:\n" + json.dumps({"conversationId": child_id, "logAbsoluteUri": f"file://{child_log_path_obj}"}),
+            },
+            {"step_index": 9, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "all done"},
+        ]
+        full_steps = copy.deepcopy(compact_steps)
+        full_steps[1]["thinking"] = "full hydrated reasoning process"
+        del full_steps[1]["truncated_fields"]
+
+        (log_dir / "transcript.jsonl").write_text("".join(json.dumps(s) + "\n" for s in compact_steps), encoding="utf-8")
+        (log_dir / "transcript_full.jsonl").write_text("".join(json.dumps(s) + "\n" for s in full_steps), encoding="utf-8")
+        child_log_path_obj.write_text("".join(json.dumps(s) + "\n" for s in [
+            {"step_index": 0, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": f"<SYSTEM_MESSAGE>\n[Message] sender={sid} priority=MESSAGE_PRIORITY_HIGH content=Check logs\n</SYSTEM_MESSAGE>"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "child finished"},
+        ]), encoding="utf-8")
+
+        state_dir = self.root / "state-resume"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "resume1.json").write_text(json.dumps({
+            "cli": "Antigravity",
+            "cwd": str(self.root),
+            "nativeId": sid,
+            "nativeProtocol": AGY_ACP_PROTOCOL,
+        }), encoding="utf-8")
+
+        env = {
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "GEMINI_HOME": str(self.gemini_home),
+            "LUMA_FIXTURE_STORE": str(self.store),
+            "LUMA_FIXTURE_OPTIONS": json.dumps(AGY_ACP_OPTIONS),
+            "LUMA_FIXTURE_RESUME_CAP": "1",
+        }
+        session = None
+        try:
+            with patch.dict(os.environ, env):
+                manager = Manager(state_dir)
+                session = manager.connect({"id": "resume1", "cli": "Antigravity", "cwd": str(self.root)})
+                snap = session.snapshot()
+                rpc_methods = [json.loads(line)["method"] for line in (self.store / "rpc_methods.jsonl").read_text(encoding="utf-8").splitlines()]
+                self.assertIn("session/resume", rpc_methods)
+                self.assertNotIn("session/load", rpc_methods)
+
+                msgs = snap["messages"]
+                self.assertEqual([(m["role"], m.get("kind", ""), m["text"]) for m in msgs], [
+                    ("user", "", "first prompt"),
+                    ("reasoning", "reasoning", "full hydrated reasoning process"),
+                    ("tool", "tool", "/tmp/notes.md"),
+                    ("tool", "tool", tr("退出规划 · 交由执行模型", "Exit plan · Hand off to executor")),
+                    ("reasoning", "reasoning", "ready reply"),
+                    ("assistant", "", "handover written"),
+                    ("user", "", "second prompt"),
+                    ("tool", "tool", "invoke_subagent"),
+                    ("assistant", "", "all done"),
+                ])
+                self.assertEqual(msgs[3]["outcome"], "## Plan\nStep 1")
+                self.assertEqual(msgs[0]["timestampMs"], 1794996000000)
+                self.assertEqual(msgs[1]["timestampMs"], 1794996003000)
+                self.assertEqual(msgs[2]["completedAtMs"], 1794996005000)
+                self.assertEqual(msgs[5]["timestampMs"], 1794996010000)
+                self.assertEqual(len(msgs[0].get("media", [])), 1)
+                cached_src = msgs[0]["media"][0]["source"]
+                self.assertTrue(cached_src.startswith(str(state_dir / "media-cache")))
+                self.assertTrue(pathlib.Path(cached_src).is_file())
+                self.assertEqual(len(snap["subAgents"]), 1)
+                self.assertEqual(snap["subAgents"][0]["itemId"], msgs[7]["id"])
+                self.assertTrue(snap["historyReady"])
+                self.assertTrue(snap["releasable"])
+        finally:
+            if session is not None:
+                session._close_current_peer()
+
+    def test_native_timestamp_extraction_across_agy_claude_pi_and_grok(self):
+        self.assertEqual(parse_ts_ms(1), 0)
+        self.assertEqual(parse_ts_ms("2026-11-18T10:00:00Z"), 1794996000000)
+
+        child_msgs = project_child_transcript(
+            "child-1",
+            [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-18T10:00:00Z", "content": "check"},
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-18T10:00:02Z",
+                    "thinking": "plan",
+                    "tool_calls": [{"name": "run_command", "args": {"CommandLine": '"ls"'}}],
+                },
+                {
+                    "step_index": 2,
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "created_at": "2026-11-18T10:00:07Z",
+                    "content": "Created At: 2026-11-18T10:00:03Z\nCompleted At: 2026-11-18T10:00:06Z\nok",
+                },
+                {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-18T10:00:09Z", "content": "done"},
+            ],
+        )
+        self.assertEqual(child_msgs[0]["timestampMs"], 1794996000000)
+        self.assertEqual(child_msgs[1]["timestampMs"], 1794996002000)
+        self.assertEqual(child_msgs[2]["timestampMs"], 1794996002000)
+        self.assertEqual(child_msgs[2]["completedAtMs"], 1794996006000)
+        self.assertEqual(child_msgs[3]["timestampMs"], 1794996009000)
+
+        cs = ClaudeSession({"cli": "Claude Code", "cwd": "/tmp", "nativeId": "c1", "receipts": {}}, lambda: None)
+        cs.current_submission = None; cs.stream_id = None; cs.stream_blocks = {}; cs.finalized_blocks = set()
+        cs.usage_message = {}; cs.usage_models = {}; cs.usage_rows = []
+        cs.project({"type": "user", "uuid": "u1", "timestamp": "2026-11-18T10:00:00Z", "message": {"role": "user", "content": "hi"}})
+        cs.project({"type": "assistant", "uuid": "a1", "timestamp": "2026-11-18T10:00:03Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}]}})
+        cs.project({"type": "user", "uuid": "tr1", "timestamp": "2026-11-18T10:00:08Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}})
+        self.assertEqual(cs.rows["u1:0"]["timestampMs"], 1794996000000)
+        self.assertEqual(cs.rows["tool-tu1"]["timestampMs"], 1794996003000)
+        self.assertEqual(cs.rows["tool-tu1"]["completedAtMs"], 1794996008000)
+
+        ps = PiSession({"cli": "pi", "cwd": "/tmp"}, lambda: None)
+        ps.project({"id": "pu1", "role": "user", "timestamp": 1794996000000, "content": "go"}, "f0")
+        ps.project({"id": "pa1", "role": "assistant", "timestamp": 1794996002000, "content": [{"type": "thinking", "thinking": "hmm", "_done": True}, {"type": "toolCall", "id": "pt1", "name": "read", "arguments": {"path": "x"}}]}, "f1", done=True)
+        ps.project({"id": "pr1", "role": "toolResult", "toolCallId": "pt1", "toolName": "read", "timestamp": 1794996005000, "content": [{"type": "text", "text": "ok"}]}, "f2", done=True)
+        self.assertEqual(ps.rows["pu1"]["timestampMs"], 1794996000000)
+        self.assertEqual(ps.rows["pa1-0"]["timestampMs"], 1794996002000)
+        self.assertEqual(ps.rows["tool-pt1"]["timestampMs"], 1794996002000)
+        self.assertEqual(ps.rows["tool-pt1"]["completedAtMs"], 1794996005000)
+
+        gs = GrokSession({"cli": "Grok Build", "cwd": "/tmp", "nativeId": "g1", "receipts": {}}, lambda: None)
+        gs.loading = gs.processing_replay = False
+        gs.seen_events = set()
+        gs.chunk_prompt = gs.chunk_kind = gs.chunk_id = gs.current_submission = None
+        gs.background_tools = {}
+        gs.child_sessions = {}
+        gs.spawn_tools = []
+        gs.event({"method": "session/update", "params": {"sessionId": "g1", "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "think"}}, "_meta": {"isReplay": True, "agentTimestampMs": 1794996001000}}})
+        gs.event({"method": "session/update", "params": {"sessionId": "g1", "update": {"sessionUpdate": "tool_call", "toolCallId": "gt1", "title": "Bash", "status": "completed"}, "_meta": {"isReplay": True, "agentTimestampMs": 1794996004000}}})
+        gs.event({"method": "session/update", "params": {"sessionId": "g1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done"}}, "_meta": {"isReplay": True, "agentTimestampMs": 1794996007000}}})
+        gs.event({"method": "session/update", "params": {"sessionId": "g1", "update": {"sessionUpdate": "turn_completed"}, "_meta": {"isReplay": True, "agentTimestampMs": 1794996008000}}})
+        rows = list(gs.rows.values())
+        self.assertEqual(rows[0]["timestampMs"], 1794996001000)
+        self.assertEqual(rows[1]["timestampMs"], 1794996004000)
+        self.assertEqual(rows[1]["completedAtMs"], 1794996004000)
+        self.assertEqual(rows[2]["timestampMs"], 1794996007000)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

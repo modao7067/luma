@@ -6,10 +6,6 @@ import androidx.activity.compose.PredictiveBackHandler
 import kotlinx.coroutines.CancellationException
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -21,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
@@ -38,6 +35,7 @@ import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -78,6 +76,9 @@ internal fun CompactComposer(
     val imeVisible = !suppressIme && WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var editing by remember { mutableStateOf(ComposerFocusState()) }
     var menus by remember { mutableStateOf(ComposerMenuState(previewMenuAnchor ?: ComposerMenuAnchor.Plus.takeIf { previewMenu })) }
+    val plusAnchor = rememberMorphAnchor()
+    val modelAnchor = rememberMorphAnchor()
+    val permissionAnchor = rememberMorphAnchor()
     val plusMenu = sessionInteractive && menus.active == ComposerMenuAnchor.Plus
     val permissions = sessionInteractive && menus.active == ComposerMenuAnchor.Permission
     val models = sessionInteractive && menus.active == ComposerMenuAnchor.Model
@@ -160,8 +161,8 @@ internal fun CompactComposer(
     Column(Modifier.fillMaxWidth()) {
         AnimatedVisibility(
             visible = view.attachments.isNotEmpty(),
-            enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-            exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+            enter = collapsibleEnter(),
+            exit = collapsibleExit(),
         ) {
             Row(
                 Modifier
@@ -174,8 +175,12 @@ internal fun CompactComposer(
                     key(attachment.id) {
                         Box(Modifier.padding(top = 4.dp, end = 4.dp)) {
                             ImageThumbnail(attachment.uri, attachment.name, busy = attachment.busy)
+                            val removeHaptic = LocalHapticFeedback.current
                             Surface(
-                                onClick = { actions.removeImage(attachment.id) },
+                                onClick = {
+                                    removeHaptic.tick()
+                                    actions.removeImage(attachment.id)
+                                },
                                 enabled = !inputBusy,
                                 shape = androidx.compose.foundation.shape.CircleShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f),
@@ -185,6 +190,8 @@ internal fun CompactComposer(
                                     .align(Alignment.TopEnd)
                                     .offset(x = 4.dp, y = (-4).dp)
                                     .size(24.dp)
+                                    .elasticPress(enabled = !inputBusy, stretch = false)
+                                    .blockHorizontalPageSwipe(enabled = !inputBusy)
                                     .semantics { contentDescription = tr("移除", "Remove") },
                             ) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -198,8 +205,8 @@ internal fun CompactComposer(
         }
         AnimatedVisibility(
             visible = view.skills.isNotEmpty(),
-            enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-            exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+            enter = collapsibleEnter(),
+            exit = collapsibleExit(),
         ) {
             Row(
                 Modifier
@@ -210,10 +217,18 @@ internal fun CompactComposer(
             ) {
                 view.skills.forEach { skill ->
                     key(skill.id) {
+                        val skillHaptic = LocalHapticFeedback.current
+                        val skillEnabled = !inputBusy && !view.uncertainSubmission
                         InputChip(
                             selected = true,
-                            onClick = { actions.toggleSkill(skill) },
-                            enabled = !inputBusy && !view.uncertainSubmission,
+                            onClick = {
+                                skillHaptic.tick()
+                                actions.toggleSkill(skill)
+                            },
+                            enabled = skillEnabled,
+                            modifier = Modifier
+                                .elasticPress(enabled = skillEnabled, stretch = false)
+                                .blockHorizontalPageSwipe(enabled = skillEnabled),
                             label = { Text(skill.name, style = MaterialTheme.typography.labelMedium) },
                             trailingIcon = { ComposerGlyph("close") },
                         )
@@ -223,8 +238,8 @@ internal fun CompactComposer(
         }
         AnimatedVisibility(
             visible = pasteNotice != null,
-            enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-            exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+            enter = collapsibleEnter(),
+            exit = collapsibleExit(),
         ) {
             Text(
                 pasteNotice.orEmpty(),
@@ -280,23 +295,26 @@ internal fun CompactComposer(
                     }
                 }
                 Box(Modifier.layoutId("plus"), contentAlignment = Alignment.Center) {
-                    FilledIconButton(
-                        onClick = { if (!plusMenu) pluginExpanded = false; menus = menus.toggle(ComposerMenuAnchor.Plus) },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                        ),
+                    ComposerAnchorButton(
+                        anchor = plusAnchor,
+                        enabled = true,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        onOpen = { if (!plusMenu) pluginExpanded = false; menus = menus.toggle(ComposerMenuAnchor.Plus) },
                         modifier = Modifier
                             .size(34.dp)
-                            .focusProperties { canFocus = false }
                             .semantics { contentDescription = tr("添加附件", "Add attachment") },
                     ) {
-                        ComposerGlyph("plus")
+                        Box(Modifier.glyphPulse(plusMenu), contentAlignment = Alignment.Center) {
+                            ComposerGlyph("plus")
+                        }
                     }
-                    OriginMenu(
+                    MorphMenu(
                         expanded = plusMenu,
                         onDismiss = { menus = menus.dismiss(ComposerMenuAnchor.Plus) },
+                        anchor = plusAnchor,
                         width = 248.dp,
+                        placement = MorphPlacement.Start,
                         preferAbove = true,
                     ) {
                         Column {
@@ -346,9 +364,13 @@ internal fun CompactComposer(
                 }
                 Box(Modifier.layoutId("primary"), contentAlignment = Alignment.Center) {
                     val stopping = primaryAction == ComposerPrimaryAction.STOP
+                    val primaryEnabled = !inputBusy && (if (stopping) view.connected && view.capabilities.stop && !view.stopping else canSend)
+                    CompositionLocalProvider(LocalRippleConfiguration provides null) {
+                    val sendHaptic = LocalHapticFeedback.current
                     FilledIconButton(
-                        enabled = !inputBusy && (if (stopping) view.connected && view.capabilities.stop && !view.stopping else canSend),
+                        enabled = primaryEnabled,
                         onClick = {
+                            sendHaptic.tap()
                             if (stopping) {
                                 actions.stop()
                             } else {
@@ -358,6 +380,8 @@ internal fun CompactComposer(
                         },
                         modifier = Modifier
                             .size(34.dp)
+                            .elasticPress(enabled = primaryEnabled)
+                            .blockHorizontalPageSwipe(enabled = primaryEnabled)
                             .focusProperties { canFocus = false }
                             .semantics {
                                 contentDescription = if (view.preparingFirstSend) {
@@ -371,11 +395,14 @@ internal fun CompactComposer(
                                 }
                             },
                     ) {
-                        if (primaryWaiting || (stopping && view.stopping)) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        } else {
-                            ComposerGlyph(if (stopping) "stop" else "send")
+                        Box(Modifier.glyphPulse(Triple(stopping, primaryWaiting, view.stopping)), contentAlignment = Alignment.Center) {
+                            if (primaryWaiting || (stopping && view.stopping)) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                ComposerGlyph(if (stopping) "stop" else "send")
+                            }
                         }
+                    }
                     }
                 }
                 run {
@@ -385,29 +412,28 @@ internal fun CompactComposer(
                             .graphicsLayer { alpha = composerTextWidthFraction(currentFraction()) }
                             .then(if (!toolsInteractive) Modifier.clearAndSetSemantics {} else Modifier),
                     ) {
-                        TextButton(
+                        val modelEnabled = toolsInteractive && view.connected && !view.preparingFirstSend
+                        ComposerAnchorButton(
+                            anchor = modelAnchor,
+                            enabled = modelEnabled,
+                            containerColor = if (modelEnabled) MaterialTheme.colorScheme.surfaceContainerHighest
+                                else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = if (view.connected) 1f else 0.6f),
+                            contentColor = if (modelEnabled) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = if (view.connected) 1f else 0.38f),
+                            onOpen = { menus = menus.toggle(ComposerMenuAnchor.Model) },
                             modifier = Modifier
                                 .height(34.dp)
-                                .focusProperties { canFocus = false },
-                            onClick = { menus = menus.toggle(ComposerMenuAnchor.Model) },
-                            enabled = toolsInteractive && view.connected && !view.preparingFirstSend,
-                            shape = CircleShape,
-                            colors = ButtonDefaults.textButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = if (view.connected) 1f else 0.6f),
-                                disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = if (view.connected) 1f else 0.38f),
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                .defaultMinSize(minWidth = ButtonDefaults.MinWidth),
                         ) {
                             Text(
                                 view.summary.modelLabel.ifBlank { view.summary.model }.ifBlank { tr("默认模型", "Default model") },
+                                Modifier.padding(horizontal = 12.dp),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                             )
                         }
-                        ModelMenu(models, { menus = menus.dismiss(ComposerMenuAnchor.Model) }, state, view, actions, preferAbove = true)
+                        ModelMenu(models, { menus = menus.dismiss(ComposerMenuAnchor.Model) }, state, view, actions, preferAbove = true, anchor = modelAnchor)
                     }
                     Box(
                         Modifier
@@ -426,23 +452,21 @@ internal fun CompactComposer(
                         )
                         val buttonContainerColor = if (permissionButton.planHighlight) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest
                         val buttonContentColor = if (permissionButton.planHighlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        FilledIconButton(
-                            onClick = { menus = menus.toggle(ComposerMenuAnchor.Permission) },
+                        ComposerAnchorButton(
+                            anchor = permissionAnchor,
                             enabled = toolsInteractive && !view.preparingFirstSend,
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = buttonContainerColor,
-                                contentColor = buttonContentColor,
-                                disabledContainerColor = buttonContainerColor,
-                                disabledContentColor = buttonContentColor,
-                            ),
+                            containerColor = buttonContainerColor,
+                            contentColor = buttonContentColor,
+                            onOpen = { menus = menus.toggle(ComposerMenuAnchor.Permission) },
                             modifier = Modifier
                                 .size(34.dp)
-                                .focusProperties { canFocus = false }
                                 .semantics { contentDescription = permissionButton.description },
                         ) {
-                            MenuIcon(permissionButton.symbol, warning = permissionButton.warning, containerLuminance = buttonContainerColor.luminance())
+                            Box(Modifier.glyphPulse(permissionButton.symbol to permissionButton.planHighlight), contentAlignment = Alignment.Center) {
+                                MenuIcon(permissionButton.symbol, warning = permissionButton.warning, containerLuminance = buttonContainerColor.luminance())
+                            }
                         }
-                        OriginMenu(permissions, { menus = menus.dismiss(ComposerMenuAnchor.Permission) }, width = 300.dp, preferAbove = true) {
+                        MorphMenu(permissions, { menus = menus.dismiss(ComposerMenuAnchor.Permission) }, permissionAnchor, width = 300.dp, placement = MorphPlacement.Start, preferAbove = true) {
                             val canConfigure = !view.sending && !view.uncertainSubmission && !view.configuring && view.connected && view.activeTurnId == null && view.queue.isEmpty()
                             val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
                             if (view.planModeSupported) {
@@ -549,6 +573,28 @@ internal fun CompactComposer(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ComposerAnchorButton(
+    anchor: MorphAnchor,
+    enabled: Boolean,
+    containerColor: androidx.compose.ui.graphics.Color,
+    contentColor: androidx.compose.ui.graphics.Color,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(
+        modifier
+            .focusProperties { canFocus = false }
+            .morphAnchor(anchor, enabled, onOpen, elastic = rememberElasticPress(), sourceColor = containerColor, touchTarget = true)
+            .clip(CircleShape)
+            .background(containerColor),
+        contentAlignment = Alignment.Center,
+    ) {
+        CompositionLocalProvider(LocalContentColor provides contentColor) { content() }
     }
 }
 

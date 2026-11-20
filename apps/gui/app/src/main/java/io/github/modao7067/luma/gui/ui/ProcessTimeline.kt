@@ -35,13 +35,17 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
@@ -53,6 +57,8 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.Hyphens
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlinx.coroutines.CancellationException
@@ -76,7 +83,7 @@ import io.github.modao7067.luma.gui.session.MediaResource
 import io.github.modao7067.luma.gui.session.SubAgentState
 
 internal data class ConversationRow(val id: String, val entries: List<ConversationItem>, val agents: List<SubAgentState> = emptyList()) {
-    val process: Boolean get() = entries.firstOrNull()?.role == "tool" || agents.isNotEmpty()
+    val process: Boolean get() = id.startsWith("process:") || entries.firstOrNull()?.role == "tool" || agents.isNotEmpty()
 }
 
 internal fun conversationRows(messages: List<ConversationItem>, agents: List<SubAgentState> = emptyList()): List<ConversationRow> {
@@ -128,6 +135,100 @@ internal fun conversationRows(messages: List<ConversationItem>, agents: List<Sub
 internal fun processGroupEntries(row: ConversationRow): List<ConversationItem> =
     if (row.agents.isEmpty()) row.entries else row.entries + row.agents.associateBy { it.id }.values.map(::subAgentProcessItem)
 
+internal fun sessionConversationRows(
+    messages: List<ConversationItem>,
+    agents: List<SubAgentState>,
+    loading: Boolean,
+    activeTurnId: String?,
+): Pair<List<ConversationRow>, String?> {
+    val base = conversationRows(messages, agents)
+    val tail = base.lastOrNull()
+    val allRows = if (!loading && activeTurnId != null && tail != null && !tail.process &&
+        tail.entries.firstOrNull()?.let { it.role == "user" && it.delivery.isEmpty() } == true
+    ) {
+        base + ConversationRow("process:turn-open:${tail.id}", emptyList())
+    } else {
+        base
+    }
+    val openProcessRowId = if (!loading && activeTurnId != null) {
+        allRows.lastOrNull()?.takeIf { it.process }?.id
+    } else {
+        null
+    }
+    return allRows to openProcessRowId
+}
+
+internal fun processGroupSlotKeys(rows: List<ConversationRow>): Map<String, String> {
+    if (rows.isEmpty()) return emptyMap()
+    val slots = LinkedHashMap<String, String>(rows.size)
+    var userOrdinal = 0
+    var groupInTurn = 0
+    rows.forEach { row ->
+        if (row.process) {
+            slots[row.id] = "u$userOrdinal:g$groupInTurn"
+            groupInTurn++
+        } else {
+            val first = row.entries.firstOrNull()
+            if (first?.role == "user" && first.delivery != "rejected") {
+                userOrdinal++
+                groupInTurn = 0
+            }
+        }
+    }
+    return slots
+}
+
+private const val NATIVE_PROCESS_GAP_CAP_MS = 30L * 60_000L
+
+internal fun nativeProcessGroupDurationMs(
+    rows: List<ConversationRow>,
+    rowIndex: Int,
+    turnOpen: Boolean = false,
+): Long? {
+    val row = rows.getOrNull(rowIndex) ?: return null
+    if (!row.process) return null
+    val entries = processGroupEntries(row)
+    if (entries.isEmpty() || processGroupHasActive(entries, turnOpen = turnOpen)) return null
+    var minEntryTs = 0L
+    var maxEntryEndTs = 0L
+    var anyCompletedTs = false
+    entries.forEach { entry ->
+        if (entry.timestampMs > 0L && (minEntryTs == 0L || entry.timestampMs < minEntryTs)) {
+            minEntryTs = entry.timestampMs
+        }
+        if (entry.completedAtMs > 0L) {
+            anyCompletedTs = true
+            if (entry.completedAtMs > maxEntryEndTs) maxEntryEndTs = entry.completedAtMs
+        }
+        if (entry.timestampMs > maxEntryEndTs) {
+            maxEntryEndTs = entry.timestampMs
+        }
+    }
+    val prevItem = rows.getOrNull(rowIndex - 1)?.takeIf { !it.process }?.entries?.firstOrNull()
+    val userStartTs = prevItem?.takeIf {
+        it.role == "user" && it.timestampMs > 0L &&
+            (minEntryTs == 0L || (it.timestampMs <= minEntryTs && minEntryTs - it.timestampMs <= NATIVE_PROCESS_GAP_CAP_MS))
+    }?.timestampMs ?: 0L
+    val startMs = when {
+        userStartTs > 0L -> userStartTs
+        minEntryTs > 0L -> minEntryTs
+        else -> return null
+    }
+    var endMs = maxEntryEndTs
+    val nextItem = rows.getOrNull(rowIndex + 1)?.takeIf { !it.process }?.entries?.firstOrNull()
+    val assistantNextTs = nextItem?.takeIf {
+        it.role == "assistant" && it.timestampMs > 0L
+    }?.timestampMs ?: 0L
+    val baselineEnd = maxOf(startMs, endMs)
+    val hasNextAssistantTs = assistantNextTs >= baselineEnd && assistantNextTs - baselineEnd <= NATIVE_PROCESS_GAP_CAP_MS
+    if (hasNextAssistantTs) {
+        endMs = assistantNextTs
+    }
+    val hasEndEvidence = anyCompletedTs || hasNextAssistantTs || (maxEntryEndTs > startMs)
+    if (!hasEndEvidence || endMs < startMs) return null
+    return (endMs - startMs).coerceAtLeast(1L)
+}
+
 internal data class ProcessPresentationRun(
     val entries: List<ConversationItem>,
     val retained: Boolean,
@@ -154,6 +255,100 @@ internal fun processPresentationRuns(
     }
 }
 
+internal class ProcessGroupExpansionState(
+    initialGroupExpanded: Boolean = false,
+    initialOpenItem: String? = null,
+) {
+    var groupExpanded by mutableStateOf(initialGroupExpanded)
+    var expandedItemIds by mutableStateOf(
+        if (initialOpenItem != null) setOf(initialOpenItem) else emptySet(),
+    )
+    var pinnedItemIds by mutableStateOf(emptySet<String>())
+    var selectedBatchItemIds by mutableStateOf(emptyMap<String, String>())
+
+    fun toggleGroup() {
+        val next = !groupExpanded
+        groupExpanded = next
+        if (!next) {
+            pinnedItemIds = emptySet()
+        }
+    }
+
+    fun isItemExpanded(id: String): Boolean = id in expandedItemIds
+
+    fun isItemPinned(id: String): Boolean = id in pinnedItemIds
+
+    fun isAnyExpanded(ids: Collection<String>): Boolean = ids.any { it in expandedItemIds }
+
+    fun isAnyPinned(ids: Collection<String>): Boolean = ids.any { it in pinnedItemIds }
+
+    fun toggleItem(id: String, pinWhenOpen: Boolean = !groupExpanded) {
+        if (id in expandedItemIds) {
+            expandedItemIds = expandedItemIds - id
+            pinnedItemIds = pinnedItemIds - id
+        } else {
+            expandedItemIds = expandedItemIds + id
+            if (pinWhenOpen) {
+                pinnedItemIds = pinnedItemIds + id
+            }
+        }
+    }
+
+    fun toggleItems(
+        ids: Collection<String>,
+        anchorId: String = ids.first(),
+        pinWhenOpen: Boolean = !groupExpanded,
+    ) {
+        if (ids.any { it in expandedItemIds }) {
+            val idSet = ids.toSet()
+            expandedItemIds = expandedItemIds - idSet
+            pinnedItemIds = pinnedItemIds - idSet
+        } else {
+            expandedItemIds = expandedItemIds + anchorId
+            if (pinWhenOpen) {
+                pinnedItemIds = pinnedItemIds + anchorId
+            }
+        }
+    }
+
+    fun selectedBatchItem(ids: List<String>, initiallyOpenItem: String? = null): String {
+        val first = ids.first()
+        val existingKey = ids.firstOrNull { it in selectedBatchItemIds }
+        val saved = existingKey?.let { selectedBatchItemIds[it] }
+        if (saved != null && saved in ids) return saved
+        val expandedMatch = ids.firstOrNull { it in expandedItemIds }
+        if (expandedMatch != null) return expandedMatch
+        val initialMatch = initiallyOpenItem?.takeIf { it in ids }
+        return initialMatch ?: first
+    }
+
+    fun selectBatchItem(batchIds: List<String>, selectedId: String) {
+        val anchor = batchIds.firstOrNull { it in selectedBatchItemIds } ?: batchIds.firstOrNull() ?: return
+        if (selectedBatchItemIds[anchor] != selectedId) {
+            selectedBatchItemIds = selectedBatchItemIds + (anchor to selectedId)
+        }
+    }
+
+    fun remapEntryId(oldId: String, newId: String) {
+        if (oldId == newId) return
+        if (oldId in expandedItemIds) {
+            expandedItemIds = (expandedItemIds - oldId) + newId
+        }
+        if (oldId in pinnedItemIds) {
+            pinnedItemIds = (pinnedItemIds - oldId) + newId
+        }
+        if (selectedBatchItemIds.containsKey(oldId) || selectedBatchItemIds.values.any { it == oldId }) {
+            selectedBatchItemIds = buildMap(selectedBatchItemIds.size) {
+                selectedBatchItemIds.forEach { (k, v) ->
+                    put(if (k == oldId) newId else k, if (v == oldId) newId else v)
+                }
+            }
+        }
+    }
+}
+
+private val nextStandaloneDurationId = AtomicLong(0L)
+
 @Composable
 internal fun ProcessGroup(
     entries: List<ConversationItem>,
@@ -164,14 +359,32 @@ internal fun ProcessGroup(
     previewGroupFraction: Float? = null,
     cli: String = "Codex",
     animateInitialArrival: Boolean = false,
+    durationKey: String? = null,
+    durationMsOverride: Long? = null,
+    fallbackDurationMs: Long? = null,
+    turnOpen: Boolean = false,
+    expansionState: ProcessGroupExpansionState? = null,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+    val expansion = expansionState ?: remember(initiallyExpanded, initiallyOpenItem, previewDetailClosing) {
+        ProcessGroupExpansionState(
+            initialGroupExpanded = initiallyExpanded,
+            initialOpenItem = initiallyOpenItem.takeUnless { previewDetailClosing },
+        )
+    }
+    val expanded = expansion.groupExpanded
     val entryState = rememberSaveableStateHolder()
     val langCode = LumaI18n.langCode()
-    val summary = remember(entries, cli, langCode) { processSummaryText(processGroupSummary(entries, cli)) }
-    val hasRunningEntries = entries.any { it.outcome == "running" }
     val colors = MaterialTheme.colorScheme
-    val border = colors.outlineVariant.copy(alpha = 0.55f)
+    val palette = remember(colors) { processRowPalette(colors) }
+    val inspection = LocalInspectionMode.current
+    val localDurationId = remember { nextStandaloneDurationId.incrementAndGet() }
+    val effectiveDurationKey = durationKey ?: "standalone:$localDurationId"
+    val hasActiveEntries = processGroupHasActive(entries, turnOpen = turnOpen)
+    val liveStoreDurationMs = if (inspection) null else ProcessDurationStore.observe(effectiveDurationKey, hasActiveEntries)
+    val recordedDurationMs = durationMsOverride ?: liveStoreDurationMs ?: fallbackDurationMs
+    val summary = remember(entries, cli, langCode, recordedDurationMs, turnOpen, palette.emphasis) {
+        processSummaryText(processGroupSummary(entries, cli, recordedDurationMs, turnOpen), palette.emphasis)
+    }
     var groupIntroduced by rememberSaveable { mutableStateOf(!animateInitialArrival) }
     LaunchedEffect(Unit) { groupIntroduced = true }
     val animatedFractionState = animateFloatAsState(
@@ -191,6 +404,7 @@ internal fun ProcessGroup(
             val oldId = prevEntryIds.getOrNull(idx)
             if (oldId != null && oldId != entry.id && oldId !in currentIds && entry.id !in prevIdSet) {
                 settledEntryIds.add(entry.id)
+                expansion.remapEntryId(oldId, entry.id)
             }
         }
     }
@@ -214,25 +428,26 @@ internal fun ProcessGroup(
     val retentionStates = entries.associate { entry ->
         key(entry.id) {
             val retainedState = animateFloatAsState(
-                targetValue = if (processEntryRetained(entry)) 1f else 0f,
+                targetValue = if (processEntryRetained(entry) || expansion.isItemPinned(entry.id)) 1f else 0f,
                 animationSpec = revealSpring(),
                 label = "process-completion-reveal",
             )
             entry.id to retainedState
         }
     }
+    val hasPinnedEntries = entries.any { expansion.isItemPinned(it.id) }
     var childrenEverVisible by remember {
         mutableStateOf(
-            expanded || (previewGroupFraction ?: 0f) > 0f || entries.any { processEntryRetained(it) },
+            expanded || (previewGroupFraction ?: 0f) > 0f || hasPinnedEntries || entries.any { processEntryRetained(it) },
         )
     }
-    if (expanded) childrenEverVisible = true
+    if (expanded || hasPinnedEntries) childrenEverVisible = true
     if (!childrenEverVisible) {
-        val childrenVisible by remember(expanded, previewGroupFraction, entries) {
+        val childrenVisible by remember(expanded, previewGroupFraction, entries, expansion) {
             derivedStateOf {
                 val gf = groupFractionProvider()
                 spatialContentVisible(expanded, gf) || entries.any {
-                    processEntryRetained(it) || revealFraction(retentionStates[it.id]?.value ?: 0f) > 0f
+                    processEntryRetained(it) || expansion.isItemPinned(it.id) || revealFraction(retentionStates[it.id]?.value ?: 0f) > 0f
                 }
             }
         }
@@ -243,28 +458,32 @@ internal fun ProcessGroup(
         Column(Modifier.fillMaxWidth()) {
             Row(
                 Modifier
-                    .clip(LumaCardShape(14.dp))
+                    .fillMaxWidth()
+                    .clip(LumaCardShape(10.dp))
                     .clickable {
                         onManualLayoutToggle?.invoke()
-                        expanded = !expanded
+                        expansion.toggleGroup()
                     }
-                    .semantics { stateDescription = (if (hasRunningEntries) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("已展开执行过程", "Expanded steps") else tr("已折叠执行过程", "Collapsed steps") }
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                    .semantics { stateDescription = (if (hasActiveEntries) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("已展开执行过程", "Expanded steps") else tr("已折叠执行过程", "Collapsed steps") }
+                    .padding(vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                MenuIcon(
-                    MenuSymbol.DOWN,
-                    size = 18.dp,
-                    rotationProvider = { groupFractionProvider() * 180f },
-                )
+                ProcessGroupIndicator(active = hasActiveEntries, palette = palette)
                 Text(
                     summary,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 2,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .processRowShimmer(
+                            active = hasActiveEntries,
+                            shimmerPeak = palette.shimmerPeak,
+                            durationMillis = PROCESS_GROUP_TITLE_SHIMMER_DURATION_MS,
+                            minBandWidth = 40.dp,
+                        ),
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
-                    color = colors.onSurfaceVariant,
+                    style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal),
+                    color = palette.text,
                 )
             }
             if (childrenEverVisible) {
@@ -273,11 +492,11 @@ internal fun ProcessGroup(
                 }
                 val latestRetentionStates by rememberUpdatedState(retentionStates)
                 val latestArrivalStates by rememberUpdatedState(arrivalStates)
-                val sliceSignatures by remember(allSlices, previewGroupFraction) {
+                val sliceSignatures by remember(allSlices, previewGroupFraction, expansion) {
                     derivedStateOf {
                         allSlices.map { slice ->
                             val sliceEntries = slice.entriesList()
-                            val retained = sliceEntries.any { processEntryRetained(it) }
+                            val retained = sliceEntries.any { processEntryRetained(it) || expansion.isItemPinned(it.id) }
                             val retiring = !retained && sliceEntries.any { revealFraction(latestRetentionStates[it.id]?.value ?: 0f) > 0f }
                             val arriving = sliceEntries.all { revealFraction(latestArrivalStates[it.id]?.value ?: 1f) < 1f }
                             Triple(retained, retiring, arriving)
@@ -301,15 +520,8 @@ internal fun ProcessGroup(
                 }
                 Column(
                     Modifier
-                        .padding(start = 14.dp)
-                        .drawBehind {
-                            val inset = 4.dp.toPx()
-                            val endY = size.height - inset
-                            if (endY > inset) {
-                                drawLine(border, Offset(0f, inset), Offset(0f, endY), 1.5.dp.toPx())
-                            }
-                        }
-                        .padding(start = 12.dp),
+                        .fillMaxWidth()
+                        .padding(start = 10.dp),
                 ) {
                     dynamicRuns.forEachIndexed { runIndex, (runRetained, runSlices) ->
                         val runEntries = remember(runSlices) { runSlices.flatMap { it.entriesList() } }
@@ -336,14 +548,20 @@ internal fun ProcessGroup(
                                         when (slice) {
                                             is ProcessRunSlice.ReadBatch -> {
                                                 val batchId = "read-batch:${slice.entries.first().id}"
+                                                val batchEntryIds = slice.entries.map { it.id }
+                                                val batchExpanded = expansion.isAnyExpanded(batchEntryIds)
+                                                val batchSelectedId = expansion.selectedBatchItem(batchEntryIds, initiallyOpenItem)
                                                 key(batchId) {
                                                     Column(Modifier.padding(bottom = 2.dp)) {
                                                         entryState.SaveableStateProvider(batchId) {
                                                             ProcessReadBatchEntry(
                                                                 entries = slice.entries,
                                                                 cli = cli,
+                                                                expanded = batchExpanded,
+                                                                selectedId = batchSelectedId,
+                                                                onToggle = { expansion.toggleItems(batchEntryIds, anchorId = batchSelectedId) },
+                                                                onSelect = { expansion.selectBatchItem(batchEntryIds, it) },
                                                                 initiallyOpenItem = initiallyOpenItem,
-                                                                previewDetailClosing = previewDetailClosing,
                                                                 previewDetailFraction = previewDetailFraction,
                                                             )
                                                         }
@@ -361,6 +579,7 @@ internal fun ProcessGroup(
                                                             initiallyOpenItem = initiallyOpenItem,
                                                             previewDetailClosing = previewDetailClosing,
                                                             previewDetailFraction = previewDetailFraction,
+                                                            expansion = expansion,
                                                         )
                                                     }
                                                 }
@@ -380,7 +599,8 @@ internal fun ProcessGroup(
                                                                 entry,
                                                                 cli = cli,
                                                                 retiring = isRetiring,
-                                                                initiallyExpanded = initiallyOpenItem == entry.id && !previewDetailClosing,
+                                                                expanded = expansion.isItemExpanded(entry.id),
+                                                                onToggle = { expansion.toggleItem(entry.id) },
                                                                 previewDetailFraction = previewDetailFraction.takeIf { initiallyOpenItem == entry.id },
                                                             )
                                                         }
@@ -412,52 +632,50 @@ private fun ProcessEntry(
     item: ConversationItem,
     cli: String,
     retiring: Boolean = false,
-    initiallyExpanded: Boolean = false,
+    expanded: Boolean = false,
+    onToggle: () -> Unit = {},
     previewDetailFraction: Float? = null,
 ) {
     if (item.kind == "subAgent") {
-        SubAgentEntry(item, initiallyExpanded, previewDetailFraction)
+        SubAgentEntry(item, initiallyExpanded = expanded, previewDetailFraction = previewDetailFraction, expandedOverride = expanded, onToggle = onToggle)
         return
     }
-    var expanded by rememberSaveable(item.id) { mutableStateOf(initiallyExpanded) }
     val reasoning = item.kind == "reasoning"
     val running = item.outcome == "running"
     val failed = item.outcome == "failed"
     val colors = MaterialTheme.colorScheme
-    val color = when {
-        failed -> colors.error
-        running -> colors.primary
-        else -> colors.onSurfaceVariant
-    }
+    val palette = remember(colors) { processRowPalette(colors) }
+    val labelColor = palette.emphasis
+    val contextColor = palette.text
+    val sepColor = palette.separator
     val label = processEntryLabel(item, cli)
-    val symbol = if (reasoning) MenuSymbol.THINKING else when (processCategory(item, cli)) {
-        ProcessCategory.Terminal -> MenuSymbol.TERMINAL
-        ProcessCategory.Edit -> MenuSymbol.DIFF
-        ProcessCategory.Read -> MenuSymbol.FOLDER
-        ProcessCategory.Search -> MenuSymbol.SEARCH
-        ProcessCategory.WebSearch, ProcessCategory.Browse -> MenuSymbol.BROWSER
-        ProcessCategory.Image -> MenuSymbol.IMAGE
-        ProcessCategory.Tool -> MenuSymbol.EXTENSION
+    val symbol = when {
+        reasoning -> MenuSymbol.LIGHTBULB
+        item.kind == "compaction" -> MenuSymbol.COMPRESS
+        else -> when (processCategory(item, cli)) {
+            ProcessCategory.Terminal -> MenuSymbol.TERMINAL
+            ProcessCategory.Edit -> MenuSymbol.EDIT_DOCUMENT
+            ProcessCategory.Read -> MenuSymbol.FILE
+            ProcessCategory.Search -> MenuSymbol.SEARCH
+            ProcessCategory.WebSearch, ProcessCategory.Browse -> MenuSymbol.BROWSER
+            ProcessCategory.Image -> MenuSymbol.IMAGE
+            ProcessCategory.Tool -> MenuSymbol.TOOLBOX
+        }
     }
     val cleanTitle = processEntryContext(item, cli)
     val canExpand = !(reasoning && item.detail.isBlank())
-    val chevronFractionState = animateFloatAsState(
-        targetValue = if (canExpand && expanded) 1f else 0f,
-        animationSpec = revealSpring(),
-        label = "process-entry-chevron",
-    )
     val onManualLayoutToggle = LocalManualLayoutToggle.current
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(LumaCardShape(12.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .let { mod ->
                     if (canExpand) {
                         mod
                             .clickable {
                                 onManualLayoutToggle?.invoke()
-                                expanded = !expanded
+                                onToggle()
                             }
                             .semantics { stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起$label", "Collapse $label") else tr("展开$label", "Expand $label") }
                     } else if (running) {
@@ -466,46 +684,27 @@ private fun ProcessEntry(
                         mod
                     }
                 }
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .processRowShimmer(active = running, shimmerPeak = palette.shimmerPeak)
+                .padding(horizontal = 6.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
-                Modifier
-                    .size(24.dp)
-                    .background(color.copy(alpha = 0.12f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                CompositionLocalProvider(LocalContentColor provides color) {
-                    MenuIcon(symbol, size = 14.dp)
-                }
+            CompositionLocalProvider(LocalContentColor provides labelColor) {
+                MenuIcon(symbol, size = 16.dp)
             }
             Text(
                 buildAnnotatedString {
-                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = color)) { append(label) }
+                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = labelColor)) { append(label) }
                     if (cleanTitle.isNotBlank()) {
-                        append(" · ")
-                        withStyle(SpanStyle(color = colors.onSurface.copy(alpha = 0.82f))) { append(cleanTitle) }
+                        withStyle(SpanStyle(color = sepColor)) { append(" · ") }
+                        withStyle(SpanStyle(color = contextColor)) { append(cleanTitle) }
                     }
                 },
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                CompositionLocalProvider(LocalContentColor provides color.copy(alpha = 0.85f)) {
-                    ProcessStatus(item.outcome)
-                }
-                if (canExpand) {
-                    CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.7f)) {
-                        MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { revealFraction(chevronFractionState.value) * 180f })
-                    }
-                }
-            }
         }
         val displayDetail = remember(item.detail, reasoning) {
             if (reasoning) item.detail else sanitizeProcessToolDetail(item.detail)
@@ -520,9 +719,9 @@ private fun ProcessEntry(
                 {
                     LiveExcerpt(
                         liveExcerptText,
-                        Modifier.padding(start = 32.dp, bottom = 6.dp),
+                        Modifier.padding(start = 30.dp, bottom = 6.dp),
                         fontFamily = if (reasoning) null else terminalFont(),
-                        color = if (failed) color else colors.onSurfaceVariant,
+                        color = contextColor,
                     )
                 }
             } else null,
@@ -532,11 +731,10 @@ private fun ProcessEntry(
                     parseProcessReadPreview(item, cli)
                 }
             } else null
-            Column(
+            Box(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 8.dp, top = 4.dp, bottom = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(top = 4.dp, bottom = 8.dp),
             ) {
                 if (reasoning) {
                     if (item.detail.isNotBlank()) {
@@ -545,29 +743,231 @@ private fun ProcessEntry(
                             source = item.detail,
                             complete = !running,
                         )
-                        NativeMarkdown(item.detail, presentation = reasoningMarkdown)
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            NativeMarkdown(item.detail, presentation = reasoningMarkdown)
+                        }
                     }
                 } else if (readPreview != null && (readPreview.fileName.isNotBlank() || item.detail.isNotBlank())) {
                     ProcessSingleReadPreviewCard(item, readPreview)
                 } else {
-                    val inputPresentation = remember(item.input, item.kind, item.toolName, item.toolKind, item.commandActions, cli) {
-                        processInputPresentation(item, cli)
+                    ProcessMergedToolCard(
+                        item = item,
+                        cli = cli,
+                        displayDetail = displayDetail,
+                        running = running,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessMergedToolCard(
+    item: ConversationItem,
+    cli: String,
+    displayDetail: String,
+    running: Boolean,
+) {
+    val inputPresentation = remember(item.input, item.kind, item.toolName, item.toolKind, item.commandActions, cli) {
+        processInputPresentation(item, cli)
+    }
+    val inputCode = inputPresentation.code
+    val hasInput = inputCode.isNotBlank()
+    val hasOutput = displayDetail.isNotBlank()
+    val showOutputSlot = hasOutput || (hasInput && running) || (!hasInput && messageMedia(item).isEmpty())
+    val showDivider = hasInput && showOutputSlot
+    if (!hasInput && !showOutputSlot) return
+
+    val colors = MaterialTheme.colorScheme
+    val dark = codePaletteDark(colors)
+    val blockColors = contentBlockColors(colors)
+    val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2200)
+            copied = false
+        }
+    }
+    val headerCaption = if (inputPresentation.caption == inputPresentation.language && inputPresentation.language.isNotBlank()) {
+        inputPresentation.caption.lowercase()
+    } else {
+        inputPresentation.caption
+    }
+    val vScroll = rememberScrollState()
+    val scrollBoundary = remember(vScroll) {
+        CodeBlockScrollBoundary(
+            canScrollVertically = { vScroll.canScrollForward || vScroll.canScrollBackward },
+            canScrollHorizontally = { false },
+            canScrollVerticallyInDirection = { deltaY ->
+                if (deltaY < 0f) vScroll.canScrollForward else if (deltaY > 0f) vScroll.canScrollBackward else false
+            },
+            canScrollHorizontallyInDirection = { false },
+        )
+    }
+    val termFont = terminalFont()
+    val codeStyle = MaterialTheme.typography.bodySmall.copy(
+        fontFamily = termFont,
+        fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
+        letterSpacing = 0.sp,
+        lineHeight = 19.sp,
+        lineBreak = LineBreak.Simple,
+        hyphens = Hyphens.None,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.None,
+        ),
+    )
+    val measurer = rememberTextMeasurer(cacheSize = 8)
+    val density = LocalDensity.current
+    val singleLineHeightDp = remember(codeStyle, density) {
+        val oneLinePx = measurer.measure("M", style = codeStyle, softWrap = false, maxLines = 1).size.height
+        val twoLinePx = measurer.measure("M\nM", style = codeStyle, softWrap = false).size.height
+        val lineStepPx = (twoLinePx - oneLinePx).coerceAtLeast(1)
+        val slotPx = (2 * lineStepPx - oneLinePx).coerceAtLeast(with(density) { 1.dp.roundToPx() })
+        with(density) { slotPx.toDp() }
+    }
+    val dividerColor = colors.outlineVariant.copy(alpha = 0.45f)
+    val wrapIndicatorColor = colors.onSurfaceVariant.copy(alpha = if (dark) 0.46f else 0.40f)
+    val inputWrapPath = remember { Path() }
+    val outputWrapPath = remember { Path() }
+    var inputLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var outputLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var outputOffsetY by remember { mutableFloatStateOf(0f) }
+
+    Surface(
+        shape = LumaCardShape(12.dp),
+        color = blockColors.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            if (hasInput) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(30.dp)
+                        .background(blockColors.header)
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        headerCaption,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = colors.onSurfaceVariant,
+                        fontFamily = termFont,
+                    )
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .clip(LumaCardShape(8.dp))
+                            .clickable {
+                                runCatching {
+                                    clipboard.setText(AnnotatedString(inputCode.substring(0, minOf(inputCode.length, 262_144))))
+                                }.onSuccess {
+                                    copied = true
+                                }
+                            }
+                            .semantics { contentDescription = tr("复制", "Copy") },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
+                            ComposerGlyph(if (copied) "check" else "copy")
+                        }
                     }
-                    if (inputPresentation.code.isNotBlank()) {
-                        CodeBlock(inputPresentation.code, inputPresentation.language, caption = inputPresentation.caption)
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 260.dp)
+                    .clipToBounds()
+                    .nestedScroll(scrollBoundary)
+                    .verticalScroll(vScroll)
+                    .padding(vertical = 8.dp),
+            ) {
+                Column(Modifier.fillMaxWidth()) {
+                    if (hasInput) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .drawBehind {
+                                    val margin = 280.dp.toPx()
+                                    val visTop = (vScroll.value.toFloat() - margin).coerceAtLeast(0f)
+                                    val visBottom = vScroll.value.toFloat() + margin * 2f
+                                    drawSoftWrapIndicators(inputLayout, wrapIndicatorColor, inputWrapPath, visTop, visBottom)
+                                }
+                                .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END),
+                        ) {
+                            LumaSelectionContainer {
+                                Text(
+                                    rememberHighlightedCode(inputCode, inputPresentation.language, colors),
+                                    Modifier.fillMaxWidth(),
+                                    fontFamily = termFont,
+                                    style = codeStyle,
+                                    softWrap = true,
+                                    onTextLayout = { inputLayout = it },
+                                )
+                            }
+                        }
                     }
-                    if (displayDetail.isNotBlank()) {
-                        CodeBlock(
-                            displayDetail,
-                            processOutputLanguage(item),
-                            caption = processOutputCaption(item),
+                    if (showDivider) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END)
+                                .height(singleLineHeightDp)
+                                .drawBehind {
+                                    val y = size.height / 2f
+                                    drawLine(dividerColor, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+                                },
                         )
-                    } else if (messageMedia(item).isEmpty()) {
-                        Text(
-                            if (running) tr("等待工具输出…", "Waiting for tool output…") else tr("工具未返回文本输出。", "Tool returned no text output."),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
+                    }
+                    if (showOutputSlot) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { coords -> outputOffsetY = coords.positionInParent().y }
+                                .drawBehind {
+                                    if (hasOutput) {
+                                        val margin = 280.dp.toPx()
+                                        val localY = vScroll.value.toFloat() - outputOffsetY
+                                        val visTop = (localY - margin).coerceAtLeast(0f)
+                                        val visBottom = localY + margin * 2f
+                                        drawSoftWrapIndicators(outputLayout, wrapIndicatorColor, outputWrapPath, visTop, visBottom)
+                                    }
+                                }
+                                .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END),
+                        ) {
+                            if (hasOutput) {
+                                LumaSelectionContainer {
+                                    Text(
+                                        rememberHighlightedCode(displayDetail, processOutputLanguage(item), colors),
+                                        Modifier.fillMaxWidth(),
+                                        fontFamily = termFont,
+                                        style = codeStyle,
+                                        softWrap = true,
+                                        onTextLayout = { outputLayout = it },
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    if (running) tr("等待工具输出…", "Waiting for tool output…") else tr("工具未返回文本输出。", "Tool returned no text output."),
+                                    fontFamily = termFont,
+                                    style = codeStyle,
+                                    color = colors.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -666,18 +1066,19 @@ internal fun groupProcessRunSlices(
 private fun ProcessReadBatchEntry(
     entries: List<ConversationItem>,
     cli: String,
+    expanded: Boolean,
+    selectedId: String,
+    onToggle: () -> Unit,
+    onSelect: (String) -> Unit,
     initiallyOpenItem: String?,
-    previewDetailClosing: Boolean,
     previewDetailFraction: Float?,
 ) {
-    val initialOpen = initiallyOpenItem != null && entries.any { it.id == initiallyOpenItem } && !previewDetailClosing
-    var expanded by rememberSaveable(entries.first().id) { mutableStateOf(initialOpen) }
-    var selectedId by rememberSaveable(entries.first().id) {
-        mutableStateOf(entries.find { it.id == initiallyOpenItem }?.id ?: entries.first().id)
-    }
     val running = entries.any { it.outcome == "running" }
     val colors = MaterialTheme.colorScheme
-    val color = if (running) colors.primary else colors.onSurfaceVariant
+    val palette = remember(colors) { processRowPalette(colors) }
+    val labelColor = palette.emphasis
+    val contextColor = palette.text
+    val sepColor = palette.separator
     val langCode = LumaI18n.langCode()
     val batchToolLabel = remember(entries, cli, langCode) {
         val labels = entries.map { processEntryLabel(it, cli) }.distinct()
@@ -686,46 +1087,35 @@ private fun ProcessReadBatchEntry(
     val fileNamesSummary = remember(entries, cli) {
         formatProcessReadBatchSummary(entries, cli)
     }
-    val chevronFractionState = animateFloatAsState(
-        targetValue = if (expanded) 1f else 0f,
-        animationSpec = revealSpring(),
-        label = "process-read-batch-chevron",
-    )
     val onManualLayoutToggle = LocalManualLayoutToggle.current
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(LumaCardShape(12.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .clickable {
                     onManualLayoutToggle?.invoke()
-                    expanded = !expanded
+                    onToggle()
                 }
                 .semantics {
                     stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起批量读取", "Collapse batch read") else tr("展开批量读取", "Expand batch read")
                 }
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .processRowShimmer(active = running, shimmerPeak = palette.shimmerPeak)
+                .padding(horizontal = 6.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
-                Modifier
-                    .size(24.dp)
-                    .background(color.copy(alpha = 0.12f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                CompositionLocalProvider(LocalContentColor provides color) {
-                    MenuIcon(MenuSymbol.FOLDER, size = 14.dp)
-                }
+            CompositionLocalProvider(LocalContentColor provides labelColor) {
+                MenuIcon(MenuSymbol.FOLDER, size = 16.dp)
             }
             Text(
                 buildAnnotatedString {
-                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = color)) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = labelColor)) {
                         append(batchToolLabel)
                     }
                     if (fileNamesSummary.isNotBlank()) {
-                        append(" · ")
-                        withStyle(SpanStyle(color = colors.onSurface.copy(alpha = 0.82f))) {
+                        withStyle(SpanStyle(color = sepColor)) { append(" · ") }
+                        withStyle(SpanStyle(color = contextColor)) {
                             append(fileNamesSummary)
                         }
                     }
@@ -735,17 +1125,6 @@ private fun ProcessReadBatchEntry(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                CompositionLocalProvider(LocalContentColor provides color.copy(alpha = 0.85f)) {
-                    ProcessStatus(if (running) "running" else "succeeded")
-                }
-                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.7f)) {
-                    MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { revealFraction(chevronFractionState.value) * 180f })
-                }
-            }
         }
         TopReveal(
             expanded = expanded,
@@ -760,7 +1139,7 @@ private fun ProcessReadBatchEntry(
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 8.dp, top = 4.dp, bottom = 10.dp),
+                    .padding(top = 4.dp, bottom = 8.dp),
             ) {
                 Surface(
                     shape = LumaCardShape(12.dp),
@@ -777,18 +1156,21 @@ private fun ProcessReadBatchEntry(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            val tabShape = LumaCardShape(8.dp)
                             entries.forEachIndexed { idx, entry ->
                                 val p = previews[idx]
                                 val selected = entry.id == activeEntry.id
                                 Surface(
-                                    shape = LumaCardShape(8.dp),
+                                    shape = tabShape,
                                     color = if (selected) contentBlockColors(colors).selected else contentBlockColors(colors).tab,
-                                    modifier = Modifier.selectable(selected = selected, role = Role.Tab) {
-                                        if (selectedId != entry.id) {
-                                            onManualLayoutToggle?.invoke()
-                                            selectedId = entry.id
-                                        }
-                                    },
+                                    modifier = Modifier
+                                        .clip(tabShape)
+                                        .selectable(selected = selected, role = Role.Tab) {
+                                            if (selectedId != entry.id) {
+                                                onManualLayoutToggle?.invoke()
+                                                onSelect(entry.id)
+                                            }
+                                        },
                                 ) {
                                     Row(
                                         Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
@@ -1183,30 +1565,25 @@ private fun EditHeaderTitleLayout(
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
         val countPlaceable = measurables.firstOrNull { it.layoutId == "count" }?.measure(loose)
         val countReserved = if (countPlaceable != null) countPlaceable.width + gapPx else 0
-        val stackMetadata = countPlaceable != null && maxW - countReserved < 96.dp.roundToPx()
-        val titleMaxW = if (stackMetadata) maxW else (maxW - countReserved).coerceAtLeast(0)
+        val titleMaxW = (maxW - countReserved).coerceAtLeast(0)
         val titlePlaceable = measurables.first { it.layoutId == "title" }.measure(loose.copy(maxWidth = titleMaxW))
         val usedAfterCount = titlePlaceable.width + countReserved
-        val remForDir = if (stackMetadata) maxW - countReserved else maxW - usedAfterCount - gapPx
+        val remForDir = maxW - usedAfterCount - gapPx
         val dirPlaceable = if (remForDir >= minDirPx) {
             measurables.firstOrNull { it.layoutId == "dir" }?.measure(loose.copy(maxWidth = remForDir))
         } else null
-        val metadataHeight = maxOf(countPlaceable?.height ?: 0, dirPlaceable?.height ?: 0)
-        val height = if (stackMetadata) titlePlaceable.height + gapPx + metadataHeight
-            else maxOf(titlePlaceable.height, metadataHeight)
+        val height = maxOf(titlePlaceable.height, countPlaceable?.height ?: 0, dirPlaceable?.height ?: 0)
         layout(maxW, constraints.constrainHeight(height)) {
-            titlePlaceable.placeRelative(0, if (stackMetadata) 0 else (height - titlePlaceable.height) / 2)
-            var cursorX = if (stackMetadata) 0 else titlePlaceable.width
-            val metadataTop = if (stackMetadata) titlePlaceable.height + gapPx else 0
-            val metadataRowHeight = if (stackMetadata) metadataHeight else height
+            titlePlaceable.placeRelative(0, (height - titlePlaceable.height) / 2)
+            var cursorX = titlePlaceable.width
             if (countPlaceable != null) {
-                if (!stackMetadata) cursorX += gapPx
-                countPlaceable.placeRelative(cursorX, metadataTop + (metadataRowHeight - countPlaceable.height) / 2)
+                cursorX += gapPx
+                countPlaceable.placeRelative(cursorX, (height - countPlaceable.height) / 2)
                 cursorX += countPlaceable.width
             }
             if (dirPlaceable != null) {
                 cursorX += gapPx
-                dirPlaceable.placeRelative(cursorX, metadataTop + (metadataRowHeight - dirPlaceable.height) / 2)
+                dirPlaceable.placeRelative(cursorX, (height - dirPlaceable.height) / 2)
             }
         }
     }
@@ -1220,7 +1597,13 @@ internal fun ProcessEditCardGroup(
     initiallyOpenItem: String?,
     previewDetailClosing: Boolean,
     previewDetailFraction: Float?,
+    expansion: ProcessGroupExpansionState? = null,
 ) {
+    val activeExpansion = expansion ?: remember(initiallyOpenItem, previewDetailClosing) {
+        ProcessGroupExpansionState(
+            initialOpenItem = initiallyOpenItem.takeUnless { previewDetailClosing },
+        )
+    }
     val langCode = LumaI18n.langCode()
     val mergedEdits = remember(entries, cli, langCode) { mergeConsecutiveProcessEdits(entries, cli) }
     val colors = MaterialTheme.colorScheme
@@ -1239,10 +1622,9 @@ internal fun ProcessEditCardGroup(
 
     mergedEdits.forEachIndexed { index, merged ->
         key(merged.id) {
+            val mergedEntryIds = merged.entries.map { it.id }
             val isInitiallyOpen = initiallyOpenItem != null && merged.entries.any { it.id == initiallyOpenItem }
-            var expanded by rememberSaveable(merged.id) {
-                mutableStateOf(isInitiallyOpen && !previewDetailClosing)
-            }
+            val expanded = activeExpansion.isAnyExpanded(mergedEntryIds)
             val previewFrac = previewDetailFraction.takeIf { isInitiallyOpen }
             val animState = animateFloatAsState(
                 targetValue = if (expanded) 1f else 0f,
@@ -1254,23 +1636,21 @@ internal fun ProcessEditCardGroup(
             openFractions += { (previewFrac ?: revealFraction(animState.value)).coerceIn(0f, 1f) }
             toggleHandlers += {
                 onManualLayoutToggle?.invoke()
-                expanded = !expanded
+                activeExpansion.toggleItems(mergedEntryIds)
             }
         }
     }
 
-    val rowVerticalPad = if (mergedEdits.size > 1) 7.dp else 6.dp
+    val rowVerticalPad = if (mergedEdits.size > 1) 6.dp else 5.dp
+    val palette = remember(colors) { processRowPalette(colors) }
     Column(Modifier.fillMaxWidth()) {
         mergedEdits.forEachIndexed { index, merged ->
             key(merged.id) {
                 entryState.SaveableStateProvider(merged.id) {
                     val running = merged.outcome == "running"
-                    val failed = merged.outcome == "failed"
-                    val color = when {
-                        failed -> colors.error
-                        running -> colors.primary
-                        else -> colors.onSurfaceVariant
-                    }
+                    val labelColor = palette.emphasis
+                    val contextColor = palette.text
+                    val sepColor = palette.separator
                     var headerHeightPx by remember { mutableIntStateOf(0) }
                     val clipBuffer = remember { Path() }
                     val expanded = expandedFlags[index]
@@ -1320,42 +1700,36 @@ internal fun ProcessEditCardGroup(
                             Modifier
                                 .fillMaxWidth()
                                 .onSizeChanged { headerHeightPx = it.height }
-                                .clip(LumaCardShape(12.dp))
+                                .clip(RoundedCornerShape(12.dp))
                                 .clickable { toggleHandlers[index]() }
                                 .semantics {
                                     stateDescription = (if (running) tr("进行中 · ", "Running · ") else "") + if (expanded) tr("收起${merged.toolLabel}", "Collapse ${merged.toolLabel}") else tr("展开${merged.toolLabel}", "Expand ${merged.toolLabel}")
                                 }
+                                .processRowShimmer(active = running, shimmerPeak = palette.shimmerPeak)
                                 .padding(horizontal = 6.dp, vertical = rowVerticalPad),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Box(
-                                Modifier
-                                    .size(24.dp)
-                                    .background(color.copy(alpha = 0.12f), CircleShape),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                CompositionLocalProvider(LocalContentColor provides color) {
-                                    MenuIcon(MenuSymbol.DIFF, size = 14.dp)
-                                }
+                            CompositionLocalProvider(LocalContentColor provides labelColor) {
+                                MenuIcon(MenuSymbol.EDIT_DOCUMENT, size = 16.dp)
                             }
                             EditHeaderTitleLayout(
                                 modifier = Modifier.weight(1f),
                                 title = {
                                     Text(
                                         buildAnnotatedString {
-                                            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = color)) {
+                                            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = labelColor)) {
                                                 append(merged.toolLabel)
                                             }
                                             if (merged.fileName.isNotBlank() && merged.fileName != merged.toolLabel) {
-                                                append(" · ")
-                                                withStyle(SpanStyle(color = colors.onSurface.copy(alpha = 0.84f))) {
+                                                withStyle(SpanStyle(color = sepColor)) { append(" · ") }
+                                                withStyle(SpanStyle(color = contextColor)) {
                                                     append(merged.fileName)
                                                 }
                                             }
                                         },
                                         style = MaterialTheme.typography.bodyMedium,
-                                        maxLines = 2,
+                                        maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 },
@@ -1393,39 +1767,27 @@ internal fun ProcessEditCardGroup(
                                     }
                                 } else null,
                             )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                if (merged.addedCount > 0 || merged.removedCount > 0) {
-                                    Row(
-                                        Modifier.padding(end = 2.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        if (merged.addedCount > 0) {
-                                            Text(
-                                                "+${merged.addedCount}",
-                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                                color = addTextColor,
-                                                fontFamily = terminalFont(),
-                                            )
-                                        }
-                                        if (merged.removedCount > 0) {
-                                            Text(
-                                                "-${merged.removedCount}",
-                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                                color = delTextColor,
-                                                fontFamily = terminalFont(),
-                                            )
-                                        }
+                            if (merged.addedCount > 0 || merged.removedCount > 0) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    if (merged.addedCount > 0) {
+                                        Text(
+                                            "+${merged.addedCount}",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = addTextColor,
+                                            fontFamily = terminalFont(),
+                                        )
                                     }
-                                }
-                                CompositionLocalProvider(LocalContentColor provides color.copy(alpha = 0.85f)) {
-                                    ProcessStatus(merged.outcome)
-                                }
-                                CompositionLocalProvider(LocalContentColor provides colors.onSurfaceVariant.copy(alpha = 0.7f)) {
-                                    MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { fractionProvider() * 180f })
+                                    if (merged.removedCount > 0) {
+                                        Text(
+                                            "-${merged.removedCount}",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = delTextColor,
+                                            fontFamily = terminalFont(),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1556,17 +1918,7 @@ private fun StreamingDiffViewer(
                     HorizontalDivider(thickness = 1.dp, color = borderColor.copy(alpha = 0.28f))
                 }
                 val vPad = if (hunkIdx == 0 && displayHunks.size == 1 && omittedDiffRows == 0) 6.dp else 5.dp
-                val hunkCode = remember(hunk.diffLines) {
-                    hunk.diffLines.joinToString("\n") { line ->
-                        val prefix = when (line.kind) {
-                            DiffLineKind.ADDITION -> "+ "
-                            DiffLineKind.DELETION -> "- "
-                            DiffLineKind.CONTEXT -> "  "
-                        }
-                        prefix + line.text
-                    }
-                }
-                val highlighted = rememberHighlightedCode(hunkCode, language, colors)
+                val highlighted = rememberHighlightedDiffHunk(hunk.diffLines, language, colors)
                 var codeLayout by remember(hunk.diffLines) { mutableStateOf<TextLayoutResult?>(null) }
                 var rowOffsetInColumn by remember(hunkIdx) { mutableFloatStateOf(0f) }
 

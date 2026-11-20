@@ -136,4 +136,40 @@ class OpenCodeProjectionTest {
         val item = OpenCodeProjection.message(message).single()
         assertEquals(listOf("/workspace/a.png"), item.media.map { it.source })
     }
+    @Test fun nativeEpochTimestampsPopulateItemsWhileTinyTestCountersNormalizeToZero() {
+        val tiny = OpenCodeProjection.message(JSONObject("""{"id":"m0","type":"assistant","time":{"created":1,"completed":2},"content":[{"type":"reasoning","text":"r"}]}""")).single()
+        assertEquals(0L, tiny.timestampMs)
+        assertEquals(0L, tiny.completedAtMs)
+        val user = OpenCodeProjection.message(JSONObject("""{"id":"u1","type":"user","text":"go","time":{"created":1760000000000}}""")).single()
+        assertEquals(1760000000000L, user.timestampMs)
+        val rows = OpenCodeProjection.message(JSONObject(
+            """{"id":"a1","type":"assistant","time":{"created":1760000001,"completed":1760000012},"content":[""" +
+                """{"type":"reasoning","text":"think","time":{"start":1760000001000,"end":1760000003000}},""" +
+                """{"type":"tool","id":"c1","name":"shell","time":{"created":1760000004000,"completed":1760000010000},"state":{"status":"completed","input":{"command":"ls"}}},""" +
+                """{"type":"text","text":"done","time":{"start":1760000011000}}]}""",
+        ))
+        assertEquals(1760000001000L, rows[0].timestampMs)
+        assertEquals(1760000003000L, rows[0].completedAtMs)
+        assertEquals(1760000004000L, rows[1].timestampMs)
+        assertEquals(1760000010000L, rows[1].completedAtMs)
+        assertEquals(1760000011000L, rows[2].timestampMs)
+    }
+    @Test fun reasoningWithEndTimeSettlesWhileIncompleteParentContinues() {
+        val settled = OpenCodeProjection.message(JSONObject(
+            """{"id":"a_mid","type":"assistant","time":{"created":1760000001000},"content":[""" +
+                """{"type":"reasoning","text":"done thinking","time":{"start":1760000001000,"end":1760000003000}},""" +
+                """{"type":"text","text":"streaming","time":{"start":1760000003500}}]}""",
+        ))
+        assertEquals("succeeded", settled[0].outcome)
+        assertEquals(1760000001000L, settled[0].timestampMs)
+        assertEquals(1760000003000L, settled[0].completedAtMs)
+
+        val stillRunning = OpenCodeProjection.message(JSONObject(
+            """{"id":"a_live","type":"assistant","time":{"created":1760000001000},"content":[""" +
+                """{"type":"reasoning","text":"still thinking","time":{"start":1760000001000,"end":null}}]}""",
+        ))
+        assertEquals("running", stillRunning[0].outcome)
+        assertEquals(1760000001000L, stillRunning[0].timestampMs)
+        assertEquals(0L, stillRunning[0].completedAtMs)
+    }
 }

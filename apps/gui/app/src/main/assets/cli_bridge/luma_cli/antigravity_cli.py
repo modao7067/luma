@@ -9,8 +9,9 @@ import threading
 import time
 import urllib.parse
 from .agy_stream import AgyPeer
-from .base import Session, item
+from .base import Session, item, parse_ts_ms
 from .i18n import lang_code, tr
+from .media import display_tool_output
 from .transport import Rejected
 from .metrics import agy_usage, agy_steps, agy_session_metrics
 
@@ -320,6 +321,18 @@ _BG_HEADER_LINE_RE = re.compile(r"^Tool is running as a background task with tas
 _CRON_CANCELLED_MSG_RE = re.compile(r'^Cron schedule "([^"]+)" cancelled\b', re.M)
 _TASK_KILLED_MSG_RE = re.compile(r'^Task id "[^"]+" (?:killed|was cancel+ed|terminated|aborted)\b', re.I)
 
+_AGY_CREATED_AT_RE = re.compile(r"(?m)^Created At:\s+(\d{4}-\d{2}-\d{2}T\S+)")
+_AGY_COMPLETED_AT_RE = re.compile(r"(?m)^Completed At:\s+(\d{4}-\d{2}-\d{2}T\S+)")
+
+def extract_agy_tool_timestamps(raw):
+    body, _ = unwrap_agy_tool_text(raw)
+    if not body:
+        return 0, 0
+    head = body[:512]
+    cm = _AGY_CREATED_AT_RE.search(head)
+    dm = _AGY_COMPLETED_AT_RE.search(head)
+    return (parse_ts_ms(cm.group(1)) if cm else 0), (parse_ts_ms(dm.group(1)) if dm else 0)
+
 def unwrap_agy_tool_text(raw):
     if not isinstance(raw, str) or not raw.strip():
         return "", False
@@ -395,14 +408,22 @@ def _settle_terminal_child_messages(messages, child_status):
 def clean_agy_tool_output(raw):
     if not isinstance(raw, str) or not raw.strip():
         return ""
+    unwrapped, has_exit = unwrap_agy_tool_text(raw)
+    if unwrapped or has_exit or (raw.strip().startswith("{") and '"output"' in raw):
+        body = unwrapped
+    else:
+        body = raw
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    if not body.strip():
+        return ""
     has_bg = (
-        "Tool is running as a background task with task id:" in raw
-        or "Task logs are available at: file://" in raw
-        or "YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS:" in raw
+        "Tool is running as a background task with task id:" in body
+        or "Task logs are available at: file://" in body
+        or "YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS:" in body
     )
     if not has_bg:
-        return raw.rstrip() if raw.strip() else ""
-    stripped = _AGY_DIRECTIVE_RE.sub("", raw)
+        return body.rstrip() if body.strip() else ""
+    stripped = _AGY_DIRECTIVE_RE.sub("", body)
     lines = [line for line in stripped.splitlines() if not _AGY_BG_META_RE.match(line.strip())]
     joined = "\n".join(lines).rstrip()
     return joined if joined.strip() else ""
@@ -431,7 +452,7 @@ def project_child_transcript(ident, steps):
             if 0 <= msg_idx < len(messages) and messages[msg_idx].get("status") in ("running", "in_progress", "pending"):
                 messages[msg_idx] = {**messages[msg_idx], "status": target_status}
 
-    def settle_bg(tid, target_status="completed", extra_outcome=""):
+    def settle_bg(tid, target_status="completed", extra_outcome="", settled_at_ms=0):
         oneshot_timers.discard(tid)
         conditional_timers.pop(tid, None)
         msg_idx = bg_tasks.pop(tid, None)
@@ -440,13 +461,15 @@ def project_child_transcript(ident, steps):
             updates = {}
             if cur.get("status") in ("running", "in_progress", "pending"):
                 updates["status"] = target_status
+                if settled_at_ms > 0:
+                    updates["completedAtMs"] = settled_at_ms
             if extra_outcome:
                 prev = (cur.get("outcome") or "").strip()
                 updates["outcome"] = f"{prev}\n{extra_outcome}" if prev and extra_outcome not in prev else extra_outcome
             if updates:
                 messages[msg_idx] = {**cur, **updates}
 
-    def handle_manage_task(params, raw_output):
+    def handle_manage_task(params, raw_output, settled_at_ms=0):
         if not isinstance(params, dict):
             return
         action = params.get("Action")
@@ -455,16 +478,16 @@ def project_child_transcript(ident, steps):
         if action == "kill" and task_id:
             if not any(err in lower_out for err in ("invalid", "failed", "error")):
                 for matched in _matching_bg_task_ids(task_id, bg_tasks):
-                    settle_bg(matched, "cancelled")
+                    settle_bg(matched, "cancelled", settled_at_ms=settled_at_ms)
         elif action == "status" and task_id:
             if any(term in lower_out for term in ("completed", "finished", "exited", "not running", "not found", "cancelled", "canceled", "killed")):
                 t_state = "cancelled" if ("cancel" in lower_out or "killed" in lower_out) else "completed"
                 for matched in _matching_bg_task_ids(task_id, bg_tasks):
-                    settle_bg(matched, t_state)
+                    settle_bg(matched, t_state, settled_at_ms=settled_at_ms)
         elif action == "list":
             if "no running" in lower_out or "no background" in lower_out:
                 for tid in list(bg_tasks):
-                    settle_bg(tid, "completed")
+                    settle_bg(tid, "completed", settled_at_ms=settled_at_ms)
                 return
             try:
                 parsed = json.loads(raw_output or "")
@@ -479,11 +502,12 @@ def project_child_transcript(ident, steps):
                 live.discard("")
                 for tid in list(bg_tasks):
                     if tid not in live and not any(tid.endswith("/" + l) or l.endswith("/" + tid) for l in live):
-                        settle_bg(tid, "completed")
+                        settle_bg(tid, "completed", settled_at_ms=settled_at_ms)
 
     for step in steps:
         if not isinstance(step, dict): continue
         index, kind, state = step.get("step_index"), step.get("type"), step.get("status")
+        step_ts = parse_ts_ms(step.get("created_at"))
         status = "running" if state in ("RUNNING", "ACTIVE") else "failed" if state == "ERROR" else "completed"
         base = f"agy:{ident}:{index}:{kind}"
         if kind in ("PLANNER_RESPONSE", "USER_INPUT", "SYSTEM_MESSAGE", "ERROR_MESSAGE") and open_tools:
@@ -493,7 +517,8 @@ def project_child_transcript(ident, steps):
             calls = [c for c in (step.get("tool_calls") if isinstance(step.get("tool_calls"), list) else []) if isinstance(c, dict)]
             if isinstance(thinking, str) and thinking:
                 think_status = "completed" if calls or state == "DONE" else status
-                messages.append(item(base + ":think", "tool", thinking[:16000], kind="reasoning", status=think_status, turnId=ident))
+                messages.append(item(base + ":think", "tool", thinking[:16000], kind="reasoning", status=think_status, turnId=ident,
+                                     timestampMs=step_ts, completedAtMs=step_ts if think_status != "running" else 0))
             if calls:
                 for number, call in enumerate(calls):
                     name = call.get("name") if isinstance(call.get("name"), str) else ""
@@ -501,21 +526,30 @@ def project_child_transcript(ident, steps):
                     raw = json.dumps(args, ensure_ascii=False)
                     msg_idx = len(messages)
                     messages.append(item(f"{base}:tool:{number}", "tool", name, kind="tool", toolName=name,
-                        input=raw[:16000], status="failed" if status == "failed" else "running", turnId=ident))
+                        input=raw[:16000], status="failed" if status == "failed" else "running", turnId=ident, timestampMs=step_ts))
                     open_tools.append((msg_idx, name, args))
                 continue
             content = step.get("content") if isinstance(step.get("content"), str) else ""
             if content:
-                messages.append(item(base + ":text", "assistant", content[:16000], status=status, turnId=ident))
+                messages.append(item(base + ":text", "assistant", content[:16000], status=status, turnId=ident, timestampMs=step_ts))
         elif kind == "GENERIC":
             content = step.get("content") if isinstance(step.get("content"), str) else ""
             if open_tools:
                 msg_idx, cname, decoded = open_tools.pop(0)
                 cleaned = clean_agy_tool_output(content)
+                t_created, t_completed = extract_agy_tool_timestamps(content)
                 tid = extract_agy_bg_task_id(content, cname, generic_state=state)
                 tool_status = "running" if tid else ("running" if state in ("RUNNING", "ACTIVE") else status)
                 if 0 <= msg_idx < len(messages):
-                    messages[msg_idx] = {**messages[msg_idx], "outcome": cleaned[:16000], "status": tool_status}
+                    cur_msg = messages[msg_idx]
+                    start_ts = cur_msg.get("timestampMs") or t_created or step_ts
+                    done_ts = t_completed or step_ts
+                    updates = {"outcome": cleaned[:16000], "status": tool_status}
+                    if start_ts > 0:
+                        updates["timestampMs"] = start_ts
+                    if tool_status not in ("running", "in_progress", "pending") and done_ts > 0:
+                        updates["completedAtMs"] = done_ts
+                    messages[msg_idx] = {**cur_msg, **updates}
                 if tid:
                     bg_tasks[tid] = msg_idx
                     if is_agy_oneshot_timer(content, cname, decoded):
@@ -524,35 +558,35 @@ def project_child_transcript(ident, steps):
                         if cond:
                             conditional_timers[tid] = cond
                 if cname == "manage_task" and state == "DONE":
-                    handle_manage_task(decoded, content)
+                    handle_manage_task(decoded, content, settled_at_ms=step_ts)
             elif content:
-                messages.append(item(base + ":out", "assistant", content[:16000], status=status, turnId=ident))
+                messages.append(item(base + ":out", "assistant", content[:16000], status=status, turnId=ident, timestampMs=step_ts))
         elif kind == "USER_INPUT":
             content = step.get("content") if isinstance(step.get("content"), str) else ""
-            if content: messages.append(item(base + ":user", "user", content[:16000], status="completed", turnId=ident))
+            if content: messages.append(item(base + ":user", "user", content[:16000], status="completed", turnId=ident, timestampMs=step_ts))
         elif kind == "ERROR_MESSAGE":
             content = step.get("content") if isinstance(step.get("content"), str) else ""
-            messages.append(item(base + ":error", "assistant", content[:16000] or tr("agy 子代理错误", "agy subagent error"), status="failed", turnId=ident))
+            messages.append(item(base + ":error", "assistant", content[:16000] or tr("agy 子代理错误", "agy subagent error"), status="failed", turnId=ident, timestampMs=step_ts))
         elif kind == "SYSTEM_MESSAGE":
             sender, body = parse_system_message(step.get("content"))
             if "All your subagents and background tasks have been stopped" in body:
                 for tid in list(bg_tasks):
-                    settle_bg(tid, "cancelled")
+                    settle_bg(tid, "cancelled", settled_at_ms=step_ts)
             for cron_match in _CRON_CANCELLED_MSG_RE.finditer(body):
                 for matched in _matching_bg_task_ids(cron_match.group(1).strip(), bg_tasks):
-                    settle_bg(matched, "completed")
+                    settle_bg(matched, "completed", settled_at_ms=step_ts)
             if sender and sender in bg_tasks:
                 if sender in oneshot_timers:
-                    settle_bg(sender, "completed")
+                    settle_bg(sender, "completed", settled_at_ms=step_ts)
                 else:
                     t_status = "cancelled" if _TASK_KILLED_MSG_RE.match(body) else "completed"
-                    settle_bg(sender, t_status, extract_agy_task_result(body)[:16000])
+                    settle_bg(sender, t_status, extract_agy_task_result(body)[:16000], settled_at_ms=step_ts)
             elif conditional_timers and (sender or (body and not _SWARM_BOARD_PING_RE.match(body.strip()))):
                 for tid, cond in list(conditional_timers.items()):
                     if cond.lower() == "any" or (sender and sender == cond):
-                        settle_bg(tid, "completed")
+                        settle_bg(tid, "completed", settled_at_ms=step_ts)
             if body and not _SWARM_BOARD_PING_RE.match(body.strip()):
-                messages.append(item(base + ":system", "user", body[:16000], status="completed", turnId=ident))
+                messages.append(item(base + ":system", "user", body[:16000], status="completed", turnId=ident, timestampMs=step_ts))
     return messages[-500:]
 
 class AgyChildTailMixin:
@@ -1120,8 +1154,8 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             old = self.rows.get(ident, item(ident, "tool", name, kind="tool", turnId=turn))
             changes = {"toolName": name or old.get("toolName", ""), "status": "failed" if info.get("error") else status}
             if "parameters" in info: changes["input"] = json.dumps(info["parameters"], ensure_ascii=False)
-            if "output" in info: changes["outcome"] = info["output"]
-            if info.get("error"): changes["outcome"] = json.dumps(info["error"], ensure_ascii=False)
+            if "output" in info: changes["outcome"] = clean_agy_tool_output(display_tool_output(None, info["output"]))
+            if info.get("error"): changes["outcome"] = clean_agy_tool_output(display_tool_output(None, info["error"]))
             self.row({**old, **changes})
             self._reanchor_cli_swarm(index, ident, turn)
             if not info.get("error") and state != "ERROR":
@@ -1300,21 +1334,31 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
                 step, call = self.pending_transcript[index]
                 state = step.get("status")
                 status = "running" if state in ("RUNNING", "ACTIVE") else "failed" if state == "ERROR" else "completed"
+                step_ts = parse_ts_ms(step.get("created_at"))
                 content = step.get("content") if isinstance(step.get("content"), str) else ""
                 if step.get("type") == "PLANNER_RESPONSE":
                     key = (index, "agent_response")
                     ident = self.index_rows.setdefault(key, f"agy:{turn}:{index}:agent_response")
                     old = self.rows.get(ident, item(ident, "assistant", "", turnId=turn))
-                    self.row({**old, "text": content, "status": status, "source": "transcript"})
+                    row_data = {**old, "text": content, "status": status, "source": "transcript"}
+                    if step_ts and not old.get("timestampMs"):
+                        row_data["timestampMs"] = step_ts
+                    self.row(row_data)
                     self.turn_has_output = True
                 else:
                     key = (index, "tool")
                     ident = self.index_rows.setdefault(key, f"agy:{turn}:{index}:tool")
                     name = call.get("name") if isinstance(call.get("name"), str) else ""
                     old = self.rows.get(ident, item(ident, "tool", name, kind="tool", toolName=name, turnId=turn))
+                    t_created, t_completed = extract_agy_tool_timestamps(content)
+                    done_ts = t_completed or step_ts
                     changes = {"toolName": old.get("toolName") or name, "status": status, "source": "transcript"}
+                    if not old.get("timestampMs") and (t_created or step_ts):
+                        changes["timestampMs"] = t_created or step_ts
+                    if status != "running" and done_ts:
+                        changes["completedAtMs"] = done_ts
                     if not old.get("input"): changes["input"] = json.dumps(transcript_args(call), ensure_ascii=False)[:16000]
-                    if content and status != "running": changes["outcome"] = content[:16000]
+                    if content and status != "running": changes["outcome"] = clean_agy_tool_output(content)[:16000]
                     self.row({**old, **changes})
                     self._reanchor_cli_swarm(index, ident, turn)
             self.pending_transcript.clear()

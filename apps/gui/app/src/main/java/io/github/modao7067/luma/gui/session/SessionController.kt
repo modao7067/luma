@@ -153,9 +153,15 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     private class Live(val record: SessionRecord) {
         val activity = SessionActivityState(record)
+        val durationTracker = io.github.modao7067.luma.gui.ui.SessionProcessDurationTracker()
         val notificationTracker = SessionNotificationTracker()
         var userStoppedTurn = false
-        var view = SessionView(summary(record), draft = record.draft, uncertainSubmission = record.submissionId != null)
+        var view = SessionView(
+            summary(record),
+            draft = record.draft,
+            uncertainSubmission = record.submissionId != null,
+            processDurations = if (record.processDurations.isEmpty()) emptyMap() else LinkedHashMap(record.processDurations),
+        )
         val items = CachedItemsMap()
         val nativeToClientId = HashMap<String, String>()
         val admitting = mutableSetOf<String>()
@@ -362,6 +368,7 @@ class SessionController(private val context: Context) : CockpitActions {
         var consumptionChanged = false
         var observationChanged = false
         var activityChanged = false
+        var durationsChanged = false
         sessions.values.forEach { s ->
             val returned = s.record.submissions.firstOrNull { HostQueueTakeback.ready(it) && it.takebackDraftRevision == s.record.draftRevision }
             if (returned != null && !s.dispatchStorageBlocked && !s.firstSendPending && !s.view.attachments.any { it.busy } &&
@@ -473,25 +480,46 @@ class SessionController(private val context: Context) : CockpitActions {
                 SessionNotificationDecision.None -> {}
             }
             diagnostics.observe(s.record.id, s.view.error, s.record.submissions, s.record.queueDismissals)
-            if (s.dormant) s.view = s.view.copy(summary = Live.summary(s.record).copy(status = tr("休眠", "Dormant")), draft = s.record.draft)
-            else s.view = SubmissionLedger.project(s.record, s.view.copy(preparingFirstSend = s.firstSendPending,
-                cliServiceUpdateImpact = if (s.view.cliServiceUpdateRequired || s.view.cliServiceUpdateAvailable) cliServiceUpdateImpact(s) else "",
-                summary = Live.summary(s.record).copy(
-                modelLabel = s.models.find { it.id == s.record.model }?.label.orEmpty(),
-                hasUnreadDot = s.record.unread || effectiveRequests.isNotEmpty(),
-                status = when {
-                (if (s.record.cli != "Codex") s.view.requests.isNotEmpty() else s.requests.isNotEmpty()) -> tr("等待处理", "Action required")
-                s.view.activeTurnId != null -> if (s.view.connected) tr("执行中", "Running") else tr("执行状态待同步", "Run state syncing")
-                s.view.connected && codexRequests.isNotEmpty() -> tr("待回答", "Awaiting reply")
-                s.view.connected -> tr("空闲", "Idle")
-                s.dormant -> tr("休眠", "Dormant")
-                else -> tr("未连接", "Disconnected")
-            }), effort = s.record.effort,
-                messages = effectiveMessages,
-                subAgents = if (s.record.cli != "Codex") s.view.subAgents else s.subAgents.values(), requests = effectiveRequests,
-                skills = s.record.skills.toList(),
-                queueRecovery = s.record.queueTransfer?.let { raw -> val t = JSONObject(raw); QueueRecovery(CodexProjection.inputText(t.getJSONArray("input")), t.getString("phase")) },
-                attachments = s.record.images.map { Attachment(it.id, it.uri, it.name) } + s.view.attachments.filter { it.busy }), s.deliveryItems).let { view -> view.copy(messages = scopeSessionMessages(s, view.messages)) }
+            if (s.dormant) {
+                s.durationTracker.reconcile(s.record.processDurations, false, false, false, null, emptyList(), emptyList())
+                val durationsSnapshot = if (s.record.processDurations.isEmpty()) emptyMap() else LinkedHashMap(s.record.processDurations)
+                s.view = s.view.copy(
+                    summary = Live.summary(s.record).copy(status = tr("休眠", "Dormant")),
+                    draft = s.record.draft,
+                    processDurations = if (s.view.processDurations == durationsSnapshot) s.view.processDurations else durationsSnapshot,
+                )
+            } else {
+                val projectedView = SubmissionLedger.project(s.record, s.view.copy(preparingFirstSend = s.firstSendPending,
+                    cliServiceUpdateImpact = if (s.view.cliServiceUpdateRequired || s.view.cliServiceUpdateAvailable) cliServiceUpdateImpact(s) else "",
+                    summary = Live.summary(s.record).copy(
+                    modelLabel = s.models.find { it.id == s.record.model }?.label.orEmpty(),
+                    hasUnreadDot = s.record.unread || effectiveRequests.isNotEmpty(),
+                    status = when {
+                    (if (s.record.cli != "Codex") s.view.requests.isNotEmpty() else s.requests.isNotEmpty()) -> tr("等待处理", "Action required")
+                    s.view.activeTurnId != null -> if (s.view.connected) tr("执行中", "Running") else tr("执行状态待同步", "Run state syncing")
+                    s.view.connected && codexRequests.isNotEmpty() -> tr("待回答", "Awaiting reply")
+                    s.view.connected -> tr("空闲", "Idle")
+                    s.dormant -> tr("休眠", "Dormant")
+                    else -> tr("未连接", "Disconnected")
+                }), effort = s.record.effort,
+                    messages = effectiveMessages,
+                    subAgents = if (s.record.cli != "Codex") s.view.subAgents else s.subAgents.values(), requests = effectiveRequests,
+                    skills = s.record.skills.toList(),
+                    queueRecovery = s.record.queueTransfer?.let { raw -> val t = JSONObject(raw); QueueRecovery(CodexProjection.inputText(t.getJSONArray("input")), t.getString("phase")) },
+                    attachments = s.record.images.map { Attachment(it.id, it.uri, it.name) } + s.view.attachments.filter { it.busy }), s.deliveryItems).let { view -> view.copy(messages = scopeSessionMessages(s, view.messages)) }
+                if (s.durationTracker.reconcile(
+                        s.record.processDurations,
+                        projectedView.connected,
+                        projectedView.loading,
+                        s.hydrating,
+                        projectedView.activeTurnId,
+                        projectedView.messages,
+                        projectedView.subAgents,
+                    )
+                ) durationsChanged = true
+                val durationsSnapshot = if (s.record.processDurations.isEmpty()) emptyMap() else LinkedHashMap(s.record.processDurations)
+                s.view = if (projectedView.processDurations == durationsSnapshot) projectedView else projectedView.copy(processDurations = durationsSnapshot)
+            }
             val observation = SessionIdlePolicy.observationIntent(s.record, s.view, when {
                 s.record.cli == "Codex" -> s.idleConfirmed
                 s.record.cli == "OpenCode" -> s.openCode != null
@@ -504,7 +532,7 @@ class SessionController(private val context: Context) : CockpitActions {
             scheduleIdleRelease(s)
             consumptionChanged = consumptionChanged || s.record.submissions.count { it.nativeConsumed } != consumedBefore
         }
-        if (consumptionChanged || observationChanged || activityChanged) try { persist() } catch (failure: Exception) {
+        if (consumptionChanged || observationChanged || activityChanged || durationsChanged) try { persist() } catch (failure: Exception) {
             current()?.let { it.view = it.view.copy(error = tr("无法保存会话同步状态：${failure.message}", "Failed to save session sync state: ${failure.message}")) }
         }
         if (!GuiProduct.usesRootExecution(context)) {
@@ -1059,7 +1087,7 @@ class SessionController(private val context: Context) : CockpitActions {
         if (agent != null && agent != observation.detail.agent) observation.signals.trySend(Unit)
         val streamedChild = agent != null && ((parent.record.cli == "Antigravity" &&
             parent.record.nativeProtocol in setOf("antigravity-cli-stream-json", "antigravity-agy-acp")) ||
-            parent.record.cli == "DeepSeek Harness" || parent.record.cli == "Grok Build" || parent.record.cli == "Kimi Code")
+            parent.record.cli in setOf("Claude Code", "DeepSeek Harness", "Grok Build", "Kimi Code"))
         observation.detail = if (streamedChild) NativeCliProjection.streamedSubAgentDetail(agent, observation.detail, parent.models)
             else observation.detail.copy(agent = agent ?: observation.detail.agent,
                 loading = if (!parent.view.connected) parent.view.loading else observation.detail.loading)

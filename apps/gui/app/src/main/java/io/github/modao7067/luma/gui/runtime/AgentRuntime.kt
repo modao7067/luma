@@ -574,7 +574,7 @@ class AgentRuntime(context: Context) {
             key = UUID.randomUUID().toString().replace("-", "")
             command = "cd ${quote(cwd)} && exec /bin/bash --login"
         } else if (nativeTerminal != null) {
-            require(cli in setOf("pi", "Grok Build")) { tr("未知原生终端协议", "Unknown native terminal protocol") }
+            require(cli in io.github.modao7067.luma.gui.session.CliCatalog.bridged) { tr("未知原生终端协议", "Unknown native terminal protocol") }
             require(nativeTerminal.getString("nativeId") == threadId.orEmpty()) { tr("原生会话身份不符", "Native session identity mismatch") }
             val instance = nativeTerminal.getString("instanceId")
             require(instance.matches(Regex("[a-f0-9]{32}"))) { tr("原生宿主身份无效", "Invalid native host identity") }

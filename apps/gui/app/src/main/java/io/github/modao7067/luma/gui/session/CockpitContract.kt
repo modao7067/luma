@@ -22,6 +22,8 @@ data class ConversationItem(
     val canRecover: Boolean = false,
     val commandActions: List<CommandAction> = emptyList(),
     val commandCwd: String = "",
+    val timestampMs: Long = 0L,
+    val completedAtMs: Long = 0L,
 )
 data class CommandAction(val type: String, val command: String, val path: String = "", val name: String = "")
 data class UserMessageContent(val text: String = "", val attachments: List<String> = emptyList())
@@ -84,6 +86,7 @@ data class SessionView(
     val cliServiceUpdateImpact: String = "",
     val cliServiceUpdateAvailable: Boolean = false,
     val awaitingHandshake: Boolean = false,
+    val processDurations: Map<String, Long> = emptyMap(),
 )
 data class BlankSessionView(
     val key: String = "blank", val cli: String = "Codex", val cwd: String = "/workspace", val draft: String = "",

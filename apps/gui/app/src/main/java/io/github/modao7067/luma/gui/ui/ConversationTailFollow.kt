@@ -38,9 +38,19 @@ internal class ConversationRowAnchoring(
     val arrivingRowIds: Set<String>,
     val rowHeights: HashMap<String, Int>,
     val measuredRowHeights: HashMap<String, Int>,
+    private val pendingArrivalRowIds: MutableSet<String> = HashSet(),
+    val processExpansions: HashMap<String, ProcessGroupExpansionState> = HashMap(),
 ) {
     fun key(id: String): String = canonicalRowIds[id] ?: id
+    fun markRowComposed(rowKey: String) {
+        pendingArrivalRowIds.remove(rowKey)
+    }
+    fun processExpansionState(rowKey: String): ProcessGroupExpansionState =
+        processExpansions.getOrPut(rowKey) { ProcessGroupExpansionState() }
 }
+
+internal fun isLivePendingUserRow(row: ConversationRow): Boolean =
+    !row.process && row.entries.firstOrNull()?.let { it.role == "user" && it.delivery == "pending" } == true
 
 internal fun resolveCanonicalRowKeys(
     rows: List<ConversationRow>,
@@ -75,14 +85,16 @@ internal fun resolveCanonicalRowKeys(
             if (oldRow != null && oldRow.id != row.id &&
                 oldRow.id !in currentRowIdSet && row.id !in prevRowIdSet &&
                 oldRow.process == row.process &&
-                oldRow.entries.firstOrNull()?.role == row.entries.firstOrNull()?.role
+                (row.process || oldRow.entries.firstOrNull()?.role == row.entries.firstOrNull()?.role)
             ) {
                 val canonical = prevCanonical[oldRow.id] ?: oldRow.id
                 if (canonical !in claimedKeys) {
                     canonicalRowIds[row.id] = canonical
                     claimedKeys.add(canonical)
-                    settledRowIds.add(row.id)
-                    settledRowIds.add(canonical)
+                    if (canonical in settledRowIds || oldRow.id in settledRowIds) {
+                        settledRowIds.add(row.id)
+                        settledRowIds.add(canonical)
+                    }
                     rowHeights["$heightKeyPrefix${oldRow.id}"]?.let { h ->
                         rowHeights["$heightKeyPrefix${row.id}"] = h
                         rowHeights["$heightKeyPrefix$canonical"] = h
@@ -118,12 +130,23 @@ internal fun rememberConversationRowAnchoring(
     rows: List<ConversationRow>,
     loading: Boolean,
     heightKeyPrefix: String = "",
+    openProcessRowId: String? = null,
 ): ConversationRowAnchoring {
     val canonicalRowIds = remember(identity) { HashMap<String, String>() }
     val prevRows = remember(identity) { mutableListOf<ConversationRow>() }
-    val settledRowIds = remember(identity) { HashSet<String>().apply { addAll(rows.map { it.id }) } }
+    val settledRowIds = remember(identity) {
+        HashSet<String>().apply {
+            rows.forEach {
+                if (!(rows.size == 1 && isLivePendingUserRow(it))) {
+                    add(it.id)
+                }
+            }
+        }
+    }
+    val pendingArrivalRowIds = remember(identity) { HashSet<String>() }
     val rowHeights = remember(identity) { HashMap<String, Int>() }
     val measuredRowHeights = remember(identity) { HashMap<String, Int>() }
+    val processExpansions = remember(identity) { HashMap<String, ProcessGroupExpansionState>() }
     val resolvedKeys = resolveCanonicalRowKeys(
         rows = rows,
         prevRows = prevRows,
@@ -133,20 +156,57 @@ internal fun rememberConversationRowAnchoring(
         measuredRowHeights = measuredRowHeights,
         heightKeyPrefix = heightKeyPrefix,
     )
+    val currentResolvedKeys = rows.mapTo(HashSet(rows.size * 2)) { resolvedKeys[it.id] ?: it.id }
+    pendingArrivalRowIds.retainAll(currentResolvedKeys)
     if (loading || (settledRowIds.isEmpty() && rows.size > 1)) {
         rows.forEach {
-            settledRowIds.add(it.id)
-            settledRowIds.add(resolvedKeys[it.id] ?: it.id)
+            if (!isLivePendingUserRow(it)) {
+                val rk = resolvedKeys[it.id] ?: it.id
+                settledRowIds.add(it.id)
+                settledRowIds.add(rk)
+                pendingArrivalRowIds.remove(rk)
+            }
         }
     }
-    val arrivingRowIds = rows.map { resolvedKeys[it.id] ?: it.id }.filterNot { it in settledRowIds }.toSet()
+    val latestUserRowKey = rows.lastOrNull { !it.process && it.entries.firstOrNull()?.role == "user" }
+        ?.let { resolvedKeys[it.id] ?: it.id }
+    val arrivingRowIds = HashSet<String>(pendingArrivalRowIds.size + 4).apply {
+        addAll(pendingArrivalRowIds)
+        rows.forEach { row ->
+            val rk = resolvedKeys[row.id] ?: row.id
+            if (rk !in settledRowIds) add(rk)
+        }
+    }
     SideEffect {
-        rows.forEach {
-            settledRowIds.add(it.id)
-            settledRowIds.add(resolvedKeys[it.id] ?: it.id)
+        rows.forEach { row ->
+            val rk = resolvedKeys[row.id] ?: row.id
+            val isLatestArrivingUser = !row.process &&
+                row.entries.firstOrNull()?.role == "user" &&
+                rk == latestUserRowKey &&
+                rk !in settledRowIds
+            settledRowIds.add(row.id)
+            settledRowIds.add(rk)
+            if (isLatestArrivingUser) {
+                pendingArrivalRowIds.clear()
+                pendingArrivalRowIds.add(rk)
+            }
+        }
+        if (latestUserRowKey != null) {
+            pendingArrivalRowIds.retainAll(setOf(latestUserRowKey))
+        } else {
+            pendingArrivalRowIds.clear()
         }
         prevRows.clear()
         prevRows.addAll(rows)
+    }
+    if (!loading) {
+        rows.forEach { row ->
+            if (row.process) {
+                val rowKey = resolvedKeys[row.id] ?: row.id
+                val entries = processGroupEntries(row)
+                ProcessDurationStore.observe("$identity:$rowKey", processGroupHasActive(entries, turnOpen = row.id == openProcessRowId))
+            }
+        }
     }
     val list = rememberLazyListState()
     val tailFollow = rememberConversationTailFollow(
@@ -155,7 +215,7 @@ internal fun rememberConversationRowAnchoring(
         ready = !loading,
         followTailGrowth = true,
     )
-    return ConversationRowAnchoring(list, tailFollow, resolvedKeys, arrivingRowIds, rowHeights, measuredRowHeights)
+    return ConversationRowAnchoring(list, tailFollow, resolvedKeys, arrivingRowIds, rowHeights, measuredRowHeights, pendingArrivalRowIds, processExpansions)
 }
 
 @Composable
@@ -166,6 +226,10 @@ internal fun ConversationProcessRowItem(
     topSpacing: Dp,
     entries: List<ConversationItem>,
     cli: String,
+    durationMsOverride: Long? = null,
+    fallbackDurationMs: Long? = null,
+    turnOpen: Boolean = false,
+    expansionState: ProcessGroupExpansionState? = null,
 ) {
     var rowIntroduced by rememberSaveable(identity, rowKey) { mutableStateOf(!animateArrival) }
     LaunchedEffect(Unit) { rowIntroduced = true }
@@ -174,8 +238,17 @@ internal fun ConversationProcessRowItem(
             Modifier.padding(top = topSpacing),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (entries.isNotEmpty()) {
-                ProcessGroup(entries, cli = cli, animateInitialArrival = false)
+            if (entries.isNotEmpty() || turnOpen) {
+                ProcessGroup(
+                    entries,
+                    cli = cli,
+                    animateInitialArrival = false,
+                    durationKey = "$identity:$rowKey",
+                    durationMsOverride = durationMsOverride,
+                    fallbackDurationMs = fallbackDurationMs,
+                    turnOpen = turnOpen,
+                    expansionState = expansionState,
+                )
             }
         }
     }
@@ -321,13 +394,23 @@ internal class ConversationTailFollow(
             if (visible == null) {
                 if (index > 0) {
                     val info = list.layoutInfo
-                    val span = (info.viewportEndOffset - info.afterContentPadding - info.viewportStartOffset).coerceAtLeast(1)
+                    val usableEnd = (info.viewportEndOffset - info.afterContentPadding).coerceAtLeast(0)
+                    val maxVisibleStart = (info.viewportEndOffset - 2).coerceAtLeast(0)
+                    val launchOffset = minOf(usableEnd, maxVisibleStart)
                     list.scrollToItem(index - 1, 0)
                     val prev = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index - 1 }
-                    if (prev != null && prev.size > span) {
-                        list.scrollToItem(index - 1, (prev.size - span).coerceAtLeast(0))
+                    if (prev != null) {
+                        if (prev.size > launchOffset) {
+                            list.scrollToItem(index - 1, (prev.size - launchOffset).coerceAtLeast(0))
+                        } else if (prev.size < launchOffset) {
+                            list.scrollBy((prev.size - launchOffset).toFloat())
+                        }
                     }
                     visible = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                    if (visible == null && prev != null && prev.size > maxVisibleStart) {
+                        list.scrollToItem(index - 1, (prev.size - maxVisibleStart).coerceAtLeast(0))
+                        visible = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                    }
                 } else {
                     list.scrollToItem(0, anchorOffsetPx.coerceAtLeast(0))
                     visible = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }

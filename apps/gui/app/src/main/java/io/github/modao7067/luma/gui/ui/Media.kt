@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import android.graphics.Bitmap
@@ -190,6 +192,41 @@ internal fun ImageThumbnail(source: String, name: String, busy: Boolean = false)
     MediaImageCard(MediaResource(source, name, "image/*"), Modifier.size(84.dp), busy, crop = true)
 }
 
+internal data class MediaCardLayout(
+    val widthDp: Float,
+    val heightDp: Float,
+    val cornerDp: Float,
+    val crop: Boolean,
+)
+
+internal fun mediaImageCardLayout(
+    intrinsicWidth: Int,
+    intrinsicHeight: Int,
+    maxWidthDp: Float = 280f,
+    maxHeightDp: Float = 360f,
+): MediaCardLayout {
+    val w = intrinsicWidth.coerceAtLeast(1).toFloat()
+    val h = intrinsicHeight.coerceAtLeast(1).toFloat()
+    val aspect = w / h
+    val downScale = minOf(1f, maxWidthDp / w, maxHeightDp / h)
+    val fittedW = w * downScale
+    val fittedH = h * downScale
+    if (aspect < 0.4f && h > maxHeightDp) {
+        val croppedW = minOf(w, maxWidthDp, maxHeightDp * 0.4f)
+        val croppedH = minOf(h, maxHeightDp)
+        return MediaCardLayout(
+            widthDp = croppedW,
+            heightDp = croppedH,
+            cornerDp = minOf(12f, minOf(croppedW, croppedH) * 0.25f).coerceAtLeast(4f),
+            crop = true,
+        )
+    }
+    val finalW = fittedW.coerceAtLeast(minOf(w, 20f))
+    val finalH = fittedH.coerceAtLeast(minOf(h, 20f))
+    val corner = minOf(12f, minOf(finalW, finalH) * 0.25f).coerceAtLeast(4f)
+    return MediaCardLayout(widthDp = finalW, heightDp = finalH, cornerDp = corner, crop = false)
+}
+
 @Composable
 internal fun MediaImageCard(
     resource: MediaResource,
@@ -206,18 +243,35 @@ internal fun MediaImageCard(
         return
     }
     val open = LocalOpenMedia.current
+    val haptic = LocalHapticFeedback.current
     val interactive = LocalSessionInteractive.current
     var origin by remember { mutableStateOf<Offset?>(null) }
-    val aspect = state.frame?.bitmap?.let { it.width.toFloat() / it.height } ?: .8f
-    Surface(shape = LumaCardShape(12.dp), color = contentBlockColors(MaterialTheme.colorScheme).surface,
-        modifier = modifier.then(if (crop) Modifier else Modifier.widthIn(max = 280.dp).heightIn(max = 360.dp).aspectRatio(aspect.coerceIn(.4f, 2f)))
+    val cardLayout = state.frame?.let { frame ->
+        mediaImageCardLayout(frame.intrinsicWidth, frame.intrinsicHeight)
+    }
+    val corner = (if (crop) 12f else cardLayout?.cornerDp ?: 12f).dp
+    val sizeModifier = when {
+        crop -> Modifier
+        cardLayout != null -> Modifier
+            .widthIn(max = cardLayout.widthDp.dp)
+            .heightIn(max = cardLayout.heightDp.dp)
+            .aspectRatio(cardLayout.widthDp / cardLayout.heightDp)
+        else -> Modifier.size(width = 120.dp, height = 84.dp)
+    }
+    Surface(shape = LumaCardShape(corner), color = contentBlockColors(MaterialTheme.colorScheme).surface,
+        modifier = modifier.then(sizeModifier)
             .onGloballyPositioned { origin = it.positionInRoot() + Offset(it.size.width / 2f, it.size.height / 2f) }
-            .clip(LumaCardShape(12.dp)).clickable(enabled = open != null && interactive && !busy) { open?.invoke(bound, origin) }
+            .clip(LumaCardShape(corner))
+            .blockHorizontalPageSwipe(enabled = open != null && interactive && !busy, allowVerticalScroll = true)
+            .clickable(enabled = open != null && interactive && !busy) {
+                haptic.tick()
+                open?.invoke(bound, origin)
+            }
             .semantics { contentDescription = tr("查看图片：${mediaTitle(bound)}", "View image: ${mediaTitle(bound)}") }.testTag(mediaCardTag(resource))) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             state.frame?.let { frame ->
                 val imageBitmap = remember(frame.bitmap) { frame.bitmap.asImageBitmap() }
-                Image(imageBitmap, mediaTitle(bound), Modifier.fillMaxSize(), contentScale = if (crop || aspect < .4f || aspect > 2f) ContentScale.Crop else ContentScale.Fit)
+                Image(imageBitmap, mediaTitle(bound), Modifier.fillMaxSize(), contentScale = if (crop || cardLayout?.crop == true) ContentScale.Crop else ContentScale.Fit)
             }
                 ?: if (state.error != null) Text(tr("无法预览", "Preview unavailable"), style = MaterialTheme.typography.labelMedium)
                 else CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -298,6 +352,25 @@ internal fun MessageMedia(
         }
         return
     }
+    if (visibleItems.all(::mediaIsImage) && visibleItems.size > 1) {
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            visibleItems.forEach { resource ->
+                val failureKey = mediaFailureKey(resource.inContext(mediaContext))
+                key(resource.source, resource.sessionId, resource.cwd) {
+                    MediaImageCard(
+                        resource,
+                        collapseOnFailure = true,
+                        onLoadFailed = { failedKeys[failureKey] = true },
+                    )
+                }
+            }
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.Start) {
         visibleItems.forEach { resource ->
             val failureKey = mediaFailureKey(resource.inContext(mediaContext))
@@ -342,10 +415,14 @@ internal fun MediaFileCard(
     }
     if (mediaIsImage(metadata)) { MediaImageCard(metadata, collapseOnFailure = collapseOnFailure, onLoadFailed = onLoadFailed); return }
     var origin by remember { mutableStateOf<Offset?>(null) }
+    val haptic = LocalHapticFeedback.current
     val isDir = mediaIsDirectory(metadata)
     Surface(shape = LumaCardShape(12.dp), color = contentBlockColors(MaterialTheme.colorScheme).surface,
         modifier = Modifier.widthIn(max = 320.dp).fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }
-            .clip(LumaCardShape(12.dp)).clickable(enabled = (isDir || open != null) && interactive) {
+            .clip(LumaCardShape(12.dp))
+            .blockHorizontalPageSwipe(enabled = (isDir || open != null) && interactive, allowVerticalScroll = true)
+            .clickable(enabled = (isDir || open != null) && interactive) {
+                haptic.tick()
                 if (isDir) {
                     val targetPath = try { io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.guestPath(metadata.source, metadata.cwd ?: "/workspace") } catch (_: Exception) { metadata.source }
                     actions?.browseFiles(targetPath)

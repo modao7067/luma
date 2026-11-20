@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import androidx.compose.animation.AnimatedVisibility
@@ -7,13 +9,11 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -22,15 +22,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import io.github.modao7067.luma.gui.session.CockpitActions
 import io.github.modao7067.luma.gui.session.ConversationItem
@@ -53,12 +60,21 @@ internal fun subAgentTitle(agent: SubAgentState): String = agent.name.ifBlank {
     if (agent.id.length > 20) tr("子代理 · ${agent.id.takeLast(8)}", "Sub-agent · ${agent.id.takeLast(8)}") else agent.id
 }
 
-internal fun subAgentProcessItem(agent: SubAgentState) = ConversationItem(
-    "subagent:${agent.id}", "tool",
-    text = subAgentTitle(agent),
-    detail = agent.detail, input = agent.task, kind = "subAgent", outcome = agent.status,
-    status = subAgentStatus(agent.status), toolName = agent.role, toolKind = agent.id, turnId = agent.turnId,
-)
+internal fun subAgentProcessItem(agent: SubAgentState): ConversationItem {
+    val startMs = agent.messages.firstOrNull { it.timestampMs > 0L }?.timestampMs ?: 0L
+    val endMs = if (subAgentIsHistorical(agent.status)) {
+        agent.messages.maxOfOrNull { maxOf(it.completedAtMs, it.timestampMs) } ?: 0L
+    } else {
+        0L
+    }
+    return ConversationItem(
+        "subagent:${agent.id}", "tool",
+        text = subAgentTitle(agent),
+        detail = agent.detail, input = agent.task, kind = "subAgent", outcome = agent.status,
+        status = subAgentStatus(agent.status), toolName = agent.role, toolKind = agent.id, turnId = agent.turnId,
+        timestampMs = startMs, completedAtMs = endMs,
+    )
+}
 
 @Composable
 internal fun SubAgentGroup(agents: List<SubAgentState>, initiallyExpanded: Boolean = false,
@@ -69,39 +85,80 @@ internal fun SubAgentGroup(agents: List<SubAgentState>, initiallyExpanded: Boole
 }
 
 @Composable
-internal fun SubAgentEntry(item: ConversationItem, initiallyExpanded: Boolean, previewDetailFraction: Float?) {
-    var expanded by rememberSaveable(item.id) { mutableStateOf(initiallyExpanded) }
-    val fractionState = animateFloatAsState(if (expanded) 1f else 0f, revealSpring(), label = "agent-detail")
+internal fun SubAgentEntry(
+    item: ConversationItem,
+    initiallyExpanded: Boolean,
+    previewDetailFraction: Float?,
+    expandedOverride: Boolean? = null,
+    onToggle: (() -> Unit)? = null,
+) {
+    var localExpanded by rememberSaveable(item.id) { mutableStateOf(initiallyExpanded) }
+    val expanded = expandedOverride ?: localExpanded
     val colors = MaterialTheme.colorScheme
-    val tint = when (item.outcome) {
-        "running", "pending" -> colors.primary
-        "failed" -> colors.error
-        else -> colors.onSurfaceVariant
-    }
+    val palette = remember(colors) { processRowPalette(colors) }
+    val running = item.outcome == "running" || item.outcome == "pending"
+    val labelColor = palette.emphasis
+    val contextColor = palette.text
+    val sepColor = palette.separator
+    val onManualLayoutToggle = LocalManualLayoutToggle.current
+    val haptic = LocalHapticFeedback.current
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().clip(LumaCardShape(12.dp))
-            .clickable { expanded = !expanded }
-            .semantics { stateDescription = "${item.status} · ${if (expanded) tr("收起子代理详情", "Collapse sub-agent details") else tr("展开子代理详情", "Expand sub-agent details")}" }
-            .padding(horizontal = 6.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CompositionLocalProvider(LocalContentColor provides tint) { MenuIcon(MenuSymbol.MODEL, size = 20.dp) }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(item.text, modifier = Modifier, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (item.toolName.isNotBlank()) Text(item.toolName, style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .blockHorizontalPageSwipe(allowVerticalScroll = true)
+                .clickable {
+                    haptic.tick()
+                    onManualLayoutToggle?.invoke()
+                    if (onToggle != null) onToggle() else localExpanded = !localExpanded
+                }
+                .semantics {
+                    stateDescription = "${item.status} · ${if (expanded) tr("收起子代理详情", "Collapse sub-agent details") else tr("展开子代理详情", "Expand sub-agent details")}"
+                }
+                .processRowShimmer(active = running, shimmerPeak = palette.shimmerPeak)
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CompositionLocalProvider(LocalContentColor provides labelColor) {
+                MenuIcon(MenuSymbol.MODEL, size = 16.dp)
             }
-            CompositionLocalProvider(LocalContentColor provides tint) { ProcessStatus(item.outcome) }
-            MenuIcon(MenuSymbol.DOWN, size = 16.dp, rotationProvider = { revealFraction(fractionState.value) * 180f })
+            Row(
+                Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    item.text,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = labelColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (item.toolName.isNotBlank()) {
+                    Text(
+                        " · ",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = sepColor,
+                        maxLines = 1,
+                    )
+                    Text(
+                        item.toolName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = contextColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
-        TopReveal(expanded, previewFraction = previewDetailFraction, collapsedContent =
-            item.input.takeIf { it.isNotBlank() }?.let { task -> {
-                Text(task, Modifier.padding(start = 34.dp, end = 6.dp, bottom = 8.dp),
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-            } }) {
-            Column(Modifier.fillMaxWidth().padding(start = 34.dp, end = 6.dp, bottom = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TopReveal(expanded, previewFraction = previewDetailFraction) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, bottom = 8.dp),
+            ) {
                 SubAgentDetails(item.input, item.detail, item.outcome, item.toolKind)
             }
         }
@@ -111,17 +168,105 @@ internal fun SubAgentEntry(item: ConversationItem, initiallyExpanded: Boolean, p
 @Composable
 internal fun SubAgentDetails(task: String, detail: String, status: String, id: String) {
     val colors = MaterialTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (task.isNotBlank()) {
-            Text("Task", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-            NativeMarkdown(task)
+    val dark = codePaletteDark(colors)
+    val blockColors = contentBlockColors(colors)
+    val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2200)
+            copied = false
         }
-        if (detail.isNotBlank()) {
-            Text(if (status == "failed") "Error" else "Result", style = MaterialTheme.typography.labelSmall,
-                color = if (status == "failed") colors.error else colors.onSurfaceVariant)
-            NativeMarkdown(detail)
+    }
+    val hasTask = task.isNotBlank()
+    val hasDetail = detail.isNotBlank()
+    val measurer = rememberTextMeasurer(cacheSize = 4)
+    val density = LocalDensity.current
+    val bodyStyle = MaterialTheme.typography.bodyLarge
+    val dividerHeightDp = remember(bodyStyle, density) {
+        val oneLinePx = measurer.measure("M", style = bodyStyle, softWrap = false, maxLines = 1).size.height
+        val twoLinePx = measurer.measure("M\nM", style = bodyStyle, softWrap = false).size.height
+        val lineStepPx = (twoLinePx - oneLinePx).coerceAtLeast(1)
+        val slotPx = (2 * lineStepPx - oneLinePx).coerceAtLeast(with(density) { 1.dp.roundToPx() })
+        with(density) { slotPx.toDp() }
+    }
+    val dividerColor = colors.outlineVariant.copy(alpha = 0.45f)
+    Surface(
+        shape = LumaCardShape(12.dp),
+        color = blockColors.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            if (hasTask) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(30.dp)
+                        .background(blockColors.header)
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Task",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = colors.onSurfaceVariant,
+                        fontFamily = terminalFont(),
+                    )
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .clip(LumaCardShape(8.dp))
+                            .clickable {
+                                runCatching {
+                                    clipboard.setText(AnnotatedString(task.substring(0, minOf(task.length, 262_144))))
+                                }.onSuccess {
+                                    copied = true
+                                }
+                            }
+                            .semantics { contentDescription = tr("复制", "Copy") },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CompositionLocalProvider(LocalContentColor provides if (copied) copiedTint else colors.onSurfaceVariant) {
+                            ComposerGlyph(if (copied) "check" else "copy")
+                        }
+                    }
+                }
+            }
+            Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                if (hasTask) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                        NativeMarkdown(task)
+                    }
+                }
+                if (hasTask && hasDetail) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .height(dividerHeightDp)
+                            .drawBehind {
+                                val y = size.height / 2f
+                                drawLine(dividerColor, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+                            },
+                    )
+                }
+                if (hasDetail) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                        NativeMarkdown(detail)
+                    }
+                } else if (!hasTask) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                        Text(
+                            subAgentStatus(status),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
-        Text(id, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
     }
 }
 
@@ -156,6 +301,7 @@ internal fun SubAgentDetailHeader(
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
+                        .glyphPulse(detail.agent.status)
                         .size(8.dp)
                         .background(dotColor, CircleShape),
                 )
@@ -174,8 +320,31 @@ internal fun SubAgentDetailScreen(
     val identity = remember(detail.parentSessionId, detail.agent.id) {
         subAgentIdentityKey(detail.parentSessionId, detail.agent.id)
     }
-    val rows = remember(detail.messages) { conversationRows(detail.messages) }
-    val anchoring = rememberConversationRowAnchoring(identity, rows, detail.loading, heightKeyPrefix = "$identity:")
+    val subAgentTurnActive = !detail.loading && (detail.agent.status == "running" || detail.agent.status == "pending")
+    val rows = remember(detail.messages, subAgentTurnActive, detail.agent.detail) {
+        val summaryText = detail.agent.detail.trim()
+        val hasTrailingSummary = summaryText.isNotBlank() && detail.messages.lastOrNull()?.text?.trim() != summaryText
+        val base = conversationRows(detail.messages)
+        val tail = base.lastOrNull()
+        if (subAgentTurnActive && !hasTrailingSummary &&
+            (tail == null || (!tail.process && tail.entries.firstOrNull()?.role == "user"))
+        ) {
+            base + ConversationRow("process:turn-open:${tail?.id ?: "root"}", emptyList())
+        } else {
+            base
+        }
+    }
+    val openProcessRowId = if (subAgentTurnActive) rows.lastOrNull()?.takeIf { it.process }?.id else null
+    val nativeProcessDurations = remember(rows, openProcessRowId) {
+        buildMap<String, Long> {
+            rows.forEachIndexed { idx, r ->
+                if (r.process) {
+                    nativeProcessGroupDurationMs(rows, idx, turnOpen = r.id == openProcessRowId)?.let { put(r.id, it) }
+                }
+            }
+        }
+    }
+    val anchoring = rememberConversationRowAnchoring(identity, rows, detail.loading, heightKeyPrefix = "$identity:", openProcessRowId = openProcessRowId)
     val list = anchoring.list
     val tailFollow = anchoring.tailFollow
     val arrivingRowIds = anchoring.arrivingRowIds
@@ -242,6 +411,7 @@ internal fun SubAgentDetailScreen(
                     val rowKey = anchoring.key(row.id)
                     val topSpacing = if (index > 0 || showTask) 16.dp else 0.dp
                     val animateRowArrival = remember(rowKey) { rowKey in arrivingRowIds }
+                    SideEffect { anchoring.markRowComposed(rowKey) }
                     if (row.process) {
                         ConversationProcessRowItem(
                             identity = identity,
@@ -250,6 +420,9 @@ internal fun SubAgentDetailScreen(
                             topSpacing = topSpacing,
                             entries = row.entries,
                             cli = cli,
+                            fallbackDurationMs = nativeProcessDurations[row.id],
+                            turnOpen = row.id == openProcessRowId,
+                            expansionState = anchoring.processExpansionState(rowKey),
                         )
                     } else {
                         val entry = row.entries.first()
@@ -326,10 +499,14 @@ internal fun SubAgentTaskBlock(
                 color = colors.onSurfaceVariant,
             )
             if (collapsible) {
+                val haptic = LocalHapticFeedback.current
                 TextButton(
-                    onClick = { expanded = !expanded },
+                    onClick = {
+                        haptic.tick()
+                        expanded = !expanded
+                    },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    modifier = Modifier.height(30.dp),
+                    modifier = Modifier.height(30.dp).blockHorizontalPageSwipe(allowVerticalScroll = true),
                 ) {
                     Text(
                         if (expanded) tr("收起任务", "Collapse task") else tr("展开任务", "Expand task"),

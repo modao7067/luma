@@ -18,7 +18,12 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-internal data class MediaFrame(val bitmap: Bitmap, val pageCount: Int = 1)
+internal data class MediaFrame(
+    val bitmap: Bitmap,
+    val pageCount: Int = 1,
+    val intrinsicWidth: Int = bitmap.width,
+    val intrinsicHeight: Int = bitmap.height,
+)
 
 internal data class MediaFrameKey(
     val owner: String,
@@ -163,20 +168,31 @@ internal fun decodeMediaFrame(context: Context, media: ResolvedMedia, maxDimensi
             val box = svg.documentViewBox
             val width = svg.documentWidth.takeIf { it > 0f } ?: box?.width() ?: 512f
             val height = svg.documentHeight.takeIf { it > 0f } ?: box?.height() ?: 512f
-            val size = decodedVectorSize(width.roundToInt().coerceAtLeast(1), height.roundToInt().coerceAtLeast(1), limit)
+            val intrinsicW = width.roundToInt().coerceAtLeast(1)
+            val intrinsicH = height.roundToInt().coerceAtLeast(1)
+            val density = context.resources.displayMetrics.density.coerceAtLeast(1f)
+            val size = decodedVectorSize(intrinsicW, intrinsicH, limit, density)
             val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
             if (box == null) svg.setDocumentViewBox(0f, 0f, width, height)
             svg.setDocumentWidth(size.width.toFloat()); svg.setDocumentHeight(size.height.toFloat())
             svg.renderToCanvas(android.graphics.Canvas(bitmap))
-            return MediaFrame(bitmap)
+            return MediaFrame(bitmap, intrinsicWidth = intrinsicW, intrinsicHeight = intrinsicH)
         }
+        var rawW = 0
+        var rawH = 0
         val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+            rawW = info.size.width
+            rawH = info.size.height
             val size = decodedMediaSize(info.size.width, info.size.height, limit)
             decoder.setTargetSize(size.width, size.height)
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
         }
-        return MediaFrame(bitmap)
+        return MediaFrame(
+            bitmap,
+            intrinsicWidth = if (rawW > 0) rawW else bitmap.width,
+            intrinsicHeight = if (rawH > 0) rawH else bitmap.height,
+        )
     } finally {
         SessionMediaResolver.unpinPath(pin)
     }
@@ -194,8 +210,13 @@ internal fun decodedMediaSize(width: Int, height: Int, requestedEdge: Int): IntS
     val factor = minOf(1.0, sqrt(8_388_608.0 / (width.toDouble() * height)), 16_384.0 / max(width, height))
     return IntSize(max(1, (width * factor).toInt()), max(1, (height * factor).toInt()))
 }
-private fun decodedVectorSize(width: Int, height: Int, requestedEdge: Int): IntSize {
-    if (requestedEdge < 2048) return boundedMediaSize(width, height, requestedEdge)
+internal fun decodedVectorSize(width: Int, height: Int, requestedEdge: Int, density: Float = 1f): IntSize {
+    if (requestedEdge < 2048) {
+        val factor = density.coerceAtLeast(1f)
+        val scaledW = (width * factor).roundToInt().coerceAtLeast(1)
+        val scaledH = (height * factor).roundToInt().coerceAtLeast(1)
+        return boundedMediaSize(scaledW, scaledH, requestedEdge)
+    }
     val up = max(1.0, requestedEdge.toDouble() / max(width, height))
     return decodedMediaSize((width * up).toInt(), (height * up).toInt(), requestedEdge)
 }

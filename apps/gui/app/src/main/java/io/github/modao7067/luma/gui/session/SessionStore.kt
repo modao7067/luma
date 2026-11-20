@@ -48,6 +48,7 @@ data class SessionRecord(
     val dismissedAsyncQuestionItems: MutableSet<String> = linkedSetOf(),
     var lastActiveAt: Long = 0L,
     var unread: Boolean = false,
+    val processDurations: MutableMap<String, Long> = linkedMapOf(),
 )
 data class StoredSubmission(
     val id: String, val text: String, val images: List<StoredImage> = emptyList(), val skills: List<DraftSkill> = emptyList(),
@@ -83,6 +84,7 @@ internal fun SessionRecord.snapshot(): SessionRecord = copy(
     queueDismissals = queueDismissals.map { it.copy() }.toMutableList(),
     receiptRecoveryRequired = LinkedHashSet(receiptRecoveryRequired),
     dismissedAsyncQuestionItems = LinkedHashSet(dismissedAsyncQuestionItems),
+    processDurations = LinkedHashMap(processDurations),
 )
 internal fun SessionNavigation.snapshot(): SessionNavigation = SessionNavigation(
     initialized = initialized,
@@ -151,6 +153,12 @@ internal fun decodeSessionIndex(root: JSONObject): List<SessionRecord> {
                 }
                 SubmissionLedger.migrate(record)
                 SessionTitlePolicy.refresh(record)
+                value.optJSONObject("processDurations")?.let { durations ->
+                    durations.keys().forEach { key ->
+                        val ms = durations.optLong(key, 0L)
+                        if (key.isNotBlank() && ms > 0L) record.processDurations[key] = ms
+                    }
+                }
             }
     }
 }
@@ -181,7 +189,8 @@ internal fun encodeSessionIndex(records: Collection<SessionRecord>): JSONObject 
                 "skills" to JSONArray(m.skills.map { obj("id" to it.id, "name" to it.name, "path" to it.path) })) }),
             "submissionImageData" to JSONArray(r.submissionImageData.map { obj("id" to it.id, "uri" to it.uri, "path" to it.path, "name" to it.name) }),
             "submissionSkillData" to JSONArray(r.submissionSkillData.map { obj("id" to it.id, "name" to it.name, "path" to it.path) }),
-            "images" to JSONArray(r.images.map { obj("id" to it.id, "uri" to it.uri, "path" to it.path, "name" to it.name) }))
+            "images" to JSONArray(r.images.map { obj("id" to it.id, "uri" to it.uri, "path" to it.path, "name" to it.name) }),
+            "processDurations" to JSONObject().apply { r.processDurations.forEach { (k, v) -> if (v > 0L) put(k, v) } })
     }))
 }
 class SessionStore internal constructor(

@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.platform.LocalHapticFeedback
+
 import io.github.modao7067.luma.gui.i18n.tr
 
 import android.graphics.Bitmap
@@ -9,10 +11,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
@@ -37,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -48,10 +47,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -77,6 +80,7 @@ import kotlinx.coroutines.launch
 import io.github.modao7067.luma.gui.LumaApplication
 import io.github.modao7067.luma.gui.browser.AgentBrowser
 import io.github.modao7067.luma.gui.browser.BrowserPolicy
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -170,13 +174,32 @@ private fun BrowserVectorMenuItem(
     val active = LocalMenuActive.current
     val contentAlpha = if (enabled) 1f else 0.38f
     val foreground = colors.onSurface.copy(alpha = contentAlpha)
+    val haptic = LocalHapticFeedback.current
+    val morphRows = LocalMorphRows.current
+    val morphRow = remember(morphRows) { morphRows?.let { MorphRows.Row(active && enabled, onClick) } }
+    if (morphRows != null && morphRow != null) {
+        DisposableEffect(morphRows, morphRow) {
+            morphRows.rows.add(morphRow)
+            onDispose { morphRows.rows.remove(morphRow) }
+        }
+        SideEffect {
+            morphRow.enabled = active && enabled
+            morphRow.onClick = onClick
+        }
+    }
+    val held = morphRows != null && morphRows.held === morphRow
     DropdownMenuItem(
-        onClick = onClick,
+        onClick = {
+            haptic.tick()
+            onClick()
+        },
         enabled = active && enabled,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 6.dp, vertical = 1.dp)
+            .then(if (morphRow != null) Modifier.onGloballyPositioned { morphRow.coordinates = it } else Modifier)
             .clip(CircleShape)
+            .then(if (held) Modifier.background(colors.onSurface.copy(alpha = 0.1f), CircleShape) else Modifier)
             .semantics(mergeDescendants = true) { this.role = Role.Button },
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
         colors = MenuDefaults.itemColors(
@@ -324,12 +347,68 @@ internal fun AttachedBrowserPane(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.background)
-            .testTag("attached-browser-pane"),
-    ) {
+    val density = LocalDensity.current
+    val backdropBlur = rememberPrismBackdropBlur(density.density)
+    val backdrop = rememberGraphicsLayer()
+    val regularBackdrop = rememberGraphicsLayer()
+    val hazeBackdrop = rememberGraphicsLayer()
+    val glassScene = remember(backdrop, regularBackdrop, hazeBackdrop, backdropBlur) {
+        GlassScene(backdrop, regularBackdrop, hazeBackdrop, backdropBlur.regularScale, backdropBlur.hazeScale)
+    }
+    val menuHost = remember { MorphMenuHost() }
+    val moreAnchor = rememberMorphAnchor()
+    val moreElastic = rememberElasticPress()
+    val moreFill = if (colors.surface.luminance() > 0.5f) colors.surfaceContainerLowest else colors.surfaceContainerHigh
+
+    CompositionLocalProvider(LocalMorphMenuHost provides menuHost) {
+        Box(
+            modifier
+                .fillMaxSize()
+                .onGloballyPositioned {
+                    glassScene.rootCoordinates = it
+                    menuHost.root = it
+                },
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawWithCache {
+                        val regularSize = IntSize(
+                            ceil(size.width * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                            ceil(size.height * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                        )
+                        val hazeSize = IntSize(
+                            ceil(size.width * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                            ceil(size.height * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                        )
+                        val hazeStepScale = backdropBlur.hazeScale / backdropBlur.regularScale
+                        regularBackdrop.renderEffect = backdropBlur.regularEffect
+                        hazeBackdrop.renderEffect = backdropBlur.hazeEffect
+                        onDrawWithContent {
+                            if (menuHost.entries.isNotEmpty()) {
+                                backdrop.record {
+                                    drawRect(colors.background)
+                                    this@onDrawWithContent.drawContent()
+                                }
+                                drawLayer(backdrop)
+                                regularBackdrop.record(size = regularSize) {
+                                    scale(backdropBlur.regularScale, backdropBlur.regularScale, pivot = Offset.Zero) {
+                                        drawLayer(backdrop)
+                                    }
+                                }
+                                hazeBackdrop.record(size = hazeSize) {
+                                    scale(hazeStepScale, hazeStepScale, pivot = Offset.Zero) {
+                                        drawLayer(regularBackdrop)
+                                    }
+                                }
+                            } else {
+                                this@onDrawWithContent.drawContent()
+                            }
+                        }
+                    }
+                    .background(colors.background)
+                    .testTag("attached-browser-pane"),
+            ) {
         Surface(
             color = colors.surfaceContainerLow,
             shadowElevation = 2.dp,
@@ -351,7 +430,7 @@ internal fun AttachedBrowserPane(
                         BrowserChromeCapsule(
                             modifier = Modifier
                                 .size(FloatingChromeSize)
-                                .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = {
+                                .liquidClickable(onClick = {
                                     focusManager.clearFocus()
                                     keyboard?.hide()
                                     onBack()
@@ -419,21 +498,36 @@ internal fun AttachedBrowserPane(
                         }
 
                         Box {
-                            BrowserChromeCapsule(
-                                modifier = Modifier
-                                    .size(FloatingChromeSize)
-                                    .liquidClickable(cornerRadius = FloatingChromeRadius, onClick = { moreOpen = true })
+                            Box(
+                                Modifier
+                                    .morphAnchor(
+                                        moreAnchor,
+                                        enabled = true,
+                                        elastic = moreElastic,
+                                        sourceColor = moreFill,
+                                        onOpen = { moreOpen = true },
+                                    )
                                     .semantics { contentDescription = tr("更多", "More") }
                                     .testTag("browser-more-button"),
-                                cornerRadius = FloatingChromeRadius,
                             ) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    BrowserMoreGlyph()
+                                BrowserChromeCapsule(
+                                    modifier = Modifier.size(FloatingChromeSize),
+                                    cornerRadius = FloatingChromeRadius,
+                                ) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        BrowserMoreGlyph()
+                                    }
                                 }
                             }
 
                             val isLoading = tab?.loading?.value == true
-                            OriginMenu(moreOpen, { moreOpen = false }) {
+                            MorphMenu(
+                                moreOpen,
+                                { moreOpen = false },
+                                moreAnchor,
+                                width = 228.dp,
+                                placement = MorphPlacement.End,
+                            ) {
                                 BrowserVectorMenuItem(
                                     label = tr("后退", "Back"),
                                     enabled = tab != null && tab.canGoBack.value && !tab.crashed.value,
@@ -567,7 +661,7 @@ internal fun AttachedBrowserPane(
                                     elevation = if (isSelected) 1.5.dp else 0.dp,
                                     modifier = Modifier
                                         .height(36.dp)
-                                        .liquidClickable(cornerRadius = 18.dp) {
+                                        .liquidClickable(stretch = false, blockDrawerSwipe = false) {
                                             selectedId = t.id
                                             browser?.selectActiveTab(sessionId, t.id)
                                         },
@@ -588,11 +682,16 @@ internal fun AttachedBrowserPane(
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
+                                        val tabCloseHaptic = LocalHapticFeedback.current
                                         Box(
                                             Modifier
                                                 .size(28.dp)
+                                                .elasticPress(stretch = false)
                                                 .clip(CircleShape)
-                                                .clickable { browser?.close(t) }
+                                                .clickable {
+                                                    tabCloseHaptic.tick()
+                                                    browser?.close(t)
+                                                }
                                                 .semantics { contentDescription = tr("关闭标签页", "Close tab") },
                                             contentAlignment = Alignment.Center,
                                         ) {
@@ -710,8 +809,8 @@ internal fun AttachedBrowserPane(
             ) {
                 AnimatedVisibility(
                     visible = activeError != null,
-                    enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-                    exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+                    enter = collapsibleEnter(),
+                    exit = collapsibleExit(),
                 ) {
                     ErrorNotice(activeError ?: retainedError) {
                         localError = null
@@ -720,8 +819,8 @@ internal fun AttachedBrowserPane(
                 }
                 AnimatedVisibility(
                     visible = activeNotice != null,
-                    enter = expandVertically(spatialSizeSpring()) + fadeIn(),
-                    exit = shrinkVertically(spatialSizeSpring()) + fadeOut(),
+                    enter = collapsibleEnter(),
+                    exit = collapsibleExit(),
                 ) {
                     LiquidSurface(
                         tonalTint = colors.secondaryContainer.copy(alpha = 0.92f),
@@ -739,6 +838,13 @@ internal fun AttachedBrowserPane(
                     }
                 }
             }
+        }
+            }
+            MorphMenuLayer(
+                menuHost,
+                glassScene,
+                WindowInsets.safeDrawing.union(WindowInsets.ime),
+            )
         }
     }
 
@@ -928,6 +1034,7 @@ internal fun BoxScope.BrowserFloatingPreview(
                 } else {
                     Color.White.copy(alpha = 0.16f)
                 }
+                val previewHaptic = LocalHapticFeedback.current
                 Surface(
                     shape = shape,
                     color = Color.White,
@@ -937,7 +1044,11 @@ internal fun BoxScope.BrowserFloatingPreview(
                         .width(cardWidthDp)
                         .aspectRatio(aspect)
                         .clip(shape)
-                        .clickable(onClick = onOpenBrowser)
+                        .blockHorizontalPageSwipe()
+                        .clickable {
+                            previewHaptic.tick()
+                            onOpenBrowser()
+                        }
                         .pointerInput(hostSize, topLimitPx, bottomReservedPx) {
                             val tracker = VelocityTracker()
                             detectDragGestures(
@@ -951,12 +1062,13 @@ internal fun BoxScope.BrowserFloatingPreview(
                                         val rightX = (hostSize.width - cardWidthPx - edgeMarginPx).coerceAtLeast(edgeMarginPx)
                                         dockedLeft = offsetX.value + cardWidthPx / 2f < hostSize.width / 2f
                                         val targetX = if (dockedLeft) edgeMarginPx else rightX
-                                        offsetX.animateTo(targetX, spatialPxSpring())
+                                        offsetX.animateTo(targetX, PrismSprings.sheetPx())
                                     }
                                 },
                                 onDragEnd = {
                                     dragging = false
-                                    val vx = tracker.calculateVelocity().x
+                                    val velocity = tracker.calculateVelocity()
+                                    val vx = velocity.x
                                     val isLeftHalf = offsetX.value + cardWidthPx / 2f < hostSize.width / 2f
                                     val pastLeft = isLeftHalf && (
                                         offsetX.value < -cardWidthPx * 0.22f ||
@@ -975,8 +1087,8 @@ internal fun BoxScope.BrowserFloatingPreview(
                                         val minY = topLimitPx
                                         val maxY = max(minY, hostSize.height - cardHeightPx - bottomReservedPx)
                                         val targetY = offsetY.value.coerceIn(minY, maxY)
-                                        scope.launch { offsetX.animateTo(targetX, spatialPxSpring()) }
-                                        scope.launch { offsetY.animateTo(targetY, spatialPxSpring()) }
+                                        scope.launch { offsetX.animateTo(targetX, PrismSprings.sheetPx(), initialVelocity = velocity.x) }
+                                        scope.launch { offsetY.animateTo(targetY, PrismSprings.sheetPx(), initialVelocity = velocity.y) }
                                     }
                                 },
                                 onDrag = { change, dragAmount ->

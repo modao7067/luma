@@ -58,6 +58,7 @@ import kotlinx.coroutines.launch
 internal val LocalNativeTextActionMode = staticCompositionLocalOf<(View, ActionMode.Callback2) -> ActionMode?> {
     { view, callback -> view.startActionMode(callback, ActionMode.TYPE_FLOATING) }
 }
+internal val LocalProcessTextCatalog = staticCompositionLocalOf<ProcessTextCatalog?> { null }
 internal val LocalProcessTextLauncher = staticCompositionLocalOf<((Intent, (Intent?) -> Unit) -> Unit)?> { null }
 internal val LocalConversationScrolling = compositionLocalOf { false }
 
@@ -102,7 +103,13 @@ internal object DisabledPlatformAutofillManager : PlatformAutofillManager {
     override fun requestAutofill(view: View, semanticsId: Int, bounds: android.graphics.Rect) = Unit
 }
 
-internal class TextSelectionWindow(val view: View, val clipboard: SelectionClipboard, val start: (View, ActionMode.Callback2) -> ActionMode?, val launch: (Intent, (Intent?) -> Unit) -> Unit) {
+internal class TextSelectionWindow(
+    val view: View,
+    val clipboard: SelectionClipboard,
+    val start: (View, ActionMode.Callback2) -> ActionMode?,
+    val processTextCatalog: ProcessTextCatalog,
+    val launch: (Intent, (Intent?) -> Unit) -> Unit,
+) {
     var active: NativeSelectionToolbar? = null
     private val toolbars = mutableSetOf<NativeSelectionToolbar>()
     fun register(toolbar: NativeSelectionToolbar) { toolbars += toolbar }
@@ -314,7 +321,14 @@ private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
     }
     val latestLaunch by rememberUpdatedState(launch)
     val start = LocalNativeTextActionMode.current
-    val window = remember(view, clipboard, start) { TextSelectionWindow(view, clipboard, start) { intent, callback -> latestLaunch(intent, callback) } }
+    val providedCatalog = LocalProcessTextCatalog.current
+    val processTextCatalog = remember(providedCatalog, view.context) {
+        providedCatalog ?: ProcessTextCatalog.forContext(view.context)
+    }
+    LaunchedEffect(processTextCatalog) { processTextCatalog.prewarm() }
+    val window = remember(view, clipboard, start, processTextCatalog) {
+        TextSelectionWindow(view, clipboard, start, processTextCatalog) { intent, callback -> latestLaunch(intent, callback) }
+    }
     CompositionLocalProvider(
         LocalSelectionWindow provides window,
         LocalReadOnlySelectionClipboard provides clipboard,
@@ -383,7 +397,7 @@ internal fun SelectionToolbarProvider(
                     val intent = processTextIntent(activity, text, editor == null)
                     window.launch(intent) { result -> if (snapshot != null) editor?.apply(snapshot, runCatching { result?.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT) }.getOrNull()) }
                 }
-            }, imagePasteAvailable = { available() }, pasteImage = { paste() }, start = window.start)
+            }, imagePasteAvailable = { available() }, pasteImage = { paste() }, start = window.start, catalog = window.processTextCatalog)
     }
     DisposableEffect(window, toolbar) { window.register(toolbar); onDispose { window.unregister(toolbar) } }
     if (editor != null) {
