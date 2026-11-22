@@ -86,6 +86,7 @@ class Recovery(unittest.TestCase):
                     "http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()\n"
                 )
                 src = program('rootService').replace("['/bin/bash','--login','-c',shell]", "['/bin/bash','--noprofile','--norc','-c',shell]")
+                src = src.replace("cwd='/workspace'", "cwd=" + repr(folder))
                 src = src.replace("deadline=time.monotonic()+3.0", "deadline=time.monotonic()+0.5")
                 src = src.replace("min(1.5,remaining)", "min(0.25,remaining)")
                 src = src.replace("select.select([fd],[],[],1.5)", "select.select([fd],[],[],0.3)")

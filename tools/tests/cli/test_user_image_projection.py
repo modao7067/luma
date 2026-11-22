@@ -107,9 +107,16 @@ class UserImageProjection(unittest.TestCase):
             existing.write_bytes(b'RIFF\x00\x00\x00\x00WEBP')
             chown_calls = []
             chmod_calls = []
+            real_stat = pathlib.Path.stat
             fake_stat = mock.Mock(st_uid=10764, st_gid=10764)
+
+            def stat_with_app_owner(path, *args, **kwargs):
+                if path == app_root:
+                    return fake_stat
+                return real_stat(path, *args, **kwargs)
+
             with mock.patch('luma_cli.base.os.geteuid', return_value=0), \
-                 mock.patch('pathlib.Path.stat', return_value=fake_stat), \
+                 mock.patch('pathlib.Path.stat', autospec=True, side_effect=stat_with_app_owner), \
                  mock.patch('luma_cli.base.os.chown', side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))), \
                  mock.patch('luma_cli.base.os.chmod', side_effect=lambda p, m: chmod_calls.append((str(p), m))):
                 Manager(str(sessions_dir))
