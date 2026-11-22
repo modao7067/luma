@@ -21,8 +21,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalInspectionMode
@@ -74,7 +72,7 @@ internal fun TopReveal(
     previewFraction: Float? = null,
     collapsedContent: (@Composable () -> Unit)? = null,
     fractionProvider: (() -> Float)? = null,
-    keepDetailComposed: Boolean = true,
+    keepDetailComposed: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     var retainedCollapsed by remember { mutableStateOf(collapsedContent) }
@@ -164,6 +162,7 @@ internal fun TopReveal(
         Layout(
             content = {
                 if (composeDetail) {
+                    val detailInteractive = LocalSessionInteractive.current && expanded
                     Box(
                         Modifier
                             .layoutId("detail")
@@ -172,15 +171,12 @@ internal fun TopReveal(
                                 alpha = if (!excerptVisible) f else ((f - .25f) / .75f).coerceIn(0f, 1f)
                                 translationY = -(1f - f) * slideRangePx[0]
                             }
-                            .then(
-                                if (expanded) Modifier
-                                else Modifier.clearAndSetSemantics {}.pointerInput(Unit) {
-                                    awaitPointerEventScope {
-                                        while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
-                                    }
-                                },
-                            ),
-                    ) { content() }
+                            .then(if (expanded) Modifier else Modifier.clearAndSetSemantics {}),
+                    ) {
+                        CompositionLocalProvider(LocalSessionInteractive provides detailInteractive) {
+                            content()
+                        }
+                    }
                 }
                 val activeCollapsed = collapsedContent ?: retainedCollapsed
                 if (activeCollapsed != null) {

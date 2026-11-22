@@ -39,6 +39,7 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -86,6 +87,15 @@ import kotlin.math.roundToInt
 
 internal val LocalAgentBrowser = staticCompositionLocalOf<AgentBrowser?> { null }
 internal val LocalBrowserPreviewFixture = staticCompositionLocalOf<Bitmap?> { null }
+
+private class InFlightFileChooserHolder {
+    var request: AgentBrowser.FileChooserRequest? = null
+}
+
+private class WebViewHostHolder {
+    var host: FrameLayout? = null
+    var attachedTab: AgentBrowser.Tab? = null
+}
 
 @Composable
 internal fun rememberAgentBrowser(): AgentBrowser? {
@@ -268,8 +278,15 @@ internal fun AttachedBrowserPane(
         }
     }
 
-    var address by rememberSaveable(sessionId, tab?.id, tab?.url?.value) {
-        mutableStateOf(tab?.url?.value.orEmpty())
+    val tabUrl = tab?.url?.value.orEmpty()
+    var address by rememberSaveable(sessionId, tab?.id) {
+        mutableStateOf(tabUrl)
+    }
+    var addressFocused by remember(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(tab?.id, tabUrl, addressFocused) {
+        if (!addressFocused) {
+            address = tabUrl
+        }
     }
     var localError by remember(sessionId) { mutableStateOf<String?>(null) }
     var moreOpen by remember(sessionId) { mutableStateOf(false) }
@@ -316,32 +333,52 @@ internal fun AttachedBrowserPane(
     }
 
     val pendingChooser = tab?.fileChooser?.value
+    val inFlightChooser = remember(sessionId) { InFlightFileChooserHolder() }
+    DisposableEffect(sessionId) {
+        onDispose {
+            inFlightChooser.request?.complete(null)
+            inFlightChooser.request = null
+        }
+    }
     val multiFileLauncher = if (!inspection) {
         rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            val req = tab?.fileChooser?.value
-            tab?.fileChooser?.value = null
+            val req = inFlightChooser.request
+            inFlightChooser.request = null
             req?.complete(uris.takeIf { it.isNotEmpty() }?.toTypedArray())
         }
     } else null
     val singleFileLauncher = if (!inspection) {
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            val req = tab?.fileChooser?.value
-            tab?.fileChooser?.value = null
+            val req = inFlightChooser.request
+            inFlightChooser.request = null
             req?.complete(uri?.let { arrayOf(it) })
         }
     } else null
     LaunchedEffect(pendingChooser, active) {
         if (pendingChooser != null && active) {
+            tab?.fileChooser?.value = null
+            inFlightChooser.request?.complete(null)
+            inFlightChooser.request = pendingChooser
             val mimeTypes = pendingChooser.acceptTypes
                 .map { if (it.contains('/')) it else "*/*" }
                 .distinct()
                 .ifEmpty { listOf("*/*") }
                 .toTypedArray()
-            runCatching {
-                if (pendingChooser.multiple) multiFileLauncher?.launch(mimeTypes)
-                else singleFileLauncher?.launch(mimeTypes)
-            }.onFailure {
-                tab.fileChooser.value = null
+            val launched = runCatching {
+                if (pendingChooser.multiple) {
+                    val launcher = multiFileLauncher ?: return@runCatching false
+                    launcher.launch(mimeTypes)
+                    true
+                } else {
+                    val launcher = singleFileLauncher ?: return@runCatching false
+                    launcher.launch(mimeTypes)
+                    true
+                }
+            }.getOrDefault(false)
+            if (!launched) {
+                if (inFlightChooser.request === pendingChooser) {
+                    inFlightChooser.request = null
+                }
                 pendingChooser.complete(null)
             }
         }
@@ -477,6 +514,7 @@ internal fun AttachedBrowserPane(
                                     modifier = Modifier
                                         .weight(1f)
                                         .focusRequester(addressFocusRequester)
+                                        .onFocusChanged { addressFocused = it.isFocused }
                                         .semantics { contentDescription = tr("网址输入", "URL input") }
                                         .testTag("browser-address-field"),
                                     decorationBox = { inner ->
@@ -741,34 +779,33 @@ internal fun AttachedBrowserPane(
                 .onSizeChanged { contentSize = it },
         ) {
             if (browser != null && tab != null && !tab.crashed.value) {
-                var attachedTab by remember { mutableStateOf<AgentBrowser.Tab?>(null) }
-                var hostRef by remember { mutableStateOf<FrameLayout?>(null) }
+                val hostHolder = remember { WebViewHostHolder() }
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         FrameLayout(ctx).also { frame ->
                             frame.clipChildren = true
-                            hostRef = frame
+                            hostHolder.host = frame
                         }
                     },
                     update = { frame ->
-                        hostRef = frame
-                        if (attachedTab !== tab) {
-                            attachedTab?.let { prev -> browser.detach(prev, frame) }
+                        hostHolder.host = frame
+                        if (hostHolder.attachedTab !== tab) {
+                            hostHolder.attachedTab?.let { prev -> browser.detach(prev, frame) }
                             browser.attach(tab, frame)
                             tab.web.setLayerType(View.LAYER_TYPE_NONE, null)
-                            attachedTab = tab
+                            hostHolder.attachedTab = tab
                         }
                     },
                 )
                 DisposableEffect(browser) {
                     onDispose {
-                        val host = hostRef
-                        val current = attachedTab
+                        val host = hostHolder.host
+                        val current = hostHolder.attachedTab
                         if (host != null && current != null) {
                             browser.detach(current, host)
                         }
-                        attachedTab = null
+                        hostHolder.attachedTab = null
                     }
                 }
             } else {
@@ -1016,11 +1053,15 @@ internal fun BoxScope.BrowserFloatingPreview(
                 IntOffset(offsetX.value.roundToInt(), offsetY.value.roundToInt())
             },
         ) {
+            val latestHostSize by rememberUpdatedState(hostSize)
+            val latestCardWidthPx by rememberUpdatedState(cardWidthPx)
+            val latestEdgeMarginPx by rememberUpdatedState(edgeMarginPx)
             DisposableEffect(Unit) {
                 onDispose {
                     dockedLeft = false
-                    if (hostSize.width > 0) {
-                        val rightX = (hostSize.width - cardWidthPx - edgeMarginPx).coerceAtLeast(edgeMarginPx)
+                    val currentSize = latestHostSize
+                    if (currentSize.width > 0) {
+                        val rightX = (currentSize.width - latestCardWidthPx - latestEdgeMarginPx).coerceAtLeast(latestEdgeMarginPx)
                         scope.launch { offsetX.snapTo(rightX) }
                     }
                 }

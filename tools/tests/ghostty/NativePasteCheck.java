@@ -223,6 +223,19 @@ public final class NativePasteCheck {
             s1.disposeEmulator();
             check(disposed.approve() == ERROR && !disposed.isPending(),
                 "a late approval after the original session is disposed writes nothing");
+            feed(e2, "\033[?2004h");
+            byte[] filler = new byte[1024 * 1024 - 8];
+            java.util.Arrays.fill(filler, (byte) 'p');
+            check(s2.writeChecked(filler, 0, filler.length), "paste overflow fixture leaves 8 bytes free");
+            check(e2.pasteStatus("hello\nworld", false) == ERROR,
+                "bracketed paste exceeding remaining input buffer returns PASTE_ERROR");
+            String drainedPaste = replies(s2);
+            check(drainedPaste.length() == filler.length && !drainedPaste.contains("\033[200~"),
+                "failed bracketed paste writes zero partial bytes and no unterminated prefix");
+            check(e2.pasteStatus("hello\nworld", false) == WRITTEN && replies(s2).equals("\033[200~hello\nworld\033[201~"),
+                "subsequent bracketed paste succeeds completely once queue drains");
+            feed(e2, "\033[?2004l");
+
             s2.disposeEmulator();
             System.out.println("NATIVE PASTE OK checks=" + checks);
         } catch (Throwable t) {

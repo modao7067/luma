@@ -61,6 +61,8 @@ def sha256_file(path):
 
 def elf_digest(path):
     data = Path(path).read_bytes()
+    if len(data) < 0x40 or data[:4] != b'\x7fELF':
+        raise ValueError('Not an ELF64 file')
     shoff = struct.unpack_from('<Q', data, 0x28)[0]
     shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 0x3A)
     headers = [struct.unpack_from('<IIQQQQIIQQ', data, shoff + i * shentsize) for i in range(shnum)]
@@ -78,15 +80,22 @@ def load_lock():
     return json.loads(LOCK.read_text())
 
 
+def entry_matches(path, entry):
+    if not path.is_file():
+        return False
+    if entry.get('hash') == 'elf-sections':
+        try:
+            return elf_digest(path) == entry['sha256']
+        except (OSError, struct.error, ValueError, IndexError):
+            return False
+    return path.stat().st_size == entry['bytes'] and sha256_file(path) == entry['sha256']
+
+
 def status_of(rel, entry):
     path = REPO / rel
     if not path.is_file():
         return 'missing'
-    if entry.get('hash') == 'elf-sections':
-        return 'ok' if elf_digest(path) == entry['sha256'] else 'changed'
-    if path.stat().st_size != entry['bytes'] or sha256_file(path) != entry['sha256']:
-        return 'changed'
-    return 'ok'
+    return 'ok' if entry_matches(path, entry) else 'changed'
 
 
 def link_or_copy(src, dst):
@@ -185,29 +194,90 @@ def missing(origin_prefix):
             if e['origin'].startswith(origin_prefix) and status_of(rel, e) != 'ok']
 
 
+def resolve_ndk():
+    ndk_env = os.environ.get('ANDROID_NDK_HOME')
+    return Path(ndk_env) if ndk_env else ensure_toolchain('ndk-r27c')
+
+
+def resolve_zig():
+    zig_env = os.environ.get('LUMA_ZIG') or os.environ.get('ZIG')
+    if zig_env:
+        candidate = Path(zig_env)
+        return candidate / 'zig' if candidate.is_dir() else candidate
+    return ensure_toolchain('zig-0.16.0') / 'zig'
+
+
+def run_step(command, env=None):
+    result = subprocess.run(command, env=env, check=False)
+    if result.returncode:
+        print(f'step failed ({result.returncode}): {" ".join(command)}', file=sys.stderr)
+    return result.returncode
+
+
 def cmd_fetch(args):
     if missing('fetch:fonts'):
-        subprocess.run([sys.executable, str(REPO / 'tools/fetch-fonts.py')], check=False)
+        rc = run_step([sys.executable, str(REPO / 'tools/fetch-fonts.py')])
+        if rc:
+            return rc
     if missing('fetch:pnpm'):
-        subprocess.run([sys.executable, str(REPO / 'tools/fetch-pnpm.py')], check=False)
+        rc = run_step([sys.executable, str(REPO / 'tools/fetch-pnpm.py')])
+        if rc:
+            return rc
     if missing('fetch:native-src'):
-        subprocess.run([sys.executable, str(REPO / 'tools/fetch-native-sources.py')], check=False)
+        rc = run_step([sys.executable, str(REPO / 'tools/fetch-native-sources.py')])
+        if rc:
+            return rc
     if missing('build:native-src'):
-        subprocess.run([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--package-sources-only'], check=True)
+        rc = run_step([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--package-sources-only'])
+        if rc:
+            return rc
     if missing('build:proot') and not args.no_native:
-        ndk = Path(os.environ['ANDROID_NDK_HOME']) if os.environ.get('ANDROID_NDK_HOME') else ensure_toolchain('ndk-r27c')
-        subprocess.run([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--ndk', str(ndk), '--no-package-sources'], check=True)
+        ndk = resolve_ndk()
+        rc = run_step([sys.executable, str(REPO / 'tools/build-native-proot.py'), '--ndk', str(ndk), '--no-package-sources'])
+        if rc:
+            return rc
     if missing('build:termux') and not args.no_native:
-        ndk = Path(os.environ['ANDROID_NDK_HOME']) if os.environ.get('ANDROID_NDK_HOME') else ensure_toolchain('ndk-r27c')
+        ndk = resolve_ndk()
         env = dict(os.environ, ANDROID_NDK_HOME=str(ndk))
-        subprocess.run(['bash', str(REPO / 'shared/terminal-emulator/build-native.sh')], env=env, check=True)
+        rc = run_step(['bash', str(REPO / 'shared/terminal-emulator/build-native.sh')], env=env)
+        if rc:
+            return rc
     if missing('build:ghostty') and not args.no_native:
-        ndk = ensure_toolchain('ndk-r27c')
-        zig = ensure_toolchain('zig-0.16.0')
+        ndk = resolve_ndk()
+        zig = resolve_zig()
         src = ensure_toolchain('ghostty-0e6afb2600d4')
-        subprocess.run([sys.executable, str(REPO / 'shared/terminal-ghostty/build-native.py'),
-                        '--source', str(src), '--zig', str(zig / 'zig'), '--ndk', str(ndk),
-                        '--build-dir', str(REPO / 'artifacts/native-build/ghostty')], check=True)
+        rc = run_step([sys.executable, str(REPO / 'shared/terminal-ghostty/build-native.py'),
+                       '--source', str(src), '--zig', str(zig), '--ndk', str(ndk),
+                       '--build-dir', str(REPO / 'artifacts/native-build/ghostty')])
+        if rc:
+            return rc
+    return 0
+
+
+def verify_imported_digests(lock):
+    toolchain_file = REPO / 'tools' / 'toolchain.json'
+    if toolchain_file.is_file():
+        artifact_hashes = json.loads(toolchain_file.read_text()).get('artifactSha256', {})
+        for key, digest in artifact_hashes.items():
+            if not key.startswith('$LUMA_ROOT/artifacts/'):
+                continue
+            target = REPO / key[len('$LUMA_ROOT/'):]
+            if not target.is_file():
+                continue
+            accepted = digest if isinstance(digest, list) else [digest]
+            if sha256_file(target) not in accepted:
+                print(f'error: imported file digest mismatch: {target.relative_to(REPO)}', file=sys.stderr)
+                return 1
+    for spec in lock.get('toolchains', {}).values():
+        archive_name = spec.get('file')
+        expected = spec.get('sha256')
+        if not archive_name or not expected:
+            continue
+        for directory in (REPO / 'artifacts' / 'download-cache', REPO / 'artifacts' / 'toolchain'):
+            candidate = directory / archive_name
+            if candidate.is_file() and sha256_file(candidate) != expected:
+                print(f'error: imported toolchain archive digest mismatch: {candidate.relative_to(REPO)}', file=sys.stderr)
+                return 1
     return 0
 
 
@@ -219,9 +289,13 @@ def cmd_import(args):
         if status_of(rel, entry) == 'ok':
             continue
         candidate = src / rel
-        if candidate.is_file() and entry.get('hash') != 'elf-sections' and sha256_file(candidate) == entry['sha256']:
-            (REPO / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidate, REPO / rel)
+        if entry_matches(candidate, entry):
+            dest = REPO / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, dest)
+            if not entry_matches(dest, entry):
+                print(f'error: copied artifact failed verification: {rel}', file=sys.stderr)
+                return 1
             copied += 1
         else:
             skipped += 1
@@ -232,14 +306,18 @@ def cmd_import(args):
             try:
                 shutil.copytree(src / old, REPO / new, symlinks=True, copy_function=shutil.copy2)
             except shutil.Error as exc:
-                print(f'warning: {len(exc.args[0])} entries of {old} could not be copied (ignored)', file=sys.stderr)
+                print(f'error: failed to copy {old}: {len(exc.args[0])} error(s)', file=sys.stderr)
+                return 1
     legacy = src / 'build-tools'
     if legacy.is_dir() and not (REPO / 'artifacts/toolchain').exists():
         try:
             shutil.copytree(legacy, REPO / 'artifacts/toolchain', symlinks=True,
                             ignore=shutil.ignore_patterns('maven', 'compute-check'))
         except shutil.Error as exc:
-            print(f'warning: {len(exc.args[0])} entries of build-tools could not be copied (ignored)', file=sys.stderr)
+            print(f'error: failed to copy build-tools: {len(exc.args[0])} error(s)', file=sys.stderr)
+            return 1
+    if verify_imported_digests(lock):
+        return 1
     print(f'imported {copied} artifact(s) from {src}; {skipped} not available there (run `bootstrap.py fetch` / build them)')
     return 0
 
@@ -296,7 +374,9 @@ def main():
             parser.error('import needs the path of the older checkout')
         return cmd_import(args)
     cmd_restore(args)
-    cmd_fetch(args)
+    rc = cmd_fetch(args)
+    if rc:
+        return rc
     return cmd_status(args)
 
 

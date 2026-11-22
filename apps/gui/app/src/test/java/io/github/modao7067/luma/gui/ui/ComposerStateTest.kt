@@ -1,5 +1,7 @@
 package io.github.modao7067.luma.gui.ui
 
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -79,5 +81,33 @@ class ComposerStateTest {
         assertFalse(composerCanSend(true, false, false, false, false, false, true, false))
         assertFalse(composerCanSend(true, false, false, false, true, true, true, true))
         assertFalse(composerCanSend(true, false, false, false, true, false, false, true))
+    }
+
+    @Test fun editorStatePreservesInFlightTypingAndCompositionAcrossDelayedLocalEchoes() {
+        val state = ComposerEditorState("")
+        state.edit(TextFieldValue("n", TextRange(1), composition = TextRange(0, 1)))
+        state.edit(TextFieldValue("ni", TextRange(2), composition = TextRange(0, 2)))
+        state.edit(TextFieldValue("nih", TextRange(3), composition = TextRange(0, 3)))
+        state.sync("n")
+        assertEquals("nih", state.value.text)
+        assertEquals(TextRange(0, 3), state.value.composition)
+        state.sync("ni")
+        assertEquals("nih", state.value.text)
+        assertEquals(TextRange(0, 3), state.value.composition)
+        state.sync("nih")
+        assertEquals("nih", state.value.text)
+        assertEquals(TextRange(0, 3), state.value.composition)
+        state.sync("")
+        assertEquals("", state.value.text)
+        assertNull(state.value.composition)
+    }
+
+    @Test fun editorStateAcceptsExternalUpdatesThatAreNotLocalEchoes() {
+        val state = ComposerEditorState("hello")
+        state.edit(TextFieldValue("hello world", TextRange(11)))
+        state.sync("hello world")
+        state.sync("hello world\n\n> quoted")
+        assertEquals("hello world\n\n> quoted", state.value.text)
+        assertEquals(TextRange(state.value.text.length), state.value.selection)
     }
 }

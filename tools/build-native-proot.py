@@ -59,15 +59,27 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def iter_third_party_files() -> list[Path]:
+    try:
+        out = subprocess.check_output(
+            ['git', '-C', str(REPO), 'ls-files', '-z', '--', 'runtime/noroot/third-party'],
+            stderr=subprocess.DEVNULL,
+        )
+        files = [REPO / rel for rel in out.decode('utf-8').split('\0') if rel]
+        existing = [p for p in files if p.is_file()]
+        if existing:
+            return sorted(existing)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return sorted(p for p in THIRD_PARTY.rglob('*') if p.is_file())
+
+
 def package_sources(bundle_path: Path) -> None:
     entries: list[tuple[str, bytes, int]] = []
-    for base, prefix in [
-        (THIRD_PARTY, 'runtime/noroot/third-party/'),
-    ]:
-        for src in sorted(p for p in base.rglob('*') if p.is_file()):
-            rel = src.relative_to(base).as_posix()
-            mode = 0o755 if os.access(src, os.X_OK) or rel.endswith(('.py', '.sh')) else 0o644
-            entries.append((prefix + rel, src.read_bytes(), mode))
+    for src in iter_third_party_files():
+        rel = src.relative_to(THIRD_PARTY).as_posix()
+        mode = 0o755 if os.access(src, os.X_OK) or rel.endswith(('.py', '.sh')) else 0o644
+        entries.append(('runtime/noroot/third-party/' + rel, src.read_bytes(), mode))
     script_path = Path(__file__).resolve()
     entries.append(('tools/build-native-proot.py', script_path.read_bytes(), 0o755))
     entries.sort(key=lambda item: item[0])
@@ -292,6 +304,7 @@ def build_proot(ndk_dir: Path, talloc_tgz: Path, build_dir: Path, out_dir: Path)
             tools['CC'],
             '-O2',
             '-fPIC',
+            '-fstack-protector-strong',
             '-std=c11',
             f'-ffile-prefix-map={build_dir}=.',
             '-c',
@@ -329,7 +342,7 @@ def build_proot(ndk_dir: Path, talloc_tgz: Path, build_dir: Path, out_dir: Path)
     extra_cflags = os.environ.get('EXTRA_CFLAGS', '').strip()
     extra_libs = os.environ.get('LP_EXTRA_LIBS', '-llog')
     cflags_parts = [
-        '-O2 -Wall -Wextra -fPIE -fno-stack-protector',
+        '-O2 -Wall -Wextra -fPIE -fstack-protector-strong',
         f'-ffile-prefix-map={build_dir}=.',
         f'-ffile-prefix-map={REPO}=.',
     ]

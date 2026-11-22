@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -27,13 +28,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.findRootCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -200,40 +209,62 @@ internal fun FilePreviewScreen(preview: FilePreview, actions: CockpitActions, pr
                 },
                 bottomBar = {},
             ) { padding ->
-                Box(Modifier.fillMaxSize()) {
-                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState(previewScrollOffset)).testTag("file-preview-scroll").padding(padding).padding(horizontal = 16.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            val source = preview.sourceResource
-                            if (source != null) {
-                                TextButton(enabled = !opening, onClick = {
-                                    opening = true; openError = null
-                                    scope.launch {
-                                        try { actions.openMediaExternally(source.inContext(parentContext)) }
-                                        catch (cancelled: CancellationException) { throw cancelled }
-                                        catch (failure: Exception) { openError = failure.message ?: tr("无法打开", "Unable to open") }
-                                        finally { opening = false }
-                                    }
-                                }) { MenuIcon(MenuSymbol.OPEN_EXTERNAL, size = 18.dp); Spacer(Modifier.width(8.dp)); Text(tr("用其他应用打开", "Open in another app")) }
-                            } else {
-                                Spacer(Modifier.width(1.dp))
+                val previewIdentity = (preview.sourceResource?.source ?: preview.path) to preview.cwd
+                val topScrollInsetPx = with(LocalDensity.current) { padding.calculateTopPadding().toPx() }
+                key(previewIdentity) {
+                    val previewScrollState = rememberScrollState(previewScrollOffset)
+                    var previewViewportHeightPx by remember { mutableFloatStateOf(0f) }
+                    Box(Modifier.fillMaxSize().onSizeChanged { previewViewportHeightPx = it.height.toFloat() }) {
+                        Column(Modifier.fillMaxSize().verticalScroll(previewScrollState).testTag("file-preview-scroll").padding(padding).padding(horizontal = 16.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                val source = preview.sourceResource
+                                if (source != null) {
+                                    TextButton(enabled = !opening, onClick = {
+                                        opening = true; openError = null
+                                        scope.launch {
+                                            try { actions.openMediaExternally(source.inContext(parentContext)) }
+                                            catch (cancelled: CancellationException) { throw cancelled }
+                                            catch (failure: Exception) { openError = failure.message ?: tr("无法打开", "Unable to open") }
+                                            finally { opening = false }
+                                        }
+                                    }) { MenuIcon(MenuSymbol.OPEN_EXTERNAL, size = 18.dp); Spacer(Modifier.width(8.dp)); Text(tr("用其他应用打开", "Open in another app")) }
+                                } else {
+                                    Spacer(Modifier.width(1.dp))
+                                }
+                                if (preview.text.isNotBlank() && !filePreviewIsMarkdown(preview)) {
+                                    val clipboard = LocalClipboardManager.current
+                                    TextButton(onClick = {
+                                        val limit = 262_144
+                                        val truncated = preview.text.length > limit
+                                        val copyEnd = markdownVisibleEnd(preview.text, limit)
+                                        val payload = if (copyEnd == preview.text.length) preview.text else preview.text.substring(0, copyEnd)
+                                        val copied = runCatching { clipboard.setText(AnnotatedString(payload)) }.isSuccess
+                                        val feedback = when {
+                                            !copied -> tr("复制失败", "Copy failed")
+                                            truncated -> tr("内容过长，已复制前 256 KB", "Content truncated; copied first 256 KB")
+                                            else -> tr("已复制全文", "Copied full text")
+                                        }
+                                        scope.launch { saveFeedback.showSnackbar(feedback) }
+                                    }) { ComposerGlyph("copy"); Spacer(Modifier.width(6.dp)); Text(tr("复制全文", "Copy all")) }
+                                }
                             }
-                            if (preview.text.isNotBlank() && !filePreviewIsMarkdown(preview)) {
-                                val clipboard = LocalClipboardManager.current
-                                TextButton(onClick = {
-                                    clipboard.setText(AnnotatedString(preview.text))
-                                    scope.launch { saveFeedback.showSnackbar(tr("已复制全文", "Copied full text")) }
-                                }) { ComposerGlyph("copy"); Spacer(Modifier.width(6.dp)); Text(tr("复制全文", "Copy all")) }
+                            openError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+                            when {
+                                preview.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                                preview.text.isEmpty() -> Text(if (preview.path.contains("diff", true)) tr("没有可显示的差异。", "No diff to display.") else tr("文件为空。", "File is empty."), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                filePreviewIsMarkdown(preview) -> ConversationTypography { NativeMarkdown(preview.text, actions::previewFile) }
+                                else -> CodeFileViewer(
+                                    code = preview.text,
+                                    language = if (preview.path.contains("diff", true)) "diff" else resolveFileCodeLanguage(preview.path, preview.text),
+                                    verticalScrollState = previewScrollState,
+                                    viewportHeightPx = previewViewportHeightPx,
+                                    topScrollInsetPx = topScrollInsetPx,
+                                    scrollKey = previewIdentity,
+                                )
                             }
                         }
-                        openError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
-                        when {
-                            preview.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-                            preview.text.isEmpty() -> Text(if (preview.path.contains("diff", true)) tr("没有可显示的差异。", "No diff to display.") else tr("文件为空。", "File is empty."), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            filePreviewIsMarkdown(preview) -> ConversationTypography { NativeMarkdown(preview.text, actions::previewFile) }
-                            else -> CodeFileViewer(preview.text, if (preview.path.contains("diff", true)) "diff" else resolveFileCodeLanguage(preview.path, preview.text))
-                        }
+                        SnackbarHost(saveFeedback, Modifier.align(Alignment.BottomCenter).padding(padding).padding(16.dp))
                     }
-                    SnackbarHost(saveFeedback, Modifier.align(Alignment.BottomCenter).padding(padding).padding(16.dp))
                 }
             }
         }
@@ -245,48 +276,77 @@ internal fun CodeFileViewer(
     code: String,
     language: String = "",
     modifier: Modifier = Modifier,
+    verticalScrollState: ScrollState? = null,
+    viewportHeightPx: Float = 0f,
+    topScrollInsetPx: Float = 0f,
+    scrollKey: Any = Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val highlighted = rememberHighlightedCode(code, language, colors, streamingHint = false)
+    val density = LocalDensity.current
+    val fallbackViewportPx = with(density) { 640.dp.toPx() }
     val lineCount = remember(code) { if (code.isEmpty()) 1 else code.count { it == '\n' } + 1 }
-    val lineNumbers = remember(lineCount) { (1..lineCount).joinToString("\n") }
+    val digits = remember(lineCount) { lineCount.toString().length.coerceAtLeast(2) }
+    val gutterWidth = when {
+        digits <= 2 -> 36.dp
+        digits == 3 -> 46.dp
+        digits == 4 -> 56.dp
+        else -> 66.dp
+    }
+    val hScroll = key(scrollKey) { rememberScrollState() }
+    var blockOffsetInParentPx by remember(scrollKey) { mutableFloatStateOf(0f) }
+    var windowTopPx by remember(scrollKey) { mutableFloatStateOf(0f) }
+    var windowHeightPx by remember { mutableFloatStateOf(0f) }
     val codeStyle = MaterialTheme.typography.bodyMedium.copy(
         color = colors.onSurface,
         fontFamily = terminalFont(),
         fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
         lineHeight = 22.sp,
         letterSpacing = 0.sp,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.None,
+        ),
     )
+    val gutterTextStyle = codeStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f))
 
-    LumaSelectionContainer {
-        Row(
-            modifier = modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)
-        ) {
-            DisableSelection {
-                Text(
-                    text = lineNumbers,
-                    style = codeStyle.copy(
-                        color = colors.onSurfaceVariant.copy(alpha = 0.55f),
-                        textAlign = TextAlign.End,
-                    ),
-                    modifier = Modifier.padding(end = 16.dp),
-                )
+    ViewportNoWrapCodeBlock(
+        code = code,
+        language = language,
+        colors = colors,
+        style = codeStyle,
+        streamingHint = false,
+        hScroll = hScroll,
+        viewportTopPx = {
+            if (verticalScrollState != null) {
+                (verticalScrollState.value.toFloat() - blockOffsetInParentPx - topScrollInsetPx).coerceAtLeast(0f)
+            } else {
+                (-windowTopPx).coerceAtLeast(0f)
             }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = highlighted,
-                    style = codeStyle,
-                    softWrap = false,
-                )
+        },
+        viewportHeightPx = {
+            when {
+                viewportHeightPx > 1f -> viewportHeightPx
+                windowHeightPx > 1f -> windowHeightPx
+                else -> fallbackViewportPx
             }
-        }
-    }
+        },
+        gutterWidth = gutterWidth,
+        gutterBg = Color.Transparent,
+        gutterDividerColor = Color.Transparent,
+        gutterTextStyle = gutterTextStyle,
+        gutterPadEnd = 16.dp,
+        lineNumberAt = { idx -> (idx + 1).toString() },
+        contentPaddingHorizontal = 0.dp,
+        contentPaddingVertical = 8.dp,
+        modifier = modifier.onGloballyPositioned { coords ->
+            if (coords.isAttached) {
+                blockOffsetInParentPx = coords.positionInParent().y
+                windowTopPx = coords.positionInWindow().y
+                windowHeightPx = coords.findRootCoordinates().size.height.toFloat()
+            }
+        },
+    )
 }
 
 @Composable

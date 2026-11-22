@@ -217,7 +217,8 @@ class StaticRunnerTest(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit) as raised:
                 runner.static_checks()
-        self.assertEqual(len(calls), 8)
+        self.assertEqual(len(calls), len(runner.STATIC_TESTS))
+        self.assertIn('test_tools_scripts', calls)
         self.assertIn('verify-no-host-paths', str(raised.exception))
         self.assertIn('verify-jvm-comments', str(raised.exception))
         self.assertIn('Git scope', str(raised.exception))

@@ -189,7 +189,8 @@ class GrokSession(AcpSession):
         if self.config.get("nativeProtocol") == "grok-private-leader-v1":
             binary = argv[0]
             self.owner = NativeOwner(self)
-            if not self.owner.handle.get("kind"):
+            launched_owner = not bool(self.owner.handle.get("kind"))
+            if launched_owner:
                 env = os.environ.copy()
                 env["LUMA_LANG"] = lang_code()
                 if env_overrides: env.update(env_overrides)
@@ -205,6 +206,7 @@ class GrokSession(AcpSession):
                 threading.Thread(target=drain, daemon=True, name="LumaGrokLeaderDiagnostic").start()
                 self.owner.handle.update(kind="grok-leader", pid=leader.pid, processStart=process_start(leader.pid), binary=binary)
                 self.save()
+                self._launched_owner = True
                 end = time.monotonic() + 15
                 while time.monotonic() < end and not Path(self.owner.socket).exists() and leader.poll() is None: time.sleep(.05)
                 locked = grok_lock_leader(self.owner.socket)
@@ -212,6 +214,13 @@ class GrokSession(AcpSession):
                     self.owner.handle.update(pid=locked[0], processStart=locked[1])
                     self.save()
                 if (leader.poll() is not None and not locked) or not Path(self.owner.socket).exists():
+                    if not self.config.get("creationUnknown"):
+                        try:
+                            self.owner.stop(force=True)
+                            self.save()
+                        except Exception:
+                            pass
+                        self._launched_owner = False
                     reason = (
                         tr("；当前原生 sandbox 不支持 leader，请保留原权限并使用原入口", "; native sandbox does not support leader, keep original permissions and entry")
                         if b"sandbox" in diagnostic.lower() else
@@ -233,14 +242,22 @@ class GrokSession(AcpSession):
         self.lifecycle("connecting")
         self.update(catalogState="loading")
         self.initializing = True
+        self._launched_owner = False
         try:
             self._connect()
         except Exception as exc:
+            if self._launched_owner and hasattr(self, "owner") and not self.config.get("creationUnknown"):
+                try:
+                    self.owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
             if self.data.get("lifecycle", {}).get("phase") != "blocked":
                 self.fail(exc, "configuration" if isinstance(exc, Rejected) else "transport")
             self.update(connected=False, catalogState="error")
             raise Rejected(self.data["error"]) from None
         finally:
+            self._launched_owner = False
             self.initializing = False
 
     def _connect(self):
@@ -628,6 +645,15 @@ class GrokSession(AcpSession):
                         error = response["error"]
                         raise RpcRejected(error) if isinstance(error, dict) else Rejected(str(error))
                     self.complete_turn(ident, response.get("result", {}))
+            except Rejected as exc:
+                if not turn["event"].is_set():
+                    with self.lock:
+                        if self.current_submission == ident:
+                            self.receipt(ident, "rejected")
+                            self.finish_chunk("unknown")
+                            self.current_submission = None
+                            self.update(running=False)
+                            self.fail(exc)
             except Exception as exc:
                 if not turn["event"].is_set():
                     with self.lock:

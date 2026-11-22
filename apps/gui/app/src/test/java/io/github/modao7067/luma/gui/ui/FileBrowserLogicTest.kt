@@ -18,6 +18,7 @@ class FileBrowserLogicTest {
 
     @Test fun `references quote each path`() {
         assertEquals("@\"/a b/c.kt\" @\"/workspace/dir\"", fileReferenceText(listOf("/a b/c.kt", "/workspace/dir")))
+        assertEquals("@\"/tmp/a b.kt\" @\"/tmp/clean.kt\"", fileReferenceText(listOf("/tmp/a \"b\r\n.kt", "/tmp/\"clean\"\n.kt")))
     }
 
     @Test fun `entry detail shows folder or size`() {

@@ -322,6 +322,7 @@ public final class TerminalView extends View {
         mFollowBottom = true;
         mObservedScreen = null;
 
+        if (mTextSelectionCursorController != null && isSelectingText()) stopTextSelectionMode();
         if (mEmulator != null) mEmulator.setRenderingActive(false);
         mTermSession = session;
         mEmulator = null;
@@ -444,14 +445,14 @@ public final class TerminalView extends View {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
                     mClient.logInfo(LOG_TAG, "IME: deleteSurroundingText(" + leftLength + ", " + rightLength + ")");
                 }
-                // While composing, deletion belongs to the IME's temporary buffer, not the PTY.
                 if (getEditable().length() != 0) return super.deleteSurroundingText(leftLength, rightLength);
-                // The stock Samsung keyboard with 'Auto check spelling' enabled sends leftLength > 1.
+                int clampedLeft = Math.max(0, Math.min(leftLength, 128));
+                int clampedRight = Math.max(0, Math.min(rightLength, 128));
                 KeyEvent deleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
-                for (int i = 0; i < leftLength; i++) sendKeyEvent(deleteKey);
+                for (int i = 0; i < clampedLeft; i++) sendKeyEvent(deleteKey);
                 KeyEvent forwardDeleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_FORWARD_DEL);
-                for (int i = 0; i < rightLength; i++) sendKeyEvent(forwardDeleteKey);
-                return super.deleteSurroundingText(leftLength, rightLength);
+                for (int i = 0; i < clampedRight; i++) sendKeyEvent(forwardDeleteKey);
+                return super.deleteSurroundingText(clampedLeft, clampedRight);
             }
 
             @Override public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
@@ -464,8 +465,9 @@ public final class TerminalView extends View {
             void sendTextToTerminal(CharSequence text) {
                 stopTextSelectionMode();
                 final int textLengthInChars = text.length();
-                // Read the latched virtual modifier once for the whole commit; a second read would
-                // consume it and lose the Shift intent in inputCodePoint's protocol branch.
+                if (textLengthInChars == 0) return;
+                final boolean virtualCtrl = mClient.readControlKey();
+                final boolean virtualAlt = mClient.readAltKey();
                 final boolean shiftHeld = mClient.readShiftKey();
                 for (int i = 0; i < textLengthInChars; i++) {
                     char firstChar = text.charAt(i);
@@ -474,28 +476,26 @@ public final class TerminalView extends View {
                         if (++i < textLengthInChars) {
                             codePoint = Character.toCodePoint(firstChar, text.charAt(i));
                         } else {
-                            // At end of string, with no low surrogate following the high:
                             codePoint = TerminalEmulator.UNICODE_REPLACEMENT_CHAR;
                         }
                     } else {
                         codePoint = firstChar;
                     }
 
-                    // Check onKeyDown() for details.
+                    if (codePoint == '\n' || codePoint == '\r') {
+                        sendCommittedEnterOrTab(true, virtualCtrl, virtualAlt, shiftHeld);
+                        continue;
+                    }
+                    if (codePoint == '\t') {
+                        sendCommittedEnterOrTab(false, virtualCtrl, virtualAlt, shiftHeld);
+                        continue;
+                    }
+
                     if (shiftHeld)
                         codePoint = Character.toUpperCase(codePoint);
 
-                    boolean ctrlHeld = false;
+                    boolean ctrlHeld = virtualCtrl;
                     if (codePoint <= 31 && codePoint != 27) {
-                        if (codePoint == '\n') {
-                            // The AOSP keyboard and descendants seems to send \n as text when the enter key is pressed,
-                            // instead of a key event like most other keyboard apps. A terminal expects \r for the enter
-                            // key (although when icrnl is enabled this doesn't make a difference - run 'stty -icrnl' to
-                            // check the behaviour).
-                            codePoint = '\r';
-                        }
-
-                        // E.g. penti keyboard for ctrl input.
                         ctrlHeld = true;
                         switch (codePoint) {
                             case 31:
@@ -516,7 +516,7 @@ public final class TerminalView extends View {
                         }
                     }
 
-                    inputCodePoint(KEY_EVENT_SOURCE_SOFT_KEYBOARD, codePoint, ctrlHeld, false, shiftHeld);
+                    inputCodePointResolved(KEY_EVENT_SOURCE_SOFT_KEYBOARD, codePoint, ctrlHeld, virtualAlt, shiftHeld);
                 }
             }
 
@@ -695,17 +695,66 @@ public final class TerminalView extends View {
         return new int[] { column, row };
     }
 
-    /** Read the clipboard exactly once; the client owns confirmation and the actual write. */
+    static final int MAX_PASTE_CHARS = 262_144;
+
+    static CharSequence readClipboardItem(Context context, ClipData.Item item) {
+        if (item == null) return null;
+        CharSequence text = item.getText();
+        if (text != null) {
+            if (text.length() == 0 || text.length() > MAX_PASTE_CHARS) return null;
+            return text;
+        }
+        android.net.Uri uri = item.getUri();
+        if (uri != null) {
+            try (android.content.res.AssetFileDescriptor afd =
+                     context.getContentResolver().openTypedAssetFileDescriptor(uri, "text/*", null)) {
+                if (afd == null) return null;
+                long length = afd.getLength();
+                if (length > (long) MAX_PASTE_CHARS * 4L) return null;
+                try (java.io.InputStream in = afd.createInputStream()) {
+                    return in == null ? null : readBoundedText(in, MAX_PASTE_CHARS);
+                }
+            } catch (java.io.FileNotFoundException e) {
+                String scheme = uri.getScheme();
+                if ("content".equals(scheme) || "android.resource".equals(scheme) || "file".equals(scheme)) {
+                    return null;
+                }
+                String uriText = uri.toString();
+                return uriText.length() <= MAX_PASTE_CHARS ? uriText : null;
+            } catch (java.io.IOException | RuntimeException e) {
+                return null;
+            }
+        }
+        android.content.Intent intent = item.getIntent();
+        if (intent != null) {
+            String uriText = intent.toUri(android.content.Intent.URI_INTENT_SCHEME);
+            return uriText.length() <= MAX_PASTE_CHARS ? uriText : null;
+        }
+        return null;
+    }
+
+    static String readBoundedText(java.io.InputStream in, int maxChars) throws java.io.IOException {
+        try (java.io.Reader reader = new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8)) {
+            StringBuilder out = new StringBuilder();
+            char[] buf = new char[4096];
+            int n;
+            while ((n = reader.read(buf)) != -1) {
+                if (out.length() + n > maxChars) return null;
+                out.append(buf, 0, n);
+            }
+            return out.length() == 0 ? null : out.toString();
+        }
+    }
+
     public void pasteFromClipboard() {
         if (mEmulator == null || mTermSession == null) return;
         ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard == null || !clipboard.hasPrimaryClip()) return;
         ClipData clip = clipboard.getPrimaryClip();
         if (clip == null || clip.getItemCount() == 0) return;
-        CharSequence text = clip.getItemAt(0).coerceToText(getContext());
+        CharSequence text = readClipboardItem(getContext(), clip.getItemAt(0));
         if (TextUtils.isEmpty(text)) return;
         if (mClient == null || !mClient.onPasteFromClipboard(text)) {
-            // No confirmation host: the native facade only writes non-dangerous text in this mode.
             mEmulator.paste(text.toString());
         }
     }
@@ -1003,9 +1052,11 @@ public final class TerminalView extends View {
         }
 
         final int metaState = event.getMetaState();
-        final boolean controlDown = event.isCtrlPressed() || mClient.readControlKey();
-        final boolean leftAltDown = (metaState & KeyEvent.META_ALT_LEFT_ON) != 0 || mClient.readAltKey();
+        final boolean virtualControlDown = mClient.readControlKey();
+        final boolean virtualAltDown = mClient.readAltKey();
         final boolean virtualShiftDown = mClient.readShiftKey();
+        final boolean controlDown = event.isCtrlPressed() || virtualControlDown;
+        final boolean leftAltDown = (metaState & KeyEvent.META_ALT_LEFT_ON) != 0 || virtualAltDown;
         final boolean shiftDown = event.isShiftPressed() || virtualShiftDown;
         final boolean rightAltDownFromEvent = (metaState & KeyEvent.META_ALT_RIGHT_ON) != 0;
 
@@ -1014,16 +1065,10 @@ public final class TerminalView extends View {
         if (event.isAltPressed() || leftAltDown) keyMod |= KeyHandler.KEYMOD_ALT;
         if (shiftDown) keyMod |= KeyHandler.KEYMOD_SHIFT;
         if (event.isNumLockOn()) keyMod |= KeyHandler.KEYMOD_NUM_LOCK;
-        // Host-local actions (Shift+PageUp/PageDown history scrolling) keep priority over every
-        // terminal protocol path and never write PTY bytes.
         if (!event.isFunctionPressed() && handleKeyCodeAction(keyCode, keyMod)) return true;
 
-        // Clear Ctrl since we handle that ourselves:
         int bitsToClear = KeyEvent.META_CTRL_MASK;
-        if (rightAltDownFromEvent) {
-            // Let right Alt/Alt Gr be used to compose characters.
-        } else {
-            // Use left alt to send to terminal (e.g. Left Alt+B to jump back a word), so remove:
+        if (!rightAltDownFromEvent) {
             bitsToClear |= KeyEvent.META_ALT_ON | KeyEvent.META_ALT_LEFT_ON;
         }
         int effectiveMetaState = event.getMetaState() & ~bitsToClear;
@@ -1038,9 +1083,8 @@ public final class TerminalView extends View {
         final int oldCombiningAccent = mCombiningAccent;
         int encoded = result;
         if ((result & KeyCharacterMap.COMBINING_ACCENT) != 0) {
-            // A dead key is composition state, not a key event; never emit a fake press/release.
             if (mCombiningAccent != 0)
-                inputCodePoint(event.getDeviceId(), mCombiningAccent, controlDown, leftAltDown, false);
+                inputCodePointResolved(event.getDeviceId(), mCombiningAccent, controlDown, leftAltDown, false);
             mCombiningAccent = result & KeyCharacterMap.COMBINING_ACCENT_MASK;
             invalidate();
             return true;
@@ -1052,9 +1096,7 @@ public final class TerminalView extends View {
             mCombiningAccent = 0;
         }
         if (compositionResolved) {
-            // Final composed text is a text commit, not a synthetic physical key/report stream.
-            // Functional Ctrl/Alt intent is still handled by inputCodePoint's protocol branch.
-            inputCodePoint(event.getDeviceId(), encoded, controlDown, leftAltDown, virtualShiftDown);
+            inputCodePointResolved(event.getDeviceId(), encoded, controlDown, leftAltDown, virtualShiftDown);
             if (mCombiningAccent != oldCombiningAccent) invalidate();
             return true;
         }
@@ -1121,42 +1163,61 @@ public final class TerminalView extends View {
         if (encoded <= 0) {
             return false;
         }
-        // The composition state (if any) was already consumed above; never re-combine with the
-        // original getUnicodeChar result here or the final text would regress to the base key.
-        inputCodePoint(event.getDeviceId(), encoded, controlDown, leftAltDown, shiftDown);
+        inputCodePointResolved(event.getDeviceId(), encoded, controlDown, leftAltDown, shiftDown);
 
         if (mCombiningAccent != oldCombiningAccent) invalidate();
 
         return true;
     }
 
-    public void inputCodePoint(int eventSource, int codePoint, boolean controlDownFromEvent, boolean leftAltDownFromEvent) {
-        inputCodePoint(eventSource, codePoint, controlDownFromEvent, leftAltDownFromEvent,
-            mClient.readShiftKey());
+    private void sendCommittedEnterOrTab(boolean isEnter, boolean controlDown, boolean altDown, boolean shiftDown) {
+        if (mTermSession == null) return;
+        if (mEmulator != null) mEmulator.setCursorBlinkState(true);
+        if (mTermSession.isKeyboardProtocolActive()) {
+            int mods = AndroidKeyMap.mods(shiftDown, controlDown, altDown, false, false, false, 0);
+            int key = isEnter ? GhosttyKey.ENTER : GhosttyKey.TAB;
+            byte[] encoded = encodeKeyEvent(key, GhosttyKey.ACTION_PRESS, mods, 0, null, 0, false);
+            if (encoded != null) {
+                scrollToBottom();
+                writeEncoded(encoded);
+            }
+            return;
+        }
+        scrollToBottom();
+        if (isEnter) {
+            mTermSession.writeCodePoint(altDown, '\r');
+        } else if (shiftDown && !controlDown && !altDown) {
+            byte[] backTab = "\033[Z".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            mTermSession.write(backTab, 0, backTab.length);
+        } else {
+            mTermSession.writeCodePoint(altDown, '\t');
+        }
     }
 
-    private void inputCodePoint(int eventSource, int codePoint, boolean controlDownFromEvent,
-                                boolean leftAltDownFromEvent, boolean shiftDownFromClient) {
+    public void inputCodePoint(int eventSource, int codePoint, boolean controlDownFromEvent, boolean leftAltDownFromEvent) {
+        final boolean virtualCtrl = mClient.readControlKey();
+        final boolean virtualAlt = mClient.readAltKey();
+        final boolean virtualShift = mClient.readShiftKey();
+        inputCodePointResolved(eventSource, codePoint,
+            controlDownFromEvent || virtualCtrl,
+            leftAltDownFromEvent || virtualAlt,
+            virtualShift);
+    }
+
+    private void inputCodePointResolved(int eventSource, int codePoint, boolean controlDown,
+                                        boolean altDown, boolean shiftDownFromClient) {
         if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
-            mClient.logInfo(LOG_TAG, "inputCodePoint(eventSource=" + eventSource + ", codePoint=" + codePoint + ", controlDownFromEvent=" + controlDownFromEvent + ", leftAltDownFromEvent="
-                + leftAltDownFromEvent + ")");
+            mClient.logInfo(LOG_TAG, "inputCodePoint(eventSource=" + eventSource + ", codePoint=" + codePoint + ", controlDown=" + controlDown + ", altDown="
+                + altDown + ")");
         }
 
         if (mTermSession == null) return;
 
-        // Ensure cursor is shown when a key is pressed down like long hold on (arrow) keys
         if (mEmulator != null)
             mEmulator.setCursorBlinkState(true);
 
-        final boolean controlDown = controlDownFromEvent || mClient.readControlKey();
-        final boolean altDown = leftAltDownFromEvent || mClient.readAltKey();
-
         if (mClient.onCodePoint(codePoint, controlDown, mTermSession)) return;
 
-        // IME/virtual text with an explicit modifier (including virtual Shift) is a functional
-        // modifier+character, not raw unmodified UTF-8. Encode it while the terminal's
-        // kitty/modifyOtherKeys state is active. The modifier was read once by the caller to avoid
-        // consuming a latched extra-key state twice.
         byte[] textBytes = codePoint >= 32 && codePoint != 0x7f ? utf8(codePoint) : null;
         if (textBytes != null && (controlDown || altDown || shiftDownFromClient)
                 && mTermSession.isKeyboardProtocolActive()) {
@@ -1168,8 +1229,6 @@ public final class TerminalView extends View {
                 if (encoded.length > 0) mTermSession.write(encoded, 0, encoded.length);
                 return;
             }
-            // Protocol-active explicit modifier path is fail-closed: never fall through to the
-            // hand-written legacy Ctrl/Alt conversion with a different byte contract.
             return;
         }
 
@@ -1762,7 +1821,7 @@ public final class TerminalView extends View {
     }
 
     private boolean hideTextSelectionCursors() {
-        return getTextSelectionCursorController().hide();
+        return mTextSelectionCursorController != null && mTextSelectionCursorController.hide();
     }
 
     private void renderTextSelection() {
@@ -1819,7 +1878,7 @@ public final class TerminalView extends View {
 
     public void stopTextSelectionMode() {
         if (hideTextSelectionCursors()) {
-            mClient.copyModeChanged(isSelectingText());
+            if (mClient != null) mClient.copyModeChanged(isSelectingText());
             invalidate();
         }
     }

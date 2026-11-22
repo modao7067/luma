@@ -231,7 +231,7 @@ internal object SubmissionLedger {
     fun rejected(record: SessionRecord, id: String? = record.submissionId) {
         migrate(record)
         val message = id?.let { find(record, it) } ?: return
-        if (message.state in setOf("accepted", "rejected")) return
+        if (message.state in setOf("accepted", "rejected", "cancelled")) return
         val canRestore = !message.dismissed && !message.external && record.draftRevision == message.draftRevision && record.draft.isEmpty() && record.images.isEmpty() && record.skills.isEmpty()
         if (canRestore) {
             record.draft = message.text

@@ -9,4 +9,7 @@ public final class GuiRuntimeBridge {
     public static void copyFile(Context context, String path, File destination, long limit) throws IOException {
         TerminalLinkReader.copy(context, path, destination, limit);
     }
+    public static void copyFile(Context context, String path, File destination, long limit, String allowedPrefix) throws IOException {
+        TerminalLinkReader.copy(context, path, destination, limit, allowedPrefix);
+    }
 }

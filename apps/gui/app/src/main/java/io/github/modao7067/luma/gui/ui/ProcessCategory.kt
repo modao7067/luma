@@ -27,7 +27,7 @@ private val openCodeToolCategories = mapOf(
     "experimental_image_generate" to ProcessCategory.Image,
 )
 private val claudeToolCategories = mapOf(
-    "Bash" to ProcessCategory.Terminal,
+    "Bash" to ProcessCategory.Terminal, "PowerShell" to ProcessCategory.Terminal,
     "Read" to ProcessCategory.Read,
     "Write" to ProcessCategory.Edit, "Edit" to ProcessCategory.Edit, "MultiEdit" to ProcessCategory.Edit,
     "NotebookEdit" to ProcessCategory.Edit,
@@ -134,7 +134,7 @@ private fun antigravitySwarmContext(item: ConversationItem): String? {
             val singleLine = obj.safeTrimmedString("text").replace(Regex("\\s+"), " ").trim()
             when {
                 singleLine.isEmpty() -> null
-                singleLine.length > 48 -> singleLine.take(48).trimEnd() + "…"
+                singleLine.length > 48 -> safeUtf16Prefix(singleLine, 48).trimEnd() + "…"
                 else -> singleLine
             }
         }
@@ -274,7 +274,7 @@ internal fun processLiveExcerpt(detail: String, maxChars: Int = 480): String {
     val step = if (maxChars >= 256) 64 else 1
     val rawStart = (text.length - maxChars).coerceAtLeast(0)
     val quantizedStart = if (step > 1) ((rawStart + step - 1) / step) * step else rawStart
-    val sliceStart = quantizedStart.coerceIn(rawStart, text.length)
+    val sliceStart = safeUtf16SliceStart(text, quantizedStart.coerceIn(rawStart, text.length))
     return "…" + text.substring(sliceStart).trimStart()
 }
 
@@ -348,6 +348,81 @@ private fun unwrapShellCommand(command: String): ShellCommandPresentation? {
 
 private data class TerminalJsonInput(val command: String?)
 
+private val terminalSummaryKeys = listOf("displaySummary", "toolSummary", "description", "summary")
+private val explicitToolSummaryKeys = listOf("displaySummary", "toolSummary")
+private val terminalCommandKeys = listOf("command", "CommandLine", "cmd")
+private val searchPrimaryKeys = listOf("pattern", "Pattern", "Query", "query", "glob", "include")
+private val searchScopeKeys = listOf("path", "SearchPath", "SearchDirectory", "directory", "dir")
+private val searchInputKeys = searchPrimaryKeys + searchScopeKeys
+private val webSearchQueryKeys = listOf("query", "Query", "q")
+private val browseUrlKeys = listOf("url", "Url", "URL", "uri")
+private val filePathKeys = listOf("file_path", "filePath", "Path", "path", "TargetFile", "DirectoryPath", "AbsolutePath")
+private val toolSummaryControlRegex = Regex(
+    "\\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][\\s\\S]*?(?:\\u0007|\\u001B\\\\)|[()][ -~]|[78=>])|\\u009B[0-?]*[ -/]*[@-~]|\\u009D[\\s\\S]*?(?:\\u0007|\\u009C)|[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F]",
+)
+private val toolSummarySpaceRegex = Regex("\\s+")
+
+private fun cleanToolSummary(raw: String): String =
+    toolSummarySpaceRegex.replace(toolSummaryControlRegex.replace(raw, ""), " ").trim()
+
+private fun parseToolInputObject(input: String, keyHints: List<String>): JSONObject? {
+    if (input.length > LIBRARY_HIGHLIGHT_LIMIT) return null
+    val trimmed = input.trim()
+    if (trimmed.length < 2 || trimmed.first() != '{' || trimmed.last() != '}') return null
+    if (keyHints.none { trimmed.contains("\"$it\"") }) return null
+    return runCatching { JSONObject(trimmed) }.getOrNull()
+}
+
+private fun toolInputSummary(input: String, keys: List<String>, skipLabel: String = ""): String? {
+    val obj = parseToolInputObject(input, keys) ?: return null
+    for (key in keys) {
+        val value = obj.opt(key)
+        if (value is String) {
+            val cleaned = cleanToolSummary(value)
+            if (cleaned.isNotEmpty() && !cleaned.equals(skipLabel, ignoreCase = true)) return cleaned
+        }
+    }
+    return null
+}
+
+private fun toolInputCategoryContext(input: String, category: ProcessCategory, skipLabel: String): String? {
+    val target = when (category) {
+        ProcessCategory.Search -> {
+            val obj = parseToolInputObject(input, searchInputKeys) ?: return null
+            val primary = searchPrimaryKeys.firstNotNullOfOrNull { key ->
+                (obj.opt(key) as? String)?.let(::cleanToolSummary)?.takeIf { it.isNotEmpty() }
+            }.orEmpty()
+            val scope = searchScopeKeys.firstNotNullOfOrNull { key ->
+                (obj.opt(key) as? String)?.let(::cleanToolSummary)?.takeIf { it.isNotEmpty() }
+            }.orEmpty()
+            when {
+                primary.isNotEmpty() && scope.isNotEmpty() -> "$primary ($scope)"
+                primary.isNotEmpty() -> primary
+                scope.isNotEmpty() -> scope
+                else -> ""
+            }
+        }
+        ProcessCategory.WebSearch -> toolInputSummary(input, webSearchQueryKeys, skipLabel = skipLabel).orEmpty()
+        ProcessCategory.Browse -> toolInputSummary(input, browseUrlKeys, skipLabel = skipLabel).orEmpty()
+        ProcessCategory.Read, ProcessCategory.Edit -> toolInputSummary(input, filePathKeys, skipLabel = skipLabel).orEmpty()
+        else -> ""
+    }
+    return target.takeIf { it.isNotEmpty() && !it.equals(skipLabel, ignoreCase = true) }
+}
+
+private fun toolInputCommandFirstLine(input: String): String? {
+    val obj = parseToolInputObject(input, terminalCommandKeys) ?: return null
+    for (key in terminalCommandKeys) {
+        val value = obj.opt(key)
+        if (value is String && value.isNotBlank()) {
+            val unwrapped = unwrapShellCommand(value.trim())?.script ?: value
+            val firstLine = unwrapped.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+            if (!firstLine.isNullOrEmpty()) return firstLine
+        }
+    }
+    return null
+}
+
 private fun terminalJsonInput(input: String): TerminalJsonInput? {
     if (input.length > LIBRARY_HIGHLIGHT_LIMIT) return null
     val trimmed = input.trim()
@@ -360,7 +435,8 @@ private fun terminalJsonInput(input: String): TerminalJsonInput? {
         val value = obj.opt(key)
         when {
             key == "command" || key == "CommandLine" || key == "cmd" -> if (value is String && value.isNotEmpty()) command = value
-            key == "description" || key == "toolSummary" || key == "summary" || key == "WaitMsBeforeAsync" || key == "IsDaemon" -> Unit
+            key == "displaySummary" || key == "description" || key == "toolSummary" || key == "summary" || key == "WaitMsBeforeAsync" || key == "IsDaemon" -> Unit
+            (key == "run_in_background" || key == "background" || key == "is_background") && value == false -> Unit
             value == null || value == JSONObject.NULL || value is String && value.isEmpty() -> Unit
             else -> return TerminalJsonInput(null)
         }
@@ -518,43 +594,55 @@ internal fun processEntryContext(item: ConversationItem, cli: String): String {
         } else first
         chosen.replace("**", "")
     } else item.text
-    fun terminalSummary(value: String): String {
-        val category = processCategory(item, cli)
-        if (category != ProcessCategory.Terminal && (item.kind != "commandExecution" || category == ProcessCategory.Read)) return value
-        return unwrapShellCommand(value)?.script ?: value
-    }
     if (cli == "Antigravity" && item.toolName in antigravitySwarmTools) {
         antigravitySwarmContext(item)?.takeIf { it.isNotEmpty() }?.let { return it }
         if (raw == "Run $label") return ""
     }
-    if (raw == label || raw in setOf("工具", "工具调用", "Tool", "Tool call")) return ""
-    if (item.kind == "mcpToolCall" && raw.trim() == "·") return ""
-    if (raw.startsWith("$label · ")) return terminalSummary(raw.removePrefix("$label · ").trim())
-    if (raw.startsWith("$label:")) return terminalSummary(raw.removePrefix("$label:").trim())
-    if (raw.endsWith(" · $label")) return terminalSummary(raw.removeSuffix(" · $label").trim())
-    return when (item.kind) {
-        "webSearch" -> raw.removePrefix("搜索 · ").removePrefix("Search · ")
-        "fileChange" -> raw.takeUnless { it == "文件变更" || it == "File changes" }.orEmpty()
-        "imageView" -> raw.takeUnless { it == "查看图片" || it == "View image" }.orEmpty()
-        "imageGeneration" -> raw.takeUnless { it == "生成图片" || it == "Generate image" }.orEmpty()
-        "subAgentActivity" -> if (cli == "Codex" && (raw == "子代理活动" || raw == "Sub-agent activity")) "" else raw
-        "compaction" -> if (cli == "OpenCode" && (raw == "上下文压缩" || raw == "Context compaction")) "" else raw
-        "commandExecution" -> if (cli == "Codex" && item.input.isBlank() && (raw == "命令" || raw == "Command")) "" else raw
-        "collabAgentToolCall" -> if (cli == "Codex") when (raw) {
-            "分派子代理" -> "Spawn subagent"
-            "等待子代理" -> "Wait for subagent"
-            "联系子代理" -> "Contact subagent"
-            "继续子代理" -> "Resume subagent"
-            "关闭子代理" -> "Close subagent"
-            "中断子代理" -> "Interrupt subagent"
-            "查看子代理" -> "List subagents"
-            "子代理操作" -> "Subagent operation"
+    val category = processCategory(item, cli)
+    val isTerminalCommand = category == ProcessCategory.Terminal || (item.kind == "commandExecution" && category != ProcessCategory.Read)
+    if (isTerminalCommand) {
+        toolInputSummary(item.input, terminalSummaryKeys, skipLabel = label)?.let { return it }
+    }
+    fun terminalSummary(value: String): String =
+        if (!isTerminalCommand) value else unwrapShellCommand(value)?.script ?: value
+    val baseContext = when {
+        raw == label || raw in setOf("工具", "工具调用", "Tool", "Tool call") -> ""
+        item.kind == "mcpToolCall" && raw.trim() == "·" -> ""
+        raw.startsWith("$label · ") -> terminalSummary(raw.removePrefix("$label · ").trim())
+        raw.startsWith("$label:") -> terminalSummary(raw.removePrefix("$label:").trim())
+        raw.endsWith(" · $label") -> terminalSummary(raw.removeSuffix(" · $label").trim())
+        else -> when (item.kind) {
+            "webSearch" -> raw.removePrefix("搜索 · ").removePrefix("Search · ")
+            "fileChange" -> raw.takeUnless { it == "文件变更" || it == "File changes" }.orEmpty()
+            "imageView" -> raw.takeUnless { it == "查看图片" || it == "View image" }.orEmpty()
+            "imageGeneration" -> raw.takeUnless { it == "生成图片" || it == "Generate image" }.orEmpty()
+            "subAgentActivity" -> if (cli == "Codex" && (raw == "子代理活动" || raw == "Sub-agent activity")) "" else raw
+            "compaction" -> if (cli == "OpenCode" && (raw == "上下文压缩" || raw == "Context compaction")) "" else raw
+            "commandExecution" -> if (cli == "Codex" && item.input.isBlank() && (raw == "命令" || raw == "Command")) "" else raw
+            "collabAgentToolCall" -> if (cli == "Codex") when (raw) {
+                "分派子代理" -> "Spawn subagent"
+                "等待子代理" -> "Wait for subagent"
+                "联系子代理" -> "Contact subagent"
+                "继续子代理" -> "Resume subagent"
+                "关闭子代理" -> "Close subagent"
+                "中断子代理" -> "Interrupt subagent"
+                "查看子代理" -> "List subagents"
+                "子代理操作" -> "Subagent operation"
+                else -> raw
+            } else raw
+            "" -> if ((cli == "OpenCode" && item.outcome == "failed" && (raw == "执行失败" || raw == "Execution failed")) ||
+                (cli == "Codex" && (raw == "工具事件" || raw == "Tool event"))) "" else raw
             else -> raw
-        } else raw
-        "" -> if ((cli == "OpenCode" && item.outcome == "failed" && (raw == "执行失败" || raw == "Execution failed")) ||
-            (cli == "Codex" && (raw == "工具事件" || raw == "Tool event"))) "" else raw
-        else -> raw
-    }.let(::terminalSummary)
+        }.let(::terminalSummary)
+    }
+    if (isTerminalCommand) {
+        return baseContext.ifBlank { toolInputCommandFirstLine(item.input).orEmpty() }
+    }
+    if (item.kind != "reasoning" && (baseContext.isBlank() || baseContext == "Run $label")) {
+        toolInputSummary(item.input, explicitToolSummaryKeys, skipLabel = label)?.let { return it }
+        toolInputCategoryContext(item.input, category, skipLabel = label)?.let { return it }
+    }
+    return baseContext
 }
 
 internal fun processInputLanguage(item: ConversationItem, cli: String): String = processInputPresentation(item, cli).language
@@ -789,7 +877,7 @@ internal fun parseProcessReadTabHeader(item: ConversationItem, cli: String): Pro
             val e = json.optInt("EndLine", json.optInt("end_line", -1))
             val limit = json.optInt("limit", -1)
             if (s > 0) startLine = s
-            if (e > 0) endLine = e else if (s > 0 && limit > 0) endLine = s + limit - 1
+            if (e > 0) endLine = e else if (s > 0 && limit > 0) endLine = (s.toLong() + limit.toLong() - 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
     }
     val detail = item.detail
@@ -897,10 +985,10 @@ internal fun parseProcessReadPreview(item: ConversationItem, cli: String): Proce
             val e = json.optInt("EndLine", json.optInt("end_line", -1))
             val limit = json.optInt("limit", -1)
             if (s > 0) startLine = s
-            if (e > 0) endLine = e else if (s > 0 && limit > 0) endLine = s + limit - 1
+            if (e > 0) endLine = e else if (s > 0 && limit > 0) endLine = (s.toLong() + limit.toLong() - 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
     }
-    val boundedDetail = if (item.detail.length > MAX_PROCESS_PREVIEW_CHARS) item.detail.substring(0, MAX_PROCESS_PREVIEW_CHARS) else item.detail
+    val boundedDetail = safeUtf16Prefix(item.detail, MAX_PROCESS_PREVIEW_CHARS)
     val rawLines = boundedDetail.lines()
     var bodyStartIndex = 0
     var strippedHeader = false
@@ -1281,7 +1369,7 @@ private fun parseUnifiedDiff(raw: String): ParsedUnifiedDiff {
     var addedCount = 0
     var removedCount = 0
     var keptLines = 0
-    val boundedRaw = if (raw.length > MAX_PROCESS_PREVIEW_CHARS * 4) raw.substring(0, MAX_PROCESS_PREVIEW_CHARS * 4) else raw
+    val boundedRaw = safeUtf16Prefix(raw, MAX_PROCESS_PREVIEW_CHARS * 4)
     for (line in boundedRaw.lineSequence()) {
         when {
             line.startsWith("Created At:") || line.startsWith("Completed At:") -> continue
@@ -1343,9 +1431,25 @@ internal fun hasProcessEditPreview(item: ConversationItem): Boolean {
         input.contains("\"Content\"") || input.contains("\"content\"")
     ) return true
     val detail = item.detail
-    if (detail.contains("@@ ") || detail.contains("*** Begin Patch") || detail.contains("diff --git")) return true
+    if (detail.contains("@@ ") || detail.contains("*** Begin Patch") || detail.contains("diff --git") ||
+        input.contains("@@ ") || input.contains("*** Begin Patch") || input.contains("diff --git")
+    ) return true
     val raw = if (detail.contains("@@") || detail.contains("+++")) detail else "$input\n$detail"
-    return raw.lineSequence().any { (it.startsWith("+") && !it.startsWith("+++")) || (it.startsWith("-") && !it.startsWith("---")) }
+    var hasPatchHeader = false
+    var hasPlusHeader = false
+    var hasMinusHeader = false
+    var hasChangeLine = false
+    for (line in raw.lineSequence()) {
+        if (line.startsWith("@@") && unifiedHunkRegex.containsMatchIn(line)) return true
+        when {
+            line.startsWith("*** Update File:") || line.startsWith("*** Add File:") || line.startsWith("*** Delete File:") -> hasPatchHeader = true
+            line.startsWith("+++ ") -> hasPlusHeader = true
+            line.startsWith("--- ") -> hasMinusHeader = true
+            (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")) -> hasChangeLine = true
+        }
+        if ((hasPatchHeader || (hasPlusHeader && hasMinusHeader)) && hasChangeLine) return true
+    }
+    return false
 }
 
 private data class EditPreviewCacheKey(

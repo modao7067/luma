@@ -183,7 +183,10 @@ internal object DebianRootMode {
     fun refreshInstalled(context: Context) {
         val app = context.applicationContext ?: context
         if (!isEnabled(app)) return
-        runCatching { writeScripts(app) }
+        runCatching {
+            val layout = writeScripts(app)
+            writeAtomic(File(layout.runtime, ".root-mode"), "chroot\n", 0x1A4)
+        }
         runCatching { NoRootRuntime.stageForRoot(app) }
     }
 
@@ -202,7 +205,6 @@ internal object DebianRootMode {
         writeAtomic(File(runtimeDir, "root-chroot-exec.py"), chrootExecPython, 0x1A4)
         writeAtomic(File(runtimeDir, "ns-holder.py"), namespaceHolderPython, 0x1A4)
         writeAtomic(File(runtimeDir, "guest-sync.py"), guestSyncPython, 0x1A4)
-        writeAtomic(File(runtimeDir, ".root-mode"), "chroot\n", 0x1A4)
         writeAtomic(File(stateDir, SETUP_NS_SCRIPT), buildSetupNsScript(filesDir, cacheDir, rootfsDir, stateDir, uid), 0x1C0)
         val enter = writeAtomic(File(stateDir, ENTER_SCRIPT), buildEnterScript(filesDir, rootfsDir, stateDir), 0x1C0)
         return Layout(filesDir, cacheDir, rootfsDir, stateDir, runtimeDir, uid, enter)
@@ -244,6 +246,7 @@ internal object DebianRootMode {
             throw IOException(lastLine(verify) ?: tr("环境检查没通过", "Environment verification failed"))
         }
 
+        writeAtomic(File(layout.runtime, ".root-mode"), "chroot\n", 0x1A4)
         writeAtomic(File(layout.state, ENABLED_FILE), "1\n", 0x180)
         cachedEnabled = true
         notifyChanged()
@@ -500,6 +503,16 @@ internal object DebianRootMode {
         val sDir = quote(stateDir.absolutePath)
         return """
             tb() { if [ -x /system/bin/toybox ]; then /system/bin/toybox "${'$'}@"; else "${'$'}@"; fi; }
+            proc_stamp() {
+              [ -r "/proc/${'$'}1/stat" ] || return 1
+              stat_line=${'$'}(cat "/proc/${'$'}1/stat" 2>/dev/null) || return 1
+              after=${'$'}{stat_line##*) }
+              [ "${'$'}after" != "${'$'}stat_line" ] || return 1
+              set -- ${'$'}after
+              eval _st=\${'$'}{20:-}
+              [ -n "${'$'}_st" ] || return 1
+              printf '%s\n' "${'$'}_st"
+            }
             FILES_DIR=$fDir
             CACHE_DIR=$cDir
             ROOTFS=$rDir
@@ -508,52 +521,88 @@ internal object DebianRootMode {
 
             target_ns=""
             if [ -r "${'$'}STATE_DIR/ns.pid" ]; then
-              read -r h_pid _ < "${'$'}STATE_DIR/ns.pid" 2>/dev/null || h_pid=""
-              if [ -n "${'$'}{h_pid:-}" ] && [ -e "/proc/${'$'}h_pid/ns/mnt" ]; then
-                ns_cand=${'$'}(tb readlink "/proc/${'$'}h_pid/ns/mnt" 2>/dev/null || true)
-                ns_init=${'$'}(tb readlink "/proc/1/ns/mnt" 2>/dev/null || true)
-                if [ -n "${'$'}ns_cand" ] && [ "${'$'}ns_cand" != "${'$'}ns_init" ]; then
-                  target_ns=${'$'}ns_cand
+              read -r h_pid h_stamp < "${'$'}STATE_DIR/ns.pid" 2>/dev/null || { h_pid=""; h_stamp=""; }
+              if [ -n "${'$'}{h_pid:-}" ] && [ -n "${'$'}{h_stamp:-}" ]; then
+                actual_h_stamp=${'$'}(proc_stamp "${'$'}h_pid" 2>/dev/null || true)
+                if [ -n "${'$'}actual_h_stamp" ] && [ "${'$'}actual_h_stamp" = "${'$'}h_stamp" ] && [ -e "/proc/${'$'}h_pid/ns/mnt" ]; then
+                  ns_cand=${'$'}(tb readlink "/proc/${'$'}h_pid/ns/mnt" 2>/dev/null || true)
+                  ns_init=${'$'}(tb readlink "/proc/1/ns/mnt" 2>/dev/null || true)
+                  if [ -n "${'$'}ns_cand" ] && [ "${'$'}ns_cand" != "${'$'}ns_init" ]; then
+                    target_ns=${'$'}ns_cand
+                  fi
                 fi
               fi
             fi
 
             if [ -n "${'$'}target_ns" ]; then
-              pids=""
+              targets=""
               for proc_ns in /proc/[0-9]*/ns/mnt; do
                 p=${'$'}{proc_ns#/proc/}
                 p=${'$'}{p%/ns/mnt}
                 [ "${'$'}p" != "1" ] && [ "${'$'}p" != "${'$'}${'$'}" ] || continue
                 cur_ns=${'$'}(tb readlink "${'$'}proc_ns" 2>/dev/null || true)
                 if [ "${'$'}cur_ns" = "${'$'}target_ns" ]; then
-                  pids="${'$'}pids ${'$'}p"
+                  p_stamp=${'$'}(proc_stamp "${'$'}p" 2>/dev/null || true)
+                  if [ -n "${'$'}p_stamp" ]; then
+                    targets="${'$'}targets ${'$'}p:${'$'}p_stamp"
+                  fi
                 fi
               done
-              if [ -n "${'$'}pids" ]; then
-                kill -TERM ${'$'}pids 2>/dev/null || true
+              if [ -n "${'$'}targets" ]; then
+                for pair in ${'$'}targets; do
+                  p=${'$'}{pair%%:*}
+                  st=${'$'}{pair#*:}
+                  cur_ns=${'$'}(tb readlink "/proc/${'$'}p/ns/mnt" 2>/dev/null || true)
+                  cur_st=${'$'}(proc_stamp "${'$'}p" 2>/dev/null || true)
+                  if [ "${'$'}cur_ns" = "${'$'}target_ns" ] && [ "${'$'}cur_st" = "${'$'}st" ]; then
+                    kill -TERM "${'$'}p" 2>/dev/null || true
+                  fi
+                done
                 i=0
                 while [ "${'$'}i" -lt 10 ]; do
                   alive=""
-                  for p in ${'$'}pids; do
-                    if [ -d "/proc/${'$'}p" ]; then alive="${'$'}alive ${'$'}p"; fi
+                  for pair in ${'$'}targets; do
+                    p=${'$'}{pair%%:*}
+                    st=${'$'}{pair#*:}
+                    cur_ns=${'$'}(tb readlink "/proc/${'$'}p/ns/mnt" 2>/dev/null || true)
+                    cur_st=${'$'}(proc_stamp "${'$'}p" 2>/dev/null || true)
+                    if [ "${'$'}cur_ns" = "${'$'}target_ns" ] && [ "${'$'}cur_st" = "${'$'}st" ]; then
+                      alive="${'$'}alive ${'$'}pair"
+                    fi
                   done
                   [ -n "${'$'}alive" ] || break
                   tb usleep 100000 2>/dev/null || sleep 1
                   i=${'$'}((i + 1))
                 done
-                for p in ${'$'}pids; do
-                  kill -KILL "${'$'}p" 2>/dev/null || true
+                for pair in ${'$'}targets; do
+                  p=${'$'}{pair%%:*}
+                  st=${'$'}{pair#*:}
+                  cur_ns=${'$'}(tb readlink "/proc/${'$'}p/ns/mnt" 2>/dev/null || true)
+                  cur_st=${'$'}(proc_stamp "${'$'}p" 2>/dev/null || true)
+                  if [ "${'$'}cur_ns" = "${'$'}target_ns" ] && [ "${'$'}cur_st" = "${'$'}st" ]; then
+                    kill -KILL "${'$'}p" 2>/dev/null || true
+                  fi
                 done
               fi
             fi
 
             tb rm -f "${'$'}STATE_DIR/ns.pid" "${'$'}ROOTFS/etc/apt/apt.conf.d/99luma-root" 2>/dev/null || true
-            for dir in "${'$'}ROOTFS" "${'$'}FILES_DIR/workspace" "${'$'}FILES_DIR/runtime" "${'$'}CACHE_DIR/kitty-frames"; do
+            files_ctx=${'$'}(tb stat -c %C "${'$'}FILES_DIR" 2>/dev/null || true)
+            cache_ctx=${'$'}(tb stat -c %C "${'$'}CACHE_DIR" 2>/dev/null || true)
+            for dir in "${'$'}ROOTFS" "${'$'}FILES_DIR/workspace" "${'$'}FILES_DIR/runtime"; do
               if [ -e "${'$'}dir" ]; then
                 tb chown -hR "${'$'}APP_UID:${'$'}APP_UID" "${'$'}dir" 2>/dev/null || true
-                tb restorecon -FR "${'$'}dir" 2>/dev/null || true
+                if [ -n "${'$'}files_ctx" ] && [ "${'$'}files_ctx" != "?" ]; then
+                  tb chcon -hR "${'$'}files_ctx" "${'$'}dir" 2>/dev/null || true
+                fi
               fi
             done
+            if [ -e "${'$'}CACHE_DIR/kitty-frames" ]; then
+              tb chown -hR "${'$'}APP_UID:${'$'}APP_UID" "${'$'}CACHE_DIR/kitty-frames" 2>/dev/null || true
+              if [ -n "${'$'}cache_ctx" ] && [ "${'$'}cache_ctx" != "?" ]; then
+                tb chcon -hR "${'$'}cache_ctx" "${'$'}CACHE_DIR/kitty-frames" 2>/dev/null || true
+              fi
+            fi
         """.trimIndent()
     }
 
@@ -598,6 +647,16 @@ if os.environ.get('LUMA_LANG') in ('zh', 'en'):
     env['LUMA_LANG'] = os.environ['LUMA_LANG']
 if tz:
     env['TZ'] = tz
+if tz in ('Asia/Shanghai', 'Asia/Urumqi', 'Asia/Chongqing', 'Asia/Chungking', 'Asia/Harbin', 'Asia/Kashgar', 'PRC'):
+    env['GOPROXY'] = 'https://goproxy.cn,direct'
+    env['RUSTUP_DIST_SERVER'] = 'https://rsproxy.cn'
+    env['RUSTUP_UPDATE_ROOT'] = 'https://rsproxy.cn/rustup'
+    env['COREPACK_NPM_REGISTRY'] = 'https://registry.npmmirror.com'
+    env['YARN_REGISTRY'] = 'https://registry.npmmirror.com'
+    env['YARN_NPM_REGISTRY_SERVER'] = 'https://registry.npmmirror.com'
+    env['NVM_NODEJS_ORG_MIRROR'] = 'https://npmmirror.com/mirrors/node'
+    env['FNM_NODE_DIST_MIRROR'] = 'https://npmmirror.com/mirrors/node'
+    env['NODE_MIRROR'] = 'https://npmmirror.com/mirrors/node/'
 
 argv = sys.argv[1:] if len(sys.argv) > 1 else ['/bin/bash', '--login']
 os.execvpe(argv[0], argv, env)
@@ -679,6 +738,85 @@ if tz and not tz.startswith('/') and '..' not in tz and os.path.isfile('/usr/sha
         except FileNotFoundError:
             pass
         os.symlink(target, '/etc/localtime')
+
+china_mirror = tz in ('Asia/Shanghai', 'Asia/Urumqi', 'Asia/Chongqing', 'Asia/Chungking', 'Asia/Harbin', 'Asia/Kashgar', 'PRC')
+
+def norm(text):
+    return text.replace('\r\n', '\n').strip()
+
+def sync_managed(path, official, china, only_if_exists=False, mode=0o644):
+    if os.path.islink(path):
+        return
+    exists = os.path.exists(path)
+    if exists and not os.path.isfile(path):
+        return
+    if not exists and only_if_exists:
+        return
+    desired = china if china_mirror else official
+    if not exists:
+        if desired is not None:
+            put(path, desired.encode('utf-8'), mode)
+        return
+    current = norm(read(path).decode('utf-8', 'replace'))
+    matches_official = official is not None and current == norm(official)
+    matches_china = current == norm(china)
+    if not matches_official and not matches_china:
+        return
+    if desired is None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    if current != norm(desired):
+        put(path, desired.encode('utf-8'), mode)
+
+sync_managed(
+    '/etc/apt/sources.list',
+    'deb https://deb.debian.org/debian trixie main\ndeb https://deb.debian.org/debian trixie-updates main\ndeb https://deb.debian.org/debian-security trixie-security main\n',
+    'deb https://mirrors.aliyun.com/debian trixie main\ndeb https://mirrors.aliyun.com/debian trixie-updates main\ndeb https://mirrors.aliyun.com/debian-security trixie-security main\n',
+    only_if_exists=True,
+)
+sync_managed(
+    '/etc/pip.conf',
+    '[global]\nbreak-system-packages = true\n',
+    '[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n',
+)
+sync_managed(
+    '/etc/uv/uv.toml',
+    None,
+    '[[index]]\nurl = "https://mirrors.aliyun.com/pypi/simple/"\ndefault = true\n',
+)
+sync_managed(
+    '/usr/local/etc/npmrc',
+    None,
+    'registry=https://registry.npmmirror.com/\ndisturl=https://npmmirror.com/mirrors/node\n',
+)
+sync_managed(
+    '/etc/npmrc',
+    None,
+    'registry=https://registry.npmmirror.com/\ndisturl=https://npmmirror.com/mirrors/node\n',
+)
+sync_managed(
+    '/root/.config/pnpm/config.yaml',
+    'packageImportMethod: copy\n',
+    'packageImportMethod: copy\nregistry: https://registry.npmmirror.com/\n',
+)
+sync_managed(
+    '/root/.bunfig.toml',
+    None,
+    '[install]\nregistry = "https://registry.npmmirror.com/"\n',
+)
+sync_managed(
+    '/root/.cargo/config.toml',
+    None,
+    '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n',
+)
+sync_managed(
+    '/etc/gemrc',
+    None,
+    ':sources:\n- https://mirrors.aliyun.com/rubygems/\n',
+)
 
 bashrc = '/root/.bashrc'
 if not os.path.islink(bashrc):

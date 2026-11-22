@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,8 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 def valid_google_auth_url(url):
-    if not isinstance(url, str) or len(url) > 16384: return False
+    if not isinstance(url, str) or not url or len(url) > 16384: return False
+    if any(ord(c) <= 0x20 or ord(c) == 0x7f for c in url): return False
     try:
         value = urlsplit(url)
         if (value.scheme != "https" or value.netloc != "accounts.google.com" or value.fragment
@@ -42,16 +44,23 @@ class BrowserRelay:
         self.thread = threading.Thread(target=self.receive, daemon=True, name="LumaNativeBrowser")
         self.thread.start()
 
-    def environment(self):
+    def _ensure_opener(self, name):
         helper = str(Path(__file__).absolute())
-        return {"BROWSER": "/usr/bin/python3 -I -B " + shlex.quote(helper) + " %s",
+        opener = self.directory / name
+        if not opener.is_file():
+            fd = os.open(opener, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexec /usr/bin/python3 -I -B " + shlex.quote(helper) + ' "$1"\n')
+            os.chmod(opener, 0o700)
+        return opener
+
+    def environment(self):
+        opener = self._ensure_opener("luma-auth-browser")
+        return {"BROWSER": str(opener),
                 "LUMA_AUTH_BROWSER_SOCKET": str(self.path), "LUMA_AUTH_BROWSER_NONCE": self.nonce}
 
     def xdg_environment(self, base_path=""):
-        helper = str(Path(__file__).absolute())
-        opener = self.directory / "xdg-open"
-        opener.write_text("#!/bin/sh\nexec /usr/bin/python3 -I -B " + shlex.quote(helper) + ' "$1"\n', encoding="utf-8")
-        opener.chmod(0o700)
+        self._ensure_opener("xdg-open")
         path_value = f"{self.directory}:{base_path}" if base_path else str(self.directory)
         return {**self.environment(), "PATH": path_value}
 
@@ -61,7 +70,8 @@ class BrowserRelay:
                 raw = self.socket.recv(32768)
                 data = json.loads(raw)
                 if not isinstance(data, dict): continue
-                if data.get("nonce") != self.nonce: continue
+                nonce = data.get("nonce")
+                if not isinstance(nonce, str) or not hmac.compare_digest(nonce, self.nonce): continue
                 if valid_google_auth_url(data.get("url")): self.opened(data["url"])
                 else: self.rejected()
             except socket.timeout: pass

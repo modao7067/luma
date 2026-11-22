@@ -64,13 +64,21 @@ def default_new_protocol(cli):
     return None, ""
 
 def _write_json_atomic(path, payload):
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
-        json.dump(payload, f, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory_fd)
@@ -857,10 +865,14 @@ def serve(port, password_file, directory):
                 server.shutdown()
                 return
         threading.Thread(target=idle_reaper, daemon=True, name="LumaBridgeIdleReaper").start()
+    term_event = threading.Event()
+    def term_shutdown():
+        term_event.wait()
+        server.shutdown()
+    threading.Thread(target=term_shutdown, daemon=True, name="LumaTermShutdown").start()
     def on_term(signum, frame):
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        manager.release_all_idle(time.monotonic() + 4)
-        raise SystemExit(0)
+        term_event.set()
     signal.signal(signal.SIGTERM, on_term)
     def startup_housekeeping():
         manager.adopt_orphans()
@@ -873,5 +885,10 @@ def serve(port, password_file, directory):
     try:
         server.serve_forever()
     finally:
+        if term_event.is_set():
+            try:
+                manager.release_all_idle(time.monotonic() + 4)
+            except Exception:
+                pass
         server.server_close()
         manager.close()

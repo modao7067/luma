@@ -97,10 +97,10 @@
    "sha256": "6d3d64ff78226bc8f5de92caae49d2963e0f33111d9ae3fc3d417c9c87ae79ff"
   },
   "runtime/noroot/src/main/assets/native-sources/proot-sources.tgz": {
-   "bytes": 332026,
+   "bytes": 332399,
    "note": "tools/build-native-proot.py --package-sources-only",
    "origin": "build:native-src",
-   "sha256": "407ea41bf67e40534c00c310448ea9ee77ddda36f820e58c18e32df8b95a49a6"
+   "sha256": "746a607f7a4643b047ef1b6287df346320150997d7f6de5f814b050b454080d6"
   },
   "runtime/noroot/src/main/assets/native-sources/talloc.tgz": {
    "bytes": 684092,
@@ -2833,22 +2833,22 @@
    "sha256": "a613536ac41bb1c044ec9b1d243302600baa78332984b2246f0305638117ca56"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libluma_compute.so": {
-   "bytes": 16328,
+   "bytes": 20496,
    "note": "runtime/noroot/scripts/build-compute-check.sh",
    "origin": "build:compute",
-   "sha256": "b7dada06c2ab0e7fd1cfd67433d0c5eb277e362c91f79e3b03274ca9619aa70d"
+   "sha256": "39306264b906c9853a6f915b4f7b8b51eb063d1b173296a43a749432f038eeaf"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libluma_exec.so": {
-   "bytes": 7328,
+   "bytes": 7544,
    "note": "runtime/noroot/scripts/build-compute-check.sh",
    "origin": "build:compute",
-   "sha256": "ae0c48df73714ed8004ce47fb326c3bdecc023fb2f921e1e2979c74c3405f7e2"
+   "sha256": "71c58b9f454bc5d2cfe8a05056f22d71d10010a49da526d4ae11ec2ac499082b"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_exec.so": {
-   "bytes": 258344,
+   "bytes": 264296,
    "note": "tools/build-native-proot.py",
    "origin": "build:proot",
-   "sha256": "0cfe0d5f67476a97aaa664b0ff94ed206d1160c362ce2a387d436d16c9fe9376"
+   "sha256": "955a5c83ff59956ab3ff1329888a52a4f7b3169dbf5daece754f7943a46b04b3"
   },
   "runtime/noroot/src/main/jniLibs/arm64-v8a/libproot_loader.so": {
    "bytes": 17800,
@@ -2947,12 +2947,12 @@
    "sha256": "27ca7f39435b0197adc6d932c9d5aebf40195e3503ca766ae28a24240b669b52"
   },
   "shared/terminal-ghostty/jniLibs/arm64-v8a/libluma_vt_jni.so": {
-   "bytes": 11284072,
-   "fileSha256": "7846757127cbef875081a42c4be9a4bac67933ef094f9759d547647a911150e6",
+   "bytes": 11284464,
+   "fileSha256": "a7c9b402788e3d26ed775230d1adbfa787d75f84a2fb2b8c81a69db91862e1f3",
    "hash": "elf-sections",
    "note": "shared/terminal-ghostty/build-native.py",
    "origin": "build:ghostty",
-   "sha256": "90d9a362faea49c95db9f83653ecf0800366739dc39d743f82920ce34fb19b5b"
+   "sha256": "e14cecdf7c290ddcca330570b62d97c0ed8acdfcc5562b0350a06a5346e74241"
   }
  },
  "schema": 1,

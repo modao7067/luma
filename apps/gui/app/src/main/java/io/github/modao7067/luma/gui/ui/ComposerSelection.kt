@@ -12,17 +12,33 @@ internal class ComposerEditorState(initial: String) {
     var value by mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
         private set
     private var external = initial
+    private val pendingLocalTexts = ArrayDeque<String>()
     var onTextChange: (String) -> Unit = {}
     fun sync(text: String) {
-        if (external != text) {
+        if (external == text) return
+        val echoIndex = pendingLocalTexts.indexOf(text)
+        if (echoIndex >= 0) {
+            repeat(echoIndex + 1) { pendingLocalTexts.removeFirst() }
             external = text
-            if (value.text != text) value = TextFieldValue(text, TextRange(text.length))
+            return
         }
+        external = text
+        pendingLocalTexts.clear()
+        if (value.text != text) value = TextFieldValue(text, TextRange(text.length))
     }
     fun edit(next: TextFieldValue) {
         val changed = value.text != next.text
         value = next
-        if (changed) onTextChange(next.text)
+        if (changed) {
+            if (pendingLocalTexts.size >= MAX_PENDING_LOCAL_TEXTS) {
+                pendingLocalTexts.removeFirst()
+            }
+            pendingLocalTexts.addLast(next.text)
+            onTextChange(next.text)
+        }
+    }
+    companion object {
+        private const val MAX_PENDING_LOCAL_TEXTS = 64
     }
 }
 internal fun clipboardHasImage(context: Context): Boolean = runCatching {

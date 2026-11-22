@@ -27,6 +27,7 @@ final class NativeBridge implements AutoCloseable {
     private volatile boolean closed;
     NativeBridge(Context c)throws IOException {
         context=c;
+        ShizukuBridge.RelaySession.cleanupStaleRelays(c);
         taskRegistry=new TaskRegistry(c);
         server=new LocalServerSocket(LinuxEnvironment.socketName(c));
         new Thread(()->{
@@ -116,7 +117,7 @@ final class NativeBridge implements AutoCloseable {
                     JSONObject st=taskRegistry.getStatus(target);
                     url=st.optString("baseUrl","");
                 }
-                if(url.isEmpty())throw new IOException(com.termux.terminal.LumaLang.tr("该服务没有可打开的 URL：","Service has no openable URL: ")+target);
+                if(!TaskRegistry.isSafeHttpUrl(url))throw new IOException(com.termux.terminal.LumaLang.tr("无效或不支持打开的 URL：","Invalid or unsupported URL: ")+target);
                 String finalUrl=url;
                 new Handler(Looper.getMainLooper()).post(()->{
                     try{

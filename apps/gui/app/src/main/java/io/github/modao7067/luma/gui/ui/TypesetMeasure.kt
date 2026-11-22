@@ -297,60 +297,114 @@ internal fun buildTextPaint(style: TypesetResolvedStyle): TextPaint = TextPaint(
     fontFeatureSettings = style.fontFeatureSettings
 }
 
-internal class AndroidTypesetMeasurer(
-    private val prepared: TypesetPreparedInput,
-) : TypesetMeasurer {
-    private val paints = Array(prepared.styles.size) { buildTextPaint(prepared.styles[it]) }
-    private val spaceWidths = FloatArray(prepared.styles.size) { -1f }
-    private val hyphenWidths = FloatArray(prepared.styles.size) { -1f }
-    private val emWidths = FloatArray(prepared.styles.size) { -1f }
-    private val singleCharWidthCache = Array(prepared.styles.size) { HashMap<Char, Float>(32) }
+internal class TypesetStyleMeasurementCache {
+    internal class Entry(val paint: TextPaint) {
+        var spaceWidth: Float = -1f
+        var hyphenWidth: Float = -1f
+        var emWidth: Float = -1f
+        val singleCharWidths = HashMap<Char, Float>(64)
+    }
 
-    override fun baseLineMetrics(): TypesetLineMetrics = prepared.baseLineMetrics
+    private val entries = HashMap<TypesetResolvedStyle, Entry>(8)
+
+    fun get(style: TypesetResolvedStyle): Entry {
+        if (entries.size >= MAX_STYLE_ENTRIES && style !in entries) {
+            entries.clear()
+        }
+        return entries.getOrPut(style) { Entry(buildTextPaint(style)) }
+    }
+
+    companion object {
+        private const val MAX_STYLE_ENTRIES = 32
+    }
+}
+
+internal class AndroidTypesetMeasurer(
+    initialPrepared: TypesetPreparedInput? = null,
+    private val styleCache: TypesetStyleMeasurementCache = TypesetStyleMeasurementCache(),
+) : TypesetMeasurer {
+    private var prepared: TypesetPreparedInput? = null
+    private var boundStyles: List<TypesetResolvedStyle> = emptyList()
+    private var boundEntries: Array<TypesetStyleMeasurementCache.Entry> = emptyArray()
+
+    init {
+        initialPrepared?.let(::bind)
+    }
+
+    fun bind(next: TypesetPreparedInput): AndroidTypesetMeasurer {
+        prepared = next
+        boundStyles = next.styles
+        boundEntries = Array(next.styles.size) { styleCache.get(next.styles[it]) }
+        return this
+    }
+
+    override fun baseLineMetrics(): TypesetLineMetrics = requireNotNull(prepared).baseLineMetrics
 
     override fun measureWidth(text: String, start: Int, end: Int, styleId: Int): Float {
         if (end <= start) return 0f
-        val safeId = styleId.coerceIn(0, paints.lastIndex)
-        val paint = paints[safeId]
+        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        val paint = entry.paint
         if (end - start == 1) {
             val ch = text[start]
-            return singleCharWidthCache[safeId].getOrPut(ch) { measureSlice(paint, text, start, end) }
+            return entry.singleCharWidths.getOrPut(ch) { measureSlice(paint, text, start, end) }
         }
         return measureSlice(paint, text, start, end)
     }
 
+    override fun measureCharAdvances(text: String, start: Int, end: Int, styleId: Int, outAdvances: FloatArray) {
+        val len = end - start
+        if (len <= 0) return
+        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        val paint = entry.paint
+        if (Build.VERSION.SDK_INT >= 29) {
+            val chars = CharArray(len)
+            text.toCharArray(chars, 0, start, end)
+            val total = runCatching {
+                paint.getTextRunAdvances(chars, 0, len, 0, len, false, outAdvances, 0)
+            }.getOrDefault(0f)
+            if (total > 0f && total.isFinite()) return
+        }
+        val count = runCatching { paint.getTextWidths(text, start, end, outAdvances) }.getOrDefault(0)
+        if (count == len) {
+            var sum = 0f
+            for (k in 0 until len) {
+                val v = outAdvances[k]
+                if (v > 0f && v.isFinite()) sum += v
+            }
+            if (sum > 0f) return
+        }
+        super.measureCharAdvances(text, start, end, styleId, outAdvances)
+    }
+
     override fun measureSpaceWidth(styleId: Int): Float {
-        val safeId = styleId.coerceIn(0, paints.lastIndex)
-        val cached = spaceWidths[safeId]
-        if (cached >= 0f) return cached
-        val measured = measureSlice(paints[safeId], " ", 0, 1).let { if (it > 0.5f) it else paints[safeId].textSize * 0.28f }
-        spaceWidths[safeId] = measured
+        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        if (entry.spaceWidth >= 0f) return entry.spaceWidth
+        val measured = measureSlice(entry.paint, " ", 0, 1).let { if (it > 0.5f) it else entry.paint.textSize * 0.28f }
+        entry.spaceWidth = measured
         return measured
     }
 
     override fun measureHyphenWidth(styleId: Int): Float {
-        val safeId = styleId.coerceIn(0, paints.lastIndex)
-        val cached = hyphenWidths[safeId]
-        if (cached >= 0f) return cached
-        val measured = measureSlice(paints[safeId], "-", 0, 1).let { if (it > 0.5f) it else paints[safeId].textSize * 0.34f }
-        hyphenWidths[safeId] = measured
+        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        if (entry.hyphenWidth >= 0f) return entry.hyphenWidth
+        val measured = measureSlice(entry.paint, "-", 0, 1).let { if (it > 0.5f) it else entry.paint.textSize * 0.34f }
+        entry.hyphenWidth = measured
         return measured
     }
 
     override fun measureEmWidth(styleId: Int): Float {
-        val safeId = styleId.coerceIn(0, paints.lastIndex)
-        val cached = emWidths[safeId]
-        if (cached >= 0f) return cached
-        val paint = paints[safeId]
+        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        if (entry.emWidth >= 0f) return entry.emWidth
+        val paint = entry.paint
         val measured = measureSlice(paint, "汉", 0, 1).let { if (it > 0.5f) it else paint.textSize }
-        emWidths[safeId] = measured
+        entry.emWidth = measured
         return measured
     }
 
     override fun measurePunctuationTrim(ch: Char, styleId: Int): PunctuationTrim {
-        val safeId = styleId.coerceIn(0, paints.lastIndex)
-        val paint = paints[safeId]
-        val style = prepared.styles[safeId]
+        val safeId = styleId.coerceIn(0, boundEntries.lastIndex)
+        val paint = boundEntries[safeId].paint
+        val style = boundStyles[safeId]
         val key = PunctCacheKey(
             typefaceIdentity = System.identityHashCode(style.typeface),
             sizeTenthsPx = (style.textSizePx * 10f).roundToInt(),

@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import io.github.modao7067.luma.gui.session.*
 import org.json.JSONArray
@@ -528,10 +529,9 @@ internal fun RequestSheet(
     onDismiss: () -> Unit,
 ) {
     val latestDismiss by rememberUpdatedState(onDismiss)
-    if (!LocalSessionInteractive.current) {
-        SideEffect(latestDismiss)
-        return
-    }
+    val sessionInteractive = LocalSessionInteractive.current
+    val latestInteractive by rememberUpdatedState(sessionInteractive)
+    val latestClosing by rememberUpdatedState(closing)
     val hostContext = LocalContext.current
     val palette = rememberRequestSheetPalette()
     if (LocalInspectionMode.current) {
@@ -539,7 +539,7 @@ internal fun RequestSheet(
             SideEffect(latestDismiss)
             return
         }
-        BackHandler(enabled = !closing) { latestDismiss() }
+        BackHandler(enabled = sessionInteractive && !closing) { latestDismiss() }
         Box(
             Modifier
                 .fillMaxSize()
@@ -562,7 +562,8 @@ internal fun RequestSheet(
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val sheetProgress = remember { Animatable(0f) }
-    val dragOffsetPx = remember { Animatable(0f) }
+    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
     var cardHeightPx by remember { mutableIntStateOf(0) }
     var dismissing by remember { mutableStateOf(false) }
     val minDismissPx = with(density) { 96.dp.toPx() }
@@ -577,22 +578,24 @@ internal fun RequestSheet(
         }
         latestDismiss()
         withFrameNanos {}
-        if (!closing) {
+        if (!latestClosing) {
             dismissing = false
             sheetProgress.animateTo(1f, PrismSprings.sheet())
         }
     }
 
     fun animateDismiss(velocityY: Float = 0f) {
-        if (dismissing || closing) return
+        if (dismissing || latestClosing) return
         dismissing = true
+        settleJob?.cancel()
+        settleJob = null
         focusManager.clearFocus()
         scope.launch {
             val h = cardHeightPx.toFloat().coerceAtLeast(1f)
-            if (dragOffsetPx.value > 0f) {
-                val remain = (sheetProgress.value - dragOffsetPx.value / h).coerceIn(0f, 1f)
+            if (dragOffsetPx > 0f) {
+                val remain = (sheetProgress.value - dragOffsetPx / h).coerceIn(0f, 1f)
                 sheetProgress.snapTo(remain)
-                dragOffsetPx.snapTo(0f)
+                dragOffsetPx = 0f
             }
             val launchVelocity = if (velocityY > 0f) -(velocityY / h).coerceIn(0f, 12f) else 0f
             finishLocalDismiss(launchVelocity)
@@ -600,13 +603,19 @@ internal fun RequestSheet(
     }
 
     fun settleDrag(velocityY: Float) {
-        if (dismissing || closing) return
+        if (dismissing || latestClosing) return
         val threshold = if (cardHeightPx > 0) maxOf(minDismissPx, cardHeightPx * 0.28f) else minDismissPx
-        if (dragOffsetPx.value > threshold || (dragOffsetPx.value > minDismissPx * 0.35f && velocityY > dismissVelocityPx)) {
+        if (dragOffsetPx > threshold || (dragOffsetPx > minDismissPx * 0.35f && velocityY > dismissVelocityPx)) {
             animateDismiss(velocityY)
-        } else if (dragOffsetPx.value > 0f) {
-            scope.launch {
-                dragOffsetPx.animateTo(0f, PrismSprings.sheetPx(), initialVelocity = velocityY.coerceIn(-4000f, 4000f))
+        } else if (dragOffsetPx > 0f) {
+            settleJob?.cancel()
+            val start = dragOffsetPx
+            settleJob = scope.launch {
+                val anim = Animatable(start)
+                anim.animateTo(0f, PrismSprings.sheetPx(), initialVelocity = velocityY.coerceIn(-4000f, 4000f)) {
+                    dragOffsetPx = value
+                }
+                dragOffsetPx = 0f
             }
         }
     }
@@ -618,12 +627,14 @@ internal fun RequestSheet(
             }
         } else {
             dismissing = true
+            settleJob?.cancel()
+            settleJob = null
             focusManager.clearFocus()
             val h = cardHeightPx.toFloat().coerceAtLeast(1f)
-            if (dragOffsetPx.value > 0f) {
-                val remain = (sheetProgress.value - dragOffsetPx.value / h).coerceIn(0f, 1f)
+            if (dragOffsetPx > 0f) {
+                val remain = (sheetProgress.value - dragOffsetPx / h).coerceIn(0f, 1f)
                 sheetProgress.snapTo(remain)
-                dragOffsetPx.snapTo(0f)
+                dragOffsetPx = 0f
             }
             try {
                 sheetProgress.animateTo(0f, PrismSprings.sheet())
@@ -634,7 +645,7 @@ internal fun RequestSheet(
         }
     }
 
-    PredictiveBackHandler(enabled = !closing && !dismissing) { progress ->
+    PredictiveBackHandler(enabled = sessionInteractive && !closing && !dismissing) { progress ->
         try {
             progress.collect { backEvent ->
                 val p = backEvent.progress.coerceIn(0f, 1f)
@@ -654,26 +665,29 @@ internal fun RequestSheet(
     val nestedScrollConnection = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && available.y < 0f && dragOffsetPx.value > 0f) {
-                    val next = (dragOffsetPx.value + available.y).coerceAtLeast(0f)
-                    val consumedY = next - dragOffsetPx.value
-                    scope.launch { dragOffsetPx.snapTo(next) }
+                if (source == NestedScrollSource.UserInput && available.y < 0f && dragOffsetPx > 0f) {
+                    settleJob?.cancel()
+                    settleJob = null
+                    val next = (dragOffsetPx + available.y).coerceAtLeast(0f)
+                    val consumedY = next - dragOffsetPx
+                    dragOffsetPx = next
                     return Offset(0f, consumedY)
                 }
                 return Offset.Zero
             }
 
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && available.y > 0f && !closing && !dismissing) {
-                    val next = (dragOffsetPx.value + available.y).coerceAtLeast(0f)
-                    scope.launch { dragOffsetPx.snapTo(next) }
+                if (source == NestedScrollSource.UserInput && available.y > 0f && latestInteractive && !latestClosing && !dismissing) {
+                    settleJob?.cancel()
+                    settleJob = null
+                    dragOffsetPx = (dragOffsetPx + available.y).coerceAtLeast(0f)
                     return Offset(0f, available.y)
                 }
                 return Offset.Zero
             }
 
             override suspend fun onPreFling(available: Velocity): Velocity {
-                if (dragOffsetPx.value > 0f) {
+                if (dragOffsetPx > 0f) {
                     settleDrag(available.y)
                     return available
                 }
@@ -683,9 +697,10 @@ internal fun RequestSheet(
     }
 
     val draggableState = rememberDraggableState { delta ->
-        if (!closing && !dismissing) {
-            val next = (dragOffsetPx.value + delta).coerceAtLeast(0f)
-            scope.launch { dragOffsetPx.snapTo(next) }
+        if (latestInteractive && !latestClosing && !dismissing) {
+            settleJob?.cancel()
+            settleJob = null
+            dragOffsetPx = (dragOffsetPx + delta).coerceAtLeast(0f)
         }
     }
 
@@ -699,12 +714,12 @@ internal fun RequestSheet(
                 .testTag("request-sheet-scrim")
                 .drawBehind {
                     val h = cardHeightPx.toFloat().coerceAtLeast(1f)
-                    val effective = (sheetProgress.value - dragOffsetPx.value / h).coerceIn(0f, 1f)
+                    val effective = (sheetProgress.value - dragOffsetPx / h).coerceIn(0f, 1f)
                     drawRect(Color.Black.copy(alpha = baseScrimAlpha * effective))
                 }
-                .pointerInput(closing, dismissing) {
+                .pointerInput(sessionInteractive, closing, dismissing) {
                     detectTapGestures {
-                        if (!closing && !dismissing) animateDismiss()
+                        if (sessionInteractive && !closing && !dismissing) animateDismiss()
                     }
                 },
         )
@@ -717,7 +732,7 @@ internal fun RequestSheet(
                 .onSizeChanged { cardHeightPx = it.height }
                 .graphicsLayer {
                     val h = size.height.coerceAtLeast(1f)
-                    val effective = (sheetProgress.value - dragOffsetPx.value / h).coerceIn(0f, 1f)
+                    val effective = (sheetProgress.value - dragOffsetPx / h).coerceIn(0f, 1f)
                     translationY = (1f - effective) * h
                 }
                 .then(if (closing || dismissing) Modifier.clearAndSetSemantics {} else Modifier)
@@ -726,7 +741,7 @@ internal fun RequestSheet(
                 .draggable(
                     state = draggableState,
                     orientation = Orientation.Vertical,
-                    enabled = !closing && !dismissing,
+                    enabled = sessionInteractive && !closing && !dismissing,
                     onDragStopped = { velocity -> settleDrag(velocity) },
                 ),
             contentAlignment = Alignment.BottomCenter,
@@ -1603,9 +1618,9 @@ private fun ColumnScope.QuestionSheetContent(
         }
 
         AnimatedContent(
-            targetState = stepIndex,
+            targetState = stepIndex to request.questions.getOrNull(stepIndex),
             transitionSpec = {
-                if (targetState > initialState) {
+                if (targetState.first > initialState.first) {
                     (slideInHorizontally(PrismSprings.pagePushOffset()) { it / 5 } + fadeIn(tween(220, easing = PrismCurves.EaseOutCubic))) togetherWith
                         (slideOutHorizontally(PrismSprings.pagePushOffset()) { -it / 5 } + fadeOut(tween(180, easing = PrismCurves.EaseInCubic)))
                 } else {
@@ -1614,8 +1629,8 @@ private fun ColumnScope.QuestionSheetContent(
                 }
             },
             label = "question-step",
-        ) { targetStep ->
-            val question = request.questions[targetStep]
+        ) { (_, targetQuestion) ->
+            val question = targetQuestion ?: return@AnimatedContent
             val (_, qPrompt) = requestQuestionCaption(question.header, question.prompt)
             val qHeader = question.header.trim()
             val displayPrompt = qPrompt.ifBlank { qHeader }.ifBlank { heroPrompt }

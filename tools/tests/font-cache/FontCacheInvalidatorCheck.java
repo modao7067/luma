@@ -53,6 +53,13 @@ public final class FontCacheInvalidatorCheck {
         check(new String(Files.readAllBytes(marker.toPath()),StandardCharsets.US_ASCII).equals(a),"failed cleanup does not mark the new APK as refreshed");
         Files.delete(skia);check(FontCacheInvalidator.refresh(marker,b,caches),"retry succeeds after cleanup failure");
         check(!FontCacheInvalidator.refresh(marker,b,caches),"successful retry is not repeated");
+        check(Files.exists(root.resolve("no-backup/fonts.sha256.lock")),"cross-process sibling lock file is created");
+        byte[] oversized=new byte[2048];java.util.Arrays.fill(oversized,(byte)'x');
+        Files.write(marker.toPath(),oversized);
+        check(FontCacheInvalidator.refresh(marker,b,caches),"oversized marker is rejected and rewritten safely");
+        Path symlinkTarget=root.resolve("marker-target");Files.write(symlinkTarget,b.getBytes(StandardCharsets.US_ASCII));
+        Files.delete(marker.toPath());Files.createSymbolicLink(marker.toPath(),symlinkTarget);
+        check(FontCacheInvalidator.refresh(marker,b,caches)&&Files.isRegularFile(marker.toPath(),LinkOption.NOFOLLOW_LINKS),"symlink marker is not followed and is replaced by regular file");
         System.out.println("ALL PASS APK-upgrade graphics cache lifecycle");
     }
 }

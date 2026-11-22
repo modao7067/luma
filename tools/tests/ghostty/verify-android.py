@@ -25,9 +25,9 @@ viewR=REPO/'shared/terminal-view/build/intermediates/compile_r_class_jar/debug/g
 sources=[]
 for name in ['shared/terminal-emulator/java','shared/terminal-view/java','shared/terminal-ghostty/java']:sources+=list((REPO/name).rglob('*.java'))
 (OUT/'MainActivity.java').write_text('package io.github.modao7067.luma.root; public class MainActivity extends android.app.Activity {}')
-for name in ['TerminalTheme','LogCallbacks','TerminalEngines', 'ManagedTerminalRequest','TerminalDocuments','TerminalLinkOpener','TerminalSystemLinks','TerminalFileProvider','WallpaperImages','LumaUi','TerminalPaste']:(OUT/(name+'.java')).write_text((REPO/'shared/ui/java/io/github/modao7067/luma/shared'/(name+'.java')).read_text().replace('io.github.modao7067.luma.shared','io.github.modao7067.luma.root'))
+for name in ['TerminalTheme','LogCallbacks','TerminalEngines', 'ManagedTerminalRequest','TerminalDocuments','TerminalFileTransfer','TerminalLinkOpener','TerminalSystemLinks','TerminalFileProvider','WallpaperImages','LumaUi','TerminalPaste']:(OUT/(name+'.java')).write_text((REPO/'shared/ui/java/io/github/modao7067/luma/shared'/(name+'.java')).read_text().replace('io.github.modao7067.luma.shared','io.github.modao7067.luma.root'))
 sources+=list(OUT.glob('*.java'))+[p for p in HERE.glob('*.java') if p.name not in ['NoRootEngineCheck.java','OffscreenBenchCheck.java']]+[REPO/'tools/tests/root-backend/AgentWindowProbe.java']
-sources+=[REPO/'runtime/root/src/main/java/io/github/modao7067/luma/root'/(name+'.java') for name in ['ShellService','RootBackend','RootShellIntegration','DirectPty','TerminalModeStore','ColdStartRepaint','AgentWindowRequest']]
+sources+=[REPO/'runtime/root/src/main/java/io/github/modao7067/luma/root'/(name+'.java') for name in ['ShellService','RootBackend','RootEntry','RootShellIntegration','DirectPty','TerminalModeStore','ColdStartRepaint','AgentWindowRequest']]
 lib=OUT/'libluma_vt_jni.so'
 if args.native_lib:shutil.copy2(args.native_lib,lib)
 else:

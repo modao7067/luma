@@ -60,11 +60,32 @@ final class LinuxEnvironment {
     static File sharedStorage(){return Environment.getExternalStorageDirectory();}
     static boolean storageAvailable(){return storageGranted() && sharedStorage().isDirectory() && sharedStorage().canRead();}
     static String socketName(Context c){return "luma.native."+c.getApplicationInfo().uid;}
+    private static final java.util.Set<String> CHINA_MAINLAND_TIMEZONES=Collections.unmodifiableSet(new java.util.HashSet<>(Arrays.asList(
+        "Asia/Shanghai","Asia/Urumqi","Asia/Chongqing","Asia/Chungking","Asia/Harbin","Asia/Kashgar","PRC")));
     static String timezoneId(){
         TimeZone tz=TimeZone.getDefault();
         String id=tz==null?"":tz.getID();
         if(id==null||id.isEmpty()||id.startsWith("/")||id.contains("..")||id.startsWith("GMT"))return "";
         return id;
+    }
+    static boolean isChinaMainlandTimezone(String tz){
+        return tz!=null && CHINA_MAINLAND_TIMEZONES.contains(tz.trim());
+    }
+    static boolean isChinaMainlandTimezone(){
+        return isChinaMainlandTimezone(timezoneId());
+    }
+    static Map<String,String> chinaMirrorEnvironment(){
+        Map<String,String> mirrors=new LinkedHashMap<>();
+        mirrors.put("GOPROXY","https://goproxy.cn,direct");
+        mirrors.put("RUSTUP_DIST_SERVER","https://rsproxy.cn");
+        mirrors.put("RUSTUP_UPDATE_ROOT","https://rsproxy.cn/rustup");
+        mirrors.put("COREPACK_NPM_REGISTRY","https://registry.npmmirror.com");
+        mirrors.put("YARN_REGISTRY","https://registry.npmmirror.com");
+        mirrors.put("YARN_NPM_REGISTRY_SERVER","https://registry.npmmirror.com");
+        mirrors.put("NVM_NODEJS_ORG_MIRROR","https://npmmirror.com/mirrors/node");
+        mirrors.put("FNM_NODE_DIST_MIRROR","https://npmmirror.com/mirrors/node");
+        mirrors.put("NODE_MIRROR","https://npmmirror.com/mirrors/node/");
+        return mirrors;
     }
     static TerminalSession session(Context c,TerminalSessionClient client){
         return session(c,client,TerminalEmulatorFactory.nativeFactory());
@@ -107,6 +128,7 @@ final class LinuxEnvironment {
         guestEnv.put("PNPM_HOME","/root/.local/share/pnpm");
         String tz=timezoneId();
         if(!tz.isEmpty() && new File(root(c),"usr/share/zoneinfo/"+tz).isFile())guestEnv.put("TZ",tz);
+        if(isChinaMainlandTimezone(tz))guestEnv.putAll(chinaMirrorEnvironment());
         guestEnv.put("SSL_CERT_FILE","/etc/ssl/certs/ca-certificates.crt");
         guestEnv.put("NO_PROXY","127.0.0.1,localhost,::1");
         guestEnv.put("no_proxy","127.0.0.1,localhost,::1");

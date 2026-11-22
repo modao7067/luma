@@ -272,6 +272,7 @@ class WsCodexMonitor:
         elif length==127:
             if len(self.buf)<10:return None
             length=struct.unpack('!Q',self.buf[2:10])[0];idx=10
+        if length>4*1024*1024:raise OSError('ws frame too large')
         if masked:idx+=4
         if len(self.buf)<idx+length:return None
         payload=bytes(self.buf[idx:idx+length])
@@ -283,6 +284,7 @@ class WsCodexMonitor:
 
     def ensure_connected(self):
         if self.sock is not None:return True
+        s=None
         try:
             if self.unix_sock:
                 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
@@ -304,9 +306,12 @@ class WsCodexMonitor:
                 chunk=s.recv(4096)
                 if not chunk:raise OSError('closed')
                 resp+=chunk
+                if len(resp)>64*1024:raise OSError('ws handshake header too large')
             head,rest=resp.split(b'\r\n\r\n',1)
+            if len(head)>64*1024:raise OSError('ws handshake header too large')
+            if len(rest)>4*1024*1024:raise OSError('ws buffer overflow')
             if b' 101 ' not in head.splitlines()[0]:raise OSError('upgrade failed')
-            self.sock=s;self.buf=bytearray(rest)
+            self.sock=s;s=None;self.buf=bytearray(rest)
             self.seq+=1;init_id=str(self.seq)
             self._send_json({'id':init_id,'method':'initialize','params':{'clientInfo':{'name':'luma_bg_watch','title':'Luma','version':'0.8.0'},'capabilities':{'experimentalApi':True}}})
             deadline=time.monotonic()+2.5
@@ -314,9 +319,10 @@ class WsCodexMonitor:
             while time.monotonic()<deadline and not init_ok:
                 frame=self._pop_frame()
                 if frame is None:
-                    chunk=s.recv(16384)
+                    chunk=self.sock.recv(16384)
                     if not chunk:raise OSError('closed during init')
                     self.buf.extend(chunk)
+                    if len(self.buf)>4*1024*1024:raise OSError('ws buffer overflow')
                     continue
                 opcode,payload=frame
                 if opcode==8:raise OSError('ws closed')
@@ -332,6 +338,9 @@ class WsCodexMonitor:
             self.sock.setblocking(False)
             return True
         except Exception:
+            if s is not None:
+                try:s.close()
+                except OSError:pass
             self.close();return False
 
     def watch_thread(self,tid,seed_running,seed_reqs):
@@ -359,11 +368,13 @@ class WsCodexMonitor:
                 chunk=self.sock.recv(65536)
                 if not chunk:self.close();return
                 self.buf.extend(chunk)
+                if len(self.buf)>4*1024*1024:self.close();return
         except BlockingIOError:pass
         except OSError:self.close();return
 
         while True:
-            frame=self._pop_frame()
+            try:frame=self._pop_frame()
+            except OSError:self.close();return
             if frame is None:break
             opcode,payload=frame
             if opcode==8:self.close();return

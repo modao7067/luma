@@ -201,15 +201,29 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         if (mNativeModeListener != null) mNativeModeListener.run();
     }
 
+    private static final int MAX_CLIPBOARD_CHARS = 262_144;
+
+    private static String clampClipboardText(String text) {
+        if (text.length() <= MAX_CLIPBOARD_CHARS) return text;
+        int end = MAX_CLIPBOARD_CHARS;
+        if (Character.isHighSurrogate(text.charAt(end - 1))) end--;
+        return text.substring(0, end);
+    }
+
     private void onNativeReplies(byte[] bytes) {
-        if (bytes.length > 0) getOutputSink().write(bytes, 0, bytes.length);
+        if (bytes != null && bytes.length > 0) getOutputSink().write(bytes, 0, bytes.length);
     }
 
     private void onRenderHold(boolean held) {
-        if (held) {
-            mHeldImages = mImages.capture(mAdapter.handle(), getCellWidthPixels(), getCellHeightPixels());
-            mHeldImageRevision = mImages.revision;
-        } else { mHeldImages = null; mFrame = null; mDirty = true; }
+        try {
+            if (held) {
+                if (mDisposed || mAdapter == null) { mHeldImages = null; return; }
+                mHeldImages = mImages.capture(mAdapter.handle(), getCellWidthPixels(), getCellHeightPixels());
+                mHeldImageRevision = mImages.revision;
+            } else { mHeldImages = null; mFrame = null; mDirty = true; }
+        } catch (RuntimeException | OutOfMemoryError ignored) {
+            mHeldImages = null;
+        }
     }
     private void updateAnimations() {
         if (mAdapter == null) return;
@@ -241,7 +255,11 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
                     if (old != null) getOutputSink().titleChanged(old, null);
                     break;
                 }
-                case 6: getOutputSink().onCopyTextToClipboard(readString(6)); break;
+                case 6: {
+                    String clip = readString(6);
+                    if (clip != null) getOutputSink().onCopyTextToClipboard(clampClipboardText(clip));
+                    break;
+                }
                 default: break;
             }
         }
@@ -391,6 +409,7 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         if (mAdapter.replyOverflow()) throw new IllegalStateException("native reply buffer overflow");
         mRows = rows; mColumns = columns;
         setCellSizePixels(cellWidthPixels, cellHeightPixels);
+        mHeldImages = null;
         mFrame = null; mDirty = true; scheduleHoldTimeout(); observeHistoryActivity();
     }
 
@@ -398,6 +417,9 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         if (mDisposed) return;
         if (mAdapter == null) return;
         mAdapter.resetTerminal();
+        mAdapter.cancelHold();
+        mHeldImages = null;
+        mImages.clear();
         mLastFlags = 0; mFrame = null; mDirty = true; dispatchEvents(); scheduleHoldTimeout();
     }
 
@@ -484,7 +506,7 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         if (!mDisposed) { mDirty = true; frame(); }
     }
 
-    @Override public int pasteStatus(String text, boolean allowUnsafe) {
+    private int pasteInternal(String text, boolean allowUnsafe, boolean notifyOverflow) {
         if (mDisposed || mAdapter == null) return PASTE_ERROR;
         if (text == null || text.isEmpty()) return PASTE_NOTHING;
         if (mHistoryCompressor != null) mHistoryCompressor.userActivity();
@@ -492,14 +514,23 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         int status = mAdapter.paste(utf8, allowUnsafe);
         if (status == PASTE_WRITTEN) {
             byte[] replies = mAdapter.takeReplies();
-            if (replies != null && replies.length > 0) getOutputSink().write(replies, 0, replies.length);
+            if (replies != null && replies.length > 0 && !getOutputSink().writeChecked(replies, 0, replies.length)) {
+                if (notifyOverflow && mClient != null && getOutputSink() instanceof com.termux.terminal.TerminalSession) {
+                    mClient.onInputBufferFull((com.termux.terminal.TerminalSession) getOutputSink(), replies.length);
+                }
+                status = PASTE_ERROR;
+            }
         }
         if (mAdapter.replyOverflow()) throw new IllegalStateException("native reply buffer overflow");
         return status;
     }
 
+    @Override public int pasteStatus(String text, boolean allowUnsafe) {
+        return pasteInternal(text, allowUnsafe, false);
+    }
+
     @Override public void paste(String text) {
-        pasteStatus(text, false);
+        pasteInternal(text, false, true);
     }
 
     public int feedCount() { return mFeedCount; }

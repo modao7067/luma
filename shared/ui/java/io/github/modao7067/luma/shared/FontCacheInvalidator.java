@@ -2,21 +2,27 @@ package io.github.modao7067.luma.shared;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 
 final class FontCacheInvalidator {
+    private static final int MAX_MARKER_BYTES = 1024;
     private static final String[] SHADER_FILES = {
         "com.android.skia.shaders_cache", "com.android.opengl.shaders_cache",
         "com.android.skia.shaders_cache.tmp", "com.android.opengl.shaders_cache.tmp"
@@ -55,33 +61,55 @@ final class FontCacheInvalidator {
         }
     }
 
+    private static boolean markerMatches(Path markerPath, String fingerprint) throws IOException {
+        if (!Files.isRegularFile(markerPath, LinkOption.NOFOLLOW_LINKS)) return false;
+        if (Files.size(markerPath) > MAX_MARKER_BYTES) return false;
+        byte[] buffer = new byte[MAX_MARKER_BYTES + 1];
+        int total = 0;
+        try (InputStream in = Files.newInputStream(markerPath)) {
+            int n;
+            while (total < buffer.length && (n = in.read(buffer, total, buffer.length - total)) != -1) {
+                total += n;
+            }
+        }
+        if (total > MAX_MARKER_BYTES) return false;
+        return fingerprint.equals(new String(buffer, 0, total, StandardCharsets.US_ASCII));
+    }
+
     static synchronized boolean refresh(File marker, String fingerprint, File... cacheDirs) throws IOException {
-        if (marker.isFile() && fingerprint.equals(new String(Files.readAllBytes(marker.toPath()), StandardCharsets.US_ASCII)))
-            return false;
+        Path markerPath = marker.toPath();
+        Path parent = markerPath.getParent();
+        if (parent != null) Files.createDirectories(parent);
+        String lockName = markerPath.getFileName().toString() + ".lock";
+        Path lockPath = parent != null ? parent.resolve(lockName) : markerPath.resolveSibling(lockName);
+        try (FileChannel lockChannel = FileChannel.open(lockPath,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock lock = lockChannel.lock()) {
+            if (markerMatches(markerPath, fingerprint)) return false;
 
-        for (File directory : cacheDirs) {
-            if (directory == null) throw new IOException("Graphics cache directory unavailable");
-            for (String name : SHADER_FILES) {
-                Path file = new File(directory, name).toPath();
-                if (Files.isDirectory(file, java.nio.file.LinkOption.NOFOLLOW_LINKS))
-                    throw new IOException("Expected a graphics cache file: " + file);
-                Files.deleteIfExists(file);
+            for (File directory : cacheDirs) {
+                if (directory == null) throw new IOException("Graphics cache directory unavailable");
+                for (String name : SHADER_FILES) {
+                    Path file = new File(directory, name).toPath();
+                    if (Files.isDirectory(file, LinkOption.NOFOLLOW_LINKS))
+                        throw new IOException("Expected a graphics cache file: " + file);
+                    Files.deleteIfExists(file);
+                }
             }
-        }
 
-        Path parent = marker.toPath().getParent();
-        Files.createDirectories(parent);
-        Path temporary = Files.createTempFile(parent, "font-cache-", ".tmp");
-        try {
-            Files.write(temporary, fingerprint.getBytes(StandardCharsets.US_ASCII));
+            Path tempDir = parent != null ? parent : new File(".").toPath();
+            Path temporary = Files.createTempFile(tempDir, "font-cache-", ".tmp");
             try {
-                Files.move(temporary, marker.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(temporary, marker.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                Files.write(temporary, fingerprint.getBytes(StandardCharsets.US_ASCII));
+                try {
+                    Files.move(temporary, markerPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(temporary, markerPath, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
             }
-        } finally {
-            Files.deleteIfExists(temporary);
+            return true;
         }
-        return true;
     }
 }

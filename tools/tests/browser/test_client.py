@@ -121,4 +121,64 @@ class ClientTest(unittest.TestCase):
         self.assertIn('href=https://example.com/docs', summary)
         self.assertRegex(summary, r'<<<UNTRUSTED_WEB_CONTENT_[0-9a-f]{12}\n')
 
+    def test_cli_validation_rejects_bad_ports_unknown_flags_missing_values_and_negative_ints(self):
+        import importlib.util, importlib.machinery
+        loader = importlib.machinery.SourceFileLoader('luma_browser_cli_val', str(CLIENT))
+        spec = importlib.util.spec_from_loader('luma_browser_cli_val', loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        for bad_argv in (
+            ['--tab'],
+            ['read', '--unknown'],
+            ['read', '--offset'],
+            ['read', '--offset', '-1'],
+            ['read', '--max-chars', 'abc'],
+            ['read', '-s'],
+            ['diff', '--bogus'],
+            ['diff', '-s'],
+            ['errors', '--limit'],
+            ['errors', '--limit', '-5'],
+            ['errors', '--bogus'],
+            ['screenshot', '--bogus'],
+            ['scroll', '--target'],
+            ['scroll', '-10'],
+            ['wait', '--timeout', '-1'],
+            ['wait', '--unknown'],
+            ['click', '@1', '--bogus'],
+            ['type', '@1', 'hi', '--bogus'],
+        ):
+            with self.assertRaises(RuntimeError, msg=repr(bad_argv)):
+                mod.build_cli_request(bad_argv)
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = pathlib.Path(directory) / 'bad.json'
+            for bad_port in (0, 65536, -1, '8080', True, None):
+                cfg.write_text(json.dumps({'host': '127.0.0.1', 'port': bad_port, 'token': 'tok'}))
+                old = os.environ.get('LUMA_BROWSER_CONFIG')
+                os.environ['LUMA_BROWSER_CONFIG'] = str(cfg)
+                try:
+                    with self.assertRaises(RuntimeError, msg=repr(bad_port)):
+                        mod.load_credentials()
+                finally:
+                    if old is None:
+                        os.environ.pop('LUMA_BROWSER_CONFIG', None)
+                    else:
+                        os.environ['LUMA_BROWSER_CONFIG'] = old
+
+    def test_actions_js_markdown_scheme_sanitization_and_select_semantics(self):
+        asset = pathlib.Path(__file__).resolve().parents[3] / 'apps/gui/app/src/main/assets/browser/actions.js'
+        source = asset.read_text(encoding='utf-8')
+        script = (
+            "const fn = (" + source + ");\n"
+            "if (typeof fn !== 'function') throw Error('not a function');\n"
+        )
+        subprocess.run(['node', '-e', script], check=True, timeout=10)
+        self.assertIn("cleanHref.startsWith('javascript:')", source)
+        self.assertIn("cleanHref.startsWith('data:')", source)
+        self.assertIn("cleanHref.startsWith('vbscript:')", source)
+        self.assertIn("if (!desired) fail('OPTION_NOT_FOUND'", source)
+        self.assertIn("'aria-controls', 'aria-owns'", source)
+        self.assertEqual(source.count("if (request.submit) triggerSubmit(selNode);"), 2)
+
 if __name__ == '__main__': unittest.main()

@@ -54,7 +54,19 @@ def load_credentials():
         credentials = json.load(f)
     if credentials.get('host') != '127.0.0.1':
         raise RuntimeError(_tr('非法浏览器接口地址', 'Invalid browser endpoint address'))
+    port = credentials.get('port')
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise RuntimeError(_tr('非法浏览器接口端口', 'Invalid browser endpoint port'))
     return credentials
+
+def parse_non_negative_int(raw, label):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(_tr(f'{label} 必须是非负整数: {raw}', f'{label} must be a non-negative integer: {raw}')) from None
+    if value < 0:
+        raise RuntimeError(_tr(f'{label} 不能为负数: {raw}', f'{label} cannot be negative: {raw}'))
+    return value
 
 def send_request(request):
     credentials = load_credentials()
@@ -65,7 +77,8 @@ def send_request(request):
         raise RuntimeError(_tr('浏览器请求过大（最多 256 KiB）', 'Browser request is too large (max 256 KiB)'))
     with socket.create_connection(('127.0.0.1', credentials['port']), timeout=28) as connection:
         connection.sendall(payload)
-        response = connection.makefile('rb').readline(8 * 1024 * 1024)
+        with connection.makefile('rb') as reader:
+            response = reader.readline(8 * 1024 * 1024)
         if not response or not response.endswith(b'\n'):
             raise RuntimeError(_tr('浏览器接口响应不完整', 'Incomplete browser endpoint response'))
         value = json.loads(response)
@@ -160,7 +173,9 @@ def build_cli_request(argv):
         if arg == '--json':
             json_out = True
             i += 1
-        elif arg == '--tab' and i + 1 < len(argv):
+        elif arg == '--tab':
+            if i + 1 >= len(argv):
+                raise RuntimeError(_tr('--tab 缺少标签页 ID', '--tab requires a tab ID'))
             tab_id = argv[i + 1]
             i += 2
         elif arg.startswith('--tab='):
@@ -222,8 +237,11 @@ def build_cli_request(argv):
         return req, json_out
     if cmd == 'screenshot':
         req = attach_tab({'action': 'screenshot'})
-        if any(tok in ('--annotate', '-a') for tok in rest):
-            req['annotate'] = True
+        for tok in rest:
+            if tok in ('--annotate', '-a'):
+                req['annotate'] = True
+            else:
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         return req, json_out
     if cmd in ('read', 'snapshot'):
         req = attach_tab({'action': 'read'})
@@ -232,22 +250,28 @@ def build_cli_request(argv):
         j = 0
         while j < len(rest):
             tok = rest[j]
-            if tok == '--offset' and j + 1 < len(rest):
-                req['offset'] = int(rest[j + 1]); j += 2
-            elif tok == '--max-chars' and j + 1 < len(rest):
-                req['maxChars'] = int(rest[j + 1]); j += 2
+            if tok == '--offset':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--offset 缺少数值参数', '--offset requires a value'))
+                req['offset'] = parse_non_negative_int(rest[j + 1], '--offset'); j += 2
+            elif tok == '--max-chars':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--max-chars 缺少数值参数', '--max-chars requires a value'))
+                req['maxChars'] = parse_non_negative_int(rest[j + 1], '--max-chars'); j += 2
             elif tok in ('-i', '--interactive'):
                 req['interactiveOnly'] = True; j += 1
             elif tok == '--full':
                 req['interactiveOnly'] = False; j += 1
             elif tok in ('-u', '--urls'):
                 req['includeUrls'] = True; j += 1
-            elif tok in ('-s', '--selector') and j + 1 < len(rest):
+            elif tok in ('-s', '--selector'):
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr(f'{tok} 缺少选择器参数', f'{tok} requires a selector value'))
                 req['scopeSelector'] = rest[j + 1]; j += 2
             elif tok in ('-c', '--compact'):
                 j += 1
             else:
-                j += 1
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         return req, json_out
     if cmd == 'diff':
         req = attach_tab({'action': 'diff'})
@@ -256,10 +280,12 @@ def build_cli_request(argv):
             tok = rest[j]
             if tok in ('-u', '--urls'):
                 req['includeUrls'] = True; j += 1
-            elif tok in ('-s', '--selector') and j + 1 < len(rest):
+            elif tok in ('-s', '--selector'):
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr(f'{tok} 缺少选择器参数', f'{tok} requires a selector value'))
                 req['scopeSelector'] = rest[j + 1]; j += 2
             else:
-                j += 1
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         return req, json_out
     if cmd in ('console', 'errors'):
         req = attach_tab({'action': cmd})
@@ -268,10 +294,12 @@ def build_cli_request(argv):
             tok = rest[j]
             if tok == '--clear':
                 req['clear'] = True; j += 1
-            elif tok == '--limit' and j + 1 < len(rest):
-                req['limit'] = int(rest[j + 1]); j += 2
+            elif tok == '--limit':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--limit 缺少数值参数', '--limit requires a value'))
+                req['limit'] = parse_non_negative_int(rest[j + 1], '--limit'); j += 2
             else:
-                j += 1
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         return req, json_out
     if cmd == 'dialog':
         decision = rest[0] if rest else 'status'
@@ -287,7 +315,12 @@ def build_cli_request(argv):
     if cmd == 'click':
         if not rest:
             raise RuntimeError(_tr('用法: luma-browser click <@ref|selector|x,y> [--submit]', 'Usage: luma-browser click <@ref|selector|x,y> [--submit]'))
-        submit = '--submit' in rest[1:]
+        submit = False
+        for tok in rest[1:]:
+            if tok == '--submit':
+                submit = True
+            else:
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         req = attach_tab({'action': 'click', **parse_target(rest[0]), 'waitAfter': True, 'returnRead': True})
         if submit:
             req['submit'] = True
@@ -300,8 +333,17 @@ def build_cli_request(argv):
         if not rest:
             raise RuntimeError(_tr('用法: luma-browser press <Key> [<@ref|selector>] [--submit]', 'Usage: luma-browser press <Key> [<@ref|selector>] [--submit]'))
         key = rest[0]
-        submit = '--submit' in rest[1:]
-        others = [x for x in rest[1:] if x != '--submit']
+        submit = False
+        others = []
+        for tok in rest[1:]:
+            if tok == '--submit':
+                submit = True
+            elif tok.startswith('--'):
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
+            else:
+                others.append(tok)
+        if len(others) > 1:
+            raise RuntimeError(_tr(f'未知参数: {others[1]}', f'Unknown argument: {others[1]}'))
         req = attach_tab({'action': 'press', 'key': key, 'waitAfter': True, 'returnRead': True})
         if others:
             req.update(parse_target(others[0]))
@@ -319,10 +361,14 @@ def build_cli_request(argv):
         act = rest[2].lower() if len(rest) >= 3 and not rest[2].startswith('--') else 'click'
         name_override = None
         extra_args = []
-        k = 3
+        k = 3 if len(rest) >= 3 and not rest[2].startswith('--') else 2
         while k < len(rest):
-            if rest[k] == '--name' and k + 1 < len(rest):
+            if rest[k] == '--name':
+                if k + 1 >= len(rest):
+                    raise RuntimeError(_tr('--name 缺少名称参数', '--name requires a value'))
                 name_override = rest[k + 1]; k += 2
+            elif rest[k].startswith('--'):
+                raise RuntimeError(_tr(f'未知参数: {rest[k]}', f'Unknown argument: {rest[k]}'))
             else:
                 extra_args.append(rest[k]); k += 1
         selector = f"role={val}:{name_override}" if (kind == 'role' and name_override) else f"{kind}={val}"
@@ -336,7 +382,12 @@ def build_cli_request(argv):
     if cmd == 'type':
         if len(rest) < 2:
             raise RuntimeError(_tr('用法: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]', 'Usage: luma-browser type <@ref|selector|x,y> <text> [--clear] [--submit]'))
-        flags = set(rest[2:])
+        flags = set()
+        for tok in rest[2:]:
+            if tok in ('--clear', '--submit'):
+                flags.add(tok)
+            else:
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         req = attach_tab({
             'action': 'type',
             **parse_target(rest[0]),
@@ -404,12 +455,14 @@ def build_cli_request(argv):
             tok = rest[j]
             if tok in ('up', 'down', 'left', 'right', 'top', 'bottom'):
                 direction = tok; j += 1
-            elif tok == '--target' and j + 1 < len(rest):
+            elif tok == '--target':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--target 缺少目标参数', '--target requires a target'))
                 target = parse_target(rest[j + 1]); j += 2
             elif re.fullmatch(r'[0-9]+', tok):
                 amount = int(tok); j += 1
             else:
-                j += 1
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         req = attach_tab({'action': 'scroll', 'direction': direction, 'returnRead': True})
         if amount is not None:
             req['amount'] = amount
@@ -417,18 +470,22 @@ def build_cli_request(argv):
             req.update(target)
         return req, json_out
     if cmd == 'swipe':
-        if len(rest) < 4:
+        if len(rest) < 4 or len(rest) > 5:
             raise RuntimeError(_tr('用法: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]', 'Usage: luma-browser swipe <fromX> <fromY> <toX> <toY> [durationMs]'))
+        try:
+            coords = [float(rest[idx]) for idx in range(4)]
+        except ValueError:
+            raise RuntimeError(_tr('swipe 坐标必须是有效数字', 'swipe coordinates must be valid numbers')) from None
         req = attach_tab({
             'action': 'swipe',
-            'fromX': float(rest[0]),
-            'fromY': float(rest[1]),
-            'toX': float(rest[2]),
-            'toY': float(rest[3]),
+            'fromX': coords[0],
+            'fromY': coords[1],
+            'toX': coords[2],
+            'toY': coords[3],
             'waitAfter': True,
         })
-        if len(rest) >= 5:
-            req['durationMs'] = int(rest[4])
+        if len(rest) == 5:
+            req['durationMs'] = parse_non_negative_int(rest[4], 'durationMs')
         return req, json_out
     if cmd == 'wait':
         req = attach_tab({'action': 'wait'})
@@ -439,14 +496,18 @@ def build_cli_request(argv):
                 req['state'] = 'ready'; j += 1
             elif tok.startswith('url='):
                 req['state'] = 'url'; req['url'] = tok.split('=', 1)[1]; j += 1
-            elif tok == '--state' and j + 1 < len(rest):
+            elif tok == '--state':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--state 缺少状态参数', '--state requires a value'))
                 req['state'] = rest[j + 1]; j += 2
-            elif tok == '--timeout' and j + 1 < len(rest):
-                req['timeoutMs'] = int(rest[j + 1]); j += 2
-            elif not tok.startswith('--'):
+            elif tok == '--timeout':
+                if j + 1 >= len(rest):
+                    raise RuntimeError(_tr('--timeout 缺少超时毫秒数', '--timeout requires a value'))
+                req['timeoutMs'] = parse_non_negative_int(rest[j + 1], '--timeout'); j += 2
+            elif not tok.startswith('-'):
                 req['selector'] = tok; j += 1
             else:
-                j += 1
+                raise RuntimeError(_tr(f'未知参数: {tok}', f'Unknown argument: {tok}'))
         return req, json_out
     raise RuntimeError(_tr(f'未知子命令: {cmd}；运行 luma-browser --help 查看用法', f'Unknown subcommand: {cmd}; run `luma-browser --help` for usage'))
 

@@ -19,9 +19,10 @@ internal fun <T> MenuChoiceList(
     key: (T) -> String,
     itemContent: @Composable (T) -> Unit,
 ) {
-    if (choices.size <= 10) {
+    val uniqueChoices = choices.distinctBy(key)
+    if (uniqueChoices.size <= 10) {
         Column(Modifier.padding(vertical = 4.dp)) {
-            choices.forEach { itemContent(it) }
+            uniqueChoices.forEach { itemContent(it) }
         }
     } else {
         val viewportHeight = LocalMenuViewportHeight.current
@@ -36,7 +37,7 @@ internal fun <T> MenuChoiceList(
             },
             contentPadding = PaddingValues(vertical = 4.dp),
         ) {
-            items(choices, key = key, contentType = { "menu-choice" }) { itemContent(it) }
+            items(uniqueChoices, key = key, contentType = { "menu-choice" }) { itemContent(it) }
         }
     }
 }

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import math
 import os
 import re
 import sqlite3
+import threading
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -134,7 +136,7 @@ def context(used, size=None, percent=None, model=None):
 
 def cost(amount, currency, estimated=False):
     amount = number(amount)
-    if amount is None or not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
+    if amount is None or amount <= 0 or not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
         return []
     prefix = tr('CLI 累计估算', 'CLI estimated cost') if estimated else tr('CLI 记录费用', 'CLI recorded cost')
     return [row(prefix + ' · ' + currency.upper(), count(amount))]
@@ -513,9 +515,9 @@ def grok_usage(usage, scope=None, model=None):
     if not any((number(usage.get(k)) or 0) > 0 for k in ('inputTokens', 'outputTokens', 'modelCalls')):
         return []
     rows = cache_ratio(usage.get('cachedReadTokens'), usage.get('inputTokens'), scope + tr(' · 输入缓存命中', ' · input cache hit'))
-    ticks = usage.get('costUsdTicks')
+    ticks = number(usage.get('costUsdTicks'))
     cost_rows = []
-    if usage.get('costIsPartial') is not True and number(ticks) is not None:
+    if usage.get('costIsPartial') is not True and ticks is not None and ticks > 0:
         cost_rows = [row(tr('CLI 记录费用 · USD', 'CLI recorded cost · USD'), count(Decimal(str(ticks)) / Decimal(10_000_000_000)))]
     if not cost_rows:
         resolved_model = model or usage.get('model')
@@ -535,6 +537,12 @@ def grok_usage(usage, scope=None, model=None):
         )
     return rows + cost_rows
 
+_KIMI_WIRE_CACHE_LOCK = threading.Lock()
+_KIMI_SESSION_DIR_CACHE: OrderedDict[tuple[tuple[str, ...], str], Path] = OrderedDict()
+_KIMI_WIRE_FILE_CACHE: OrderedDict[str, tuple[tuple[int, int, str, Any], tuple[int, bool, float]]] = OrderedDict()
+_KIMI_SESSION_DIR_CACHE_MAX = 128
+_KIMI_WIRE_FILE_CACHE_MAX = 256
+
 def _kimi_wire_cost(native_id, fallback_model=None, home=None):
     if not isinstance(native_id, str) or not _SAFE_NATIVE_ID_RE.fullmatch(native_id):
         return None
@@ -546,25 +554,70 @@ def _kimi_wire_cost(native_id, fallback_model=None, home=None):
             p = Path(raw).expanduser()
             if p not in roots and (p / 'sessions').is_dir():
                 roots.append(p)
+    roots_key = (tuple(str(r) for r in roots), dir_name)
     session_dir = None
-    for root in roots:
-        for wd in (root / 'sessions').iterdir():
-            cand = wd / dir_name
-            if wd.is_dir() and not wd.is_symlink() and cand.is_dir() and not cand.is_symlink():
-                session_dir = cand
+    with _KIMI_WIRE_CACHE_LOCK:
+        cached_dir = _KIMI_SESSION_DIR_CACHE.get(roots_key)
+        if cached_dir is not None:
+            if cached_dir.is_dir() and not cached_dir.is_symlink() and (cached_dir / 'agents').is_dir():
+                _KIMI_SESSION_DIR_CACHE.move_to_end(roots_key)
+                session_dir = cached_dir
+            else:
+                _KIMI_SESSION_DIR_CACHE.pop(roots_key, None)
+    if session_dir is None:
+        for root in roots:
+            try:
+                entries = list((root / 'sessions').iterdir())
+            except OSError:
+                continue
+            for wd in entries:
+                cand = wd / dir_name
+                if wd.is_dir() and not wd.is_symlink() and cand.is_dir() and not cand.is_symlink():
+                    session_dir = cand
+                    break
+            if session_dir is not None:
                 break
-        if session_dir is not None:
-            break
+        if session_dir is not None and (session_dir / 'agents').is_dir():
+            with _KIMI_WIRE_CACHE_LOCK:
+                _KIMI_SESSION_DIR_CACHE[roots_key] = session_dir
+                _KIMI_SESSION_DIR_CACHE.move_to_end(roots_key)
+                while len(_KIMI_SESSION_DIR_CACHE) > _KIMI_SESSION_DIR_CACHE_MAX:
+                    _KIMI_SESSION_DIR_CACHE.popitem(last=False)
     if session_dir is None or not (session_dir / 'agents').is_dir():
         return None
     import json as _json
+    clean_fallback = _clean_model_name(fallback_model)
+    cat = _get_pricing_catalog()
+    cat_sig = (cat.get('mode'), cat.get('updatedAt'), len(cat.get('rates') or ()))
     tot_cost = 0.0
     priced_any = False
     seen_records = 0
-    for agent_dir in sorted((session_dir / 'agents').iterdir()):
+    try:
+        agent_dirs = sorted((session_dir / 'agents').iterdir())
+    except OSError:
+        return None
+    for agent_dir in agent_dirs:
         wire = agent_dir / 'wire.jsonl'
         if not agent_dir.is_dir() or agent_dir.is_symlink() or not wire.is_file() or wire.is_symlink():
             continue
+        try:
+            st = wire.stat()
+        except OSError:
+            continue
+        wire_key = str(wire)
+        file_sig = (st.st_size, st.st_mtime_ns, clean_fallback, cat_sig)
+        with _KIMI_WIRE_CACHE_LOCK:
+            cached_wire = _KIMI_WIRE_FILE_CACHE.get(wire_key)
+            if cached_wire is not None and cached_wire[0] == file_sig:
+                _KIMI_WIRE_FILE_CACHE.move_to_end(wire_key)
+                f_seen, f_priced, f_cost = cached_wire[1]
+                seen_records += f_seen
+                priced_any = priced_any or f_priced
+                tot_cost += f_cost
+                continue
+        f_seen = 0
+        f_priced = False
+        f_cost = 0.0
         latest_model = None
         try:
             with wire.open('r', encoding='utf-8', errors='replace') as fh:
@@ -595,8 +648,8 @@ def _kimi_wire_cost(native_id, fallback_model=None, home=None):
                     c_write = int(number(u.get('inputCacheCreation') if 'inputCacheCreation' in u else u.get('input_cache_creation')) or 0)
                     if inp + out_tok + c_read + c_write <= 0:
                         continue
-                    seen_records += 1
-                    eff_model = _concrete_kimi_code_model(obj.get('model')) or latest_model or _clean_model_name(fallback_model)
+                    f_seen += 1
+                    eff_model = _concrete_kimi_code_model(obj.get('model')) or latest_model or clean_fallback
                     if eff_model and _lookup_model_rate(eff_model) is not None:
                         priced = _price_record({
                             'model': eff_model,
@@ -608,10 +661,18 @@ def _kimi_wire_cost(native_id, fallback_model=None, home=None):
                         })
                         c_val = number(priced.get('costUsd'))
                         if c_val is not None:
-                            tot_cost += float(c_val)
-                            priced_any = True
+                            f_cost += float(c_val)
+                            f_priced = True
         except OSError:
             continue
+        with _KIMI_WIRE_CACHE_LOCK:
+            _KIMI_WIRE_FILE_CACHE[wire_key] = (file_sig, (f_seen, f_priced, f_cost))
+            _KIMI_WIRE_FILE_CACHE.move_to_end(wire_key)
+            while len(_KIMI_WIRE_FILE_CACHE) > _KIMI_WIRE_FILE_CACHE_MAX:
+                _KIMI_WIRE_FILE_CACHE.popitem(last=False)
+        seen_records += f_seen
+        priced_any = priced_any or f_priced
+        tot_cost += f_cost
     if seen_records == 0 or not priced_any:
         return None
     return _estimated_cost_rows(tot_cost)

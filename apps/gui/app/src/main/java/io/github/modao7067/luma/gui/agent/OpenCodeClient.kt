@@ -23,7 +23,7 @@ class OpenCodeClient(private val url: String, password: String) {
     private fun request(path: String) = Request.Builder().url(url + path).header("Authorization", authorization)
     suspend fun call(path: String, method: String = "GET", body: JSONObject? = null): JSONObject = execute(path, method, body, null)
     suspend fun probe(path: String = "/api/info", timeoutMillis: Long = 3_000L): JSONObject = execute(path, "GET", null, timeoutMillis)
-    private suspend fun execute(path: String, method: String, body: JSONObject?, timeoutMillis: Long?): JSONObject = withContext(Dispatchers.IO) {
+    private suspend fun execute(path: String, method: String, body: JSONObject?, timeoutMillis: Long?): JSONObject = coroutineScope {
         check(!closed) { tr("OpenCode 界面连接已关闭", "OpenCode UI connection closed") }
         val payload = if (method in listOf("GET", "DELETE")) null else (body ?: JSONObject()).toString().toRequestBody("application/json".toMediaType())
         val runner = if (timeoutMillis == null) httpClient else httpClient.newBuilder()
@@ -33,19 +33,32 @@ class OpenCodeClient(private val url: String, password: String) {
             .build()
         val call = runner.newCall(request(path).method(method, payload).build())
         calls.add(call)
-        if (closed) { call.cancel(); calls.remove(call); error(tr("OpenCode 界面连接已关闭", "OpenCode UI connection closed")) }
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val watcher = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { if (!finished.get()) call.cancel() }
+        }
         try {
-            call.execute().use { response ->
-                if (response.code == 401 || response.code == 403) throw OpenCodeRejected(response.code, tr("OpenCode 服务认证失败：HTTP ${response.code}", "OpenCode authentication failed: HTTP ${response.code}"))
-                val source = response.body?.source()
-                val text = if (source == null) "" else {
+            withContext(Dispatchers.IO) {
+                coroutineContext.ensureActive()
+                if (closed) error(tr("OpenCode 界面连接已关闭", "OpenCode UI connection closed"))
+                call.execute().use { response ->
+                    if (response.code == 401 || response.code == 403) throw OpenCodeRejected(response.code, tr("OpenCode 服务认证失败：HTTP ${response.code}", "OpenCode authentication failed: HTTP ${response.code}"))
+                    val source = response.body.source()
                     require(!source.request(8L * 1024 * 1024 + 1)) { tr("OpenCode 响应超过 8 MiB，请在终端查看", "OpenCode response exceeds 8 MiB; inspect it in terminal") }
-                    source.readUtf8()
+                    val text = source.readUtf8()
+                    if (!response.isSuccessful) throw OpenCodeRejected(response.code, runCatching { JSONObject(text).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() } ?: "OpenCode HTTP ${response.code}")
+                    if (text.isBlank()) JSONObject() else JSONObject(text)
                 }
-                if (!response.isSuccessful) throw OpenCodeRejected(response.code, runCatching { JSONObject(text).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() } ?: "OpenCode HTTP ${response.code}")
-                if (text.isBlank()) JSONObject() else JSONObject(text)
             }
-        } finally { calls.remove(call) }
+        } catch (e: IOException) {
+            coroutineContext.ensureActive()
+            throw e
+        } finally {
+            finished.set(true)
+            watcher.cancel()
+            if (closed || !isActive) call.cancel()
+            calls.remove(call)
+        }
     }
     suspend fun subscribe(scope: CoroutineScope, onEvent: (JSONObject) -> Unit, onDisconnect: (Throwable) -> Unit) {
         val ready = CompletableDeferred<Unit>()
@@ -55,6 +68,11 @@ class OpenCodeClient(private val url: String, password: String) {
             stream?.cancel(); stream = call; connected = false
         }
         scope.launch(Dispatchers.IO) {
+            var streamOpened = false
+            val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+            val watcher = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+                try { awaitCancellation() } finally { if (!finished.get()) call.cancel() }
+            }
             try {
                 call.execute().use { response ->
                     if (!response.isSuccessful) throw OpenCodeRejected(response.code, tr("OpenCode 事件连接失败：HTTP ${response.code}", "OpenCode event stream failed: HTTP ${response.code}"))
@@ -63,10 +81,15 @@ class OpenCodeClient(private val url: String, password: String) {
                         connected = true
                     }
                     ready.complete(Unit)
-                    val source = response.body?.source() ?: throw IOException(tr("OpenCode 事件响应为空", "Empty OpenCode event stream"))
+                    streamOpened = true
+                    val source = response.body.source()
                     val data = StringBuilder()
                     while (isActive && !closed && stream === call) {
-                        val line = source.readUtf8Line() ?: throw IOException(tr("OpenCode 事件连接已断开，请重新连接核对", "OpenCode event stream disconnected; reconnect to verify"))
+                        val line = try {
+                            source.readUtf8LineStrict(MAX_SSE_BYTES)
+                        } catch (_: java.io.EOFException) {
+                            throw IOException(tr("OpenCode 事件连接已断开，请重新连接核对", "OpenCode event stream disconnected; reconnect to verify"))
+                        }
                         if (line.isEmpty()) {
                             if (data.isNotEmpty()) {
                                 val raw = JSONTokener(data.toString()).nextValue()
@@ -74,27 +97,62 @@ class OpenCodeClient(private val url: String, password: String) {
                                 data.setLength(0)
                             }
                         } else if (line.startsWith("data:")) {
+                            val chunk = line.removePrefix("data:").trimStart()
+                            val nextBytes = data.length.toLong() + (if (data.isNotEmpty()) 1L else 0L) + chunk.length.toLong()
+                            if (nextBytes > MAX_SSE_BYTES) {
+                                throw IOException(tr("OpenCode 事件超过 8 MiB，已断开连接", "OpenCode event exceeds 8 MiB; stream disconnected"))
+                            }
                             if (data.isNotEmpty()) data.append('\n')
-                            data.append(line.removePrefix("data:").trimStart())
+                            data.append(chunk)
                         }
                     }
                 }
             } catch (e: Exception) {
-                val current = synchronized(streamLock) { (stream === call).also { if (it) connected = false } }
+                val current = synchronized(streamLock) {
+                    (stream === call).also {
+                        if (it) {
+                            connected = false
+                            stream = null
+                        }
+                    }
+                }
                 ready.completeExceptionally(e)
-                if (current && !closed && isActive && e !is CancellationException) onDisconnect(e)
+                if (streamOpened && current && !closed && isActive && e !is CancellationException) onDisconnect(e)
+            } finally {
+                finished.set(true)
+                watcher.cancel()
             }
         }
-        try { withTimeout(20000) { ready.await() } }
-        catch (e: TimeoutCancellationException) { call.cancel(); throw java.net.SocketTimeoutException(tr("OpenCode 事件连接超时", "OpenCode event stream timed out")) }
-        catch (e: Exception) { call.cancel(); throw e }
+        try {
+            withTimeout(20000) { ready.await() }
+        } catch (e: TimeoutCancellationException) {
+            synchronized(streamLock) {
+                if (stream === call) {
+                    stream = null
+                    connected = false
+                }
+            }
+            call.cancel()
+            currentCoroutineContext().ensureActive()
+            throw java.net.SocketTimeoutException(tr("OpenCode 事件连接超时", "OpenCode event stream timed out"))
+        } catch (e: Exception) {
+            synchronized(streamLock) {
+                if (stream === call) {
+                    stream = null
+                    connected = false
+                }
+            }
+            call.cancel()
+            throw e
+        }
     }
     fun close() {
-        synchronized(streamLock) { closed = true; connected = false; stream?.cancel() }
+        synchronized(streamLock) { closed = true; connected = false; stream?.cancel(); stream = null }
         calls.forEach { it.cancel() }; calls.clear()
         httpClient.connectionPool.evictAll()
     }
     companion object {
+        private const val MAX_SSE_BYTES = 8L * 1024L * 1024L
         private val client = OkHttpClient.Builder().proxy(java.net.Proxy.NO_PROXY).retryOnConnectionFailure(false)
             .followRedirects(false).connectTimeout(10, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS).build()
     }

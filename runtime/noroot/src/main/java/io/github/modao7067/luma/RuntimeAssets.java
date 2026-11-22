@@ -14,17 +14,19 @@ import java.security.MessageDigest;
 final class RuntimeAssets {
     static File directory(Context c){return new File(c.getFilesDir(),"runtime");}
     static boolean isRootMode(Context c){
-        return new File(c.getFilesDir(),"root-chroot/enabled").isFile()
-            || new File(directory(c),".root-mode").isFile();
+        return new File(c.getFilesDir(),"root-chroot/enabled").isFile();
     }
     static synchronized void ensure(Context c)throws Exception {
         ensureRuntime(c);
         ensureGuest(c);
     }
     static synchronized void ensureRuntime(Context c)throws Exception {
+        ensureRuntime(c,isRootMode(c));
+    }
+    static synchronized void ensureRuntime(Context c,boolean rootMode)throws Exception {
         cancelled();
         copy(c,"runtime",directory(c));
-        if(isRootMode(c)){
+        if(rootMode){
             write(new File(directory(c),"SKILL.md"),read(c,"root-mode/SKILL.md"));
         }
         Os.chmod(new File(directory(c),"SKILL.md").getAbsolutePath(),0644);
@@ -59,7 +61,7 @@ final class RuntimeAssets {
             "#!/usr/bin/env node\n"+
             "const fs=require('node:fs'),cp=require('node:child_process');\n"+
             "const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
-            "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
+            "if(process.getuid&&process.getuid()===0&&process.env.LUMA_ENV==='debian-chroot'&&fs.existsSync('/proc/1/root/system')&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  let dir='';\n"+
             "  try{dir=fs.readFileSync('/opt/luma/native-lib-dir','utf8').trim();}catch{}\n"+
             "  if(!dir){process.stderr.write(_zh?'未找到原生库目录\\n':'Native library directory not found\\n');process.exit(1);}\n"+
@@ -74,7 +76,7 @@ final class RuntimeAssets {
             "#!/usr/bin/env node\n"+
             "const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');\n"+
             "const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
-            "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
+            "if(process.getuid&&process.getuid()===0&&process.env.LUMA_ENV==='debian-chroot'&&fs.existsSync('/proc/1/root/system')&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  const args=process.argv.slice(2);\n"+
             "  if(!args.length||args[0]==='--help'||args[0]==='-h'){\n"+
             "    process.stdout.write(_zh?'用法: android-run /workspace/program [参数]\\n':'Usage: android-run /workspace/program [args...]\\n');\n"+
@@ -97,7 +99,7 @@ final class RuntimeAssets {
         String adbBody=
             "#!/usr/bin/env node\n"+
             "const fs=require('node:fs'),cp=require('node:child_process');\n"+
-            "if(process.getuid&&process.getuid()===0&&fs.existsSync('/opt/luma/.root-mode')){\n"+
+            "if(process.getuid&&process.getuid()===0&&process.env.LUMA_ENV==='debian-chroot'&&fs.existsSync('/proc/1/root/system')&&fs.existsSync('/opt/luma/.root-mode')){\n"+
             "  const args=process.argv.slice(2);\n"+
             "  if(!args.length||args[0]==='--help'||args[0]==='-h'){\n"+
             "    const _zh=String(process.env.LUMA_LANG||'zh').toLowerCase().startsWith('zh');\n"+
@@ -155,11 +157,18 @@ final class RuntimeAssets {
     static String profileScript(Context c,File root){
         String tz=LinuxEnvironment.timezoneId();
         String tzExport=(!tz.isEmpty() && new File(root,"usr/share/zoneinfo/"+tz).isFile()) ? "export TZ="+tz+"\n" : "";
+        StringBuilder mirrorExports=new StringBuilder();
+        if(LinuxEnvironment.isChinaMainlandTimezone(tz)){
+            for(java.util.Map.Entry<String,String> entry:LinuxEnvironment.chinaMirrorEnvironment().entrySet()){
+                mirrorExports.append("export ").append(entry.getKey()).append("=\"${").append(entry.getKey()).append(":-").append(entry.getValue()).append("}\"\n");
+            }
+        }
         String profileScript=
             "export PNPM_HOME=/root/.local/share/pnpm\n"+
             "export PATH=/opt/luma/bin:$PNPM_HOME/bin:$HOME/.local/bin:$HOME/.kimi-code/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.qoder/bin:$HOME/.codebuddy/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH\n"+
             "export LUMA_NATIVE_SOCKET="+LinuxEnvironment.socketName(c)+"\n"+
             tzExport+
+            mirrorExports+
             "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n"+
             "export NO_PROXY=127.0.0.1,localhost,::1\n"+
             "export no_proxy=127.0.0.1,localhost,::1\n"+
@@ -178,7 +187,7 @@ final class RuntimeAssets {
         return profileScript;
     }
     static synchronized void stageForRoot(Context c)throws Exception {
-        ensureRuntime(c);
+        ensureRuntime(c,true);
         File root=LinuxEnvironment.root(c);
         File guest=new File(directory(c),"guest");
         MessageDigest digest=MessageDigest.getInstance("SHA-256");
@@ -247,13 +256,85 @@ final class RuntimeAssets {
         if(!Files.exists(mtab,LinkOption.NOFOLLOW_LINKS))Os.symlink("/proc/self/mounts",mtab.toString());
         File pipConf=new File(root,"etc/pip.conf");
         if(!Files.exists(pipConf.toPath(),LinkOption.NOFOLLOW_LINKS)){
-            write(pipConf,"[global]\nbreak-system-packages = true\n".getBytes(StandardCharsets.UTF_8));
+            write(pipConf,OFFICIAL_PIP_CONF.getBytes(StandardCharsets.UTF_8));
             Os.chmod(pipConf.getAbsolutePath(),0644);
         }
+    }
+    private static final String OFFICIAL_APT_SOURCES=
+        "deb https://deb.debian.org/debian trixie main\n"+
+        "deb https://deb.debian.org/debian trixie-updates main\n"+
+        "deb https://deb.debian.org/debian-security trixie-security main\n";
+    private static final String CHINA_APT_SOURCES=
+        "deb https://mirrors.aliyun.com/debian trixie main\n"+
+        "deb https://mirrors.aliyun.com/debian trixie-updates main\n"+
+        "deb https://mirrors.aliyun.com/debian-security trixie-security main\n";
+    private static final String OFFICIAL_PIP_CONF=
+        "[global]\nbreak-system-packages = true\n";
+    private static final String CHINA_PIP_CONF=
+        "[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n";
+    private static final String CHINA_UV_TOML=
+        "[[index]]\nurl = \"https://mirrors.aliyun.com/pypi/simple/\"\ndefault = true\n";
+    private static final String CHINA_NPMRC=
+        "registry=https://registry.npmmirror.com/\ndisturl=https://npmmirror.com/mirrors/node\n";
+    private static final String OFFICIAL_PNPM_CONFIG=
+        "packageImportMethod: copy\n";
+    private static final String CHINA_PNPM_CONFIG=
+        "packageImportMethod: copy\nregistry: https://registry.npmmirror.com/\n";
+    private static final String CHINA_BUNFIG=
+        "[install]\nregistry = \"https://registry.npmmirror.com/\"\n";
+    private static final String CHINA_CARGO_CONFIG=
+        "[source.crates-io]\nreplace-with = \"rsproxy-sparse\"\n\n[source.rsproxy-sparse]\nregistry = \"sparse+https://rsproxy.cn/index/\"\n";
+    private static final String CHINA_GEMRC=
+        ":sources:\n- https://mirrors.aliyun.com/rubygems/\n";
+    private static String normalizeConfig(String text){
+        return text.replace("\r\n","\n").trim();
+    }
+    private static void syncManagedConfig(File target,String officialContent,String chinaContent,boolean chinaMirror,boolean onlyIfExists,int mode)throws Exception {
+        Path path=target.toPath();
+        if(Files.isSymbolicLink(path))return;
+        boolean exists=Files.exists(path,LinkOption.NOFOLLOW_LINKS);
+        if(exists && !Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS))return;
+        if(!exists && onlyIfExists)return;
+        String desired=chinaMirror ? chinaContent : officialContent;
+        if(!exists){
+            if(desired!=null){
+                write(target,desired.getBytes(StandardCharsets.UTF_8));
+                Os.chmod(target.getAbsolutePath(),mode);
+            }
+            return;
+        }
+        String current=normalizeConfig(new String(Files.readAllBytes(path),StandardCharsets.UTF_8));
+        boolean matchesOfficial=officialContent!=null && current.equals(normalizeConfig(officialContent));
+        boolean matchesChina=current.equals(normalizeConfig(chinaContent));
+        if(!matchesOfficial && !matchesChina)return;
+        if(desired==null){
+            Files.deleteIfExists(path);
+            return;
+        }
+        if(!current.equals(normalizeConfig(desired))){
+            write(target,desired.getBytes(StandardCharsets.UTF_8));
+            Os.chmod(target.getAbsolutePath(),mode);
+        }
+    }
+    static void syncMirrorConfigs(File root)throws Exception {
+        syncMirrorConfigs(root,LinuxEnvironment.isChinaMainlandTimezone());
+    }
+    static void syncMirrorConfigs(File root,boolean chinaMirror)throws Exception {
+        if(!new File(root,"etc/debian_version").isFile())return;
+        syncManagedConfig(new File(root,"etc/apt/sources.list"),OFFICIAL_APT_SOURCES,CHINA_APT_SOURCES,chinaMirror,true,0644);
+        syncManagedConfig(new File(root,"etc/pip.conf"),OFFICIAL_PIP_CONF,CHINA_PIP_CONF,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"etc/uv/uv.toml"),null,CHINA_UV_TOML,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"usr/local/etc/npmrc"),null,CHINA_NPMRC,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"etc/npmrc"),null,CHINA_NPMRC,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"root/.config/pnpm/config.yaml"),OFFICIAL_PNPM_CONFIG,CHINA_PNPM_CONFIG,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"root/.bunfig.toml"),null,CHINA_BUNFIG,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"root/.cargo/config.toml"),null,CHINA_CARGO_CONFIG,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"etc/gemrc"),null,CHINA_GEMRC,chinaMirror,false,0644);
     }
     static void repairDebianRoot(File root)throws Exception {
         if(!new File(root,"etc/debian_version").isFile())return;
         prepareDebianSkeleton(root);
+        syncMirrorConfigs(root);
         String tz=LinuxEnvironment.timezoneId();
         if(!tz.isEmpty()&&new File(root,"usr/share/zoneinfo/"+tz).isFile()){
             File tzFile=new File(root,"etc/timezone");
@@ -328,6 +409,24 @@ final class RuntimeAssets {
         try {
             try(FileOutputStream out=new FileOutputStream(temp)){out.write(data);out.getFD().sync();}
             if(!temp.renameTo(target)){
+                Files.deleteIfExists(target.toPath());
+                if(!temp.renameTo(target))throw new IOException(com.termux.terminal.LumaLang.tr("无法更新运行文件：","Failed to update runtime file: ")+target);
+            }
+        } finally {temp.delete();}
+    }
+    static void copyAtomic(File src,File target)throws IOException {
+        File parent=target.getParentFile();
+        if(parent!=null && !parent.isDirectory() && !parent.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目录","Failed to create directory"));
+        File temp=File.createTempFile("luma-",".tmp",parent);
+        try {
+            try(InputStream in=Files.newInputStream(src.toPath(),LinkOption.NOFOLLOW_LINKS);FileOutputStream out=new FileOutputStream(temp)){
+                byte[] buf=new byte[65536];int n;
+                while((n=in.read(buf))!=-1)out.write(buf,0,n);
+                out.getFD().sync();
+            }
+            if(Files.isSymbolicLink(target.toPath()))throw new IOException(com.termux.terminal.LumaLang.tr("目标路径为符号链接：","Destination path is a symbolic link: ")+target);
+            if(!temp.renameTo(target)){
+                if(Files.isSymbolicLink(target.toPath()))throw new IOException(com.termux.terminal.LumaLang.tr("目标路径为符号链接：","Destination path is a symbolic link: ")+target);
                 Files.deleteIfExists(target.toPath());
                 if(!temp.renameTo(target))throw new IOException(com.termux.terminal.LumaLang.tr("无法更新运行文件：","Failed to update runtime file: ")+target);
             }

@@ -76,13 +76,14 @@ internal fun SessionDetail(
         val live = selectionProvider.value
         return (if (live != null) live() else selection.value) == sessionId
     }
-    val interactive = ownsSession()
+    val ownsCurrentSession = ownsSession()
+    val interactive = LocalSessionInteractive.current && ownsCurrentSession
     val guardedActions = remember(sessionId, actions) {
         CurrentSessionActions(actions) { ownsSession() }
     }
     CompositionLocalProvider(LocalSessionInteractive provides interactive,
         LocalMediaContext provides MediaContext(view.summary.id, view.summary.cwd)) {
-        Box(Modifier.fillMaxSize().then(if (interactive) Modifier else Modifier
+        Box(Modifier.fillMaxSize().then(if (ownsCurrentSession) Modifier else Modifier
             .clearAndSetSemantics {}
             .pointerInput(Unit) {
                 awaitPointerEventScope {
@@ -90,6 +91,7 @@ internal fun SessionDetail(
                 }
             })) {
             SessionDetailContent(state, view, guardedActions,
+                ownsSession = ownsCurrentSession,
                 onPickImages = { if (ownsSession()) onPickImages() },
                 onDrawer = { if (ownsSession()) onDrawer() },
                 onNew = { if (ownsSession()) onNew() },
@@ -103,6 +105,7 @@ internal fun SessionDetail(
 @Composable
 private fun SessionDetailContent(
     state: CockpitState, view: SessionView, actions: CockpitActions,
+    ownsSession: Boolean,
     onPickImages: () -> Unit, onDrawer: () -> Unit, onNew: () -> Unit,
     onSettings: () -> Unit = {},
     onUsage: () -> Unit = {},
@@ -111,17 +114,20 @@ private fun SessionDetailContent(
     var requestId by remember(view.summary.id) { mutableStateOf<String?>(null) }
     var openedAgentKey by rememberSaveable(view.summary.id) { mutableStateOf<String?>(null) }
     var lastSyncedBackendKey by remember(view.summary.id) { mutableStateOf<String?>(null) }
+    var requestedAgentKey by remember(view.summary.id) { mutableStateOf<String?>(null) }
     val externalDetail = state.subAgentDetail?.takeIf { it.parentSessionId == view.summary.id }
     val externalKey = externalDetail?.let { subAgentIdentityKey(view.summary.id, it.agent.id) }
     if (externalKey != lastSyncedBackendKey) {
         lastSyncedBackendKey = externalKey
         openedAgentKey = externalKey
+        if (externalKey != null) requestedAgentKey = externalKey
     }
     val isCurrentSession = LocalSessionInteractive.current
     SideEffect {
-        if (!isCurrentSession) {
+        if (!ownsSession) {
             requestId = null
             openedAgentKey = null
+            requestedAgentKey = null
         }
     }
     val activeAgentId = openedAgentKey?.let { parseSubAgentIdentityKey(it, view.summary.id) }
@@ -138,8 +144,18 @@ private fun SessionDetailContent(
             }
         }
     }
-    if (openedAgentKey != null && currentSubAgentDetail == null) {
-        SideEffect { openedAgentKey = null }
+    if (openedAgentKey != null && currentSubAgentDetail == null && !view.loading && view.connected) {
+        SideEffect {
+            openedAgentKey = null
+            requestedAgentKey = null
+        }
+    }
+    LaunchedEffect(ownsSession, view.summary.id, openedAgentKey, activeAgentId, externalKey, view.loading, view.connected) {
+        val key = openedAgentKey
+        if (ownsSession && key != null && activeAgentId != null && externalKey == null && !view.loading && view.connected && requestedAgentKey != key) {
+            requestedAgentKey = key
+            actions.openSubAgent(view.summary.id, activeAgentId)
+        }
     }
     var retainedSubAgentDetail by remember(view.summary.id) { mutableStateOf(currentSubAgentDetail) }
     if (currentSubAgentDetail != null) retainedSubAgentDetail = currentSubAgentDetail
@@ -154,11 +170,14 @@ private fun SessionDetailContent(
     val detailFraction = (rawDetailFraction * (1f - detailBackProgress * 0.35f)).coerceIn(0f, 1f)
     val detailVisible = spatialContentVisible(detailOpen, rawDetailFraction)
     fun openSubAgentDetail(agentId: String) {
-        openedAgentKey = subAgentIdentityKey(view.summary.id, agentId)
+        val key = subAgentIdentityKey(view.summary.id, agentId)
+        openedAgentKey = key
+        requestedAgentKey = key
         actions.openSubAgent(view.summary.id, agentId)
     }
     fun closeSubAgentDetail() {
         openedAgentKey = null
+        requestedAgentKey = null
         actions.closeSubAgent()
     }
     PredictiveBackHandler(enabled = isCurrentSession && detailOpen) { progress ->
@@ -323,12 +342,12 @@ private fun SessionDetailContent(
         }
     }
     var retainedSheetRequest by remember(view.summary.id) { mutableStateOf<UserRequest?>(null) }
-    if (!isCurrentSession || detailOpen) {
+    if (!ownsSession || detailOpen) {
         if (retainedSheetRequest != null) {
             SideEffect { retainedSheetRequest = null }
         }
     }
-    val liveSheetRequest = if (isCurrentSession && !detailOpen) {
+    val liveSheetRequest = if (ownsSession && !detailOpen) {
         requestId?.let { id -> view.requests.find { it.id == id } }
     } else {
         null
@@ -336,12 +355,12 @@ private fun SessionDetailContent(
     if (liveSheetRequest != null) {
         retainedSheetRequest = liveSheetRequest
     }
-    val displaySheetRequest = if (isCurrentSession && !detailOpen) {
+    val displaySheetRequest = if (ownsSession && !detailOpen) {
         requestId?.let { id -> liveSheetRequest ?: retainedSheetRequest?.takeIf { it.id == id } }
     } else {
         null
     }
-    if (isCurrentSession && !detailOpen && requestId != null && displaySheetRequest == null) {
+    if (ownsSession && !detailOpen && requestId != null && displaySheetRequest == null) {
         LaunchedEffect(requestId) { requestId = null }
     }
     val hasSubAgentCapsule = view.subAgents.isNotEmpty()
@@ -353,7 +372,7 @@ private fun SessionDetailContent(
                 Modifier
                     .fillMaxSize()
                     .then(
-                        if (parentInteractive) Modifier
+                        if (!detailOpen && !state.browserOpen && !sheetBlocking) Modifier
                         else Modifier
                             .clearAndSetSemantics {}
                             .pointerInput(Unit) {
@@ -367,6 +386,7 @@ private fun SessionDetailContent(
                     floatingBottomClearance = floatingConversationClearance(hasSubAgentCapsule),
                     topBar = {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val headerError = view.error ?: state.error
                             ConversationHeader(
                                 view,
                                 actions,
@@ -375,7 +395,9 @@ private fun SessionDetailContent(
                                 onTerminal = { actions.openShell(actions.environment, "/workspace") },
                                 onSettings = onSettings,
                                 onUsage = onUsage,
-                                hasError = view.error != null || state.error != null,
+                                hasError = !headerError.isNullOrBlank(),
+                                errorText = headerError,
+                                onDismissError = actions::dismissError,
                             )
                             val currentRequest = view.requests.firstOrNull()
                             var retainedRequest by remember(view.summary.id) { mutableStateOf(currentRequest) }

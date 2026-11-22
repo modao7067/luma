@@ -35,55 +35,6 @@
     </issue>
 
     <issue
-        id="IntentReset"
-        message="Calling `setType` after setting URI in `Intent` constructor will clear the data: Call `setDataAndType` instead?"
-        errorLine1="                fallback.setType(&quot;image/*&quot;);"
-        errorLine2="                         ~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
-            line="731"
-            column="26"/>
-        <location
-            file="src/main/java/io/github/modao7067/luma/MainActivity.java"
-            line="730"
-            column="66"
-            message="Originally set here"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33 (current min is 31): `java.io.OutputStream#nullOutputStream`"
-        errorLine1="                    os = pfd != null ? new ParcelFileDescriptor.AutoCloseOutputStream(pfd) : OutputStream.nullOutputStream();"
-        errorLine2="                                                                                                          ~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
-            line="501"
-            column="107"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33 (current min is 31): `java.io.InputStream#nullInputStream`"
-        errorLine1="                    is = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();"
-        errorLine2="                                                                                                        ~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
-            line="514"
-            column="105"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33 (current min is 31): `java.io.InputStream#nullInputStream`"
-        errorLine1="                    es = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();"
-        errorLine2="                                                                                                        ~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/ShizukuBridge.java"
-            line="527"
-            column="105"/>
-    </issue>
-
-    <issue
         id="SdCardPath"
         message="Do not hardcode &quot;/sdcard/&quot;; use `Environment.getExternalStorageDirectory().getPath()` instead"
         errorLine1="        else if(path.equals(&quot;/sdcard&quot;) || path.startsWith(&quot;/sdcard/&quot;)){"

@@ -187,7 +187,10 @@ internal class NativeCliSession(
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { view = view.copy(loading = false, connected = false, requests = emptyList(), connection = tr("连接中断 · 请重新同步", "Disconnected · Resync required"), error = e.message); publish() }
                 }
+            } catch (e: CancellationException) {
+                api?.close(); api = null; job.cancel(); throw e
             } catch (e: Exception) {
+                api?.close(); api = null; job.cancel()
                 if (e is NativeCliRuntimePolicy.CarrierUpdateRequired || e is ManagedSessionPolicy.ProtocolUpdateRequired) {
                     snapshot = obj("catalogState" to "error", "error" to e.message,
                         "lifecycle" to obj("phase" to "blocked", "reason" to "configuration", "retryable" to false, "message" to e.message))
@@ -294,20 +297,23 @@ internal class NativeCliSession(
         if (!view.connected && !view.loading) return
         val currentEpoch = epoch
         scope.launch {
-            runCatching {
+            try {
                 val next = client.call("$path?after=$revision")
                 if (currentEpoch == epoch && !next.optBoolean("unchanged") && next.optLong("revision", -1) >= revision) {
                     val base = view
                     val projected = withContext(Dispatchers.Default) { NativeCliProjection.view(next, base) }
                     apply(next, base to projected)
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
             }
         }
     }
     fun configure(body: JSONObject) {
         if (view.configuring) return
         run {
-            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { tr("请等待任务与队列结束再修改设置", "Wait for active turn and queue to finish before changing settings") }
+            check(view.connected && view.activeTurnId == null && view.queue.isEmpty() && !SubmissionLedger.pending(record)) { tr("请等待任务与队列结束再修改设置", "Wait for active turn and queue to finish before changing settings") }
             view = view.copy(configuring = true); publish()
             try { action("configure", body) } finally { view = view.copy(configuring = false) }
         }
@@ -336,8 +342,20 @@ internal class NativeCliSession(
         if (id in answering || view.requests.none { it.id == id }) return
         run {
             answering.add(id); view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) }); publish()
-            try { action("answer", obj("id" to id, "choice" to choice, "answers" to JSONObject(answers))) }
-            catch (e: NativeCliRejected) { answering.remove(id); throw e }
+            try {
+                action("answer", obj("id" to id, "choice" to choice, "answers" to JSONObject(answers)))
+            } catch (e: CancellationException) {
+                answering.remove(id)
+                view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) })
+                publish()
+                throw e
+            } catch (e: Exception) {
+                answering.remove(id)
+                view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) })
+                publish()
+                if (e !is NativeCliRejected) pullLatest()
+                throw e
+            }
         }
     }
     fun rename(title: String) = run { check(view.connected); check(view.capabilities.rename) { tr("此 CLI 未提供原生改名接口", "Native rename is not supported by this CLI") }; require(title.isNotBlank()); action("rename", obj("title" to title.trim())) }

@@ -121,10 +121,46 @@ final class TerminalFileTransfer {
         +"except FileNotFoundError:sys.stderr.write(_tr('找不到文件：','File not found: ')+path);sys.exit(2)\n"
         +"except PermissionError:sys.stderr.write(_tr('没有文件读取权限：','Permission denied reading file: ')+path);sys.exit(3)\n"
         +"except (OSError,ValueError) as error:sys.stderr.write(str(error));sys.exit(4)\n";
+    static final class Cancellation {
+        private boolean cancelled;
+        private Process process;
+        synchronized boolean isCancelled(){return cancelled;}
+        synchronized boolean attach(Process target){
+            if(cancelled)return false;
+            process=target;
+            return true;
+        }
+        synchronized void detach(Process target){if(process==target)process=null;}
+        void cancel(){
+            Process active;
+            synchronized(this){
+                if(cancelled)return;
+                cancelled=true;
+                active=process;
+                process=null;
+            }
+            if(active!=null)active.destroyForcibly();
+        }
+    }
+    private static final ThreadLocal<Cancellation> ACTIVE_CANCELLATION=new ThreadLocal<>();
+    static Cancellation bindCancellation(Cancellation next){
+        Cancellation previous=ACTIVE_CANCELLATION.get();
+        if(next==null)ACTIVE_CANCELLATION.remove();else ACTIVE_CANCELLATION.set(next);
+        return previous;
+    }
     static String quote(String value){return "'"+value.replace("'","'\"'\"'")+"'";}
     static void copy(ProcessBuilder builder,File destination,long limit)throws IOException {
+        copy(builder,destination,limit,ACTIVE_CANCELLATION.get());
+    }
+    static void copy(ProcessBuilder builder,File destination,long limit,Cancellation cancellation)throws IOException {
+        if(Thread.currentThread().isInterrupted()||(cancellation!=null&&cancellation.isCancelled()))
+            throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
         builder.environment().putIfAbsent("LUMA_LANG",com.termux.terminal.LumaLang.code());
         Process process=builder.start();
+        if(cancellation!=null&&!cancellation.attach(process)){
+            process.destroyForcibly();
+            throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
+        }
         ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"LumaFileTimeout");t.setDaemon(true);return t;});
         ScheduledFuture<?> timeout=timer.schedule(process::destroyForcibly,30,TimeUnit.SECONDS);
         ByteArrayOutputStream detail=new ByteArrayOutputStream();
@@ -132,14 +168,19 @@ final class TerminalFileTransfer {
         try(InputStream in=process.getInputStream();OutputStream out=new FileOutputStream(destination)){
             byte[]data=new byte[65536];long total=0;int n;
             while((n=in.read(data))!=-1){
-                if(Thread.currentThread().isInterrupted())throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
+                if(Thread.currentThread().isInterrupted()||(cancellation!=null&&cancellation.isCancelled()))throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
                 total+=n;if(total>limit)throw new IOException(com.termux.terminal.LumaLang.tr("文件过大","File is too large"));out.write(data,0,n);
             }
+            if(Thread.currentThread().isInterrupted()||(cancellation!=null&&cancellation.isCancelled()))throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"));
             if(!process.waitFor(2,TimeUnit.SECONDS)||process.exitValue()!=0){
                 errors.join(100);String message; synchronized(detail){message=detail.toString("UTF-8").trim();}
                 throw new IOException(message.isEmpty() ? com.termux.terminal.LumaLang.tr("文件读取失败或超时","File read failed or timed out") : message);
             }
         }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(com.termux.terminal.LumaLang.tr("已取消","Cancelled"),e);}
-        finally{timeout.cancel(false);timer.shutdownNow();process.destroy();}
+        finally{
+            if(cancellation!=null)cancellation.detach(process);
+            timeout.cancel(false);timer.shutdownNow();
+            if(cancellation!=null&&cancellation.isCancelled())process.destroyForcibly();else process.destroy();
+        }
     }
 }

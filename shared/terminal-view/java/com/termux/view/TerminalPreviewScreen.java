@@ -19,8 +19,10 @@ public final class TerminalPreviewScreen implements AutoCloseable {
     private PreparedText text;
     private Bitmap image;
     private int layoutWidth,layoutHeight,feedOffset;
-    private final byte[] chunk=new byte[8192];
-    private boolean closed,loading;
+    private static final long LOAD_INVALIDATE_INTERVAL_MS=100L;
+    private final byte[] chunk=new byte[32768];
+    private boolean closed,loading,firstChunkNotified;
+    private long lastLoadInvalidatedAt;
     private String initializationError;
     private Runnable invalidator=()->{};
     int topRow;
@@ -83,18 +85,27 @@ public final class TerminalPreviewScreen implements AutoCloseable {
         if(image!=null)return;
         initializationError=null;
         TerminalOutput output=new TerminalOutput(){
-            public void write(byte[]b,int o,int n){}public void titleChanged(String a,String b){}public void onCopyTextToClipboard(String s){}public void onPasteTextFromClipboard(){}public void onBell(){}public void onColorsChanged(){}public void onScreenChanged(){invalidator.run();}
+            public void write(byte[]b,int o,int n){}public void titleChanged(String a,String b){}public void onCopyTextToClipboard(String s){}public void onPasteTextFromClipboard(){}public void onBell(){}public void onColorsChanged(){}public void onScreenChanged(){if(!loading)invalidator.run();}
         };
         try {emulator=GhosttyTerminalEmulator.forOutput(output,cols,rows,Math.max(1,Math.round(renderer.mFontWidth)),renderer.mFontLineSpacing,4096,CLIENT,palette);}
         catch(RuntimeException | LinkageError failure){initializationError=com.termux.terminal.LumaLang.tr("libghostty 预览初始化失败，请重新打开","libghostty preview initialization failed; please reopen");invalidator.run();return;}
         byte[] hide="\033[?25l".getBytes(StandardCharsets.UTF_8);emulator.append(hide,hide.length);feedOffset=0;
+        firstChunkNotified=false;lastLoadInvalidatedAt=0L;
         loading=text!=null&&text.ansi.length>0;if(loading)handler.post(feedMore);
     }
     private final Runnable feedMore=()->{
         if(closed||!loading||emulator==null)return;int count=Math.min(chunk.length,text.ansi.length-feedOffset);
         System.arraycopy(text.ansi,feedOffset,chunk,0,count);emulator.append(chunk,count);feedOffset+=count;
-        if(feedOffset<text.ansi.length)TerminalPreviewScreen.this.handler.post(TerminalPreviewScreen.this.feedMore);else{loading=false;topRow=-emulator.getViewportHistoryRows();emulator.setViewportTopRow(topRow);}
-        invalidator.run();
+        if(feedOffset<text.ansi.length){
+            TerminalPreviewScreen.this.handler.post(TerminalPreviewScreen.this.feedMore);
+            long now=SystemClock.uptimeMillis();
+            if(!firstChunkNotified||now-lastLoadInvalidatedAt>=LOAD_INVALIDATE_INTERVAL_MS){
+                firstChunkNotified=true;lastLoadInvalidatedAt=now;invalidator.run();
+            }
+        }else{
+            loading=false;topRow=-emulator.getViewportHistoryRows();emulator.setViewportTopRow(topRow);
+            firstChunkNotified=true;lastLoadInvalidatedAt=SystemClock.uptimeMillis();invalidator.run();
+        }
     };
     public RectF bounds(){checkOwner();return new RectF(frame);}
     public int lineHeight(){checkOwner();return renderer.mFontLineSpacing;}

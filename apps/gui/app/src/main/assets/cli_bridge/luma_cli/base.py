@@ -317,14 +317,43 @@ class Session:
         try: self._save_delivery_state(phase)
         except DeliveryPersistenceError: pass
 
+    def _is_settled_uncertain(self, ident):
+        if self.config.get("settledUnknown", {}).get(ident):
+            return True
+        delivery = self.config.get("deliveries", {}).get(ident)
+        return bool(delivery and delivery.get("settled"))
+
+    def settle_uncertain(self, ident):
+        with self.lock:
+            if not ident:
+                return
+            receipts = self.config.setdefault("receipts", {})
+            if receipts.get(ident) in ("accepted", "rejected"):
+                return
+            if ident in receipts:
+                self.config.setdefault("settledUnknown", {})[ident] = True
+            delivery = self.config.get("deliveries", {}).get(ident)
+            if delivery and delivery.get("state") in ("dispatching", "unknown"):
+                delivery["settled"] = True
+            try:
+                self._checkpoint_native_evidence("settle-uncertain")
+            finally:
+                self.seq += 1
+                self.delivery_wake.set()
+
     def receipt(self, ident, value, *, require_durable=False):
         with self.lock:
             receipts = self.config.setdefault("receipts", {})
             if receipts.get(ident) == "accepted" and value != "accepted": return
             receipts[ident] = value
+            if value in ("accepted", "rejected"):
+                settled = self.config.get("settledUnknown")
+                if isinstance(settled, dict):
+                    settled.pop(ident, None)
             delivery = self.config.get("deliveries", {}).get(ident)
             if delivery and value in ("accepted", "rejected"):
                 delivery["state"] = value
+                delivery.pop("settled", None)
             try:
                 if require_durable: self._save_delivery_state("receipt")
                 else: self._checkpoint_native_evidence("receipt")
@@ -593,7 +622,10 @@ class Session:
                     deliveries = self.config.get("deliveries", {})
                     if self.delivery_storage_error is not None: continue
                     if not self.data["connected"] or self.data.get("connecting"): continue
-                    if not self.correlated_delivery and any(v in ("unknown", "pending") for v in self.config.get("receipts", {}).values()): continue
+                    if not self.correlated_delivery and any(
+                        v in ("unknown", "pending") and not (v == "unknown" and self._is_settled_uncertain(k))
+                        for k, v in self.config.get("receipts", {}).items()
+                    ): continue
                     caps = self.data["capabilities"]
                     def runnable(value):
                         if value["state"] != "queued": return False
@@ -740,7 +772,10 @@ class Session:
                     if self.delivery_storage_error is not None: self._save_delivery_state("recovery")
                 return result
             if name == "configure":
-                if any(d["state"] in ("queued", "dispatching", "unknown") for d in self.config.get("deliveries", {}).values()):
+                if any(
+                    d["state"] in ("queued", "dispatching", "unknown") and not (d["state"] == "unknown" and self._is_settled_uncertain(k))
+                    for k, d in self.config.get("deliveries", {}).items()
+                ):
                     raise Rejected(tr("请等待已提交消息结算后修改设置", "Wait for submitted messages to settle before changing settings"))
                 return self.configure(data)
             if name == "rename": return self.rename(data["title"])
@@ -768,9 +803,15 @@ class Session:
             if self.pending_requests or self.data["requests"]: return tr("原生请求等待处理", "Native request is awaiting user action")
             if self.data["queue"] or self.data.get("nativeQueuePending"): return tr("原生队列尚未清空", "Native queue is not empty")
             if self.delivery_storage_error is not None: return tr("发送账本尚未可靠保存", "Delivery ledger has not been reliably saved")
-            if any(d["state"] in ("queued", "dispatching", "unknown", "pending") for d in self.config.get("deliveries", {}).values()):
+            if any(
+                d["state"] in ("queued", "dispatching", "unknown", "pending") and not (d["state"] == "unknown" and self._is_settled_uncertain(k))
+                for k, d in self.config.get("deliveries", {}).items()
+            ):
                 return tr("后台消息尚未结算", "Background messages have not settled")
-            if any(r in ("unknown", "pending", "dispatching", "queued") for r in self.config.get("receipts", {}).values()):
+            if any(
+                r in ("unknown", "pending", "dispatching", "queued") and not (r == "unknown" and self._is_settled_uncertain(k))
+                for k, r in self.config.get("receipts", {}).items()
+            ):
                 return tr("原生送达尚未确认", "Native delivery receipt has not been confirmed")
             terminal = {"succeeded", "completed", "failed", "cancelled", "closed", "aborted"}
             if any(a.get("status") not in terminal for a in self.subagents.values()): return tr("子代理尚未确认结束", "Subagent has not been confirmed finished")

@@ -146,6 +146,49 @@ public final class EnvironmentPreservationCheck {
             &&Files.isDirectory(healRoot.resolve("run/lock"))
             &&Files.isSymbolicLink(healRoot.resolve("etc/mtab"))
             &&Files.readString(healRoot.resolve("etc/pip.conf")).contains("break-system-packages"),"Debian runtime skeleton, mtab, pip.conf, and user npmrc preservation verified");
+        check(LinuxEnvironment.isChinaMainlandTimezone("Asia/Shanghai")
+            &&LinuxEnvironment.isChinaMainlandTimezone("Asia/Urumqi")
+            &&!LinuxEnvironment.isChinaMainlandTimezone("Asia/Hong_Kong")
+            &&!LinuxEnvironment.isChinaMainlandTimezone("Asia/Singapore")
+            &&!LinuxEnvironment.isChinaMainlandTimezone("America/New_York"),"mainland China timezone predicate matches only CN timezones");
+        Path mirrorRoot=base.resolve("mirror-sync");
+        write(mirrorRoot.resolve("etc/debian_version"),"13.7\n");
+        write(mirrorRoot.resolve("etc/apt/sources.list"),
+            "deb https://deb.debian.org/debian trixie main\n"+
+            "deb https://deb.debian.org/debian trixie-updates main\n"+
+            "deb https://deb.debian.org/debian-security trixie-security main\n");
+        write(mirrorRoot.resolve("root/.npmrc"),"user-kept=true\n");
+        RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),true);
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.aliyun.com/debian")
+            &&Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.aliyun.com/debian-security")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.aliyun.com/pypi/simple/")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("break-system-packages = true")
+            &&Files.readString(mirrorRoot.resolve("etc/uv/uv.toml")).contains("mirrors.aliyun.com/pypi/simple/")
+            &&Files.readString(mirrorRoot.resolve("usr/local/etc/npmrc")).contains("registry.npmmirror.com")
+            &&Files.readString(mirrorRoot.resolve("etc/npmrc")).contains("registry.npmmirror.com")
+            &&Files.readString(mirrorRoot.resolve("root/.config/pnpm/config.yaml")).contains("registry.npmmirror.com")
+            &&Files.readString(mirrorRoot.resolve("root/.bunfig.toml")).contains("registry.npmmirror.com")
+            &&Files.readString(mirrorRoot.resolve("root/.cargo/config.toml")).contains("rsproxy.cn")
+            &&Files.readString(mirrorRoot.resolve("etc/gemrc")).contains("mirrors.aliyun.com/rubygems/")
+            &&Files.readString(mirrorRoot.resolve("root/.npmrc")).equals("user-kept=true\n"),"China timezone adapts all package mirrors while keeping user .npmrc");
+        RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),false);
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("deb.debian.org/debian")
+            &&!Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.aliyun.com")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("break-system-packages = true")
+            &&!Files.exists(mirrorRoot.resolve("etc/uv/uv.toml"))
+            &&!Files.exists(mirrorRoot.resolve("usr/local/etc/npmrc"))
+            &&!Files.exists(mirrorRoot.resolve("etc/npmrc"))
+            &&Files.readString(mirrorRoot.resolve("root/.config/pnpm/config.yaml")).equals("packageImportMethod: copy\n")
+            &&!Files.exists(mirrorRoot.resolve("root/.bunfig.toml"))
+            &&!Files.exists(mirrorRoot.resolve("root/.cargo/config.toml"))
+            &&!Files.exists(mirrorRoot.resolve("etc/gemrc")),"non-China timezone reverts managed mirrors cleanly");
+        write(mirrorRoot.resolve("etc/apt/sources.list"),"deb https://custom.example/debian trixie main\n");
+        write(mirrorRoot.resolve("etc/pip.conf"),"[global]\nindex-url = https://custom.example/simple\n");
+        write(mirrorRoot.resolve("root/.config/pnpm/config.yaml"),"packageImportMethod: copy\nregistry: https://custom.example/\n");
+        RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),true);
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).equals("deb https://custom.example/debian trixie main\n")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).equals("[global]\nindex-url = https://custom.example/simple\n")
+            &&Files.readString(mirrorRoot.resolve("root/.config/pnpm/config.yaml")).equals("packageImportMethod: copy\nregistry: https://custom.example/\n"),"custom user mirror configs are never overwritten");
         System.out.println("ALL PASS "+checks+" environment preservation checks");
     }
 }

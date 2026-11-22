@@ -81,6 +81,8 @@ class Peer:
         key = str(uuid.uuid4())
         waiter = queue.Queue(maxsize=1)
         with self.lock:
+            if self.closed:
+                raise ConnectionError(tr("CLI 进程已退出，请重新连接", "CLI process has exited; please reconnect"))
             self.pending[key] = waiter
         try:
             if dialect == "pi":
@@ -100,9 +102,14 @@ class Peer:
             while True:
                 started = time.monotonic()
                 try:
-                    response = waiter.get(timeout=min(remaining, 0.25) if remaining is not None else None)
+                    wait_timeout = min(remaining, 0.25) if remaining is not None else 1.0
+                    response = waiter.get(timeout=wait_timeout)
                     break
                 except queue.Empty:
+                    if remaining is None:
+                        if self.closed or self.proc.poll() is not None:
+                            raise ConnectionError(tr("CLI 进程已退出，请重新连接", "CLI process has exited; please reconnect")) from None
+                        continue
                     if not pause_for_user or not self.waiting_for_user(): remaining -= time.monotonic() - started
                     if remaining <= 0:
                         error = TimeoutError(f"{method} " + tr("未收到确认；不要自动重发", "did not receive acknowledgment; do not resend automatically"))
@@ -193,9 +200,22 @@ class Peer:
 
         for thread in (getattr(self, "reader_thread", None), self.stderr_thread):
             if thread and thread is not threading.current_thread(): thread.join(timeout=2)
-        if self.proc.stdin and not self.proc.stdin.closed: self.proc.stdin.close()
+        first_error = None
+        if self.proc.stdin and not self.proc.stdin.closed:
+            try:
+                self.proc.stdin.close()
+            except OSError as exc:
+                first_error = exc
         for stream, thread in ((self.proc.stdout, getattr(self, "reader_thread", None)), (self.proc.stderr, self.stderr_thread)):
             if stream and not stream.closed:
                 if thread and thread is not threading.current_thread() and thread.is_alive():
-                    raise OSError(tr("CLI 输出读取线程尚未退出", "CLI stdout reader thread has not exited"))
-                stream.close()
+                    if first_error is None:
+                        first_error = OSError(tr("CLI 输出读取线程尚未退出", "CLI stdout reader thread has not exited"))
+                    continue
+                try:
+                    stream.close()
+                except OSError as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error

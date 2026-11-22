@@ -221,6 +221,7 @@ class SessionActivityPolicyTest {
         ))
         assertEquals(10_000L, record.lastActiveAt)
         now = 11_000L
+        record.submissions.single().state = "accepted"
         assertTrue(activity.reconcile(
             record, connected = true, loading = false, hydrating = false,
             activeTurnId = null, messages = listOf(ConversationItem("fresh-reply", "assistant", "New reply")),
@@ -229,6 +230,89 @@ class SessionActivityPolicyTest {
         assertEquals(11_000L, record.lastActiveAt)
         assertTrue(record.unread)
         assertTrue(activity.lastTurnCompleted)
+    }
+
+    @Test fun dormantSessionWithHistoricalReplyAndUndispatchedLocalSubmissionDoesNotFalseComplete() {
+        var now = 20_000L
+        val clock = SessionActivityClock(nowMs = { now })
+        val record = SessionRecord("dormant", "History", "noroot", "/workspace", lastActiveAt = 100L)
+        val activity = SessionActivityState(record)
+        val historical = listOf(ConversationItem("old-reply", "assistant", "Earlier answer"))
+
+        assertFalse(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = historical, requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        ))
+        activity.forgetHistory()
+
+        now = 21_000L
+        record.submissions += StoredSubmission("queued-local", "Next question", state = "local")
+        assertTrue(activity.reconcile(
+            record, connected = false, loading = true, hydrating = true,
+            activeTurnId = null, messages = emptyList(), requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        ))
+        assertEquals(21_000L, record.lastActiveAt)
+        assertFalse(activity.lastTurnCompleted)
+        assertFalse(record.unread)
+
+        now = 22_000L
+        assertFalse(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = historical, requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        ))
+        assertEquals(21_000L, record.lastActiveAt)
+        assertFalse(activity.lastTurnCompleted)
+        assertFalse(record.unread)
+
+        now = 23_000L
+        record.submissions.single().state = "accepted"
+        assertTrue(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null,
+            messages = historical + listOf(
+                ConversationItem("queued-local", "user", "Next question"),
+                ConversationItem("new-reply", "assistant", "Fresh answer"),
+            ),
+            requests = emptyList(), viewingInForeground = false, clock = clock,
+        ))
+        assertEquals(23_000L, record.lastActiveAt)
+        assertTrue(activity.lastTurnCompleted)
+        assertTrue(record.unread)
+    }
+
+    @Test fun acceptedSubmissionWithoutNewAssistantReplyAfterUserMessageDoesNotFalseComplete() {
+        var now = 30_000L
+        val clock = SessionActivityClock(nowMs = { now })
+        val record = SessionRecord("dormant2", "History", "noroot", "/workspace", lastActiveAt = 100L)
+        val activity = SessionActivityState(record)
+        val historical = listOf(ConversationItem("old-reply", "assistant", "Earlier answer"))
+        activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null, messages = historical, requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        )
+        activity.forgetHistory()
+
+        now = 31_000L
+        record.submissions += StoredSubmission("accepted-sub", "Question", state = "accepted")
+        assertTrue(activity.reconcile(
+            record, connected = false, loading = true, hydrating = true,
+            activeTurnId = null, messages = emptyList(), requests = emptyList(),
+            viewingInForeground = false, clock = clock,
+        ))
+
+        now = 32_000L
+        assertFalse(activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = null,
+            messages = historical + ConversationItem("accepted-sub", "user", "Question"),
+            requests = emptyList(), viewingInForeground = false, clock = clock,
+        ))
+        assertFalse(activity.lastTurnCompleted)
+        assertFalse(record.unread)
     }
 
     @Test fun formatSessionActivityTimeUses24HourYesterdayWeekdayAndCalendarDates() {

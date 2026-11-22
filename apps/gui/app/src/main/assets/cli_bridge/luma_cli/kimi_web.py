@@ -39,6 +39,14 @@ def _web_tool_kind(name, display):
 def _web_tool_label(name, args, display):
     disp = display if isinstance(display, dict) else {}
     inp = args if isinstance(args, dict) else {}
+    if _web_tool_kind(name, disp) == "execute":
+        skip = (name or "").lower()
+        for key in ("displaySummary", "toolSummary", "description", "summary"):
+            val = inp.get(key)
+            if isinstance(val, str):
+                cleaned = " ".join(val.split()).strip()
+                if cleaned and cleaned.lower() != skip:
+                    return cleaned
     label = (
         disp.get("command")
         or inp.get("command")
@@ -311,10 +319,23 @@ class KimiWebSession(Session):
         tool_frames = {}
         agent_anchors = {}
         turn_errors = {t["error"] for t in snapshot["items"] if t.get("kind") == "turn" and t.get("error")}
-        attachments = {a["attachmentId"]: a for a in snapshot.get("attachments", [])}
-        prompts = {p["promptId"]: p.get("content") or [] for p in snapshot.get("prompts", [])}
+        attachments = {
+            a["attachmentId"]: a
+            for a in snapshot.get("attachments", []) or []
+            if isinstance(a, dict) and isinstance(a.get("attachmentId"), str) and a.get("attachmentId")
+        }
+        prompts = {
+            p["promptId"]: p.get("content") or []
+            for p in snapshot.get("prompts", []) or []
+            if isinstance(p, dict) and p.get("promptId")
+        }
         def media(ids):
-            return [r for ident in ids or [] for r in self.attachment(attachments[ident])]
+            out = []
+            for ident in ids or []:
+                raw = attachments.get(ident)
+                if raw is not None:
+                    out.extend(self.attachment(raw))
+            return out
         def user(ident, body, ids, turn_id):
             resources = media(ids)
             for part in prompts.get(ident.removeprefix(prefix) if prefix else ident, []):

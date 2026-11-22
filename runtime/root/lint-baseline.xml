@@ -2,55 +2,6 @@
 <issues format="6" by="lint 9.5.0" type="baseline" client="gradle" dependencies="false" name="AGP (9.5.0)" variant="all" version="9.5.0">
 
     <issue
-        id="IntentReset"
-        message="Calling `setType` after setting URI in `Intent` constructor will clear the data: Call `setDataAndType` instead?"
-        errorLine1="                fallback.setType(&quot;image/*&quot;);"
-        errorLine2="                         ~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/root/MainActivity.java"
-            line="659"
-            column="26"/>
-        <location
-            file="src/main/java/io/github/modao7067/luma/root/MainActivity.java"
-            line="658"
-            column="66"
-            message="Originally set here"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33 (current min is 31): `android.app.Activity#getOnBackInvokedDispatcher`"
-        errorLine1="        if(backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);"
-        errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/root/MainActivity.java"
-            line="762"
-            column="31"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33 (current min is 31): `android.window.OnBackInvokedDispatcher#unregisterOnBackInvokedCallback`"
-        errorLine1="        if(backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);"
-        errorLine2="                                                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/root/MainActivity.java"
-            line="762"
-            column="60"/>
-    </issue>
-
-    <issue
-        id="NewApi"
-        message="Call requires API level 33, or core library desugaring (current min is 31): `java.io.InputStream#transferTo`"
-        errorLine1="                    try(InputStream input=app.getAssets().open(&quot;root-keeper/&quot;+name);OutputStream out=new FileOutputStream(target)){input.transferTo(out);}"
-        errorLine2="                                                                                                                                         ~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/modao7067/luma/root/RootBackend.java"
-            line="148"
-            column="138"/>
-    </issue>
-
-    <issue
         id="ViewConstructor"
         message="Custom view `RootTerminalHeader` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
         errorLine1="final class RootTerminalHeader extends LinearLayout {"

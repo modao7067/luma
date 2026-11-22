@@ -166,12 +166,14 @@ class AgentBrowser(private val context: Context) {
         }
     }
 
+    internal class UserTakeoverException(message: String) : CancellationException(message)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val tokens = ConcurrentHashMap<String, String>()
     private val activeTabByOwner = ConcurrentHashMap<String, String>()
     private val foregroundTabByOwner = ConcurrentHashMap<String, String>()
-    private val activeAgentJobs = ConcurrentHashMap<String, Job>()
+    private val activeAgentJobs = ConcurrentHashMap<String, MutableSet<Job>>()
     private val dir = File(context.filesDir, "${io.github.modao7067.luma.gui.GuiProduct.agentRuntimePath()}/browser").apply {
         mkdirs()
         Os.chmod(absolutePath, 448)
@@ -184,19 +186,46 @@ class AgentBrowser(private val context: Context) {
     @Volatile private var contentViewportWidthPx: Int = context.resources.displayMetrics.widthPixels.coerceAtLeast(360)
     @Volatile private var contentViewportHeightPx: Int = (context.resources.displayMetrics.heightPixels * 0.84f).roundToInt().coerceAtLeast(480)
 
+    private fun trackAgentJob(owner: String, job: Job) {
+        synchronized(activeAgentJobs) {
+            activeAgentJobs.getOrPut(owner) { linkedSetOf() }.add(job)
+        }
+    }
+
+    private fun untrackAgentJob(owner: String, job: Job) {
+        synchronized(activeAgentJobs) {
+            activeAgentJobs[owner]?.let { set ->
+                set.remove(job)
+                if (set.isEmpty()) activeAgentJobs.remove(owner)
+            }
+        }
+    }
+
+    private fun cancelAgentJobs(owner: String, cause: CancellationException) {
+        val jobs = synchronized(activeAgentJobs) { activeAgentJobs.remove(owner)?.toList().orEmpty() }
+        jobs.forEach { it.cancel(cause) }
+    }
+
     init {
         installAssets()
-        if (manifest.baseFile.exists()) runCatching {
+        val manifestFile = File(context.filesDir, "browser-tabs.json")
+        if (manifestFile.exists() || File("${manifestFile.path}.bak").exists()) runCatching {
             JSONObject(String(manifest.readFully())).optJSONArray("tabs")?.objects()?.forEach {
                 val url = it.optString("url")
                 if (BrowserPolicy.allowedUrl(url)) newTab(it.getString("owner"), url, it.getString("id"))
             }
         }
         scope.launch(Dispatchers.IO) {
-            while (isActive) {
-                val socket = server.accept()
+            while (isActive && !server.isClosed) {
+                val socket = try {
+                    server.accept()
+                } catch (_: java.io.IOException) {
+                    if (server.isClosed || !isActive) break
+                    delay(100)
+                    continue
+                }
                 if (!clients.tryAcquire()) {
-                    socket.close()
+                    runCatching { socket.close() }
                     continue
                 }
                 launch {
@@ -244,7 +273,7 @@ class AgentBrowser(private val context: Context) {
         if (owner != null) {
             activeTabFor(owner)?.let { foregroundTabByOwner[owner] = it.id }
             if (!allowLiveAgent.value) {
-                activeAgentJobs.remove(owner)?.cancel(CancellationException(tr("用户已进入浏览器接管操作", "User took over browser control")))
+                cancelAgentJobs(owner, UserTakeoverException(tr("用户已进入浏览器接管操作", "User took over browser control")))
                 agentOperatingSessions[owner] = false
             }
         }
@@ -274,63 +303,51 @@ class AgentBrowser(private val context: Context) {
         }
     }
 
-    private suspend fun serve(socket: java.net.Socket) {
-        socket.use {
-            socket.soTimeout = 5000
-            val response = try {
-                val input = socket.getInputStream()
-                val bytes = java.io.ByteArrayOutputStream()
-                while (true) {
-                    val value = input.read()
-                    require(value >= 0) { tr("请求未完成", "Incomplete request") }
-                    if (value == 10) break
-                    require(bytes.size() < 262144) { tr("请求过大", "Request payload too large") }
-                    bytes.write(value)
-                }
-                val request = JSONObject(bytes.toString("UTF-8"))
-                val owner = tokens[request.optString("token")] ?: error(tr("浏览器接口未授权", "Unauthorized browser API token"))
-                withTimeout(25000) {
-                    withContext(Dispatchers.Main) {
-                        val action = request.optString("action")
-                        val fgBlocked = if (foregroundSession.value != owner || allowLiveAgent.value || action == "tabs") {
-                            false
-                        } else if (action == "open" && request.optBoolean("background", false)) {
-                            false
-                        } else {
-                            val explicitTab = request.optString("tab")
-                            val fgTab = foregroundTabByOwner[owner] ?: activeTabByOwner[owner]
-                            explicitTab.isEmpty() || explicitTab == "\$active" || explicitTab == fgTab
-                        }
-                        if (fgBlocked) {
-                            return@withContext obj(
-                                "ok" to false,
-                                "code" to "USER_CONTROL_ACTIVE",
-                                "error" to tr("用户正在前台查看或操作该标签页；请等待用户返回会话，或使用 open --background / --tab 操作后台标签页", "User is actively viewing this tab in the foreground; wait until they return to the session, or use open --background / --tab"),
-                                "dispatched" to false,
-                            )
-                        }
-                        val currentJob = coroutineContext[Job]
-                        val tracksForeground = foregroundSession.value != owner
-                        if (action != "tabs" && currentJob != null && tracksForeground) activeAgentJobs[owner] = currentJob
-                        try {
-                            execute(owner, request)
-                        } finally {
-                            if (currentJob != null && tracksForeground) activeAgentJobs.remove(owner, currentJob)
-                        }
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                obj(
-                    "ok" to false,
-                    "code" to "USER_CONTROL_ACTIVE",
-                    "error" to (cancelled.message ?: tr("操作已被前台用户接管中断", "Action interrupted by foreground user takeover")),
-                    "dispatched" to false,
-                )
-            } catch (e: Exception) {
-                obj("ok" to false, "error" to (e.message ?: tr("浏览器操作失败", "Browser action failed")))
+    private fun readRequestLine(socket: java.net.Socket, maxBytes: Int = 262144, timeoutMs: Long = 3_000L): String {
+        val input = socket.getInputStream()
+        val bytes = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        val deadlineNs = System.nanoTime() + timeoutMs * 1_000_000L
+        while (true) {
+            val remainingNs = deadlineNs - System.nanoTime()
+            if (remainingNs <= 0L) throw java.net.SocketTimeoutException(tr("请求读取超时", "Request read timed out"))
+            val remainingMs = ((remainingNs + 999_999L) / 1_000_000L).coerceAtLeast(1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            socket.soTimeout = remainingMs
+            val read = input.read(buffer)
+            if (read < 0) throw IllegalArgumentException(tr("请求未完成", "Incomplete request"))
+            for (i in 0 until read) {
+                val value = buffer[i].toInt() and 0xFF
+                if (value == 10) return bytes.toString("UTF-8")
+                require(bytes.size() < maxBytes) { tr("请求过大", "Request payload too large") }
+                bytes.write(value)
             }
-            socket.getOutputStream().write((response.toString() + "\n").toByteArray())
         }
+    }
+
+    private suspend fun serve(socket: java.net.Socket) {
+        serveBrowserSocket(
+            socket = socket,
+            dispatcher = Dispatchers.Main,
+            timeoutMs = 25000L,
+            readRequest = { readRequestLine(it) },
+            resolveOwner = { request -> tokens[request.optString("token")] ?: error(tr("浏览器接口未授权", "Unauthorized browser API token")) },
+            isForegroundBlocked = { owner, request ->
+                val action = request.optString("action")
+                if (foregroundSession.value != owner || allowLiveAgent.value || action == "tabs") {
+                    false
+                } else if (action == "open" && request.optBoolean("background", false)) {
+                    false
+                } else {
+                    val explicitTab = request.optString("tab")
+                    val fgTab = foregroundTabByOwner[owner] ?: activeTabByOwner[owner]
+                    explicitTab.isEmpty() || explicitTab == "\$active" || explicitTab == fgTab
+                }
+            },
+            shouldTrackForeground = { owner, action -> action != "tabs" && foregroundSession.value != owner },
+            trackJob = ::trackAgentJob,
+            untrackJob = ::untrackAgentJob,
+            runAction = { owner, request, markDispatched -> execute(owner, request, markDispatched) },
+        )
     }
 
     private fun writeBinding(file: File, text: String) {
@@ -347,18 +364,18 @@ class AgentBrowser(private val context: Context) {
     }
 
     fun bind(session: String, threadId: String? = null): String {
-        require(session.matches(Regex("[a-zA-Z0-9_-]{1,128}")))
+        require(session.matches(SESSION_ID_PATTERN))
         val file = File(dir, "$session.json")
         val token = if (file.isFile) runCatching { JSONObject(file.readText()).getString("token") }.getOrNull() else null
         val capability = token ?: ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
         tokens[capability] = session
-        writeBinding(file, obj("host" to "127.0.0.1", "port" to server.localPort, "token" to capability).toString())
-        if (threadId != null) {
-            require(threadId.matches(Regex("[a-zA-Z0-9_-]{1,128}")))
+        val payload = obj("host" to "127.0.0.1", "port" to server.localPort, "token" to capability).toString()
+        writeBinding(file, payload)
+        if (threadId != null && threadId.matches(THREAD_ID_PATTERN)) {
             val alias = File(dir, "threads/$threadId.json")
             alias.parentFile!!.mkdirs()
             Os.chmod(alias.parentFile!!.absolutePath, 448)
-            writeBinding(alias, file.readText())
+            writeBinding(alias, payload)
         }
         return io.github.modao7067.luma.gui.GuiProduct.runtimePath(context.filesDir, "${io.github.modao7067.luma.gui.GuiProduct.agentRelative()}/browser/$session.json")
     }
@@ -370,13 +387,22 @@ class AgentBrowser(private val context: Context) {
             } else {
                 File(context.filesDir, "runtime/bin/luma-browser")
             }
-            target.parentFile!!.mkdirs()
+            val parent = target.parentFile!!
+            parent.mkdirs()
             val raw = context.assets.open("browser/$name").bufferedReader().use { it.readText() }
             val text = raw
                 .replace("/opt/luma/agent", io.github.modao7067.luma.gui.GuiProduct.runtimePath(context.filesDir, io.github.modao7067.luma.gui.GuiProduct.agentRelative()))
                 .replace("usable inside NoRoot", "usable inside the current Linux environment")
-            target.writeText(text)
-            Os.chmod(target.absolutePath, if (name == "SKILL.md") 384 else 448)
+            val mode = if (name == "SKILL.md") 384 else 448
+            val temp = File(parent, ".${target.name}.${UUID.randomUUID()}.tmp")
+            try {
+                temp.writeText(text)
+                Os.chmod(temp.absolutePath, mode)
+                if (!temp.renameTo(target)) throw java.io.IOException("Failed to install $name")
+            } catch (e: Exception) {
+                temp.delete()
+                throw e
+            }
         }
     }
 
@@ -747,9 +773,29 @@ class AgentBrowser(private val context: Context) {
         persist()
     }
 
-    fun closeOwned(owner: String) {
+    private fun safeOwnerPrefix(owner: String): String =
+        owner.filter { it.isLetterOrDigit() || it == '_' || it == '-' }.ifEmpty { "tab" }
+
+    fun closeOwned(owner: String, threadId: String? = null) {
+        cancelAgentJobs(owner, CancellationException(tr("会话已归档", "Session archived")))
         tabs.filter { it.owner == owner }.toList().forEach(::close)
         activeTabByOwner.remove(owner)
+        foregroundTabByOwner.remove(owner)
+        agentOperatingSessions.remove(owner)
+        agentOperationSeq.remove(owner)
+        agentInFlightCount.remove(owner)
+        tokens.entries.filter { it.value == owner }.forEach { tokens.remove(it.key, owner) }
+        if (foregroundSession.value == owner) foregroundSession.value = null
+        runCatching {
+            if (owner.matches(SESSION_ID_PATTERN)) File(dir, "$owner.json").delete()
+            if (threadId != null && threadId.matches(THREAD_ID_PATTERN)) File(dir, "threads/$threadId.json").delete()
+            val prefix = "${safeOwnerPrefix(owner)}-"
+            dir.listFiles()?.forEach { candidate ->
+                if (candidate.isFile && candidate.name.startsWith(prefix) && candidate.name.endsWith(".png")) {
+                    candidate.delete()
+                }
+            }
+        }
     }
 
     fun navigate(tab: Tab, url: String, selectActive: Boolean = true) {
@@ -867,7 +913,9 @@ class AgentBrowser(private val context: Context) {
     }
 
     private suspend fun awaitPageSettled(tab: Tab, maxWaitMs: Long = 4200L) {
-        val deadline = SystemClock.uptimeMillis() + maxWaitMs.coerceIn(150L, 10_000L)
+        val clamped = maxWaitMs.coerceIn(0L, 10_000L)
+        if (clamped == 0L) return
+        val deadline = SystemClock.uptimeMillis() + clamped
         delay(90)
         while (SystemClock.uptimeMillis() < deadline) {
             if (tab.closed || tab.crashed.value || tab.error.value != null) return
@@ -1179,7 +1227,7 @@ class AgentBrowser(private val context: Context) {
         return out to annotations
     }
 
-    private suspend fun execute(owner: String, request: JSONObject): JSONObject {
+    private suspend fun execute(owner: String, request: JSONObject, onMutatingDispatch: () -> Unit = {}): JSONObject {
         BrowserProtocol.validate(request)
         val action = request.getString("action")
         if (action == "tabs") {
@@ -1194,12 +1242,13 @@ class AgentBrowser(private val context: Context) {
         agentInFlightCount[owner] = (agentInFlightCount[owner] ?: 0) + 1
         try {
             if (action == "open") {
+                onMutatingDispatch()
                 val tab = newTab(owner, request.getString("url"), selectActive = !bgOpen)
                 tab.inFlightCount++
                 syncTabLifecycle()
                 try {
                     if (request.optBoolean("waitAfter", false)) {
-                        awaitPageSettled(tab, request.optLong("settleMs", 5000L))
+                        awaitPageSettled(tab, request.optLong("settleMs", 5000L).coerceIn(0L, 10_000L))
                     }
                     if (!bgOpen) {
                         scope.launch { refreshPreview(tab, force = true, bumpRevision = true) }
@@ -1227,9 +1276,15 @@ class AgentBrowser(private val context: Context) {
             syncTabLifecycle()
             try {
                 val result = if (action != "wait" && action != "batch") {
-                    tab.lock.withLock { executeStep(tab, request) }
+                    tab.lock.withLock {
+                        if (action == "close" || action in BrowserProtocol.mutatingActions) onMutatingDispatch()
+                        executeStep(tab, request)
+                    }
                 } else {
-                    runLockedBrowserWorkflow(tab.lock, request, { step -> executeStep(tab, step) })
+                    runLockedBrowserWorkflow(tab.lock, request, { step ->
+                        if (step.optString("action") in BrowserProtocol.mutatingActions) onMutatingDispatch()
+                        executeStep(tab, step)
+                    })
                 }
                 if (action == "close") {
                     if (activeTabFor(owner) == null) {
@@ -1237,7 +1292,7 @@ class AgentBrowser(private val context: Context) {
                     }
                 } else if (action != "wait") {
                     if (request.optBoolean("waitAfter", false) && result.optBoolean("ok") && tab.jsDialog.value == null) {
-                        awaitPageSettled(tab, request.optLong("settleMs", 4200L))
+                        awaitPageSettled(tab, request.optLong("settleMs", 4200L).coerceIn(0L, 10_000L))
                         result.put("tab", info(tab))
                     }
                     if (request.optBoolean("returnRead", false) && result.optBoolean("ok") && !tab.loading.value && tab.error.value == null && tab.jsDialog.value == null) {
@@ -1446,7 +1501,7 @@ class AgentBrowser(private val context: Context) {
                 } else {
                     rawBitmap to null
                 }
-                val file = File(dir, "${UUID.randomUUID()}.png")
+                val file = File(dir, "${safeOwnerPrefix(tab.owner)}-${UUID.randomUUID()}.png")
                 val outW = outBitmap.width
                 val outH = outBitmap.height
                 withContext(Dispatchers.IO) {
@@ -1577,7 +1632,75 @@ class AgentBrowser(private val context: Context) {
     }
 
     companion object {
+        private val SESSION_ID_PATTERN = Regex("[a-zA-Z0-9_-]{1,128}")
+        private val THREAD_ID_PATTERN = Regex("[a-zA-Z0-9_-]{1,131}")
         private const val DESKTOP_USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    }
+}
+
+internal suspend fun serveBrowserSocket(
+    socket: java.net.Socket,
+    dispatcher: CoroutineDispatcher,
+    timeoutMs: Long,
+    readRequest: (java.net.Socket) -> String,
+    resolveOwner: (JSONObject) -> String,
+    isForegroundBlocked: (String, JSONObject) -> Boolean,
+    shouldTrackForeground: (String, String) -> Boolean,
+    trackJob: (String, Job) -> Unit,
+    untrackJob: (String, Job) -> Unit,
+    runAction: suspend (String, JSONObject, () -> Unit) -> JSONObject,
+) {
+    socket.use {
+        var mayHaveDispatched = false
+        val response = try {
+            val line = readRequest(socket)
+            val request = JSONObject(line)
+            val owner = resolveOwner(request)
+            withTimeout(timeoutMs) {
+                withContext(dispatcher) {
+                    if (isForegroundBlocked(owner, request)) {
+                        return@withContext obj(
+                            "ok" to false,
+                            "code" to "USER_CONTROL_ACTIVE",
+                            "error" to tr("用户正在前台查看或操作该标签页；请等待用户返回会话，或使用 open --background / --tab 操作后台标签页", "User is actively viewing this tab in the foreground; wait until they return to the session, or use open --background / --tab"),
+                            "dispatched" to false,
+                        )
+                    }
+                    val action = request.optString("action")
+                    coroutineScope {
+                        val currentJob = coroutineContext[Job]
+                        val tracksForeground = shouldTrackForeground(owner, action)
+                        if (currentJob != null && tracksForeground) trackJob(owner, currentJob)
+                        try {
+                            runAction(owner, request) { mayHaveDispatched = true }
+                        } finally {
+                            if (currentJob != null && tracksForeground) untrackJob(owner, currentJob)
+                        }
+                    }
+                }
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            obj(
+                "ok" to false,
+                "code" to "DEADLINE_EXCEEDED",
+                "error" to (timeout.message ?: tr("浏览器操作超时", "Browser action timed out")),
+                "dispatched" to mayHaveDispatched,
+            )
+        } catch (takeover: AgentBrowser.UserTakeoverException) {
+            currentCoroutineContext().ensureActive()
+            obj(
+                "ok" to false,
+                "code" to "USER_CONTROL_ACTIVE",
+                "error" to (takeover.message ?: tr("操作已被前台用户接管中断", "Action interrupted by foreground user takeover")),
+                "dispatched" to mayHaveDispatched,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            obj("ok" to false, "error" to (e.message ?: tr("浏览器操作失败", "Browser action failed")))
+        }
+        socket.getOutputStream().write((response.toString() + "\n").toByteArray())
     }
 }

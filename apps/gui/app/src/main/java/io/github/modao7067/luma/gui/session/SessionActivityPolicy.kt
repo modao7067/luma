@@ -31,24 +31,28 @@ internal class SessionActivityClock(
 
 internal class SessionActivityState(record: SessionRecord) {
     private val knownSubmissionIds = record.submissions.mapTo(HashSet()) { it.id }
+    private val pendingSubmissionIds = mutableSetOf<String>()
     private var everSettled = false
     private var wasTurnActive = false
     private var knownRequestIds = emptySet<String>()
     private var knownAssistantIds = emptySet<String>()
+    private var priorAssistantIds = emptySet<String>()
     private var lastRequestsRef: List<UserRequest>? = null
     private var lastMessagesRef: List<ConversationItem>? = null
-    private var pendingPostSubmitCompletion = false
     var lastTurnCompleted: Boolean = false
         private set
 
     fun forgetHistory() {
+        if (knownAssistantIds.isNotEmpty()) {
+            priorAssistantIds = knownAssistantIds
+        }
         everSettled = false
         wasTurnActive = false
         knownRequestIds = emptySet()
         knownAssistantIds = emptySet()
         lastRequestsRef = null
         lastMessagesRef = null
-        pendingPostSubmitCompletion = false
+        pendingSubmissionIds.clear()
         lastTurnCompleted = false
     }
 
@@ -73,11 +77,20 @@ internal class SessionActivityState(record: SessionRecord) {
 
         var hasNewSubmission = false
         for (submission in record.submissions) {
-            if (knownSubmissionIds.add(submission.id)) hasNewSubmission = true
+            if (knownSubmissionIds.add(submission.id)) {
+                hasNewSubmission = true
+                pendingSubmissionIds.add(submission.id)
+            }
+        }
+        if (pendingSubmissionIds.isNotEmpty()) {
+            val activeById = record.submissions.associateBy { it.id }
+            pendingSubmissionIds.removeAll { id ->
+                val sub = activeById[id]
+                sub == null || sub.dismissed || sub.state in setOf("rejected", "cancelled")
+            }
         }
         if (hasNewSubmission) {
             record.lastActiveAt = clock.next()
-            pendingPostSubmitCompletion = true
             changed = true
         }
 
@@ -102,19 +115,35 @@ internal class SessionActivityState(record: SessionRecord) {
             knownAssistantIds = currentAssistantIds
             lastRequestsRef = requests
             lastMessagesRef = messages
-            if (pendingPostSubmitCompletion && !turnActive && currentAssistantIds.isNotEmpty()) {
-                pendingPostSubmitCompletion = false
-                lastTurnCompleted = true
-                record.lastActiveAt = clock.next()
-                if (!viewingInForeground && !record.unread) record.unread = true
-                changed = true
-            } else if (turnActive) {
-                pendingPostSubmitCompletion = false
+            if (turnActive) {
+                pendingSubmissionIds.clear()
+            } else if (pendingSubmissionIds.isNotEmpty()) {
+                val byId = record.submissions.associateBy { it.id }
+                val settledIds = pendingSubmissionIds.filter { id ->
+                    byId[id]?.state == "accepted"
+                }
+                if (settledIds.isNotEmpty()) {
+                    val newAssistantAfterSubmission = settledIds.any { id ->
+                        val userIdx = messages.indexOfLast { it.role == "user" && it.id == id }
+                        if (userIdx >= 0) {
+                            messages.subList(userIdx + 1, messages.size).any { it.role == "assistant" && it.id !in priorAssistantIds }
+                        } else {
+                            currentAssistantIds.any { it !in priorAssistantIds }
+                        }
+                    }
+                    if (newAssistantAfterSubmission) {
+                        pendingSubmissionIds.removeAll(settledIds.toSet())
+                        lastTurnCompleted = true
+                        record.lastActiveAt = clock.next()
+                        if (!viewingInForeground && !record.unread) record.unread = true
+                        changed = true
+                    }
+                }
             }
             return changed
         }
 
-        if (turnActive) pendingPostSubmitCompletion = false
+        if (turnActive) pendingSubmissionIds.clear()
 
         val hasNewRequest = currentRequestIds !== knownRequestIds && currentRequestIds.any { it !in knownRequestIds }
         val fastSyncCompleted = !wasTurnActive && !turnActive && currentAssistantIds !== knownAssistantIds && currentAssistantIds.any { it !in knownAssistantIds }
@@ -125,7 +154,7 @@ internal class SessionActivityState(record: SessionRecord) {
             changed = true
         }
         if (turnCompleted) {
-            pendingPostSubmitCompletion = false
+            pendingSubmissionIds.clear()
             lastTurnCompleted = true
             if (!viewingInForeground && !record.unread) {
                 record.unread = true

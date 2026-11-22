@@ -27,9 +27,11 @@ MAX_WINDOWS = 16
 MAX_REQUEST = 128 * 1024
 MAX_CLIENT_BUFFER = 1024 * 1024
 _LANG = os.environ.get('LUMA_LANG', 'zh')
+if _LANG not in ('zh', 'en'):
+    _LANG = 'en' if str(_LANG).lower().startswith('en') else 'zh'
 
 def _tr(zh, en):
-    return zh if str(_LANG or 'zh').lower().startswith('zh') else en
+    return zh if _LANG == 'zh' else en
 
 def frame(value):
     return (json.dumps(value, separators=(',', ':')) + '\n').encode()
@@ -157,6 +159,7 @@ class Server:
                 os.execve('/bin/bash', ['bash', '-c', script], env)
             except BaseException:
                 os._exit(127)
+        os.set_inheritable(fd, False)
         os.set_blocking(fd, False)
         window = Window(ident, str(request.get('name', _tr('窗口', 'Window')))[:128], pid, fd, size)
         self.windows[ident] = window
@@ -179,9 +182,10 @@ class Server:
                 self.disconnect(client)
                 return
             client.auth = True
-            if request.get('lang'):
+            lang = request.get('lang')
+            if lang in ('zh', 'en'):
                 global _LANG
-                _LANG = str(request.get('lang'))
+                _LANG = lang
             client.role = 'lease' if request.get('role') == 'lease' else 'control'
             self.send(client, dict(event='list', windows=[w.info() for w in self.windows.values()], version=VERSION,
                                    serverPid=os.getpid(),modeMetadataFd=True,modeStateCaps=MODE_STATE_CAPS))
@@ -205,6 +209,10 @@ class Server:
                 if window.mode_state is not None:window.mode_state.close()
                 window.mode_state=replacement
             elif client.rights:
+                for fd in client.rights:
+                    try:os.close(fd)
+                    except OSError:pass
+                client.rights.clear()
                 raise ValueError('Unexpected file descriptors')
             self.stop_drain(window)
             window.owner, client.lease = client, ident
@@ -401,6 +409,10 @@ class Server:
                                 request = parsed
                                 self.request(client, request)
                             except (ValueError, KeyError, TypeError, OSError) as failure:
+                                for fd in client.rights:
+                                    try:os.close(fd)
+                                    except OSError:pass
+                                client.rights.clear()
                                 self.send(client, dict(event='error', id=request.get('id'),
                                            request=request.get('request', 0), message=str(failure)))
                     if client.sock.fileno() >= 0 and events & selectors.EVENT_WRITE and client.output:

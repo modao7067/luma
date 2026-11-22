@@ -346,8 +346,18 @@ class SessionController(private val context: Context) : CockpitActions {
     private fun persist() {
         check(storeError == null) { storeError!! }
         store.navigation.selectedId = selected
-        store.save(sessions.values.map { it.record })
-        sessions.values.forEach { it.dispatchStorageBlocked = false }
+        store.save(sessions.values.map { it.record }) {
+            scope.launch {
+                var cleared = false
+                sessions.values.forEach {
+                    if (it.dispatchStorageBlocked) {
+                        it.dispatchStorageBlocked = false
+                        cleared = true
+                    }
+                }
+                if (cleared) publish()
+            }
+        }
     }
     private fun persistDurable() {
         check(storeError == null) { storeError!! }
@@ -355,6 +365,13 @@ class SessionController(private val context: Context) : CockpitActions {
         store.saveDurable(sessions.values.map { it.record })
         sessions.values.forEach { it.dispatchStorageBlocked = false }
     }
+    private suspend fun persistDurableAsync() {
+        check(storeError == null) { storeError!! }
+        store.navigation.selectedId = selected
+        store.saveDurableAsync(sessions.values.map { it.record }, ioDispatcher)
+        sessions.values.forEach { it.dispatchStorageBlocked = false }
+    }
+    private fun inCliMaintenance(s: Live): Boolean = cliMaintenanceJob?.isActive == true && s.record.cli in CliCatalog.bridged
     private fun canDispatchLocal(s: Live) = !s.releasing && s.observing && s.view.connected && !s.view.loading && !s.view.configuring && !s.dispatchStorageBlocked &&
         (s.record.cli !in CliCatalog.bridged || s.nativeCli?.canDispatchLocal == true)
     private fun cliServiceUpdateImpact(s: Live): String {
@@ -412,7 +429,7 @@ class SessionController(private val context: Context) : CockpitActions {
                                 val message = SubmissionLedger.find(s.record, id)?.takeIf(SubmissionLedger::isLocal) ?: continue
                                 if (message.settings.any { (key, value) -> settings(s)[key] != value }) {
                                     SubmissionLedger.rejectLocal(s.record, id, ::persistDurable)
-                                    s.view = s.view.copy(error = tr("待发消息的会话设置已改变", "Session settings changed for queued message")); continue
+                                    if (s.generation == epoch) s.view = s.view.copy(error = tr("待发消息的会话设置已改变", "Session settings changed for queued message")); continue
                                 }
                                 val input = ManagedSubmission(message.id, message.text, message.images, message.skills, true)
                                 try {
@@ -426,13 +443,15 @@ class SessionController(private val context: Context) : CockpitActions {
                                 catch (e: Exception) {
                                     if (SubmissionLedger.find(s.record, id)?.let(SubmissionLedger::isLocal) == true) SubmissionLedger.rejectLocal(s.record, id, ::persistDurable)
                                     else throw e
-                                    s.view = s.view.copy(error = e.message)
+                                    if (s.generation == epoch) s.view = s.view.copy(error = e.message)
                                 }
                             }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) {
-                            s.dispatchStorageBlocked = true
-                            s.view = s.view.copy(error = e.message ?: tr("待发未能保存，消息仍保留", "Failed to save queue state; message preserved"))
+                            if (s.generation == epoch) {
+                                s.dispatchStorageBlocked = true
+                                s.view = s.view.copy(error = e.message ?: tr("待发未能保存，消息仍保留", "Failed to save queue state; message preserved"))
+                            }
                         } finally {
                             if (s.dispatchJob === currentCoroutineContext()[Job]) { s.dispatchingLocal = false; s.dispatchJob = null }
                             publish()
@@ -664,7 +683,10 @@ class SessionController(private val context: Context) : CockpitActions {
                 }
                 if (sessions[s.record.id] !== s || s.generation != epoch) return@launch
                 dropIdleCache(s)
-                if (SubmissionLedger.pending(s.record)) startObservation(s)
+                s.releasing = false
+                if (SubmissionLedger.pending(s.record) || (!backgrounded && (selected == s.record.id || foregroundTracker.isPinned(s.record.id)))) {
+                    startObservation(s)
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {  }
             finally {
@@ -791,7 +813,14 @@ class SessionController(private val context: Context) : CockpitActions {
         }
     }
 
-    private fun startObservation(s: Live, recoverExternal: Boolean = false, beforeConnect: () -> Unit = {}) {
+    private fun resetConnectionTransientState(s: Live) {
+        s.settingsWaiter?.cancel()
+        s.settingsWaiter = null
+        s.settingsExpected = null
+        s.takingBack = false
+    }
+
+    private fun startObservation(s: Live, recoverExternal: Boolean = false, beforeConnect: suspend () -> Unit = {}) {
         val restoreExternal = recoverExternal || s.dormant
         s.dormant = false
         s.observing = true
@@ -802,8 +831,9 @@ class SessionController(private val context: Context) : CockpitActions {
         val previous = s.connectJob
         previous?.cancel()
         s.rpc?.close(); s.rpc = null; s.openCode?.close(); s.nativeCli?.close()
+        resetConnectionTransientState(s)
         s.requests.clear()
-        s.view = s.view.copy(connected = false, loading = true, sending = false, canOpenTui = false, requests = emptyList())
+        s.view = resetConnectionView(s.view, loading = true)
         val job = scope.launch(start = CoroutineStart.LAZY) {
             var prepared = false
             try {
@@ -837,13 +867,18 @@ class SessionController(private val context: Context) : CockpitActions {
                 commands.existing(request)?.let { return commandInfo(it) }
                 check(storeError == null) { storeError!! }
                 val id = UUID.randomUUID().toString()
-                val entry = commands.reserve(request, id)
+                val entry = commands.reserveDurable(request, id, dispatcher = ioDispatcher)
                 try {
                     val s = addManagedSession(request, id, null)
-                    commands.update(entry, "starting")
+                    commands.updateDurable(entry, "starting", dispatcher = ioDispatcher)
                     startObservation(s)
                     commandInfo(entry)
-                } catch (e: Exception) { commands.update(entry, "rejected", e.message); throw e }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    commands.updateDurable(entry, "rejected", e.message, dispatcher = ioDispatcher)
+                    throw e
+                }
             }
             "attach" -> {
                 val cli = request.getString("cli"); val nativeId = request.getString("nativeId")
@@ -877,15 +912,21 @@ class SessionController(private val context: Context) : CockpitActions {
                 check(!s.view.configuring && !s.firstSendPending) { tr("会话正在更新设置", "Session is updating settings") }
                 if (s.view.activeTurnId == null) s.userStoppedTurn = false
                 val submissionId = if (s.record.cli == "OpenCode") "msg_" + UUID.randomUUID().toString().replace("-", "") else UUID.randomUUID().toString()
-                val entry = commands.reserve(request, s.record.id, submissionId)
+                val entry = commands.reserveDurable(request, s.record.id, submissionId, dispatcher = ioDispatcher)
                 try {
+                    check(sessions[s.record.id] === s) { tr("会话已不存在", "Session no longer exists") }
                     SubmissionLedger.checkpoint(s.record, submissionId, ::persistDurable) {
                         SubmissionLedger.begin(s.record, submissionId, externalText = request.getString("text"), settings = settings(s), busy = true)
                         SubmissionLedger.state(s.record, submissionId, "local")
                     }
-                } catch (e: SubmissionPersistenceFailure) { commands.update(entry, "rejected", e.message); throw e }
-                commands.update(entry, "pending")
-                if (!s.view.connected && !s.view.loading && !s.observing) startObservation(s)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    commands.updateDurable(entry, "rejected", e.message, dispatcher = ioDispatcher)
+                    throw e
+                }
+                commands.updateDurable(entry, "pending", dispatcher = ioDispatcher)
+                if ((!s.view.connected && !s.view.loading && !s.observing) || (s.releasing && !inCliMaintenance(s))) startObservation(s)
                 publish()
                 commandInfo(entry)
             }
@@ -948,7 +989,7 @@ class SessionController(private val context: Context) : CockpitActions {
                 s.view.error != null -> "error"
                 else -> entry.state
             }
-            try { commands.update(entry, result, if (result in setOf("error", "rejected")) s.view.error else null) }
+            try { commands.updateAsync(entry, result, if (result in setOf("error", "rejected")) s.view.error else null) }
             catch (e: Exception) { s.view = s.view.copy(error = tr("无法保存命令状态：${e.message}", "Failed to save command state: ${e.message}")) }
         }
     }
@@ -1031,7 +1072,7 @@ class SessionController(private val context: Context) : CockpitActions {
 
     private fun addSession(title: String, environment: String, cwd: String, model: String, threadId: String?, cli: String = "Codex") {
         if (storeError != null) return
-        if (cli !in CliCatalog.ids || environment != this.environment || !cwd.startsWith('/') || cwd.contains('\u0000')) {
+        if (cli !in CliCatalog.ids || environment != this.environment || !cwd.startsWith('/') || cwd.any { it.isISOControl() }) {
             mutableState.value = mutableState.value.copy(error = tr("请输入内置环境中的绝对工作目录", "Enter an absolute working directory inside the environment")); return
         }
         val existing = sessions.values.firstOrNull { it.record.cli == cli && it.record.environment == environment && threadId != null && it.record.threadId == threadId && it.record.externalSocket == null &&
@@ -1052,15 +1093,21 @@ class SessionController(private val context: Context) : CockpitActions {
         fileGeneration++; previewGeneration++; inventoryGeneration++
         mutableState.value = mutableState.value.copy(fileBrowser = null, filePreview = null, inventory = null, plugins = PluginCatalog(), browserOpen = false)
         selected = id; preferences.edit().putString("session", id).apply(); saveNavigation(); publish()
-        if (!s.view.connected && !s.view.loading && s.openCode?.recovering != true) startObservation(s)
+        if (!inCliMaintenance(s) && (s.releasing || (!s.view.connected && !s.view.loading && s.openCode?.recovering != true))) startObservation(s)
     }
     override fun openSubAgent(parentSessionId: String, agentId: String) {
         val parent = current()?.takeIf { it.record.id == parentSessionId } ?: return
-        val agent = parent.view.subAgents.firstOrNull { it.id == agentId } ?: return
+        val agent = parent.view.subAgents.firstOrNull { it.id == agentId }
+            ?: if (parent.view.loading || parent.hydrating || !parent.view.connected) SubAgentState(id = agentId) else return
         val current = childObservation
         if (current?.parentId == parentSessionId && current.childId == agentId && current.epoch == parent.generation) return
         clearSubAgentObservation()
-        childObservation = ChildObservation(parentSessionId, agentId, parent.generation, SubAgentDetailView(parentSessionId, agent))
+        childObservation = ChildObservation(
+            parentSessionId,
+            agentId,
+            parent.generation,
+            SubAgentDetailView(parentSessionId, agent, loading = !parent.view.connected || parent.view.loading || parent.hydrating),
+        )
         publish()
     }
     override fun closeSubAgent() { clearSubAgentObservation(); publish() }
@@ -1078,7 +1125,7 @@ class SessionController(private val context: Context) : CockpitActions {
         val parent = sessions[observation.parentId]
         if (parent == null || selected != observation.parentId) { clearSubAgentObservation(); return null }
         val agent = parent.view.subAgents.firstOrNull { it.id == observation.childId }
-        if (agent == null && !parent.view.loading && !parent.hydrating) { clearSubAgentObservation(); return null }
+        if (agent == null && parent.view.connected && !parent.view.loading && !parent.hydrating) { clearSubAgentObservation(); return null }
         if (parent.generation != observation.epoch) {
             observation.job?.cancel(); observation.signals.close()
             observation = ChildObservation(observation.parentId, observation.childId, parent.generation, observation.detail)
@@ -1090,8 +1137,8 @@ class SessionController(private val context: Context) : CockpitActions {
             parent.record.cli in setOf("Claude Code", "DeepSeek Harness", "Grok Build", "Kimi Code"))
         observation.detail = if (streamedChild) NativeCliProjection.streamedSubAgentDetail(agent, observation.detail, parent.models)
             else observation.detail.copy(agent = agent ?: observation.detail.agent,
-                loading = if (!parent.view.connected) parent.view.loading else observation.detail.loading)
-        if (!streamedChild && foreground && !observation.started && parent.view.connected && parent.record.cli in setOf("Codex", "OpenCode")) startSubAgentRead(parent, observation)
+                loading = if (!parent.view.connected) parent.view.loading else if (agent == null) true else observation.detail.loading)
+        if (!streamedChild && foreground && !observation.started && agent != null && parent.view.connected && !parent.view.loading && !parent.hydrating && parent.record.cli in setOf("Codex", "OpenCode")) startSubAgentRead(parent, observation)
         return observation.detail
     }
     private fun startSubAgentRead(parent: Live, observation: ChildObservation) {
@@ -1178,7 +1225,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     lastArmedRootSessions = emptyList()
                     RootBackgroundNotifications.disarmLocal(context)
                 }
-                current()?.let { if (it.dormant && !it.observing) startObservation(it) }
+                current()?.let { if ((it.dormant && !it.observing) || (it.releasing && !inCliMaintenance(it))) startObservation(it) }
             } else {
                 childObservation?.let { it.job?.cancel(); it.job = null; it.started = false; it.detail = it.detail.copy(loading = false) }
             }
@@ -1319,7 +1366,7 @@ class SessionController(private val context: Context) : CockpitActions {
     override fun reconnect() {
         val s = current() ?: return
         if (cliMaintenanceJob?.isActive == true) return
-        startObservation(s, recoverExternal = true) { if (s.dispatchStorageBlocked) persist() }
+        startObservation(s, recoverExternal = true) { if (s.dispatchStorageBlocked) persistDurableAsync() }
     }
 
     override fun restartCliBridge() {
@@ -1341,8 +1388,13 @@ class SessionController(private val context: Context) : CockpitActions {
                 s.deliveryTimer = null; s.idleJob = null; s.reconnectJob = null; s.queueRefresh = null
                 s.dispatchingLocal = false; s.dismissing = false; s.firstSendScheduled = false
                 s.nativeCli?.close()
-                s.view = s.view.copy(connected = false, loading = true, canOpenTui = false, requests = emptyList(),
-                    connection = tr("正在更新 CLI 服务…", "Updating CLI service…"), error = null)
+                resetConnectionTransientState(s)
+                s.view = resetConnectionView(
+                    s.view,
+                    loading = true,
+                    connection = tr("正在更新 CLI 服务…", "Updating CLI service…"),
+                    error = null,
+                )
                 jobs
             }
             publish()
@@ -1379,7 +1431,13 @@ class SessionController(private val context: Context) : CockpitActions {
         s.connectJob = currentCoroutineContext()[Job]
         val epoch = ++s.generation
         s.idleConfirmed = false
-        s.view = s.view.copy(loading = true, connected = false, connection = tr("连接运行环境…", "Connecting to runtime…"), error = null, canOpenTui = false)
+        resetConnectionTransientState(s)
+        s.view = resetConnectionView(
+            s.view,
+            loading = true,
+            connection = tr("连接运行环境…", "Connecting to runtime…"),
+            error = null,
+        )
         publish()
         if (s.record.cli in CliCatalog.bridged) {
             val cachedModels = s.models.takeIf { s.nativeCli?.catalogIdentity == NativeCliCatalogIdentity.of(s.record) }.orEmpty()
@@ -1398,7 +1456,9 @@ class SessionController(private val context: Context) : CockpitActions {
         check(s.record.cli in CliCatalog.ids) { tr("此 CLI 适配尚未启用", "Adapter for this CLI is not enabled yet") }
         if (s.record.cli == "OpenCode") {
             openCodeIdleJob?.cancel(); openCodeIdleJob = null
-            sessions.values.filter { it.record.environment == environment }.forEach { browser.bind(it.record.id, it.record.threadId) }
+            sessions.values.filter { it.record.environment == s.record.environment && it.record.cli == "OpenCode" }.forEach {
+                runCatching { browser.bind(it.record.id, it.record.threadId) }
+            }
             s.openCode?.close()
             val adapter = OpenCodeSession(s.record, runtime, ::persist,
                 bindBrowser = { browser.bind(s.record.id, it) },
@@ -1425,23 +1485,27 @@ class SessionController(private val context: Context) : CockpitActions {
         if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
         s.endpoint = endpoint
         s.rpc?.close(); s.deltaPublishJob?.cancel(); s.deltaPublishJob = null; s.requests.clear(); s.buffered.clear(); s.hydrationBoundary.clear(); s.endedTurns.clear(); s.subAgentMetadataReads.clear()
-        val rpc = CodexRpc(endpoint.url, endpoint.authToken, transport = runtime.codexTransport(endpoint),
-            onEvent = { message -> scope.launch { if (s.observing && s.generation == epoch) {
+        lateinit var rpc: CodexRpc
+        rpc = CodexRpc(endpoint.url, endpoint.authToken, transport = runtime.codexTransport(endpoint),
+            onEvent = { message -> scope.launch { if (s.observing && s.generation == epoch && s.rpc === rpc) {
                 if (s.hydrating) { s.buffered.add(message); return@launch }
                 var failed = false
                 try { event(s, message) }
                 catch (failure: Exception) { failed = true; s.view = s.view.copy(error = tr("无法应用服务事件，请重新连接同步：${failure.message}", "Failed to apply service event; reconnect to resync: ${failure.message}")) }
                 publishCodexEvent(s, message, forceImmediate = failed)
             } } },
-            onDisconnect = { failure -> scope.launch { if (s.observing && s.generation == epoch) {
+            onDisconnect = { failure -> scope.launch { if (s.observing && s.generation == epoch && s.rpc === rpc) {
                 s.deltaPublishJob?.cancel(); s.deltaPublishJob = null
                 s.view = s.view.copy(connected = false, connection = tr("连接中断 · 任务状态待同步", "Disconnected · Task state syncing"), loading = false, sending = false, error = failure.message)
                 s.requests.clear(); publish()
             } } })
         s.rpc = rpc; s.hydrating = true
+        var succeeded = false
         try {
             rpc.connect()
-            sessions.values.filter { it.record.environment == environment }.forEach { browser.bind(it.record.id, it.record.threadId) }
+            sessions.values.filter { it.record.environment == s.record.environment && it.record.cli == "Codex" }.forEach {
+                runCatching { browser.bind(it.record.id, it.record.threadId) }
+            }
             val browserOverrides = CodexConnectionSetup.prepare(s.record, runtime.skillsPath(s.record.environment),
                 browserConfig = { browser.bind(s.record.id, s.record.threadId) }, request = rpc::request, persist = ::persist,
                 recoverExternal = recoverExternal)
@@ -1485,16 +1549,22 @@ class SessionController(private val context: Context) : CockpitActions {
             s.view = s.view.copy(permission = resumed.optJSONObject("activePermissionProfile")?.optString("id").orEmpty(), speed = tier, planMode = resumedPlan)
             hydrate(s)
             val models = mutableListOf<ModelOption>(); var cursor: String? = null
+            val seenModelCursors = hashSetOf<String>()
             do {
                 val page = rpc.request("model/list", obj("limit" to 100, "cursor" to cursor))
-                models += CodexProjection.models(page.optJSONArray("data") ?: JSONArray()); cursor = page.stringOrNull("nextCursor")
+                models += CodexProjection.models(page.optJSONArray("data") ?: JSONArray())
+                val nextCursor = page.stringOrNull("nextCursor")
+                cursor = if (nextCursor != null && seenModelCursors.add(nextCursor)) nextCursor else null
             } while (cursor != null)
             s.models = models
             try {
                 val options = mutableListOf<RequestChoice>(); var next: String? = null
+                val seenPermissionCursors = hashSetOf<String>()
                 do {
                     val page = rpc.request("permissionProfile/list", obj("cwd" to s.record.cwd, "cursor" to next, "limit" to 100))
-                    options += CodexCapabilities.permissions(page); next = page.stringOrNull("nextCursor")
+                    options += CodexCapabilities.permissions(page)
+                    val nextCursor = page.stringOrNull("nextCursor")
+                    next = if (nextCursor != null && seenPermissionCursors.add(nextCursor)) nextCursor else null
                 } while (next != null)
                 s.view = s.view.copy(permissions = options, capabilityNotice = null)
             } catch (e: RpcRejected) { s.view = s.view.copy(permissions = emptyList(), capabilityNotice = tr("当前 CLI 未提供可选择的权限配置", "No selectable permission configurations provided by CLI")) }
@@ -1508,8 +1578,19 @@ class SessionController(private val context: Context) : CockpitActions {
             currentCoroutineContext().ensureActive()
             if (!s.observing || s.generation != epoch) throw CancellationException(tr("界面观察已停止", "Session observation stopped"))
             s.view = s.view.copy(connected = true, loading = false, connection = tr("已连接", "Connected"), canOpenTui = true, error = null)
+            succeeded = true
         } finally {
-            if (s.observing && s.generation == epoch) {
+            if (!succeeded) {
+                rpc.close()
+                if (s.rpc === rpc) s.rpc = null
+                if (s.rpc == null) {
+                    s.hydrating = false
+                    s.buffered.clear()
+                    s.hydrationBoundary.clear()
+                    s.deltaPublishJob?.cancel()
+                    s.deltaPublishJob = null
+                }
+            } else if (s.observing && s.generation == epoch && s.rpc === rpc) {
                 s.hydrating = false
                 val events = s.buffered.toList(); s.buffered.clear()
                 val replay = s.hydrationBoundary.replayEvents(events) { itemId, toolDetail ->
@@ -1536,6 +1617,7 @@ class SessionController(private val context: Context) : CockpitActions {
         val rpc = s.rpc ?: return; val id = s.record.threadId ?: return
         s.subAgents.clear(); s.nativeToClientId.clear()
         val hydrated = CachedItemsMap(); var cursor: String? = null
+        val seenCursors = hashSetOf<String>()
         do {
             val pageBefore = s.buffered.size
             val page = rpc.request("thread/items/list", obj("threadId" to id, "limit" to 100, "sortDirection" to "asc", "cursor" to cursor))
@@ -1566,7 +1648,8 @@ class SessionController(private val context: Context) : CockpitActions {
                 }
                 s.subAgents.item(item, turnId); confirmSubmission(s, item)
             }
-            cursor = page.stringOrNull("nextCursor")
+            val nextCursor = page.stringOrNull("nextCursor")
+            cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
         } while (cursor != null)
         s.items.clear(); s.items.putAll(hydrated)
         if (SessionTitlePolicy.history(s.record, s.items.values, ready = true)) persist()
@@ -1621,15 +1704,19 @@ class SessionController(private val context: Context) : CockpitActions {
     private suspend fun refreshQueue(s: Live) {
         val rpc = s.rpc ?: return; val id = s.record.threadId ?: return
         val queue = mutableListOf<JSONObject>(); var cursor: String? = null
+        val seenCursors = hashSetOf<String>()
         do {
             val page = rpc.request("thread/queue/list", obj("threadId" to id, "limit" to 100, "cursor" to cursor))
-            queue += page.optJSONArray("data")?.objects().orEmpty(); cursor = page.stringOrNull("nextCursor")
+            queue += page.optJSONArray("data")?.objects().orEmpty()
+            val nextCursor = page.stringOrNull("nextCursor")
+            cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
         } while (cursor != null)
         applyQueue(s, queue)
         publish()
     }
     private suspend fun reconcileCodexSubmission(s: Live, id: String, rpc: CodexRpc, epoch: Int) {
         var cursor: String? = null
+        val seenCursors = hashSetOf<String>()
         do {
             if (!s.observing || s.generation != epoch || s.rpc !== rpc || !rpc.connected) return
             val page = rpc.request("thread/items/list", obj("threadId" to s.record.threadId, "limit" to 100, "sortDirection" to "desc", "cursor" to cursor))
@@ -1638,7 +1725,8 @@ class SessionController(private val context: Context) : CockpitActions {
                 it.optString("type") == "userMessage" && (CodexProjection.clientMessageId(it) ?: s.nativeToClientId[it.optString("id")] ?: it.optString("id")) == id
             } == true }
             if (row != null) { putItem(s, row.getJSONObject("item"), completed = !row.isNull("completedAtMs"), turnId = row.optString("turnId")); publish(); return }
-            cursor = page.stringOrNull("nextCursor")
+            val nextCursor = page.stringOrNull("nextCursor")
+            cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
         } while (cursor != null)
     }
     private fun applyQueue(s: Live, queue: List<JSONObject>) {
@@ -1967,6 +2055,21 @@ class SessionController(private val context: Context) : CockpitActions {
         }
         publish()
     }
+    fun appendDraft(sessionId: String, text: String) {
+        val s = sessions[sessionId]?.takeIf { it.record.environment == environment } ?: return
+        if (s.firstSendPending) return
+        val updated = if (s.record.draft.isBlank()) text else s.record.draft.trimEnd() + "\n\n" + text
+        if (s.record.draft != updated) s.record.draftRevision++
+        s.record.draft = updated
+        saveJob?.cancel(); saveJob = scope.launch {
+            delay(250)
+            try { persist() } catch (e: Exception) {
+                s.view = s.view.copy(error = e.message)
+                publish()
+            }
+        }
+        publish()
+    }
     override fun addImage(uri: String) {
         val s = current()
         if (s == null) {
@@ -2011,7 +2114,7 @@ class SessionController(private val context: Context) : CockpitActions {
             if (!s.view.error.orEmpty().let { it.contains("重新连接") || it.contains("reconnect", ignoreCase = true) }) s.view = s.view.copy(error = "${s.view.error}\n" + tr("请处理后重新连接；未发送的输入仍保留。", "Resolve the issue and reconnect; unsent input is preserved."))
             publish(); return
         }
-        if (!s.view.connected || s.view.loading) {
+        if (!s.view.connected || s.view.loading || s.releasing) {
             if (s.view.attachments.any { it.busy } || (s.record.draft.isBlank() && s.record.images.isEmpty() && s.record.skills.isEmpty())) return
             if (s.view.activeTurnId == null) s.userStoppedTurn = false
             val id = if (s.record.cli == "OpenCode") "msg_" + UUID.randomUUID().toString().replace("-", "") else UUID.randomUUID().toString()
@@ -2021,7 +2124,7 @@ class SessionController(private val context: Context) : CockpitActions {
                     SubmissionLedger.state(s.record, id, "local")
                 }
             } catch (e: SubmissionPersistenceFailure) { s.view = s.view.copy(error = e.message); publish(); return }
-            if (!s.view.loading && !s.observing) startObservation(s)
+            if (!s.view.loading && (!s.observing || (s.releasing && !inCliMaintenance(s)))) startObservation(s)
             publish(); return
         }
         if (s.view.activeTurnId == null) s.userStoppedTurn = false
@@ -2078,7 +2181,7 @@ class SessionController(private val context: Context) : CockpitActions {
                         publish()
                     } else {
                         s.admitting.remove(id)
-                        s.view = s.view.copy(sending = false, awaitingHandshake = false)
+                        if (s.generation == epoch) s.view = s.view.copy(sending = false, awaitingHandshake = false)
                     }
                 },
                 isRejected = { it is RpcRejected },
@@ -2130,6 +2233,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun stop() {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) {
             if (s.view.connected && !s.view.stopping && s.view.activeTurnId != null) {
                 s.userStoppedTurn = true
@@ -2146,22 +2250,29 @@ class SessionController(private val context: Context) : CockpitActions {
         }
         val turn = s.view.activeTurnId ?: return
         if (s.view.stopping) return
+        val epoch = s.generation
         s.userStoppedTurn = true
+        s.view = s.view.copy(stopping = true); publish()
         launch(s) {
-            s.view = s.view.copy(stopping = true); publish()
             try {
                 s.rpc!!.request("turn/interrupt", obj("threadId" to s.record.threadId, "turnId" to turn))
             } catch (e: Exception) {
-                if (e !is CancellationException && s.view.activeTurnId != null) s.userStoppedTurn = false
-                if (e is RpcRejected) s.view = s.view.copy(stopping = false)
+                if (s.generation == epoch) {
+                    if (e !is CancellationException && s.view.activeTurnId != null) s.userStoppedTurn = false
+                    if (e is RpcRejected) s.view = s.view.copy(stopping = false)
+                }
                 throw e
             }
         }
     }
     private fun queueMutation(s: Live, block: suspend () -> Unit) {
-        if (!s.view.connected || s.view.queueBusy || s.record.queueTransfer != null) return
+        if (s.releasing || !s.view.connected || s.view.queueBusy || s.record.queueTransfer != null) return
+        val epoch = s.generation
         s.view = s.view.copy(queueBusy = true); publish()
-        launch(s) { try { block() } finally { s.view = s.view.copy(queueBusy = false) } }
+        launch(s) {
+            try { block() }
+            finally { s.view = clearQueueBusyIfSameGeneration(s.view, s.generation, epoch) }
+        }
     }
     private fun nativeQueue(s: Live): List<QueueEntry> = SubmissionLedger.queue(s.record, when {
         s.record.cli in CliCatalog.bridged -> s.nativeCli?.nativeQueue.orEmpty()
@@ -2250,7 +2361,7 @@ class SessionController(private val context: Context) : CockpitActions {
             val host = s.view.queue.firstOrNull { it.id == id && it.hostOwned && it.canEdit && !it.localRecovery }
             if (host != null) {
                 check(!s.takingBack) { tr("正在取回待发消息，请稍候", "Taking back queued message; please wait") }
-                check(!s.view.loading) { tr("请先等待 CLI 观察同步后取回待发消息", "Wait for CLI sync before taking back queued message") }
+                check(!s.view.loading && !s.releasing) { tr("请先等待 CLI 观察同步后取回待发消息", "Wait for CLI sync before taking back queued message") }
                 val clientId = host.clientUserMessageId ?: error(tr("后台待发未提供精确身份，不能取回", "Backend queue item lacks exact identity and cannot be taken back"))
                 check(host.id == clientId) { tr("后台待发身份不一致，不能取回", "Backend queue identity mismatch; cannot take back") }
                 val operation = HostQueueTakeback.begin(s.record, clientId, UUID.randomUUID().toString(), ::persistDurable)
@@ -2276,7 +2387,12 @@ class SessionController(private val context: Context) : CockpitActions {
                         } else if (s.generation == epoch) s.view = s.view.copy(error = rejected.message)
                     } catch (_: Exception) {
                         if (s.generation == epoch) s.view = s.view.copy(error = tr("取回结果待核对；不会返回输入框或重发，请重新同步", "Takeback unconfirmed; will not restore or resend, resync first"))
-                    } finally { s.takingBack = false; if (s.generation == epoch) s.view = s.view.copy(queueBusy = false) }
+                    } finally {
+                        if (s.generation == epoch) {
+                            s.takingBack = false
+                            s.view = clearQueueBusyIfSameGeneration(s.view, s.generation, epoch)
+                        }
+                    }
                 }
                 return
             }
@@ -2296,6 +2412,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun steerQueued(id: String) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.queueChange(id, true); return }
         if (s.record.cli == "OpenCode") { s.openCode?.queueChange(id, true); return }
         queueMutation(s) {
@@ -2346,6 +2463,7 @@ class SessionController(private val context: Context) : CockpitActions {
         obj("mode" to mode, "settings" to obj("model" to model, "reasoning_effort" to if (effort.isBlank()) JSONObject.NULL else effort, "developer_instructions" to JSONObject.NULL))
     override fun configure(model: String, effort: String) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.configure(obj("model" to model, "effort" to effort)); return }
         if (s.record.cli == "OpenCode") { s.openCode?.configure(model, effort); return }
         val params = obj("model" to model).apply {
@@ -2359,8 +2477,28 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun refreshDashboard() {
         val s = current() ?: return
-        if (s.dispatchStorageBlocked) try { persist() }
-        catch (e: Exception) { s.view = s.view.copy(error = tr("无法保存发送状态，待发仍保留", "Failed to save send state; queued item preserved")); publish(); return }
+        if (s.dispatchStorageBlocked) {
+            val epoch = s.generation
+            scope.launch {
+                try {
+                    persistDurableAsync()
+                    publish()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    if (sessions[s.record.id] === s && s.generation == epoch) {
+                        s.view = s.view.copy(error = tr("无法保存发送状态，待发仍保留", "Failed to save send state; queued item preserved"))
+                        publish()
+                    }
+                    return@launch
+                }
+                if (sessions[s.record.id] === s && s.generation == epoch) refreshDashboardBody(s)
+            }
+            return
+        }
+        refreshDashboardBody(s)
+    }
+    private fun refreshDashboardBody(s: Live) {
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.refreshDashboard(); return }
         if (s.record.cli == "OpenCode") { s.openCode?.refreshDashboard(); return }
         if (!s.view.connected) return
@@ -2387,6 +2525,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     private fun configureNative(params: JSONObject, validate: (Live) -> Unit) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) {
             val body = JSONObject()
             if (params.has("permissions")) body.put("permission", params.getString("permissions"))
@@ -2397,24 +2536,31 @@ class SessionController(private val context: Context) : CockpitActions {
         }
         if (s.record.cli == "OpenCode") { s.view = s.view.copy(error = tr("OpenCode 未提供此设置选项", "Setting not supported by OpenCode")); publish(); return }
         if (s.view.configuring) return
+        val epoch = s.generation
         s.view = s.view.copy(configuring = true); publish()
         launch(s) {
-            try {
+            runGenerationScopedSettings(
+                setWaiter = { waiter, expected -> s.settingsWaiter = waiter; s.settingsExpected = expected },
+                clearWaiterIfSame = { waiter ->
+                    if (s.settingsWaiter === waiter) {
+                        s.settingsWaiter = null
+                        s.settingsExpected = null
+                    }
+                },
+                clearConfiguring = { s.view = clearConfiguringIfSameGeneration(s.view, s.generation, epoch) },
+            ) { assignWaiter ->
                 check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { tr("请在任务与队列结束后修改设置", "Wait for active turn and queue to finish before changing settings") }
                 validate(s)
-                val waiter = CompletableDeferred<JSONObject>()
-                s.settingsWaiter = waiter; s.settingsExpected = params
+                val nextWaiter = assignWaiter(params)
                 s.rpc!!.request("thread/settings/update", params.put("threadId", s.record.threadId))
-                val settings = withTimeoutOrNull(10000) { waiter.await() }
+                val settings = withTimeoutOrNull(10000) { nextWaiter.await() }
                 check(settings != null) { tr("设置结果尚未同步，请重新连接核对；不会自动重试", "Settings result awaiting sync; reconnect to verify") }
-            } finally {
-                s.settingsWaiter = null; s.settingsExpected = null
-                s.view = s.view.copy(configuring = false)
             }
         }
     }
     override fun configurePermission(id: String) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli == "OpenCode") {
             if (SubmissionLedger.pending(s.record)) {
                 s.view = s.view.copy(error = tr("请在任务与队列结束后修改权限模式", "Wait for active turn and queue to finish before changing permission mode"))
@@ -2433,6 +2579,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun configurePlanMode(enabled: Boolean) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) {
             configureNative(obj("planMode" to enabled)) {}
             return
@@ -2451,7 +2598,7 @@ class SessionController(private val context: Context) : CockpitActions {
     override fun command(id: String) {
         val s = current() ?: return
         when (id) {
-            "compact" -> if (s.record.cli in CliCatalog.bridged) s.nativeCli?.compact() else if (s.record.cli == "OpenCode") s.openCode?.compact() else launch(s) { check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { tr("请等待当前任务与队列结束", "Wait for current turn and queue to finish") }; s.rpc!!.request("thread/compact/start", obj("threadId" to s.record.threadId)) }
+            "compact" -> if (s.releasing) return else if (s.record.cli in CliCatalog.bridged) s.nativeCli?.compact() else if (s.record.cli == "OpenCode") s.openCode?.compact() else launch(s) { check(s.view.connected && s.view.activeTurnId == null && nativeQueue(s).isEmpty() && !SubmissionLedger.pending(s.record)) { tr("请等待当前任务与队列结束", "Wait for current turn and queue to finish") }; s.rpc!!.request("thread/compact/start", obj("threadId" to s.record.threadId)) }
             "diff" -> previewDiff()
             "steer" -> steer()
             "stop" -> stop()
@@ -2485,10 +2632,12 @@ class SessionController(private val context: Context) : CockpitActions {
                     }
                 } else {
                     val entries = mutableListOf<ReadOnlyEntry>(); var next: String? = null
+                    val seenCursors = hashSetOf<String>()
                     do {
                         val page = s.rpc!!.request("mcpServerStatus/list", obj("threadId" to s.record.threadId, "cursor" to next, "limit" to 100))
                         entries += page.optJSONArray("data")?.objects().orEmpty().map(CodexCapabilities::mcp)
-                        next = page.stringOrNull("nextCursor")
+                        val nextCursor = page.stringOrNull("nextCursor")
+                        next = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
                     } while (next != null)
                     entries
                 }
@@ -2514,10 +2663,12 @@ class SessionController(private val context: Context) : CockpitActions {
                         DraftSkill(it.getString("path"), it.getString("name"), it.getString("path"))
                     }.distinctBy { it.id }
                     val mcp = mutableListOf<ReadOnlyEntry>(); var cursor: String? = null
+                    val seenCursors = hashSetOf<String>()
                     do {
                         val page = s.rpc!!.request("mcpServerStatus/list", obj("threadId" to s.record.threadId, "limit" to 100, "cursor" to cursor))
                         mcp += page.optJSONArray("data")?.objects().orEmpty().map(CodexCapabilities::mcp)
-                        cursor = page.stringOrNull("nextCursor")
+                        val nextCursor = page.stringOrNull("nextCursor")
+                        cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
                     } while (cursor != null)
                     PluginCatalog(skills, mcp, error = groups.flatMap { it.optJSONArray("errors")?.objects().orEmpty() }.takeIf { it.isNotEmpty() }?.joinToString("\n") { CodexCapabilities.redact(it.toString()) })
                 }
@@ -2561,6 +2712,7 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun answer(requestId: String, choice: String, answers: Map<String, List<String>>) {
         val s = current() ?: return
+        if (s.releasing) return
         if (s.record.cli in CliCatalog.bridged) { s.nativeCli?.answer(requestId, choice, answers); return }
         if (s.record.cli == "OpenCode") { s.openCode?.answer(requestId, choice, answers); return }
         val async = asyncQuestions(s).find { it.id == requestId }
@@ -2581,7 +2733,17 @@ class SessionController(private val context: Context) : CockpitActions {
         launch(s) {
             val response = request.response(choice, answers)
             request.answering = true; publish()
-            s.rpc!!.respond(request.rawId, response)
+            try {
+                s.rpc!!.respond(request.rawId, response)
+            } catch (e: CancellationException) {
+                request.answering = false
+                publish()
+                throw e
+            } catch (e: Exception) {
+                request.answering = false
+                publish()
+                throw e
+            }
         }
     }
     override fun renameSession(id: String, title: String) {
@@ -2617,7 +2779,7 @@ class SessionController(private val context: Context) : CockpitActions {
             publish(); return
         }
         disposeSession(s, destroyBackend = true)
-        browser.closeOwned(id)
+        browser.closeOwned(id, s.record.threadId)
         if (wasSelected) preferences.edit().remove("session").apply()
         publish()
     }
@@ -2688,26 +2850,35 @@ class SessionController(private val context: Context) : CockpitActions {
             val isLocalGuest = !captured.source.startsWith("http:") && !captured.source.startsWith("https:") &&
                 !captured.source.startsWith("data:") && !captured.source.startsWith("codex-")
             if (isLocalGuest) {
+                val generation = ++previewGeneration
                 scope.launch {
-                    val inspected = try { runtime.inspectMedia(owner.record.environment, captured) } catch (_: Exception) { captured }
+                    val inspected = try {
+                        runtime.inspectMedia(owner.record.environment, captured)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        captured
+                    }
+                    if (selected != owner.record.id || generation != previewGeneration) return@launch
                     if (inspected.mimeType == "inode/directory") {
                         val guestPath = try { io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.guestPath(captured.source, captured.cwd ?: owner.record.cwd) } catch (_: Exception) { captured.source }
                         browseFiles(guestPath)
                         return@launch
                     }
                     if (io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.isText(inspected.mimeType)) {
-                        if (selected == owner.record.id) previewTextResource(owner, title, inspected)
+                        previewTextResource(owner, title, inspected)
                         return@launch
                     }
-                    if (selected == owner.record.id) {
-                        previewGeneration++
-                        mutableState.value = mutableState.value.copy(filePreview = FilePreview(title, "", media = inspected))
-                    }
+                    mutableState.value = mutableState.value.copy(
+                        filePreview = FilePreview(title, "", media = inspected, sessionId = owner.record.id, cwd = captured.cwd ?: owner.record.cwd),
+                    )
                 }
                 return
             }
             previewGeneration++
-            mutableState.value = mutableState.value.copy(filePreview = FilePreview(title, "", media = captured))
+            mutableState.value = mutableState.value.copy(
+                filePreview = FilePreview(title, "", media = captured, sessionId = owner.record.id, cwd = captured.cwd ?: owner.record.cwd),
+            )
             return
         }
         previewTextResource(owner, title, captured)
@@ -2728,7 +2899,7 @@ class SessionController(private val context: Context) : CockpitActions {
             val isLocalGuest = !captured.source.startsWith("http:") && !captured.source.startsWith("https:") &&
                 !captured.source.startsWith("data:") && !captured.source.startsWith("codex-")
             if (isLocalGuest) {
-                val inspected = try { runtime.inspectMedia(owner.record.environment, captured) } catch (_: Exception) { null }
+                val inspected = try { runtime.inspectMedia(owner.record.environment, captured) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
                 if (inspected?.mimeType == "inode/directory") {
                     val guestPath = try { io.github.modao7067.luma.gui.runtime.MediaSourcePolicy.guestPath(captured.source, captured.cwd ?: owner.record.cwd) } catch (_: Exception) { captured.source }
                     withContext(Dispatchers.Main.immediate) { browseFiles(guestPath) }
@@ -2762,7 +2933,29 @@ class SessionController(private val context: Context) : CockpitActions {
     }
     override fun closePreview() { previewGeneration++; mutableState.value = mutableState.value.copy(filePreview = null) }
     override fun dismissError() { current()?.openCode?.dismissError(); current()?.nativeCli?.dismissError(); current()?.let { it.view = it.view.copy(error = null) }; mutableState.value = mutableState.value.copy(error = null); publish() }
-    fun saveDrafts() { saveJob?.cancel(); try { persist(); store.flush() } catch (e: Exception) { mutableState.value = mutableState.value.copy(error = tr("无法保存草稿：${e.message}", "Failed to save draft: ${e.message}")); publish() } }
+    fun saveDrafts() {
+        saveJob?.cancel()
+        try {
+            persist()
+        } catch (e: Exception) {
+            mutableState.value = mutableState.value.copy(error = tr("无法保存草稿：${e.message}", "Failed to save draft: ${e.message}"))
+            publish()
+            return
+        }
+        scope.launch {
+            try {
+                withContext(ioDispatcher) {
+                    store.flush()
+                    commands.flush()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutableState.value = mutableState.value.copy(error = tr("无法保存草稿：${e.message}", "Failed to save draft: ${e.message}"))
+                publish()
+            }
+        }
+    }
     fun disconnectAll() {
         wakeEpoch++
         clearSubAgentObservation()
@@ -2887,4 +3080,54 @@ internal fun reconcileCodexIdleSubmissions(
         }
     }
     return changed
+}
+
+internal fun resetConnectionView(
+    view: SessionView,
+    loading: Boolean = true,
+    connection: String = view.connection,
+    error: String? = view.error,
+): SessionView = view.copy(
+    connected = false,
+    loading = loading,
+    sending = false,
+    stopping = false,
+    configuring = false,
+    queueBusy = false,
+    canOpenTui = false,
+    requests = emptyList(),
+    connection = connection,
+    error = error,
+)
+
+internal fun clearQueueBusyIfSameGeneration(
+    view: SessionView,
+    currentGeneration: Int,
+    expectedGeneration: Int,
+): SessionView = if (currentGeneration == expectedGeneration) view.copy(queueBusy = false) else view
+
+internal fun clearConfiguringIfSameGeneration(
+    view: SessionView,
+    currentGeneration: Int,
+    expectedGeneration: Int,
+): SessionView = if (currentGeneration == expectedGeneration) view.copy(configuring = false) else view
+
+internal suspend fun runGenerationScopedSettings(
+    setWaiter: (CompletableDeferred<JSONObject>, JSONObject) -> Unit,
+    clearWaiterIfSame: (CompletableDeferred<JSONObject>) -> Unit,
+    clearConfiguring: () -> Unit,
+    block: suspend (assignWaiter: (JSONObject) -> CompletableDeferred<JSONObject>) -> Unit,
+) {
+    var waiter: CompletableDeferred<JSONObject>? = null
+    try {
+        block { expected ->
+            val nextWaiter = CompletableDeferred<JSONObject>()
+            waiter = nextWaiter
+            setWaiter(nextWaiter, expected)
+            nextWaiter
+        }
+    } finally {
+        waiter?.let(clearWaiterIfSame)
+        clearConfiguring()
+    }
 }

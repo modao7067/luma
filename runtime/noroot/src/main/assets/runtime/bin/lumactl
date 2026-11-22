@@ -99,6 +99,25 @@ function printServiceSummary(svc, asJson) {
   }
 }
 
+function needArg(args, index, flag) {
+  if (index >= args.length || args[index] === undefined) {
+    throw new Error(tr(`参数 ${flag} 缺少值`, `Missing value for ${flag}`));
+  }
+  return args[index];
+}
+
+function needInt(args, index, flag, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const raw = needArg(args, index, flag);
+  if (!/^-?\d+$/.test(raw)) {
+    throw new Error(tr(`参数 ${flag} 需要整数值：${raw}`, `Invalid integer for ${flag}: ${raw}`));
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(tr(`参数 ${flag} 数值超出范围：${raw}`, `Out-of-range integer for ${flag}: ${raw}`));
+  }
+  return value;
+}
+
 async function cmdStart(args) {
   const req = {
     op: 'svc.start',
@@ -116,31 +135,32 @@ async function cmdStart(args) {
     if (a === '--') {
       cmdArgs.push(...args.slice(i + 1));
       break;
-    } else if (a === '--id') req.id = args[++i];
-    else if (a === '--name') req.name = args[++i];
-    else if (a === '--cwd') req.cwd = path.resolve(args[++i]);
-    else if (a === '--backend') req.backend = args[++i];
-    else if (a === '--port') req.listen.port = parseInt(args[++i], 10);
-    else if (a === '--host') req.listen.host = args[++i];
+    } else if (a === '--id') req.id = needArg(args, ++i, a);
+    else if (a === '--name') req.name = needArg(args, ++i, a);
+    else if (a === '--cwd') req.cwd = path.resolve(needArg(args, ++i, a));
+    else if (a === '--backend') req.backend = needArg(args, ++i, a);
+    else if (a === '--port') req.listen.port = needInt(args, ++i, a, 0, 65535);
+    else if (a === '--host') req.listen.host = needArg(args, ++i, a);
     else if (a === '--lan') { req.lan = true; if (!req.listen.host) req.listen.host = '0.0.0.0'; }
-    else if (a === '--base-path') req.listen.basePath = args[++i];
-    else if (a === '--probe') req.probe.type = args[++i];
-    else if (a === '--probe-path') req.probe.path = args[++i];
-    else if (a === '--probe-status') req.probe.okStatus = args[++i];
-    else if (a === '--probe-regex') req.probe.regex = args[++i];
+    else if (a === '--base-path') req.listen.basePath = needArg(args, ++i, a);
+    else if (a === '--probe') req.probe.type = needArg(args, ++i, a);
+    else if (a === '--probe-path') req.probe.path = needArg(args, ++i, a);
+    else if (a === '--probe-status') req.probe.okStatus = needArg(args, ++i, a);
+    else if (a === '--probe-regex') req.probe.regex = needArg(args, ++i, a);
     else if (a === '--timeout') {
-      const t = parseInt(args[++i], 10);
+      const t = needInt(args, ++i, a, 1);
       req.probe.startupTimeoutMs = t;
       req.waitTimeoutMs = t;
-    } else if (a === '--restart') req.restartPolicy = args[++i];
-    else if (a === '--max-restarts') req.maxRestarts = parseInt(args[++i], 10);
-    else if (a === '--grace') req.gracePeriodMs = parseInt(args[++i], 10);
+    } else if (a === '--restart') req.restartPolicy = needArg(args, ++i, a);
+    else if (a === '--max-restarts') req.maxRestarts = needInt(args, ++i, a, 0);
+    else if (a === '--grace') req.gracePeriodMs = needInt(args, ++i, a, 0);
     else if (a === '--env') {
-      const kv = args[++i] || '';
+      const kv = needArg(args, ++i, a);
       const eq = kv.indexOf('=');
-      if (eq > 0) req.env[kv.slice(0, eq)] = kv.slice(eq + 1);
+      if (eq <= 0) throw new Error(tr(`参数 --env 格式无效（需要 KEY=VALUE）：${kv}`, `Invalid --env format (expected KEY=VALUE): ${kv}`));
+      req.env[kv.slice(0, eq)] = kv.slice(eq + 1);
     } else if (a === '--env-file') {
-      Object.assign(req.env, parseEnvFile(args[++i]));
+      Object.assign(req.env, parseEnvFile(needArg(args, ++i, a)));
     } else if (a === '--wait') explicitWait = true;
     else if (a === '--no-wait') explicitWait = false;
     else if (a === '--json') asJson = true;
@@ -185,24 +205,31 @@ async function cmdStatus(args) {
 }
 
 async function cmdStop(args) {
-  const id = args.find((a) => !a.startsWith('-'));
-  const asJson = args.includes('--json');
+  let id = null;
+  let asJson = false;
   let grace = -1;
-  const gIdx = args.indexOf('--grace');
-  if (gIdx >= 0 && args[gIdx + 1]) grace = parseInt(args[gIdx + 1], 10);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--json') asJson = true;
+    else if (a === '--grace') grace = needInt(args, ++i, a, 0);
+    else if (!a.startsWith('-') && !id) id = a;
+  }
   if (!id) throw new Error(tr('用法: lumactl stop <id> [--grace ms] [--json]', 'Usage: lumactl stop <id> [--grace ms] [--json]'));
   const { result } = await callBridge({ op: 'svc.stop', id, gracePeriodMs: grace });
   printServiceSummary(result, asJson);
 }
 
 async function cmdWait(args) {
-  const id = args.find((a) => !a.startsWith('-'));
-  const asJson = args.includes('--json');
+  let id = null;
+  let asJson = false;
   let waitFor = 'ready';
   let timeoutMs = 60000;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--for') waitFor = args[++i];
-    else if (args[i] === '--timeout') timeoutMs = parseInt(args[++i], 10);
+    const a = args[i];
+    if (a === '--json') asJson = true;
+    else if (a === '--for') waitFor = needArg(args, ++i, a);
+    else if (a === '--timeout') timeoutMs = needInt(args, ++i, a, 1);
+    else if (!a.startsWith('-') && !id) id = a;
   }
   if (!id) throw new Error(tr('用法: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]', 'Usage: lumactl wait <id> [--for ready|exited] [--timeout ms] [--json]'));
   const { result } = await callBridge({ op: 'svc.wait', id, waitFor, timeoutMs });
@@ -211,14 +238,16 @@ async function cmdWait(args) {
 }
 
 async function cmdLogs(args) {
-  const id = args.find((a) => !a.startsWith('-'));
+  let id = null;
   let follow = false;
   let tail = 0;
   let offset = 0;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '-f' || args[i] === '--follow') follow = true;
-    else if (args[i] === '--tail') tail = parseInt(args[++i], 10);
-    else if (args[i] === '--offset') offset = parseInt(args[++i], 10);
+    const a = args[i];
+    if (a === '-f' || a === '--follow') follow = true;
+    else if (a === '--tail') tail = needInt(args, ++i, a, 0);
+    else if (a === '--offset') offset = needInt(args, ++i, a, 0);
+    else if (!a.startsWith('-') && !id) id = a;
   }
   if (!id) throw new Error(tr('用法: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]', 'Usage: lumactl logs <id> [-f|--follow] [--tail bytes] [--offset bytes]'));
   await callBridge({ op: 'svc.logs', id, follow, tail, offset }, (buf) => {

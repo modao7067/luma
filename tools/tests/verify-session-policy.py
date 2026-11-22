@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, str(next(_p for _p in _pl.Path(__file__).resolve().parents if (_p/'toolenv.py').is_file()))); import toolenv
 from pathlib import Path
+import os
+import re
 import subprocess
 import sys
 REPO = Path(__file__).resolve().parents[2]
@@ -38,9 +40,53 @@ public class SessionPolicyCheck {
 }'''
 }.items():
  p=work/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(source);files.append(p)
+def _annotation_version(path: Path):
+    match = re.fullmatch(r'annotation-jvm-(\d+(?:\.\d+)*)\.jar', path.name)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split('.'))
+
+
+def resolve_annotations_jar():
+    gradle_home = Path(os.environ.get('GRADLE_USER_HOME') or (Path.home() / '.gradle'))
+    roots = (
+        REPO / 'artifacts/maven/androidx/annotation/annotation-jvm',
+        gradle_home / 'caches/modules-2/files-2.1/androidx.annotation/annotation-jvm',
+    )
+    candidates = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob('annotation-jvm-*.jar'):
+            if not candidate.is_file():
+                continue
+            version = _annotation_version(candidate)
+            if version is not None:
+                candidates.append((version, candidate))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
+
+
 files+=list((REPO/'shared/terminal-emulator/java').rglob('*.java'))+list((REPO/'shared/terminal-ghostty/java').rglob('*.java'))
 sdk=toolenv.ANDROID_JAR
-annotations=str(REPO/'artifacts/maven/androidx/annotation/annotation-jvm/1.9.1/annotation-jvm-1.9.1.jar')
+annotations_jar=resolve_annotations_jar()
+if annotations_jar is not None:
+    compile_cp=os.pathsep.join([sdk,str(annotations_jar)])
+else:
+    for ann_name in ('NonNull','Nullable'):
+        ann_path=work/'androidx/annotation'/(ann_name+'.java')
+        ann_path.parent.mkdir(parents=True,exist_ok=True)
+        ann_path.write_text(
+            'package androidx.annotation;\n'
+            'import java.lang.annotation.Retention;\n'
+            'import java.lang.annotation.RetentionPolicy;\n'
+            f'@Retention(RetentionPolicy.CLASS) public @interface {ann_name} {{}}\n'
+        )
+        files.append(ann_path)
+    compile_cp=sdk
 classes=work/'classes'
-subprocess.run(['javac','--release','17','-cp',sdk+':'+annotations,'-d',str(classes),*map(str,files)],check=True)
-subprocess.run(['java','-cp',str(classes)+':'+sdk+':'+annotations,'com.termux.terminal.SessionPolicyCheck'],check=True)
+classes.mkdir(parents=True,exist_ok=True)
+subprocess.run(['javac','--release','17','-cp',compile_cp,'-d',str(classes),*map(str,files)],check=True)
+subprocess.run(['java','-cp',os.pathsep.join([str(classes),compile_cp]),'com.termux.terminal.SessionPolicyCheck'],check=True)

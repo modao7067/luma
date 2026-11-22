@@ -112,7 +112,6 @@ class CodeBuddyHttpPeer(Peer):
                 if waiter:
                     try: waiter.put_nowait(error)
                     except queue.Full: pass
-                elif not self.closed: self.reader.close()
             finally:
                 if connection: self.finish(connection)
         threading.Thread(target=dispatch, daemon=True, name="LumaCodeBuddyRpc").start()

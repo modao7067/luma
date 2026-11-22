@@ -4,12 +4,45 @@ import android.graphics.Insets
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.view.View
 import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsAnimation
 import android.view.WindowManager.LayoutParams
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import java.util.WeakHashMap
+
+private class DecorImeFilter {
+    var activeCount: Int = 0
+}
+
+private val decorImeFilters = WeakHashMap<View, DecorImeFilter>()
+
+private fun acquireDecorImeFilter(decor: View): DecorImeFilter {
+    val existing = decorImeFilters[decor]
+    if (existing != null) {
+        existing.activeCount++
+        return existing
+    }
+    val filter = DecorImeFilter().apply { activeCount = 1 }
+    decorImeFilters[decor] = filter
+    decor.setOnApplyWindowInsetsListener { view, insets ->
+        val effective = if (filter.activeCount > 0) withoutMenuIme(insets) else insets
+        view.onApplyWindowInsets(effective)
+    }
+    decor.setWindowInsetsAnimationCallback(
+        object : WindowInsetsAnimation.Callback(WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            override fun onProgress(insets: WindowInsets, runningAnimations: MutableList<WindowInsetsAnimation>): WindowInsets =
+                if (filter.activeCount > 0) withoutMenuIme(insets) else insets
+        },
+    )
+    return filter
+}
+
+private fun releaseDecorImeFilter(filter: DecorImeFilter) {
+    filter.activeCount = (filter.activeCount - 1).coerceAtLeast(0)
+}
 
 @Composable
 internal fun ActionWindowPolicy(window: Window?, enabled: Boolean, filterImeInsets: Boolean = false) {
@@ -21,23 +54,20 @@ internal fun ActionWindowPolicy(window: Window?, enabled: Boolean, filterImeInse
         window.setFlags(LayoutParams.FLAG_ALT_FOCUSABLE_IM, mask)
         window.setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         val decor = window.decorView
-        if (filterImeInsets) {
-            decor.setOnApplyWindowInsetsListener { _, insets -> withoutMenuIme(insets) }
-            decor.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-                override fun onProgress(insets: WindowInsets, runningAnimations: MutableList<WindowInsetsAnimation>): WindowInsets = withoutMenuIme(insets)
-            })
-            decor.requestApplyInsets()
+        val filter = if (filterImeInsets) {
+            acquireDecorImeFilter(decor).also { decor.requestApplyInsets() }
+        } else {
+            null
         }
         onDispose {
-            if (filterImeInsets) {
-                decor.setOnApplyWindowInsetsListener(null)
-                decor.setWindowInsetsAnimationCallback(null)
-            } else {
-                window.setFlags(previousFlags, mask)
-                window.setSoftInputMode(previousSoftInput)
-                if (previousSoftInput == LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED) {
-                    window.attributes = window.attributes.apply { softInputMode = previousSoftInput }
-                }
+            window.setFlags(previousFlags, mask)
+            window.setSoftInputMode(previousSoftInput)
+            if (previousSoftInput == LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED) {
+                window.attributes = window.attributes.apply { softInputMode = previousSoftInput }
+            }
+            if (filter != null) {
+                releaseDecorImeFilter(filter)
+                decor.requestApplyInsets()
             }
         }
     }

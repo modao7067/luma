@@ -2,6 +2,7 @@ package io.github.modao7067.luma.gui.ui
 
 import io.github.modao7067.luma.gui.i18n.tr
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -14,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -40,7 +42,11 @@ internal fun ConversationHeader(
     previewMore: Boolean = false,
     blankCli: String = "Codex",
     hasError: Boolean = view?.error != null,
+    errorText: String? = null,
+    onDismissError: (() -> Unit)? = null,
 ) {
+    val effectiveError = errorText?.takeIf { it.isNotBlank() } ?: view?.error?.takeIf { it.isNotBlank() }
+    val showErrorDot = hasError || effectiveError != null
     val chromeHeight = FloatingChromeSize
     val chromeRadius = FloatingChromeRadius
     var more by remember { mutableStateOf(previewMore) }
@@ -120,15 +126,15 @@ internal fun ConversationHeader(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    if (view != null || hasError) {
+                    if (view != null || showErrorDot) {
                         val dotState = when {
-                            hasError -> 3
+                            showErrorDot -> 3
                             view?.activeTurnId != null -> 2
                             view?.connected == true -> 1
                             else -> 0
                         }
                         val dotColor = when (dotState) {
-                            3 -> colors.error
+                            3 -> Color(0xFFEF4444)
                             2 -> colors.primary
                             1 -> colors.tertiary
                             else -> colors.outline
@@ -139,7 +145,7 @@ internal fun ConversationHeader(
                                 .glyphPulse(dotState)
                                 .size(7.dp)
                                 .background(dotColor, CircleShape)
-                                .semantics { stateDescription = if (hasError) tr("连接异常", "Connection error") else if (view?.connected == true) tr("已连接", "Connected") else tr("连接中", "Connecting") },
+                                .semantics { stateDescription = if (showErrorDot) tr("连接异常", "Connection error") else if (view?.connected == true) tr("已连接", "Connected") else tr("连接中", "Connecting") },
                         )
                     }
                 }
@@ -165,6 +171,53 @@ internal fun ConversationHeader(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (view.connected) colors.onSecondaryContainer else colors.onSurfaceVariant,
                             )
+                        }
+                    }
+                }
+                if (effectiveError != null) {
+                    val dangerColor = Color(0xFFEF4444)
+                    Surface(
+                        color = dangerColor.copy(alpha = 0.12f),
+                        border = BorderStroke(0.5.dp, dangerColor.copy(alpha = 0.32f)),
+                        shape = LumaCardShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Column(
+                            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                effectiveError,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurface,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 160.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            )
+                            if (onDismissError != null) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            onDismissError()
+                                            if (view == null) dashboard = false
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp),
+                                        colors = ButtonDefaults.textButtonColors(contentColor = dangerColor),
+                                    ) {
+                                        Text(
+                                            tr("忽略", "Dismiss"),
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }

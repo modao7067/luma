@@ -820,6 +820,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         owner = self.ensure_owner()
         hook_url, hook_token = self.setup_hook_endpoint()
         start_file = owner.directory / "session-start.json"
+        launched = False
         if not owner.handle.get("kind"):
             start_file.unlink(missing_ok=True)
             relay_path = owner.write_private_file("hook-relay.py", _HOOK_RELAY_SCRIPT, mode=0o700)
@@ -849,7 +850,15 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
             }
             if self.config.get("browserConfig"):
                 env["LUMA_BROWSER_CONFIG"] = self.config["browserConfig"]
-            owner.launch_tui(argv, env, host_kind="pty-tui", binary_name="claude")
+            launched = bool(owner.launch_tui(argv, env, host_kind="pty-tui", binary_name="claude"))
+
+        def cleanup_launched():
+            if launched:
+                try:
+                    owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
 
         self.peer = PtyOwnerPeer(owner, self.close_pty_observer)
         self.update(
@@ -876,6 +885,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
             deadline = time.monotonic() + self.startup_wait_sec
             while time.monotonic() < deadline and not self._session_started.is_set():
                 if not owner.alive():
+                    cleanup_launched()
                     raise Rejected(tr("Claude Code TUI 启动失败或已退出", "Claude Code TUI failed to start or exited"))
                 disk_start = self._read_start_file()
                 if disk_start:
@@ -884,10 +894,12 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
                 self._session_started.wait(0.2)
 
         if self._identity_mismatched:
+            cleanup_launched()
             raise Rejected(self.data.get("error") or tr("原生前台会话已改变", "Native foreground session changed"))
 
         if not self._session_started.is_set():
             if not owner.alive():
+                cleanup_launched()
                 raise Rejected(tr("Claude Code TUI 启动失败或已退出", "Claude Code TUI failed to start or exited"))
             pane = owner.capture_pane(40)
             self._startup_waiting = True
@@ -1477,11 +1489,55 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
             ) + target
         )
 
+    @staticmethod
+    def _validate_slash_value(value, label):
+        if not isinstance(value, str) or not value or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+            raise Rejected(tr(f"无效的 {label} 参数", f"Invalid {label} value"))
+
+    @staticmethod
+    def _pane_rejection_line(before_text, after_text, command_text):
+        before_lines = [ln.strip() for ln in (before_text or "").splitlines() if ln.strip()]
+        after_lines = [ln.strip() for ln in (after_text or "").splitlines() if ln.strip()]
+        overlap = 0
+        if before_lines and after_lines:
+            max_k = min(len(before_lines), len(after_lines))
+            for k in range(max_k, 0, -1):
+                if before_lines[-k:] == after_lines[:k]:
+                    overlap = k
+                    break
+        new_lines = after_lines[overlap:]
+        pattern = re.compile(
+            r"(?i)(?:invalid\s+(?:model|effort)|unknown\s+(?:model|effort|command)|"
+            r"not\s+(?:supported|available|valid|found)|cannot\s+set|failed\s+to\s+set|"
+            r"unsupported\s+(?:model|effort)|model\s+not\s+found|disabled\s+by\s+policy|"
+            r"^\s*error\s*:)"
+        )
+        for line in new_lines:
+            if line == command_text:
+                continue
+            if pattern.search(line):
+                return line
+        return None
+
+    def _inject_slash_setting(self, command_text, label):
+        before = self.owner.capture_pane(20)
+        self.owner.inject_text(command_text, submit=True, submit_delay=0.18)
+        for _ in range(2):
+            time.sleep(0.15)
+            after = self.owner.capture_pane(20)
+            rejected_line = self._pane_rejection_line(before, after, command_text)
+            if rejected_line:
+                raise Rejected(tr(f"Claude Code 拒绝更改 {label}：{rejected_line}", f"Claude Code rejected {label} change: {rejected_line}"))
+
     def configure(self, p):
         if self.data["running"]:
             raise Rejected(tr("请等待回合结束再更改设置", "Wait for the current turn to finish before changing settings"))
         if p.get("speed"):
             raise Rejected(tr("当前 Claude 双端协议未提供原生速度设置接口；保留 CLI 配置", "This Claude dual-end protocol has no native speed setting; CLI config is preserved"))
+        if p.get("model"):
+            self._validate_slash_value(p["model"], "model")
+        if p.get("effort"):
+            self._validate_slash_value(p["effort"], "effort")
         if p.get("permission"):
             value = p["permission"]
             self.validate_permission(value)
@@ -1498,8 +1554,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
             if self.data.get("models") and value not in {m["id"] for m in self.data["models"]}:
                 raise Rejected(tr("模型不在原生目录中", "Model is not in the native catalog"))
             if value != self.data["model"]:
-                self.owner.inject_text(f"/model {value}", submit=True, submit_delay=0.18)
-                time.sleep(0.25)
+                self._inject_slash_setting(f"/model {value}", "model")
                 self.config["selectedModel"] = value
                 for m in self.native_models:
                     if isinstance(m, dict) and m.get("value") == value:
@@ -1513,8 +1568,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         if p.get("effort"):
             value = p["effort"]
             if value != self.data.get("effort"):
-                self.owner.inject_text(f"/effort {value}", submit=True, submit_delay=0.18)
-                time.sleep(0.25)
+                self._inject_slash_setting(f"/effort {value}", "effort")
                 self.config["selectedEffort"] = value
                 self.update(effort=value)
                 self.save()

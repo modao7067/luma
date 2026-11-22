@@ -1,12 +1,20 @@
 package io.github.modao7067.luma.gui.browser
 
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 
 class BrowserWorkflowTest {
     private fun json(text: String) = JSONObject(text)
@@ -192,6 +200,48 @@ class BrowserWorkflowTest {
         assertEquals("live-snap", dispatchedSteps[1].getString("snapshot"))
         assertEquals("live-snap", dispatchedSteps[2].getString("snapshot"))
         assertEquals("live-snap", dispatchedSteps[3].getString("snapshot"))
+    }
+
+    @Test fun foregroundTakeoverOverRealSocketWritesCompleteUserControlActiveJsonForBothDispatchedStates() = runBlocking {
+        for (shouldMarkDispatched in listOf(false, true)) {
+            ServerSocket(0, 8, InetAddress.getByName("127.0.0.1")).use { server ->
+                val trackedJob = CompletableDeferred<Job>()
+                val serverDone = launch(Dispatchers.IO) {
+                    val accepted = server.accept()
+                    serveBrowserSocket(
+                        socket = accepted,
+                        dispatcher = Dispatchers.Default,
+                        timeoutMs = 25000L,
+                        readRequest = { sock -> sock.getInputStream().bufferedReader().readLine() ?: "" },
+                        resolveOwner = { "owner-1" },
+                        isForegroundBlocked = { _, _ -> false },
+                        shouldTrackForeground = { _, _ -> true },
+                        trackJob = { _, job -> trackedJob.complete(job) },
+                        untrackJob = { _, _ -> },
+                        runAction = { _, _, markDispatched ->
+                            if (shouldMarkDispatched) markDispatched()
+                            delay(10000L)
+                            ok()
+                        },
+                    )
+                }
+                Socket("127.0.0.1", server.localPort).use { client ->
+                    client.soTimeout = 5000
+                    client.getOutputStream().write("{\"action\":\"click\",\"token\":\"tok\"}\n".toByteArray())
+                    client.getOutputStream().flush()
+                    val job = trackedJob.await()
+                    delay(20)
+                    job.cancel(AgentBrowser.UserTakeoverException("User took over"))
+                    val line = client.getInputStream().bufferedReader().readLine()
+                    assertNotNull(line)
+                    val response = JSONObject(line!!)
+                    assertFalse(response.getBoolean("ok"))
+                    assertEquals("USER_CONTROL_ACTIVE", response.getString("code"))
+                    assertEquals(shouldMarkDispatched, response.getBoolean("dispatched"))
+                }
+                serverDone.join()
+            }
+        }
     }
 
 }

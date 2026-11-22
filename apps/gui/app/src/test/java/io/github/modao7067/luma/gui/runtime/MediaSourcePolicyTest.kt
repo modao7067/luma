@@ -157,8 +157,57 @@ class MediaSourcePolicyTest {
             assertNull(AgentRuntime.resolveManagedRootProtectedPath(filesDir, "root", "/proc/1/root${rootAgent.absolutePath}/cli-sessions/media-cache/../../cli-bridge-token"))
             assertNull(AgentRuntime.resolveManagedRootProtectedPath(filesDir, "root", "/proc/1/root${rootAgent.absolutePath}/cli-sessions/session.json"))
             assertNull(AgentRuntime.resolveManagedRootProtectedPath(filesDir, "root", "/proc/1/root/data/data/com.example/files/secret.txt"))
+
+            val rootTarget = AgentRuntime.resolveManagedRootProtectedTarget(filesDir, "root", "/proc/1/root$mediaCachePath")
+            assertEquals("/proc/1/root$mediaCachePath", rootTarget?.guestPath)
+            assertEquals("/proc/1/root${rootAgent.absolutePath}/cli-sessions/media-cache", rootTarget?.allowedPrefix)
+
+            val norootAgent = java.io.File(filesDir, "runtime/agent")
+            val norootSkillHost = "${norootAgent.absolutePath}/skills/luma-browser/SKILL.md"
+            val norootTargetHost = AgentRuntime.resolveManagedRootProtectedTarget(filesDir, "noroot", norootSkillHost, usesRootExecution = true)
+            assertEquals("/opt/luma/agent/skills/luma-browser/SKILL.md", norootTargetHost?.guestPath)
+            assertNull(norootTargetHost?.allowedPrefix)
+            val norootTargetGuest = AgentRuntime.resolveManagedRootProtectedTarget(filesDir, "noroot", "/opt/luma/agent/browser/shot.png", usesRootExecution = true)
+            assertEquals("/opt/luma/agent/browser/shot.png", norootTargetGuest?.guestPath)
+            assertNull(AgentRuntime.resolveManagedRootProtectedTarget(filesDir, "noroot", "/opt/luma/agent/browser/state.json", usesRootExecution = true))
+            assertNull(AgentRuntime.resolveManagedRootProtectedTarget(filesDir, "noroot", norootSkillHost, usesRootExecution = false))
         } finally {
             filesDir.deleteRecursively()
         }
+    }
+
+    @Test fun pruneOldBridgeRevisionsPreservesActiveServiceRecordsInServicesDir() {
+        val base = java.nio.file.Files.createTempDirectory("luma-prune-bridge").toFile()
+        try {
+            val agentDir = java.io.File(base, "agent").apply { mkdirs() }
+            val cacheDir = java.io.File(base, "cache").apply { mkdirs() }
+            val servicesDir = java.io.File(cacheDir, "services").apply { mkdirs() }
+            val v1 = java.io.File(agentDir, "cli-bridge-v1").apply { mkdirs() }
+            val v2 = java.io.File(agentDir, "cli-bridge-v2").apply { mkdirs() }
+            val v3 = java.io.File(agentDir, "cli-bridge-v3").apply { mkdirs() }
+            val v4 = java.io.File(agentDir, "cli-bridge-v4").apply { mkdirs() }
+            java.io.File(servicesDir, "active.json").writeText(JSONObject().put("phase", "running").put("cmd", "/opt/luma/agent/cli-bridge-v2/main.py").toString())
+            java.io.File(servicesDir, "stopped.json").writeText(JSONObject().put("phase", "exited").put("cmd", "/opt/luma/agent/cli-bridge-v1/main.py").toString())
+
+            AgentRuntime.pruneOldBridgeRevisions(agentDir, cacheDir, "cli-bridge-v4")
+            assertFalse(v1.exists())
+            assertTrue(v2.isDirectory)
+            assertFalse(v3.exists())
+            assertTrue(v4.isDirectory)
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test fun externalCodexPolicyRejectsControlCharsInCwdAndSupportsCustomLauncher() {
+        val socket = "/tmp/codex-daemon-0/test.sock"
+        for (badCwd in listOf("/work\ninject", "/work\rinject", "/work\u0000inject", "relative")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                ExternalCodexPolicy.remoteCommand(socket, "native", badCwd)
+            }
+        }
+        val custom = ExternalCodexPolicy.proxyCommand(socket, "/sbin/su", "/data/user/0/pkg/files/root-chroot/enter.sh")
+        assertEquals(listOf("/sbin/su", "-c"), custom.take(2))
+        assertTrue(custom[2].contains("'/data/user/0/pkg/files/root-chroot/enter.sh' 'codex' 'app-server' 'proxy' '--sock' '$socket'"))
     }
 }

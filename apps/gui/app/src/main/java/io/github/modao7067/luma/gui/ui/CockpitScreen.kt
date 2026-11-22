@@ -129,12 +129,14 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
         lastViews[it.summary.id] = it
         seenSaveableIds.add(it.summary.id)
     }
-    LaunchedEffect(selected?.summary?.id, state.sessions) {
-        val activeId = selected?.summary?.id
-        if (activeId != null) kotlinx.coroutines.delay(250)
-        lastViews.keys.retainAll(setOfNotNull(activeId))
-        val aliveIds = state.sessions.map { it.id }.toSet()
-        val removed = seenSaveableIds - aliveIds
+    val activeSessionId = selected?.summary?.id
+    LaunchedEffect(activeSessionId) {
+        if (activeSessionId != null) kotlinx.coroutines.delay(250)
+        lastViews.keys.retainAll(setOfNotNull(activeSessionId))
+    }
+    val aliveSessionIds = remember(state.sessions) { state.sessions.map { it.id }.toSet() }
+    LaunchedEffect(aliveSessionIds) {
+        val removed = seenSaveableIds - aliveSessionIds
         removed.forEach { id ->
             savedScreens.removeState(id)
             seenSaveableIds.remove(id)
@@ -155,6 +157,15 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
             }
         }
     } else null
+    fun launchImagePicker(owner: String) {
+        val launcher = picker ?: return
+        pickerSessionId = owner
+        runCatching { launcher.launch("image/*") }.onFailure {
+            pickerSessionId = null
+            pickerSessionMismatch = false
+            pickerError = tr("无法打开图片选择器", "Unable to open image picker")
+        }
+    }
     val keyboard = LocalSoftwareKeyboardController.current
     val browserActive = state.browserOpen && selected != null
     var retainedBrowserSessionId by remember { mutableStateOf(selected?.summary?.id?.takeIf { state.browserOpen }) }
@@ -258,8 +269,9 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
         }
     }
 
+    val hostInteractive = LocalSessionInteractive.current
     Box(Modifier.fillMaxSize().onSizeChanged { measuredWidthPx = it.width }) {
-        CompositionLocalProvider(LocalSessionInteractive provides !tier0Covered) {
+        CompositionLocalProvider(LocalSessionInteractive provides (hostInteractive && !tier0Covered)) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -310,6 +322,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                     },
                 ) {
                     Box(Modifier.fillMaxSize()) {
+                        CompositionLocalProvider(LocalSessionInteractive provides (hostInteractive && !tier0Covered && !drawerVisible)) {
                         Surface(
                             color = MaterialTheme.colorScheme.background,
                             modifier = Modifier
@@ -335,7 +348,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                 if (activeView == null) {
                                     BlankConversation(
                                         state, actions, currentSessionId, currentBlankKey,
-                                        onPickImages = { pickerSessionId = "blank:${state.blank.key}"; picker?.launch("image/*") },
+                                        onPickImages = { launchImagePicker("blank:${state.blank.key}") },
                                         onTakePhoto = capture.launch, takePhotoEnabled = capture.available && !capture.busy,
                                         onDrawer = { scope.launch { openDrawer() } },
                                         onNew = { actions.createDefaultCliSession(state.blank.cli) },
@@ -348,7 +361,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                             state,
                                             activeView,
                                             actions,
-                                            onPickImages = { pickerSessionId = "session:${activeView.summary.id}"; picker?.launch("image/*") },
+                                            onPickImages = { launchImagePicker("session:${activeView.summary.id}") },
                                             onTakePhoto = capture.launch, takePhotoEnabled = capture.available && !capture.busy,
                                             onDrawer = { scope.launch { openDrawer() } },
                                             onNew = { actions.createDefaultCliSession(activeView.summary.cli) },
@@ -359,6 +372,7 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                                     }
                                 }
                             }
+                        }
                         }
                         val browserOwnerId = selected?.summary?.id?.takeIf { browserActive } ?: retainedBrowserSessionId
                         if (browserOwnerId != null && (browserActive || browserOffset.value > 0.001f)) {
@@ -456,24 +470,26 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                     )
                 }
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    when (displayedSecondary) {
-                        CockpitSecondaryPage.Usage -> GlobalUsageScreen(
-                            environment = actions.environment,
-                            onDismiss = { usageOpen = false },
-                        )
-                        CockpitSecondaryPage.Settings -> SettingsScreen(
-                            enabledClis = enabledClis,
-                            onToggleCli = { cli, enabled ->
-                                val updated = if (enabled) enabledClis + cli else enabledClis - cli
-                                enabledClis = updated
-                                prefs?.edit()?.putStringSet("enabled_clis", updated)?.apply()
-                            },
-                            onDismiss = { settingsOpen = false },
-                        )
-                        is CockpitSecondaryPage.Files -> FileBrowserScreen(
-                            browser = displayedSecondary.browser,
-                            actions = actions,
-                        )
+                    CompositionLocalProvider(LocalSessionInteractive provides (hostInteractive && !tier1Covered)) {
+                        when (displayedSecondary) {
+                            CockpitSecondaryPage.Usage -> GlobalUsageScreen(
+                                environment = actions.environment,
+                                onDismiss = { usageOpen = false },
+                            )
+                            CockpitSecondaryPage.Settings -> SettingsScreen(
+                                enabledClis = enabledClis,
+                                onToggleCli = { cli, enabled ->
+                                    val updated = if (enabled) enabledClis + cli else enabledClis - cli
+                                    enabledClis = updated
+                                    prefs?.edit()?.putStringSet("enabled_clis", updated)?.apply()
+                                },
+                                onDismiss = { settingsOpen = false },
+                            )
+                            is CockpitSecondaryPage.Files -> FileBrowserScreen(
+                                browser = displayedSecondary.browser,
+                                actions = actions,
+                            )
+                        }
                     }
                     if (prevProgress > 0.001f) {
                         Box(
@@ -533,7 +549,11 @@ private fun CockpitContent(state: CockpitState, actions: CockpitActions, preview
                     )
                 }
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    FilePreviewScreen(displayedPreview, actions)
+                    CompositionLocalProvider(LocalSessionInteractive provides (hostInteractive && previewActive)) {
+                        key(displayedPreview.sourceResource?.source ?: displayedPreview.path, displayedPreview.cwd) {
+                            FilePreviewScreen(displayedPreview, actions)
+                        }
+                    }
                 }
             }
         }

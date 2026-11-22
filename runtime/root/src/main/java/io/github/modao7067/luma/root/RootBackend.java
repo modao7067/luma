@@ -136,20 +136,68 @@ final class RootBackend implements AutoCloseable {
 
     private static String quote(String value){return "'"+value.replace("'","'\"'\"'")+"'";}
 
+    private static byte[] readAssetBytes(Context context, String assetPath) throws IOException {
+        try (InputStream input = context.getAssets().open(assetPath);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = input.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toByteArray();
+        }
+    }
+
+    private static byte[] sha256(byte[] data) throws Exception {
+        return java.security.MessageDigest.getInstance("SHA-256").digest(data);
+    }
+
+    private static byte[] sha256File(File file) throws Exception {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        try (InputStream in = new FileInputStream(file)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) digest.update(buf, 0, n);
+        }
+        return digest.digest();
+    }
+
     private String installPrivateKeeper() throws Exception {
+        return installPrivateKeeper(app);
+    }
+
+    private static synchronized String installPrivateKeeper(Context app) throws Exception {
         File directory=new File(app.getFilesDir(),"root-keeper-v3");
-        if(!directory.isDirectory()){
-            File staging=new File(app.getFilesDir(),"root-keeper-"+UUID.randomUUID());
-            if(!staging.mkdir())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建私有 Root 后端目录","Failed to create private Root backend directory"));
-            Os.chmod(staging.getAbsolutePath(),0700);
-            try {
-                for(String name:new String[]{"daemon.py","mode_state.py"}){
-                    File target=new File(staging,name);
-                    try(InputStream input=app.getAssets().open("root-keeper/"+name);OutputStream out=new FileOutputStream(target)){input.transferTo(out);}
-                    Os.chmod(target.getAbsolutePath(),0600);
-                }
-                if(!staging.renameTo(directory))throw new IOException(com.termux.terminal.LumaLang.tr("无法发布私有 Root 后端","Failed to publish private Root backend"));
-            }finally{for(File file:staging.listFiles()==null?new File[0]:staging.listFiles())file.delete();staging.delete();}
+        if(!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()){
+            throw new IOException(com.termux.terminal.LumaLang.tr("无法创建私有 Root 后端目录","Failed to create private Root backend directory"));
+        }
+        Os.chmod(directory.getAbsolutePath(),0700);
+        for(String name:new String[]{"daemon.py","mode_state.py"}){
+            byte[] expected=readAssetBytes(app,"root-keeper/"+name);
+            byte[] expectedHash=sha256(expected);
+            File target=new File(directory,name);
+            boolean matches=target.isFile() && !Files.isSymbolicLink(target.toPath()) && target.length()==expected.length;
+            if(matches){
+                try{matches=java.security.MessageDigest.isEqual(expectedHash,sha256File(target));}
+                catch(Exception ignored){matches=false;}
+            }
+            if(!matches){
+                File temp=File.createTempFile("keeper-",".tmp",directory);
+                try {
+                    try(FileOutputStream out=new FileOutputStream(temp)){
+                        int off=0;
+                        while(off<expected.length){
+                            int len=Math.min(8192,expected.length-off);
+                            out.write(expected,off,len);
+                            off+=len;
+                        }
+                        out.getFD().sync();
+                    }
+                    Os.chmod(temp.getAbsolutePath(),0600);
+                    if(!temp.renameTo(target)){
+                        Files.deleteIfExists(target.toPath());
+                        if(!temp.renameTo(target))throw new IOException(com.termux.terminal.LumaLang.tr("无法发布私有 Root 后端","Failed to publish private Root backend"));
+                    }
+                }finally{temp.delete();}
+            }
         }
         return "/proc/1/root"+new File(directory,"daemon.py").getAbsolutePath();
     }
@@ -182,7 +230,7 @@ final class RootBackend implements AutoCloseable {
                 String detail=errors.toString("UTF-8").trim();
                 throw new IOException(detail.isEmpty()?com.termux.terminal.LumaLang.tr("Root 模式后端没启动起来。用临时 Root 的话，确认 Root 还在后再试","Root backend failed to start. If using temporary Root, confirm Root is active and try again"):detail);
             }
-            throw new IOException(privateKeeper?com.termux.terminal.LumaLang.tr("Ubuntu Root 后端启动失败，请确认 Root 授权与 /data/local/linux/bin/ubuntu 可用","Failed to start Ubuntu Root backend; check Root access and /data/local/linux/bin/ubuntu"):com.termux.terminal.LumaLang.tr("Ubuntu 后端不可用，请确认 /opt/luma-root/daemon.py 已安装且 Root 授权可用","Ubuntu backend unavailable; check /opt/luma-root/daemon.py and Root access"));
+            throw new IOException(privateKeeper?com.termux.terminal.LumaLang.tr("Ubuntu Root 后端启动失败，请确认 Root 授权与 "+entry+" 可用","Failed to start Ubuntu Root backend; check Root access and "+entry):com.termux.terminal.LumaLang.tr("Ubuntu 后端不可用，请确认 /opt/luma-root/daemon.py 已安装且 Root 授权可用","Ubuntu backend unavailable; check /opt/luma-root/daemon.py and Root access"));
         }
     }
 
@@ -196,13 +244,16 @@ final class RootBackend implements AutoCloseable {
                     if(!bootstrapAllowed)throw new IOException(com.termux.terminal.LumaLang.tr("Ubuntu 后端未连接，请在窗口列表中重试后端连接","Ubuntu backend not connected; retry connection from the windows list"));
                     bootstrapAllowed=false;launch();current=connect();
                 }
-                if(closed){current.close();return;}
-                socket=current;
-                lastError=null;
                 synchronized(outputLock){
+                    if(closed){
+                        try{current.close();}catch(IOException ignored){}
+                        return;
+                    }
+                    socket=current;
                     output=new BufferedWriter(new OutputStreamWriter(current.getOutputStream(),StandardCharsets.UTF_8));
                     write(new JSONObject().put("op","hello").put("token",token).put("lang",com.termux.terminal.LumaLang.code()));
                 }
+                lastError=null;
                 try(BufferedReader input=new BufferedReader(new InputStreamReader(current.getInputStream(),StandardCharsets.UTF_8))) {
                     String line;
                     while(!closed && (line=input.readLine())!=null) {
@@ -223,16 +274,18 @@ final class RootBackend implements AutoCloseable {
 
     private void deliver(Runnable work) {
         if(closed)return;
-        CountDownLatch done=new CountDownLatch(1);
-        main.post(()->{try{if(!closed)work.run();}finally{done.countDown();}});
-        try {done.await(10,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}
+        main.post(()->{if(!closed)work.run();});
     }
 
     private void disconnectSocket() {
-        LocalSocket current=socket;socket=null;
+        LocalSocket current;
+        synchronized(outputLock){
+            current=socket;
+            socket=null;
+            output=null;
+        }
         writer.getQueue().clear();
         if(current!=null)try{current.close();}catch(IOException ignored){}
-        output=null;
     }
     @Override public void close(){closed=true;disconnectSocket();writer.shutdownNow();}
 }

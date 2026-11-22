@@ -77,10 +77,11 @@ final class EnvironmentInstaller {
         }
         StringBuilder hash=new StringBuilder();for(byte b:digest.digest())hash.append(String.format("%02x",b&255));
         if(!hash.toString().equals(manifest.getString("sha256")))throw new IOException(com.termux.terminal.LumaLang.tr("内置环境校验失败，请重新获取安装包","Bundled environment checksum failed; please obtain a fresh APK"));
-        directory(target.getParentFile());
-        File stage=Files.createTempDirectory(target.getParentFile().toPath(),"debian.installing-").toFile();
+        File parent=target.getParentFile();
+        directory(parent);
         long total=manifest.getLong("unpackedBytes");
-        if(stage.getUsableSpace()<total+128L*1024*1024)throw new IOException(com.termux.terminal.LumaLang.isZh()?("存储空间不足，至少需要 "+((total+128L*1024*1024)/1024/1024)+" MiB 可用空间"):("Insufficient storage; at least "+((total+128L*1024*1024)/1024/1024)+" MiB required"));
+        if(parent.getUsableSpace()<total+128L*1024*1024)throw new IOException(com.termux.terminal.LumaLang.isZh()?("存储空间不足，至少需要 "+((total+128L*1024*1024)/1024/1024)+" MiB 可用空间"):("Insufficient storage; at least "+((total+128L*1024*1024)/1024/1024)+" MiB required"));
+        File stage=Files.createTempDirectory(parent.toPath(),"debian.installing-").toFile();
         long written=0;int lastPercent=-1;
         try(InputStream packaged=c.getAssets().open(archive);
             InputStream decoded=archive.endsWith(".xz")?new XZInputStream(packaged,32*1024):packaged;
@@ -118,6 +119,7 @@ final class EnvironmentInstaller {
         progress.update(com.termux.terminal.LumaLang.tr("初始化工作区和 Agent 环境说明…","Initializing workspace and Agent environment guide…"));
         copyWorkspace(c,"workspace",LinuxEnvironment.workspace(c));
         RuntimeAssets.installBundledPackages(c,stage);
+        RuntimeAssets.syncMirrorConfigs(stage);
         markReady(stage);
         cancelled();
         Files.move(stage.toPath(),target.toPath());

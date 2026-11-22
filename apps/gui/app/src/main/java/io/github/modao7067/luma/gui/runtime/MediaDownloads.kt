@@ -87,12 +87,14 @@ internal object MediaDownloads {
             return "/sdcard/$relativePath$actual"
         } catch (error: Throwable) { failure = error; throw error }
         finally {
-            if (!committed) try {
-                if (resolver.delete(uri, null, null) != 1) throw IOException(tr("保存失败，未完成文件清理失败", "Save failed and incomplete file cleanup also failed"))
-            } catch (cleanup: Exception) {
-                val error = IOException(tr("保存失败，未完成文件清理失败", "Save failed and incomplete file cleanup also failed"), failure ?: cleanup)
-                if (failure != null) error.addSuppressed(cleanup)
-                throw error
+            if (!committed) {
+                val cleanupError = try {
+                    if (resolver.delete(uri, null, null) != 1) IOException(tr("保存失败，未完成文件清理失败", "Save failed and incomplete file cleanup also failed")) else null
+                } catch (cleanup: Exception) { cleanup }
+                if (cleanupError != null) {
+                    val original = failure
+                    if (original != null) original.addSuppressed(cleanupError) else throw cleanupError
+                }
             }
         }
     }

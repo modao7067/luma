@@ -49,6 +49,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import io.github.modao7067.luma.gui.runtime.AgentRuntime
 import org.json.JSONArray
@@ -780,13 +783,27 @@ internal fun GlobalUsageScreen(
     var loadingLimits by remember(environment, langCode, suppliedLimits) {
         mutableStateOf((suppliedLimits ?: limits) == null && !inspection)
     }
-    var manualRefreshing by remember { mutableStateOf(false) }
+    var manualRefreshing by remember(environment) { mutableStateOf(false) }
     var limitsFetchedInSession by remember(environment, langCode, suppliedLimits) {
         mutableStateOf(suppliedLimits != null)
     }
     var summaryRequestSeq by remember { mutableIntStateOf(0) }
     var limitsRequestSeq by remember { mutableIntStateOf(0) }
+    var summaryJob by remember { mutableStateOf<Job?>(null) }
+    var limitsJob by remember { mutableStateOf<Job?>(null) }
     var errorState by remember { mutableStateOf<UsageErrorState?>(null) }
+
+    DisposableEffect(environment) {
+        onDispose {
+            summaryJob?.cancel()
+            summaryJob = null
+            limitsJob?.cancel()
+            limitsJob = null
+            manualRefreshing = false
+            loadingSummary = false
+            loadingLimits = false
+        }
+    }
 
     LaunchedEffect(langCode) {
         if (errorState is UsageErrorState.Message) errorState = null
@@ -825,24 +842,26 @@ internal fun GlobalUsageScreen(
             limitsFetchedInSession = true
         }
 
-        scope.launch {
-            runCatching {
+        summaryJob?.cancel()
+        summaryJob = scope.launch {
+            try {
                 val raw = rt.readGlobalUsageSummary(
                     environment = requestEnv,
                     timeZone = tz,
                     refresh = forceRefresh,
                     period = periodArg,
                 )
-                raw to parseGlobalUsageSummary(raw)
-            }.onSuccess { (raw, parsed) ->
+                val parsed = parseGlobalUsageSummary(raw)
                 writeCachedSummarySnapshot(prefs, requestEnv, periodArg, raw, parsed)
-                if (environment == requestEnv && parsed.hasRolling30dCost) {
+                if (summaryRequestSeq == reqId && environment == requestEnv && parsed.hasRolling30dCost) {
                     lastKnownRolling30dCost = parsed.rolling30dCostByCli
                 }
                 if (summaryRequestSeq == reqId && environment == requestEnv && currentSelectedPeriodId() == periodArg) {
                     summary = parsed
                 }
-            }.onFailure { err ->
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (err: Exception) {
                 if (summaryRequestSeq == reqId && environment == requestEnv && currentSelectedPeriodId() == periodArg) {
                     val activeStatsSummary = resolveStatsSummary(summary, suppliedSummary, periodArg)
                     if (forceRefresh || activeStatsSummary == null) {
@@ -850,24 +869,29 @@ internal fun GlobalUsageScreen(
                             ?: UsageErrorState.SummaryLoadFailed
                     }
                 }
-            }
-            if (summaryRequestSeq == reqId && environment == requestEnv) {
-                loadingSummary = false
-                if (!loadingLimits) manualRefreshing = false
+            } finally {
+                if (summaryRequestSeq == reqId && environment == requestEnv) {
+                    loadingSummary = false
+                    if (!loadingLimits && currentSelectedPeriodId() == periodArg) {
+                        manualRefreshing = false
+                    }
+                }
             }
         }
 
         if (needLimits) {
-            scope.launch {
-                runCatching {
+            limitsJob?.cancel()
+            limitsJob = scope.launch {
+                try {
                     val raw = rt.readGlobalUsageLimits(requestEnv, fresh = forceRefresh)
-                    raw to parseGlobalUsageLimits(raw)
-                }.onSuccess { (raw, parsed) ->
+                    val parsed = parseGlobalUsageLimits(raw)
                     writeCachedLimitsSnapshot(prefs, requestEnv, raw, parsed, requestLang)
                     if (limitsRequestSeq == limitsReqId && environment == requestEnv && LumaI18n.langCode() == requestLang) {
                         limits = parsed
                     }
-                }.onFailure { err ->
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (err: Exception) {
                     if (limitsRequestSeq == limitsReqId && environment == requestEnv && LumaI18n.langCode() == requestLang) {
                         if (forceRefresh || (metricView == UsageMetricView.LIMITS && limits == null)) {
                             if (errorState == null) {
@@ -876,10 +900,13 @@ internal fun GlobalUsageScreen(
                             }
                         }
                     }
-                }
-                if (limitsRequestSeq == limitsReqId && environment == requestEnv && LumaI18n.langCode() == requestLang) {
-                    loadingLimits = false
-                    if (!loadingSummary) manualRefreshing = false
+                } finally {
+                    if (limitsRequestSeq == limitsReqId && environment == requestEnv && LumaI18n.langCode() == requestLang) {
+                        loadingLimits = false
+                        if (!loadingSummary && currentSelectedPeriodId() == periodArg) {
+                            manualRefreshing = false
+                        }
+                    }
                 }
             }
         }
@@ -1226,7 +1253,16 @@ private fun UsageLimitsContent(
         return
     }
 
-    val nowMs = remember(limits?.generatedAt) { System.currentTimeMillis() }
+    val inspection = LocalInspectionMode.current
+    val nowMs by produceState(initialValue = System.currentTimeMillis(), limits?.generatedAt, inspection) {
+        value = System.currentTimeMillis()
+        if (!inspection) {
+            while (true) {
+                delay(30_000L)
+                value = System.currentTimeMillis()
+            }
+        }
+    }
     providers.forEach { provider ->
         ProviderLimitCard(
             provider = provider,

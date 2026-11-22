@@ -16,13 +16,17 @@ object ExternalCodexPolicy {
     fun remoteCommand(socket: String, threadId: String, cwd: String): String {
         validateSocket(socket)
         require(threadId.matches(Regex("[a-zA-Z0-9_-]{1,128}"))) { tr("原生会话标识无效", "Invalid native session ID") }
-        require(cwd.startsWith('/') && '\u0000' !in cwd) { tr("请输入绝对路径", "Enter an absolute path") }
+        require(cwd.startsWith('/') && cwd.none { it.isISOControl() }) { tr("请输入绝对路径", "Enter an absolute path") }
         return "cd ${quote(cwd)} && exec codex resume ${quote(threadId)} --remote ${quote("unix://$socket")}"
     }
-    fun proxyCommand(socket: String): List<String> {
+    fun proxyCommand(socket: String): List<String> =
+        proxyCommand(socket, "/system/bin/su", "/data/local/linux/bin/ubuntu")
+    fun proxyCommand(context: android.content.Context, socket: String): List<String> =
+        proxyCommand(socket, DebianRootMode.suExecutable(), DebianRootMode.rootLauncher(context))
+    fun proxyCommand(socket: String, suBinary: String, launcher: String): List<String> {
         validateSocket(socket)
-        return listOf("/system/bin/su", "-c", "exec " +
-            listOf("/data/local/linux/bin/ubuntu", "codex", "app-server", "proxy", "--sock", socket).joinToString(" ", transform = ::quote))
+        return listOf(suBinary, "-c", "exec " +
+            listOf(launcher, "codex", "app-server", "proxy", "--sock", socket).joinToString(" ", transform = ::quote))
     }
     private fun quote(value: String) = "'" + value.replace("'", "'\"'\"'") + "'"
 }

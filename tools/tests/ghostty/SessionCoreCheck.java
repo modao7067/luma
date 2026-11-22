@@ -96,6 +96,58 @@ public final class SessionCoreCheck {
         final long h=wr.handle();final int[] rc={0};final GhosttyFrameAdapter wrf=wr;
         Thread t=new Thread(()->{wrf.close();rc[0]=wrf.handle()==h?1:0;});t.start();t.join();
         check(rc[0]==1&&wr.handle()==h&&wr.buffer()!=null,"wrong-thread adapter.close rejects and preserves owner state");
+        TerminalSession nullReset=new TerminalSession(new Provider(),1000,client(),GhosttyTerminalEmulator::new);
+        nullReset.reset();
+        nullReset.write(u("ignored"),0,7);
+        nullReset.write(u("empty"),0,0);
+        check(nullReset.getEmulator()==null,"reset and write are safe before emulator initialization or with zero count");
+        ByteQueue nonBlocking=new ByteQueue(16,64);
+        byte[] forty=new byte[40];Arrays.fill(forty,(byte)'a');
+        check(nonBlocking.writeNonBlocking(forty,0,forty.length),"non-blocking queue grows within max bound");
+        byte[] thirty=new byte[30];Arrays.fill(thirty,(byte)'b');
+        check(!nonBlocking.writeNonBlocking(thirty,0,thirty.length),"non-blocking queue rejects overflow atomically without partial write");
+        byte[] twentyFour=new byte[24];Arrays.fill(twentyFour,(byte)'c');
+        check(nonBlocking.writeNonBlocking(twentyFour,0,twentyFour.length),"non-blocking queue accepts exact remaining capacity after atomic reject");
+        byte[] drained=new byte[128];int total=0,got;
+        while((got=nonBlocking.read(drained,false))>0)total+=got;
+        boolean orderOk=total==64;
+        for(int i=0;orderOk&&i<40;i++)orderOk=drained[i]=='a';
+        for(int i=40;orderOk&&i<64;i++)orderOk=drained[i]=='c';
+        check(orderOk,"non-blocking queue preserves complete ordered writes with no truncated prefix");
+        final int[] rejectedTotal={0};
+        TerminalSessionClient overflowClient=(TerminalSessionClient)Proxy.newProxyInstance(
+            TerminalSessionClient.class.getClassLoader(),new Class<?>[]{TerminalSessionClient.class},
+            (p,m,a)->{
+                if("onInputBufferFull".equals(m.getName())){rejectedTotal[0]+=(Integer)a[1];return null;}
+                if("getTerminalCursorStyle".equals(m.getName()))return 0;
+                return null;
+            });
+        TerminalSession overflowSession=new TerminalSession(new Provider(),1000,overflowClient,GhosttyTerminalEmulator::new);
+        overflowSession.mShellPid=1;
+        byte[] fill=new byte[1024*1024-10];Arrays.fill(fill,(byte)'x');
+        check(overflowSession.writeChecked(fill,0,fill.length),"session writeChecked fills queue near capacity");
+        byte[] tooBig=u("01234567890123456789");
+        check(!overflowSession.writeChecked(tooBig,0,tooBig.length),"session writeChecked rejects input larger than remaining space");
+        overflowSession.write(tooBig,0,tooBig.length);
+        check(rejectedTotal[0]==tooBig.length,"session write reports rejected bytes to client without blocking");
+        byte[] fits=u("0123456789");
+        check(overflowSession.writeChecked(fits,0,fits.length),"session writeChecked still accepts exact fit after rejection");
+        byte[] sinkBuf=new byte[8192];int sessionBytes=0;byte[] tail10=new byte[10];
+        while((got=overflowSession.mTerminalToProcessIOQueue.read(sinkBuf,false))>0){
+            if(got>=10){System.arraycopy(sinkBuf,got-10,tail10,0,10);}
+            else{
+                int keep=10-got;System.arraycopy(tail10,got,tail10,0,keep);
+                System.arraycopy(sinkBuf,0,tail10,keep,got);
+            }
+            sessionBytes+=got;
+        }
+        check(sessionBytes==1024*1024&&"0123456789".equals(new String(tail10,StandardCharsets.UTF_8)),
+            "session queue delivered only complete writes in order");
+        final int[] readerResult={0};
+        Thread blockedReader=new Thread(()->{readerResult[0]=nonBlocking.read(new byte[16],true);});
+        blockedReader.start();Thread.sleep(20);nonBlocking.close();blockedReader.join(1000);
+        check(!blockedReader.isAlive()&&readerResult[0]==-1,"ByteQueue.close wakes blocked reader");
+        check(!nonBlocking.writeNonBlocking(u("x"),0,1),"closed non-blocking queue rejects writes immediately");
         wr.close();
         System.out.println("SESSION CORE OK checks="+checks);
     }

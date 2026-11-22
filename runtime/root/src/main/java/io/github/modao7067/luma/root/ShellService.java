@@ -25,10 +25,14 @@ public final class ShellService extends Service {
     }
     private boolean managedWorkspace;
     boolean managedWorkspace(){return managedWorkspace;}
+    private static final int MAX_CLIPBOARD_CHARS=262_144;
     private ManagedTerminalRequest savedRequest(String id){
         if(!managedWorkspace())return null;
         try{return ManagedTerminalRequest.restore(getSharedPreferences("root-managed-windows",MODE_PRIVATE).getString(id,null),"root");}
-        catch(java.io.IOException failure){throw new IllegalStateException(com.termux.terminal.LumaLang.tr("无法读取窗口归属，原记录已保留","Failed to read window ownership; existing record preserved"),failure);}
+        catch(java.io.IOException|RuntimeException failure){
+            android.util.Log.w("UbuntuGlass","Ignoring corrupt managed window record "+id,failure);
+            return null;
+        }
     }
     private boolean dedicated(RemoteWindow window){
         ManagedTerminalRequest request=savedRequest(window.id);
@@ -387,7 +391,7 @@ public final class ShellService extends Service {
             }else if(kind.equals("closed")){
                 completeClose(window);
             }
-        }catch(org.json.JSONException|IllegalArgumentException e){backendError=e.getMessage();if(listener!=null)listener.onBackendError(backendError);}
+        }catch(org.json.JSONException|IllegalArgumentException|IllegalStateException e){backendError=e.getMessage();if(listener!=null)listener.onBackendError(backendError);}
     }
     private final class RemoteWindow implements TerminalSession.PtyProvider {
         final String id;TerminalSession terminal;boolean ready,started,created=true,alive=true,createSent,opening,detached;
@@ -545,8 +549,34 @@ public final class ShellService extends Service {
         session=null;
         super.onDestroy();
     }
+    private static String clampClipboardText(CharSequence input){
+        if(input==null)return "";
+        int len=input.length();
+        if(len<=MAX_CLIPBOARD_CHARS)return input.toString();
+        int end=MAX_CLIPBOARD_CHARS;
+        if(end>0 && Character.isHighSurrogate(input.charAt(end-1)))end--;
+        return input.subSequence(0,end).toString();
+    }
+    private String readBoundedClipboardUri(android.net.Uri uri){
+        try(android.content.res.AssetFileDescriptor afd=getContentResolver().openTypedAssetFileDescriptor(uri,"text/*",null)){
+            if(afd==null)return null;
+            try(java.io.Reader reader=new java.io.InputStreamReader(afd.createInputStream(),java.nio.charset.StandardCharsets.UTF_8)){
+                StringBuilder out=new StringBuilder();
+                char[] buf=new char[8192];
+                int n;
+                while(out.length()<MAX_CLIPBOARD_CHARS && (n=reader.read(buf,0,Math.min(buf.length,MAX_CLIPBOARD_CHARS-out.length())))!=-1){
+                    out.append(buf,0,n);
+                }
+                if(out.length()>0 && Character.isHighSurrogate(out.charAt(out.length()-1)))out.setLength(out.length()-1);
+                return out.toString();
+            }
+        }catch(Exception ignored){
+            return null;
+        }
+    }
     private final class Client extends LogCallbacks implements TerminalSessionClient {
         public void onEmulatorError(TerminalSession s,String message){backendError=message;if(listener!=null)listener.onBackendError(message);}
+        public void onInputBufferFull(TerminalSession s,int rejectedBytes){if(listener!=null)listener.onBackendError(com.termux.terminal.LumaLang.tr("终端输入缓冲区已满，本次输入未写入","Terminal input buffer is full; input was not written"));}
         public void onTextChanged(TerminalSession s){RemoteWindow window=find(s);if(window!=null)window.repaint.output();if(listener!=null && sessions.contains(s))listener.onScreenChanged(s);}
         public void onTitleChanged(TerminalSession s){if(listener!=null && sessions.contains(s))listener.onSessionStateChanged(s);}
         public void onCommandStateChanged(TerminalSession s){RemoteWindow window=find(s);if(window!=null)window.checkpointModes();if(listener!=null && sessions.contains(s))listener.onSessionStateChanged(s);}
@@ -557,14 +587,33 @@ public final class ShellService extends Service {
         public Integer getTerminalCursorStyle(){return 1;}
         public void onBell(TerminalSession s){}
         public void onCopyTextToClipboard(TerminalSession s,String text){
-            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Terminal",text));
+            if(text==null)return;
+            ClipboardManager cm=getSystemService(ClipboardManager.class);
+            if(cm==null)return;
+            try{
+                cm.setPrimaryClip(ClipData.newPlainText("Terminal",clampClipboardText(text)));
+            }catch(RuntimeException ignored){}
         }
         public void onPasteTextFromClipboard(TerminalSession s){
+            if(s==null || s.getEmulator()==null)return;
             ClipboardManager cm=getSystemService(ClipboardManager.class);
-            if(cm.hasPrimaryClip()){
-                CharSequence t=cm.getPrimaryClip().getItemAt(0).coerceToText(ShellService.this);
-                if(t!=null && s.getEmulator()!=null)s.getEmulator().paste(t.toString());
+            if(cm==null || !cm.hasPrimaryClip())return;
+            ClipData clip;
+            try{clip=cm.getPrimaryClip();}catch(RuntimeException ignored){return;}
+            if(clip==null || clip.getItemCount()==0)return;
+            ClipData.Item item=clip.getItemAt(0);
+            if(item==null)return;
+            CharSequence raw=item.getText();
+            String pasted=null;
+            if(raw!=null){
+                pasted=clampClipboardText(raw);
+            }else if(item.getUri()!=null){
+                pasted=readBoundedClipboardUri(item.getUri());
+            }else{
+                Intent intent=item.getIntent();
+                if(intent!=null)pasted=clampClipboardText(intent.toUri(Intent.URI_INTENT_SCHEME));
             }
+            if(pasted!=null && !pasted.isEmpty() && s.getEmulator()!=null)s.getEmulator().paste(pasted);
         }
     }
 }

@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -47,6 +48,35 @@ BINARY_SUFFIXES = (
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.ttf', '.otf', '.woff', '.woff2',
     '.zip', '.xz', '.gz', '.tgz', '.jar', '.aar', '.dex', '.so', '.a', '.o', '.spv', '.mp4', '.wav',
 )
+ZIP_TEXT_SUFFIXES = ('.json', '.txt', '.md')
+ZIP_TEXT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def decode_scannable_text(data: bytes) -> str | None:
+    if data.startswith((b'\xff\xfe', b'\xfe\xff')) and not data.startswith((b'\xff\xfe\x00\x00', b'\x00\x00\xfe\xff')):
+        return data.decode('utf-16', errors='replace')
+    if b'\x00' in data[:8192]:
+        return None
+    return data.decode('utf-8', errors='replace')
+
+
+def scan_tmux_bundle(bundle: Path) -> tuple[int, list[str]]:
+    if not bundle.is_file():
+        return 0, []
+    scanned = 0
+    findings: list[str] = []
+    with zipfile.ZipFile(bundle, 'r') as archive:
+        for info in archive.infolist():
+            if info.is_dir() or not info.filename.lower().endswith(ZIP_TEXT_SUFFIXES):
+                continue
+            if info.file_size > ZIP_TEXT_MAX_BYTES:
+                continue
+            text = decode_scannable_text(archive.read(info))
+            if text is None:
+                continue
+            scanned += 1
+            findings.extend(scan_text(f'{bundle.name}!{info.filename}', text))
+    return scanned, findings
 
 
 def scan_text(label: str, text: str) -> list[str]:
@@ -83,10 +113,11 @@ def main() -> int:
         if rel.lower().endswith(BINARY_SUFFIXES):
             continue
         data = (REPO / rel).read_bytes()
-        if b'\x00' in data[:8192]:
+        text = decode_scannable_text(data)
+        if text is None:
             continue
         scanned_files += 1
-        violations.extend(scan_text(rel, data.decode('utf-8', errors='replace')))
+        violations.extend(scan_text(rel, text))
 
     bundle = REPO / 'runtime/noroot/src/main/assets/native-sources/proot-sources.tgz'
     scanned_members = 0
@@ -99,10 +130,17 @@ def main() -> int:
                 if handle is None:
                     continue
                 payload = handle.read()
-                if b'\x00' in payload[:8192]:
+                text = decode_scannable_text(payload)
+                if text is None:
                     continue
                 scanned_members += 1
-                violations.extend(scan_text(f'proot-sources.tgz!{member.name}', payload.decode('utf-8', errors='replace')))
+                violations.extend(scan_text(f'proot-sources.tgz!{member.name}', text))
+
+    tmux_scanned, tmux_findings = scan_tmux_bundle(
+        REPO / 'apps/gui/app/src/main/assets/cli_bridge/native/tmux-debian-arm64.zip',
+    )
+    scanned_members += tmux_scanned
+    violations.extend(tmux_findings)
 
     if violations:
         for item in violations[:50]:

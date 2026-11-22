@@ -121,7 +121,7 @@ internal fun summarizeMarkdownCard(code: String): MarkdownCardSummary {
     }
     val titleIndex = if (headingTitle != null) headingLineIndex else firstContentLineIndex
     val rawTitle = headingTitle ?: firstContentTitle ?: tr("Markdown 文档", "Markdown document")
-    val title = if (rawTitle.length > 44) rawTitle.take(44).trimEnd() + "…" else rawTitle
+    val title = if (rawTitle.length > 44) safeUtf16Prefix(rawTitle, 44).trimEnd() + "…" else rawTitle
     val excerpt = contentLines
         .asSequence()
         .filter { it.first != titleIndex }
@@ -167,11 +167,29 @@ private fun widenMarkdownFenceLine(line: String, fence: MarkdownFenceLine, targe
 }
 
 private fun normalizeMarkdownFenceLines(lines: List<String>): List<String> {
-    if (lines.size < 2) return lines
+    val n = lines.size
+    if (n < 2) return lines
+    val parsed = arrayOfNulls<MarkdownFenceLine>(n)
+    for (idx in 0 until n) {
+        parsed[idx] = parseMarkdownFence(lines[idx])
+    }
+    val maxBareBacktickAfter = IntArray(n)
+    val maxBareTildeAfter = IntArray(n)
+    var maxBacktick = 0
+    var maxTilde = 0
+    for (idx in n - 1 downTo 0) {
+        maxBareBacktickAfter[idx] = maxBacktick
+        maxBareTildeAfter[idx] = maxTilde
+        val f = parsed[idx]
+        if (f != null && f.info.isEmpty()) {
+            if (f.char == '`') maxBacktick = maxOf(maxBacktick, f.length)
+            else if (f.char == '~') maxTilde = maxOf(maxTilde, f.length)
+        }
+    }
     var result: MutableList<String>? = null
     var i = 0
-    while (i < lines.size) {
-        val outer = parseMarkdownFence(lines[i])
+    while (i < n) {
+        val outer = parsed[i]
         if (outer == null) {
             i++
             continue
@@ -184,8 +202,8 @@ private fun normalizeMarkdownFenceLines(lines: List<String>): List<String> {
         var closeIndex = -1
         var firstBareCloseIndex = -1
         var j = i + 1
-        while (j < lines.size) {
-            val fence = parseMarkdownFence(lines[j])
+        while (j < n) {
+            val fence = parsed[j]
             if (fence != null) {
                 if (firstBareCloseIndex == -1 && fence.info.isEmpty() && fence.char == outer.char && fence.length >= outer.length) {
                     firstBareCloseIndex = j
@@ -202,10 +220,7 @@ private fun normalizeMarkdownFenceLines(lines: List<String>): List<String> {
                 } else if (
                     isMarkdownContainer &&
                     fence.indent > outer.indent &&
-                    (j + 1 until lines.size).any { k ->
-                        val later = parseMarkdownFence(lines[k])
-                        later != null && later.info.isEmpty() && later.char == fence.char && later.length >= fence.length
-                    }
+                    (if (fence.char == '`') maxBareBacktickAfter[j] else maxBareTildeAfter[j]) >= fence.length
                 ) {
                     innerStack.add(fence)
                     if (fence.char == outer.char) maxInnerSameChar = maxOf(maxInnerSameChar, fence.length)
@@ -219,11 +234,11 @@ private fun normalizeMarkdownFenceLines(lines: List<String>): List<String> {
         if (isCarousel) {
             val mutable = result ?: lines.toMutableList().also { result = it }
             mutable[i] = ""
-            val endExclusive = if (closeIndex != -1) closeIndex else lines.size
+            val endExclusive = if (closeIndex != -1) closeIndex else n
             if (closeIndex != -1) mutable[closeIndex] = ""
             var nestedFence: MarkdownFenceLine? = null
             for (k in (i + 1) until endExclusive) {
-                val f = parseMarkdownFence(mutable[k])
+                val f = parsed[k]
                 if (f != null) {
                     if (nestedFence == null) {
                         nestedFence = f
@@ -235,20 +250,20 @@ private fun normalizeMarkdownFenceLines(lines: List<String>): List<String> {
                     mutable[k] = if (cleaned.isBlank()) "" else cleaned
                 }
             }
-            i = if (closeIndex != -1) closeIndex + 1 else lines.size
+            i = if (closeIndex != -1) closeIndex + 1 else n
         } else if (closeIndex != -1 || isMarkdownContainer) {
             if (maxInnerSameChar >= outer.length) {
                 val targetLength = maxInnerSameChar + 1
                 val mutable = result ?: lines.toMutableList().also { result = it }
                 mutable[i] = widenMarkdownFenceLine(mutable[i], outer, targetLength)
                 if (closeIndex != -1) {
-                    val closeFence = parseMarkdownFence(mutable[closeIndex])!!
+                    val closeFence = parsed[closeIndex]!!
                     mutable[closeIndex] = widenMarkdownFenceLine(mutable[closeIndex], closeFence, targetLength)
                 }
             }
-            i = if (closeIndex != -1) closeIndex + 1 else lines.size
+            i = if (closeIndex != -1) closeIndex + 1 else n
         } else {
-            i = if (firstBareCloseIndex != -1) firstBareCloseIndex + 1 else lines.size
+            i = if (firstBareCloseIndex != -1) firstBareCloseIndex + 1 else n
         }
     }
     return result ?: lines
@@ -345,32 +360,39 @@ internal class MarkdownDocumentParser {
         listOf(TablesExtension.create(), StrikethroughExtension.builder().requireTwoTildes(true).build()),
     )
         .includeSourceSpans(org.commonmark.parser.IncludeSourceSpans.BLOCKS_AND_INLINES).build()
-    var parses: Long = 0; private set
-    var parseNanos: Long = 0; private set
-    var reusedBlocks: Long = 0; private set
+    private val parseCount = java.util.concurrent.atomic.AtomicLong()
+    private val parseNanosTotal = java.util.concurrent.atomic.AtomicLong()
+    private val reusedBlockCount = java.util.concurrent.atomic.AtomicLong()
+    val parses: Long get() = parseCount.get()
+    val parseNanos: Long get() = parseNanosTotal.get()
+    val reusedBlocks: Long get() = reusedBlockCount.get()
     fun parse(source: String, complete: Boolean, previous: MarkdownDocument? = null): MarkdownDocument {
         val begin = System.nanoTime()
         val old = previous?.takeIf { it.configuration == CONFIGURATION }?.blocks?.associateBy { it.offset }.orEmpty()
+        var localParses = 0L
+        var localReused = 0L
         val blocks = buildList {
             markdownSourceParts(source).forEach { part ->
                 if (part.math) {
                     val node = MarkdownAst(MarkdownKind.MATH, literal = part.source, revealUnits = part.source.length.coerceAtLeast(1))
                     val retained = old[part.offset]?.takeIf { it.node == node }
-                    if (retained != null) { reusedBlocks++; add(retained) } else add(MarkdownDocumentBlock(part.offset, node))
+                    if (retained != null) { localReused++; add(retained) } else add(MarkdownDocumentBlock(part.offset, node))
                 } else {
-                    parses++
+                    localParses++
                     val document = parser.parse(part.source)
                     document.childNodes().forEachIndexed { index, raw ->
                         val node = freezeMarkdownNode(raw)
                         if (node.kind == MarkdownKind.CODE_BLOCK && node.literal.isBlank()) return@forEachIndexed
                         val at = part.offset + (raw.sourceSpans.firstOrNull()?.inputIndex ?: index)
                         val retained = old[at]?.takeIf { it.node == node }
-                        if (retained != null) { reusedBlocks++; add(retained) } else add(MarkdownDocumentBlock(at, node))
+                        if (retained != null) { localReused++; add(retained) } else add(MarkdownDocumentBlock(at, node))
                     }
                 }
             }
         }
-        parseNanos += System.nanoTime() - begin
+        if (localParses > 0L) parseCount.addAndGet(localParses)
+        if (localReused > 0L) reusedBlockCount.addAndGet(localReused)
+        parseNanosTotal.addAndGet(System.nanoTime() - begin)
         return MarkdownDocument(source, blocks.toList(), complete = complete)
     }
     companion object { const val CONFIGURATION = "commonmark-0.32.0:gfm-tables+strike2:math-fences:v4" }
@@ -383,16 +405,29 @@ internal class MarkdownDocumentCache(
 ) {
     private data class Key(val source: String, val configuration: String)
     private val entries = LinkedHashMap<Key, MarkdownDocument>(16, .75f, true)
+    private var recentLargeKey: Key? = null
+    private var recentLargeDoc: MarkdownDocument? = null
     private var sources = 0; private var nodes = 0; private var hits = 0L; private var misses = 0L; private var rejected = 0L
     init { require(sourceBudget > 0 && maxEntries > 0 && maxSource in 1..sourceBudget && nodeBudget > 0 && maxNodes in 1..nodeBudget) }
-    @Synchronized fun peek(source: String): MarkdownDocument? = if (source.length > maxSource) null else entries[Key(source, MarkdownDocumentParser.CONFIGURATION)]
+    @Synchronized fun peek(source: String): MarkdownDocument? {
+        val key = Key(source, MarkdownDocumentParser.CONFIGURATION)
+        if (source.length > maxSource) {
+            return if (recentLargeKey == key) recentLargeDoc else null
+        }
+        return entries[key] ?: if (recentLargeKey == key) recentLargeDoc else null
+    }
     @Synchronized fun get(source: String): MarkdownDocument? {
         val value = peek(source); if (value == null) misses++ else hits++; return value
     }
     @Synchronized fun put(document: MarkdownDocument) {
         if (!document.complete) return
-        if (document.source.length > maxSource || document.nodeCount > maxNodes) { rejected++; return }
         val key = Key(document.source, document.configuration)
+        if (document.source.length > maxSource || document.nodeCount > maxNodes) {
+            rejected++
+            recentLargeKey = key
+            recentLargeDoc = document
+            return
+        }
         entries.remove(key)?.let { sources -= it.source.length; nodes -= it.nodeCount }
         entries[key] = document; sources += document.source.length; nodes += document.nodeCount
         while (entries.size > maxEntries || sources > sourceBudget || nodes > nodeBudget) {
@@ -407,4 +442,15 @@ internal fun markdownVisibleEnd(text: String, requested: Int): Int {
     var end = requested.coerceIn(0, text.length)
     if (end in 1 until text.length && Character.isHighSurrogate(text[end - 1]) && Character.isLowSurrogate(text[end])) end--
     return end
+}
+
+internal fun safeUtf16Prefix(text: String, maxChars: Int): String {
+    val end = markdownVisibleEnd(text, maxChars)
+    return if (end == text.length) text else text.substring(0, end)
+}
+
+internal fun safeUtf16SliceStart(text: String, requestedStart: Int): Int {
+    var start = requestedStart.coerceIn(0, text.length)
+    if (start in 1 until text.length && Character.isHighSurrogate(text[start - 1]) && Character.isLowSurrogate(text[start])) start++
+    return start
 }

@@ -79,7 +79,7 @@ class AgentRuntime(context: Context) {
         val logFile = File(privateDirectory("root"), "external-codex.log")
         val log = io.github.modao7067.luma.gui.agent.CodexProxyLog(logFile)
         io.github.modao7067.luma.gui.agent.CodexProcessTransport(
-            start = { ProcessBuilder(ExternalCodexPolicy.proxyCommand(socket)).start() },
+            start = { ProcessBuilder(ExternalCodexPolicy.proxyCommand(app, socket)).start() },
             diagnostic = { event ->
                 try { log.append(event); Os.chmod(logFile.absolutePath, 0x180) }
                 catch (error: Exception) { android.util.Log.e("LumaExternalCodex", "无法写入外部 Codex 私有诊断", error) }
@@ -239,25 +239,8 @@ class AgentRuntime(context: Context) {
         pruneOldBridgeRevisions(directory, revision)
     }
 
-    private fun pruneOldBridgeRevisions(directory: File, currentRevision: String) {
-        val activeRevisions = mutableSetOf(currentRevision)
-        directory.listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { file ->
-            runCatching {
-                val text = file.readText()
-                Regex("cli-bridge-v[0-9]+").findAll(text).forEach { activeRevisions.add(it.value) }
-            }
-        }
-        File(app.cacheDir, "services/tasks").listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { file ->
-            runCatching {
-                val json = JSONObject(file.readText())
-                if (json.optString("phase") != "exited") {
-                    Regex("cli-bridge-v[0-9]+").findAll(json.toString()).forEach { activeRevisions.add(it.value) }
-                }
-            }
-        }
-        directory.listFiles()?.filter {
-            it.isDirectory && it.name.startsWith("cli-bridge-v") && it.name !in activeRevisions
-        }?.forEach { it.deleteRecursively() }
+    internal fun pruneOldBridgeRevisions(directory: File, currentRevision: String) {
+        pruneOldBridgeRevisions(directory, app.cacheDir, currentRevision)
     }
 
     private suspend fun connectNativeCliLocked(cli: String, environment: String): RuntimeEndpoint {
@@ -337,12 +320,13 @@ class AgentRuntime(context: Context) {
         val basePath = canonicalBase.path
         val targetPath = canonicalTarget.path
         if (targetPath != basePath && !targetPath.startsWith("$basePath/")) return null
+        if (!canonicalTarget.canRead()) return null
         val logicalPath = if (rel.isEmpty()) prefix else "$prefix/" + targetPath.removePrefix(basePath).trimStart('/')
         return canonicalTarget to logicalPath
     }
 
     internal fun managedRootProtectedPath(environment: String, source: String): String? =
-        resolveManagedRootProtectedPath(app.filesDir, environment, source)
+        resolveManagedRootProtectedPath(app.filesDir, environment, source, usesRootExecution(environment))
 
     internal fun copyMediaFile(environment: String, path: String, destination: File, limit: Long) {
         validateEnvironment(environment); validatePath(path)
@@ -350,8 +334,8 @@ class AgentRuntime(context: Context) {
             local.inputStream().use { MediaByteReader.copy(it, destination, limit) }
             return
         }
-        resolveManagedRootProtectedPath(app.filesDir, environment, path)?.let { protectedHostPath ->
-            io.github.modao7067.luma.root.GuiRuntimeBridge.copyFile(app, protectedHostPath, destination, limit)
+        resolveManagedRootProtectedTarget(app.filesDir, environment, path, usesRootExecution(environment))?.let { target ->
+            io.github.modao7067.luma.root.GuiRuntimeBridge.copyFile(app, target.guestPath, destination, limit, target.allowedPrefix)
             return
         }
         val normalized = File(path).toPath().normalize().toString()
@@ -362,9 +346,17 @@ class AgentRuntime(context: Context) {
     suspend fun mediaMetadata(environment: String, source: String, cwd: String): Pair<Long, String> = withContext(Dispatchers.IO) {
         val imported = importedImageFile(environment, source)
         if (imported != null) return@withContext imported.length() to MediaSourcePolicy.mime(imported.name)
-        val protectedPath = resolveManagedRootProtectedPath(app.filesDir, environment, source)
-        val path = protectedPath ?: MediaSourcePolicy.guestPath(source, cwd)
-        val result = JSONObject(execute(environment, listOf("/usr/bin/python3", "-I", "-c", RuntimeScripts.mediaMetadata, path)))
+        val protectedTarget = resolveManagedRootProtectedTarget(app.filesDir, environment, source, usesRootExecution(environment))
+        val path = protectedTarget?.guestPath ?: MediaSourcePolicy.guestPath(source, cwd)
+        val command = buildList {
+            add("/usr/bin/python3")
+            add("-I")
+            add("-c")
+            add(RuntimeScripts.mediaMetadata)
+            add(path)
+            protectedTarget?.allowedPrefix?.let(::add)
+        }
+        val result = JSONObject(execute(environment, command))
         result.getLong("size") to result.optString("mime")
     }
     suspend fun inspectMedia(environment: String, resource: io.github.modao7067.luma.gui.session.MediaResource): io.github.modao7067.luma.gui.session.MediaResource = withContext(Dispatchers.IO) {
@@ -418,8 +410,16 @@ class AgentRuntime(context: Context) {
                 }
         }
         val normalized = File(path).toPath().normalize().toString()
-        if (MediaSourcePolicy.isForbiddenGuestPath(normalized)) throw IOException(tr("不允许访问系统伪文件系统路径", "Accessing system pseudo-filesystem paths is not allowed"))
-        val entries = JSONArray(execute(environment, listOf("/usr/bin/python3", "-I", "-c", RuntimeScripts.listFiles, normalized)))
+        val skillsRootAllowed = if (environment == "root") {
+            val skillsPrefix = hostPath(File(app.filesDir, "${io.github.modao7067.luma.gui.GuiProduct.agentRuntimePath("root")}/skills"))
+            if (normalized == skillsPrefix || normalized.startsWith("$skillsPrefix/")) skillsPrefix else null
+        } else null
+        if (skillsRootAllowed == null && MediaSourcePolicy.isForbiddenGuestPath(normalized)) throw IOException(tr("不允许访问系统伪文件系统路径", "Accessing system pseudo-filesystem paths is not allowed"))
+        val listCmd = buildList {
+            add("/usr/bin/python3"); add("-I"); add("-c"); add(RuntimeScripts.listFiles); add(normalized)
+            skillsRootAllowed?.let(::add)
+        }
+        val entries = JSONArray(execute(environment, listCmd))
         List(entries.length()) { index -> entries.getJSONObject(index).let {
             RuntimeFile(it.getString("name"), it.getString("path"), it.getBoolean("directory"),
                 if (it.isNull("size")) null else it.optLong("size"), if (it.isNull("mtime")) null else it.optLong("mtime"))
@@ -429,8 +429,7 @@ class AgentRuntime(context: Context) {
         validateEnvironment(environment)
         validatePath(path)
         val localManaged = managedSkillEntry(environment, path)?.first ?: importedImageFile(environment, path)
-        if (localManaged != null) {
-            if (!localManaged.isFile) throw IOException(tr("找不到文件：$path", "File not found: $path"))
+        if (localManaged != null && localManaged.isFile && localManaged.canRead()) {
             val data = localManaged.inputStream().use { input ->
                 val out = ByteArrayOutputStream()
                 val buf = ByteArray(8192)
@@ -452,6 +451,17 @@ class AgentRuntime(context: Context) {
             } catch (_: java.nio.charset.CharacterCodingException) {
                 throw IOException(tr("该文件不是 UTF-8 文本，请在终端使用原生文件预览", "Not a UTF-8 text file; preview it in the terminal"))
             }
+        }
+        resolveManagedRootProtectedTarget(app.filesDir, environment, path, usesRootExecution(environment))?.let { target ->
+            val command = buildList {
+                add("/usr/bin/python3")
+                add("-I")
+                add("-c")
+                add(RuntimeScripts.readFile)
+                add(target.guestPath)
+                target.allowedPrefix?.let(::add)
+            }
+            return@withContext execute(environment, command)
         }
         val normalized = File(path).toPath().normalize().toString()
         if (MediaSourcePolicy.isForbiddenGuestPath(normalized)) throw IOException(tr("不允许读取系统伪文件系统路径", "Reading system pseudo-filesystem paths is not allowed"))
@@ -714,11 +724,12 @@ class AgentRuntime(context: Context) {
     }
     private fun guestPath(environment: String, name: String) = "/opt/luma/${io.github.modao7067.luma.gui.GuiProduct.agentRelative(environment)}/$name"
     private fun hostPath(file: File) = "/proc/1/root" + file.absolutePath
-    private fun validatePath(path: String) { require(path.startsWith("/") && '\u0000' !in path) { tr("请输入绝对路径", "Enter an absolute path") } }
+    private fun validatePath(path: String) { require(path.startsWith("/") && path.none { it.isISOControl() }) { tr("请输入绝对路径", "Enter an absolute path") } }
     private fun validateEnvironment(environment: String) { require(environment == "root" || environment == "noroot") { tr("未知运行环境", "Unknown runtime environment") } }
     companion object {
         private val locks = mapOf("root" to Mutex(), "noroot" to Mutex())
         private val globalUsageStageLock = Any()
+        internal data class ManagedProtectedTarget(val guestPath: String, val allowedPrefix: String?)
         private data class ManagedMediaDir(val subPath: String, val directChildOnly: Boolean, val forbidJson: Boolean)
         private val managedMediaDirs = listOf(
             ManagedMediaDir("attachments", directChildOnly = true, forbidJson = true),
@@ -726,6 +737,26 @@ class AgentRuntime(context: Context) {
             ManagedMediaDir("browser", directChildOnly = true, forbidJson = true),
             ManagedMediaDir("skills", directChildOnly = false, forbidJson = false),
         )
+        internal fun pruneOldBridgeRevisions(directory: File, cacheDir: File, currentRevision: String) {
+            val activeRevisions = mutableSetOf(currentRevision)
+            directory.listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { file ->
+                runCatching {
+                    val text = file.readText()
+                    Regex("cli-bridge-v[0-9]+").findAll(text).forEach { activeRevisions.add(it.value) }
+                }
+            }
+            File(cacheDir, "services").listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { file ->
+                runCatching {
+                    val json = JSONObject(file.readText())
+                    if (json.optString("phase") != "exited") {
+                        Regex("cli-bridge-v[0-9]+").findAll(json.toString()).forEach { activeRevisions.add(it.value) }
+                    }
+                }
+            }
+            directory.listFiles()?.filter {
+                it.isDirectory && it.name.startsWith("cli-bridge-v") && it.name !in activeRevisions
+            }?.forEach { it.deleteRecursively() }
+        }
         internal fun resolveManagedRuntimeFile(filesDir: File, environment: String, source: String): File? {
             if (environment != "root" && environment != "noroot") return null
             if (source.isBlank() || '\u0000' in source) return null
@@ -748,7 +779,7 @@ class AgentRuntime(context: Context) {
                 val rel = normalized.removePrefix("$matchedPrefix/")
                 if (rel.isEmpty() || (entry.directChildOnly && '/' in rel)) continue
                 val target = File(baseDir, rel)
-                if (!target.isFile) continue
+                if (!target.isFile || !target.canRead()) continue
                 val canonicalBase = runCatching { baseDir.canonicalFile }.getOrNull() ?: continue
                 val canonicalTarget = runCatching { target.canonicalFile }.getOrNull() ?: continue
                 val basePath = canonicalBase.path
@@ -763,8 +794,14 @@ class AgentRuntime(context: Context) {
             }
             return null
         }
-        internal fun resolveManagedRootProtectedPath(filesDir: File, environment: String, source: String): String? {
-            if (environment != "root") return null
+        internal fun resolveManagedRootProtectedTarget(
+            filesDir: File,
+            environment: String,
+            source: String,
+            usesRootExecution: Boolean = environment == "root",
+        ): ManagedProtectedTarget? {
+            if (!usesRootExecution) return null
+            if (environment != "root" && environment != "noroot") return null
             if (source.isBlank() || '\u0000' in source) return null
             val rawPath = when {
                 source.startsWith("file:") || source.startsWith("sandbox:") ->
@@ -777,23 +814,49 @@ class AgentRuntime(context: Context) {
                 add(filesDir.absolutePath.trimEnd('/'))
                 runCatching { filesDir.canonicalPath.trimEnd('/') }.getOrNull()?.let(::add)
             }
-            for (rootPath in candidateRoots) {
-                val agentRootPath = "$rootPath/runtime/agent/root"
-                for (entry in managedMediaDirs) {
-                    val basePath = "$agentRootPath/${entry.subPath}"
-                    val prefixes = listOf(basePath, "/proc/1/root$basePath")
-                    val matchedPrefix = prefixes.firstOrNull { normalized.startsWith("$it/") } ?: continue
-                    val rel = normalized.removePrefix("$matchedPrefix/")
-                    if (rel.isEmpty()) continue
-                    val segments = rel.split('/')
-                    if (segments.any { it.isEmpty() || it == "." || it == ".." }) continue
-                    if (entry.directChildOnly && segments.size != 1) continue
-                    if (entry.forbidJson && segments.last().endsWith(".json", ignoreCase = true)) continue
-                    return "/proc/1/root$basePath/$rel"
+            if (environment == "root") {
+                for (rootPath in candidateRoots) {
+                    val agentRootPath = "$rootPath/runtime/agent/root"
+                    for (entry in managedMediaDirs) {
+                        val basePath = "$agentRootPath/${entry.subPath}"
+                        val prefixes = listOf(basePath, "/proc/1/root$basePath")
+                        val matchedPrefix = prefixes.firstOrNull { normalized.startsWith("$it/") } ?: continue
+                        val rel = normalized.removePrefix("$matchedPrefix/")
+                        if (rel.isEmpty()) continue
+                        val segments = rel.split('/')
+                        if (segments.any { it.isEmpty() || it == "." || it == ".." }) continue
+                        if (entry.directChildOnly && segments.size != 1) continue
+                        if (entry.forbidJson && segments.last().endsWith(".json", ignoreCase = true)) continue
+                        val allowedPrefix = "/proc/1/root$basePath"
+                        return ManagedProtectedTarget("$allowedPrefix/$rel", allowedPrefix)
+                    }
                 }
+                return null
+            }
+            for (entry in managedMediaDirs) {
+                val prefixes = buildList {
+                    add("/opt/luma/agent/${entry.subPath}")
+                    for (rootPath in candidateRoots) {
+                        add("$rootPath/runtime/agent/${entry.subPath}")
+                    }
+                }
+                val matchedPrefix = prefixes.firstOrNull { normalized.startsWith("$it/") } ?: continue
+                val rel = normalized.removePrefix("$matchedPrefix/")
+                if (rel.isEmpty()) continue
+                val segments = rel.split('/')
+                if (segments.any { it.isEmpty() || it == "." || it == ".." }) continue
+                if (entry.directChildOnly && segments.size != 1) continue
+                if (entry.forbidJson && segments.last().endsWith(".json", ignoreCase = true)) continue
+                return ManagedProtectedTarget("/opt/luma/agent/${entry.subPath}/$rel", null)
             }
             return null
         }
+        internal fun resolveManagedRootProtectedPath(
+            filesDir: File,
+            environment: String,
+            source: String,
+            usesRootExecution: Boolean = environment == "root",
+        ): String? = resolveManagedRootProtectedTarget(filesDir, environment, source, usesRootExecution)?.guestPath
         private fun quote(value: String) = "'" + value.replace("'", "'\"'\"'") + "'"
         private fun randomToken(): String = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
         private fun writePrivate(file: File, text: String) {

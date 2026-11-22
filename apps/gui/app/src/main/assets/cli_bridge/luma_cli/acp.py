@@ -463,8 +463,13 @@ class AcpSession(Session):
             except Rejected as exc:
                 with self.lock:
                     if self.current_submission != p["submissionId"]: return
+                    had_wait_error = self.prompt_wait_error is not None
                     self.current_submission = None
                     self.prompt_wait_error = None
+                    if had_wait_error:
+                        self.settle_uncertain(p["submissionId"])
+                    else:
+                        self.receipt(p["submissionId"], "rejected")
                     self.finish_chunk("failed")
                     self.settle_incomplete_rows("unknown")
                     self.pending_requests.clear()

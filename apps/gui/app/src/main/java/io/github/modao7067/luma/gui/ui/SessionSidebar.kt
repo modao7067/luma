@@ -416,9 +416,13 @@ private fun SidebarEnvironmentHeader(
                         if (direct.canRead()) {
                             direct.readText()
                         } else {
-                            val tmp = File(context.cacheDir, "sidebar-os-release.tmp")
-                            io.github.modao7067.luma.root.GuiRuntimeBridge.copyFile(context, "/etc/os-release", tmp, 4096)
-                            tmp.readText().also { tmp.delete() }
+                            val tmp = File.createTempFile("sidebar-os-release-", ".tmp", context.cacheDir)
+                            try {
+                                io.github.modao7067.luma.root.GuiRuntimeBridge.copyFile(context, "/etc/os-release", tmp, 4096)
+                                tmp.readText()
+                            } finally {
+                                tmp.delete()
+                            }
                         }
                     } else {
                         sequenceOf(

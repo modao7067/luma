@@ -3,11 +3,17 @@ package io.github.modao7067.luma.gui.session
 import io.github.modao7067.luma.gui.agent.withMediaContext
 import org.junit.Assert.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Test
 
 class SubmissionLedgerTest {
@@ -277,4 +283,155 @@ class SubmissionLedgerTest {
             dir.deleteRecursively()
         }
     } }
+
+    @Test fun cancelledSubmissionCannotBeOverwrittenByLateRejection() {
+        val r = record()
+        SubmissionLedger.begin(r, "cancelled-sub")
+        SubmissionLedger.state(r, "cancelled-sub", "cancelled")
+        SubmissionLedger.rejected(r, "cancelled-sub")
+        assertEquals("cancelled", r.submissions.single().state)
+        assertEquals("", r.draft)
+    }
+
+    @Test fun sessionStoreDrainWritesIsPerKeyAndCallbacksFireOnlyOnSuccess() {
+        val dir = Files.createTempDirectory("luma-store-isolation").toFile()
+        val slowEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseSlow = java.util.concurrent.CountDownLatch(1)
+        val committed = java.util.concurrent.CountDownLatch(1)
+        val failedCallbackFired = java.util.concurrent.atomic.AtomicBoolean(false)
+        try {
+            val fastStore = SessionStore(File(dir, "fast.json")) { target, bytes -> target.writeBytes(bytes) }
+            val slowStore = SessionStore(File(dir, "slow.json")) { target, bytes ->
+                slowEntered.countDown()
+                releaseSlow.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                target.writeBytes(bytes)
+            }
+            val failStore = SessionStore(File(dir, "fail.json")) { _, _ -> throw IOException("disk full") }
+
+            fastStore.save(listOf(record())) { committed.countDown() }
+            fastStore.flush()
+            assertTrue(committed.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+            slowStore.save(listOf(record()))
+            assertTrue(slowEntered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+            val started = System.nanoTime()
+            fastStore.flush()
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            assertTrue("fastStore.flush blocked on slowStore (${elapsedMs}ms)", elapsedMs < 1_000L)
+
+            releaseSlow.countDown()
+            slowStore.flush()
+
+            failStore.save(listOf(record())) { failedCallbackFired.set(true) }
+            assertThrows(IOException::class.java) { failStore.flush() }
+            assertFalse(failedCallbackFired.get())
+        } finally {
+            releaseSlow.countDown()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun commandStoreSupportsDurableAndAsyncBackgroundWritesWithRollback() = runBlocking {
+        val dir = Files.createTempDirectory("luma-cmd-store").toFile()
+        try {
+            val targetFile = File(dir, "commands.json")
+            var failNext = false
+            val reader: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null }
+            val writer: (File, ByteArray) -> Unit = { f, bytes ->
+                if (failNext) throw IOException("write error")
+                f.writeBytes(bytes)
+            }
+            val store = SessionCommandStore(targetFile, reader, writer)
+            val req = JSONObject("""{"action":"create","cli":"Codex","cwd":"/work","requestId":"req_1"}""")
+            val entry = store.reserveDurable(req, "sess-1")
+            assertEquals("reserved", entry.state)
+            store.updateAsync(entry, "starting")
+            store.flush()
+
+            val reloaded = SessionCommandStore(targetFile, reader, writer)
+            assertEquals("starting", reloaded.entries["req_1"]?.state)
+
+            failNext = true
+            val req2 = JSONObject("""{"action":"create","cli":"Codex","cwd":"/work","requestId":"req_2"}""")
+            try {
+                reloaded.reserveDurable(req2, "sess-2")
+                fail("Expected IOException")
+            } catch (_: IOException) {
+            }
+            assertNull(reloaded.entries["req_2"])
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun coalescedCommandStoreFailureNotifiesEveryConcurrentWaiter() = runBlocking {
+        val dir = Files.createTempDirectory("luma-cmd-coalesce").toFile()
+        try {
+            val targetFile = File(dir, "commands.json")
+            val firstStarted = CountDownLatch(1)
+            val releaseFirst = CountDownLatch(1)
+            val writeCalls = AtomicInteger(0)
+            val reader: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null }
+            val writer: (File, ByteArray) -> Unit = { f, bytes ->
+                when (writeCalls.incrementAndGet()) {
+                    1 -> {
+                        firstStarted.countDown()
+                        releaseFirst.await(5, TimeUnit.SECONDS)
+                        f.writeBytes(bytes)
+                    }
+                    else -> throw IOException("coalesced disk failure")
+                }
+            }
+            val store = SessionCommandStore(targetFile, reader, writer)
+            val req0 = JSONObject("""{"action":"create","cli":"Codex","cwd":"/work","requestId":"req_0"}""")
+            val firstEntry = store.entries.getOrPut("req_0") {
+                SessionCommandStore.Entry("req_0", SessionManagementProtocol.canonical(req0), "sess-0", null)
+            }
+            store.updateAsync(firstEntry, "starting")
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
+
+            val reqA = JSONObject("""{"action":"create","cli":"Codex","cwd":"/work","requestId":"req_a"}""")
+            val reqB = JSONObject("""{"action":"create","cli":"Codex","cwd":"/work","requestId":"req_b"}""")
+            val aFailed = CompletableDeferred<Throwable?>()
+            val bFailed = CompletableDeferred<Throwable?>()
+
+            val jobA = launch(Dispatchers.Default) {
+                val caught = try {
+                    store.reserveDurable(reqA, "sess-a")
+                    null
+                } catch (e: IOException) {
+                    e
+                }
+                aFailed.complete(caught)
+            }
+            val jobB = launch(Dispatchers.Default) {
+                val caught = try {
+                    store.reserveDurable(reqB, "sess-b")
+                    null
+                } catch (e: IOException) {
+                    e
+                }
+                bFailed.complete(caught)
+            }
+
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while ((store.entries["req_a"] == null || store.entries["req_b"] == null) && System.nanoTime() < deadline) {
+                Thread.sleep(5)
+            }
+            assertNotNull(store.entries["req_a"])
+            assertNotNull(store.entries["req_b"])
+            releaseFirst.countDown()
+            jobA.join()
+            jobB.join()
+
+            assertTrue(aFailed.await() is IOException)
+            assertTrue(bFailed.await() is IOException)
+            assertNull(store.entries["req_a"])
+            assertNull(store.entries["req_b"])
+            assertEquals(2, writeCalls.get())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

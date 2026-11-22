@@ -26,7 +26,19 @@ public final class TerminalPreviewView extends View {
                 }return true;
             }
             @Override public boolean onFling(MotionEvent a,MotionEvent b,float x,float y){if(page!=null&&Math.abs(b.getX()-a.getX())>Math.abs(b.getY()-a.getY())&&Math.abs(b.getX()-a.getX())>48)page.accept(b.getX()<a.getX()?1:-1);return true;}
-            @Override public void onLongPress(MotionEvent e){if(screen!=null&&!screen.isImage())getContext().getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(com.termux.terminal.LumaLang.tr("预览文本","Preview text"),screen.plainText()));}
+            @Override public void onLongPress(MotionEvent e){
+                if(screen==null||screen.isImage())return;
+                ClipboardManager clipboard=getContext().getSystemService(ClipboardManager.class);
+                if(clipboard==null)return;
+                String text=screen.plainText();
+                if(text.length()>262_144){
+                    int end=262_144;
+                    if(Character.isHighSurrogate(text.charAt(end-1)))end--;
+                    text=text.substring(0,end);
+                }
+                try{clipboard.setPrimaryClip(ClipData.newPlainText(com.termux.terminal.LumaLang.tr("预览文本","Preview text"),text));}
+                catch(RuntimeException ignored){}
+            }
         });
     }
     public void pageHandler(IntConsumer handler){page=handler;}

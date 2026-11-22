@@ -40,6 +40,22 @@ def _pi_model_efforts(m, current_levels, is_current):
         out.append(lv)
     return out
 
+_PI_TOOL_SUMMARY_CTRL_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\x07|\x1b\\)|[()][ -~]|[78=>])"
+    r"|\x9b[0-?]*[ -/]*[@-~]|\x9d[\s\S]*?(?:\x07|\x9c)"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+)
+
+def _pi_tool_summary(args, keys=("displaySummary", "toolSummary", "description", "summary"), skip_name=""):
+    skip = skip_name.lower()
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str):
+            cleaned = " ".join(_PI_TOOL_SUMMARY_CTRL_RE.sub("", value).split()).strip()
+            if cleaned and cleaned.lower() != skip:
+                return cleaned
+    return ""
+
 def _pi_tool_title(name, raw_args):
     base = name or tr("工具", "Tool")
     if not name:
@@ -56,8 +72,10 @@ def _pi_tool_title(name, raw_args):
     if name in ("read", "write", "edit", "ls", "glob"):
         target = str(args.get("path") or ("." if name == "ls" and args else "")).strip()
     elif name in ("bash", "powershell"):
-        cmd = str(args.get("command") or "").strip()
-        target = next((line.strip() for line in cmd.splitlines() if line.strip()), "")
+        target = _pi_tool_summary(args, skip_name=name)
+        if not target:
+            cmd = str(args.get("command") or "").strip()
+            target = next((line.strip() for line in cmd.splitlines() if line.strip()), "")
     elif name in ("grep", "find"):
         pat = str(args.get("pattern") or "").strip()
         scope = str(args.get("path") or "").strip()
@@ -66,6 +84,10 @@ def _pi_tool_title(name, raw_args):
         target = str(args.get("query") or "").strip()
     elif name == "eval":
         target = str(args.get("title") or args.get("language") or "").strip()
+    else:
+        target = _pi_tool_summary(args, ("displaySummary", "toolSummary"), skip_name=name)
+    if target and target.lower() == name.lower():
+        target = ""
     return f"{name} · {target}" if target else base
 
 def _tool_patch_or_text(container):

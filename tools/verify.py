@@ -10,6 +10,15 @@ REPO = Path(__file__).resolve().parents[1]
 BASE = REPO / 'tools'
 
 
+FORBIDDEN_PARTS = ('signing', 'build', '.gradle', 'jniLibs', '__pycache__')
+FORBIDDEN_NAMES = ('local.properties', '.env', '.bash_history', 'root-backend.token')
+FORBIDDEN_SUFFIXES = ('.apk', '.jks', '.keystore', '.key', '.pem', '.db', '.env', '.pyc', '.pyo', 'release.properties')
+STATIC_TESTS = (
+    'test_source_hygiene', 'verify-layout', 'verify-build-entry', 'test_native_builds', 'test_tools_scripts',
+    'verify-production-gates', 'verify-no-host-paths', 'verify-jvm-comments', 'verify-python-comments',
+)
+
+
 def verify_git_scope():
     paths = subprocess.check_output(
         [str(BASE / 'luma'), 'git', 'ls-files', '--cached', '--others', '--exclude-standard'], text=True,
@@ -21,19 +30,18 @@ def verify_git_scope():
             'gradle.properties', 'gradlew', 'gradlew.bat',
         )):
             raise ValueError('Source path outside allowed scope: ' + path)
-        if any(part in Path(path).parts for part in ('signing', 'build', '.gradle', 'jniLibs')):
+        entry_path = Path(path)
+        if any(part in FORBIDDEN_PARTS for part in entry_path.parts):
             raise ValueError('Private/generated source path: ' + path)
-        if path.endswith(('.apk', '.jks', '.keystore', '.key', '.pem', 'local.properties')):
+        lower_name = entry_path.name.lower()
+        if lower_name in FORBIDDEN_NAMES or lower_name.endswith(FORBIDDEN_SUFFIXES):
             raise ValueError('Private/generated source file: ' + path)
     print('PASS Git scope:', len(paths), 'allowed source files', flush=True)
 
 
 def static_checks():
     failed = []
-    for name in (
-        'test_source_hygiene', 'verify-layout', 'verify-build-entry', 'test_native_builds',
-        'verify-production-gates', 'verify-no-host-paths', 'verify-jvm-comments', 'verify-python-comments',
-    ):
+    for name in STATIC_TESTS:
         print('RUN static:', name, flush=True)
         if subprocess.run([sys.executable, str(BASE / 'tests' / (name + '.py'))]).returncode:
             failed.append(name)
@@ -56,6 +64,7 @@ def static_checks():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--static', action='store_true', help='Run source gates without SDK or downloaded artifacts')
+    parser.add_argument('--strict-toolchain', action='store_true', help='Fail if any pinned toolchain artifact is missing')
     args = parser.parse_args()
     static_checks()
     if args.static:
@@ -68,10 +77,11 @@ def main():
     def resolve(name):
         return Path(name.replace('$ANDROID_HOME', str(toolenv.ANDROID_HOME)).replace('$LUMA_ROOT', str(REPO)).replace('$AAPT2', toolenv.AAPT2))
 
+    strict_toolchain = args.strict_toolchain or bool(os.environ.get('LUMA_STRICT_TOOLCHAIN'))
     for name, digest in json.loads((BASE / 'toolchain.json').read_text())['artifactSha256'].items():
         path = resolve(name)
         if not path.is_file():
-            if os.environ.get('LUMA_STRICT_TOOLCHAIN'):
+            if strict_toolchain:
                 raise SystemExit('Pinned tool missing: ' + str(path))
             print('WARN pinned tool not present, skipped:', path)
             continue

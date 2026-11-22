@@ -3,16 +3,30 @@ apply from: rootProject.file('gradle/android-common.gradle')
 def signingHome = rootProject.file('apps/gui')
 def releasePropsFile = new File(signingHome, 'signing/luma-release.properties')
 def releaseProps = new Properties()
-if (releasePropsFile.isFile()) releasePropsFile.withInputStream { releaseProps.load(it) }
+def releaseKeystoreFile = null
+if (releasePropsFile.isFile()) {
+    releasePropsFile.withInputStream { releaseProps.load(it) }
+    ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { propName ->
+        def value = releaseProps.getProperty(propName)
+        if (value == null || value.trim().isEmpty()) {
+            throw new org.gradle.api.GradleException("Missing or blank '${propName}' in ${releasePropsFile}")
+        }
+    }
+    def storePath = releaseProps.getProperty('storeFile').trim()
+    releaseKeystoreFile = new File(storePath).isAbsolute() ? new File(storePath) : new File(signingHome, storePath)
+    if (!releaseKeystoreFile.isFile()) {
+        throw new org.gradle.api.GradleException("Release keystore file not found: ${releaseKeystoreFile}")
+    }
+}
 
 android {
     buildFeatures { compose true; buildConfig true; resValues true }
     signingConfigs {
         release {
             if (releasePropsFile.isFile()) {
-                storeFile new File(signingHome, releaseProps.getProperty('storeFile'))
+                storeFile releaseKeystoreFile
                 storePassword releaseProps.getProperty('storePassword')
-                keyAlias releaseProps.getProperty('keyAlias')
+                keyAlias releaseProps.getProperty('keyAlias').trim()
                 keyPassword releaseProps.getProperty('keyPassword')
                 enableV1Signing false; enableV2Signing true; enableV3Signing true
             }

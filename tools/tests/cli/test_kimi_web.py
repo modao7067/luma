@@ -275,6 +275,7 @@ class KimiWebTest(unittest.TestCase):
             by_id = {r['id']: r for r in s.data['requests']}
             self.assertEqual(set(by_id), {'allow', 'ask'})
             self.assertEqual(json.loads(by_id['allow']['body'])['command'], 'printf full-command-not-truncated')
+            self.assertEqual(s.rows['f-bash']['text'], 'Print fixture')
             self.assertEqual(by_id['ask']['title'], 'Answer')
             self.assertEqual(by_id['ask']['questions'][0]['options'], ['First', 'Second'])
             self.assertEqual(by_id['ask']['questions'][0]['optionValues'], ['opt_0_0', 'opt_0_1'])

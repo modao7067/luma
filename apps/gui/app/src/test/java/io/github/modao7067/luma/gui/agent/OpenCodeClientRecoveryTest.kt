@@ -105,6 +105,80 @@ class OpenCodeClientRecoveryTest {
         }
     }
 
+    @Test fun subscribeFailureBeforeOpenNeverFiresOnDisconnect() = runBlocking {
+        Fixture { exchange -> exchange.respond(500, "{\"message\":\"boom\"}") }.use { fixture ->
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val api = OpenCodeClient(fixture.url, "fixture")
+            val disconnects = AtomicInteger()
+            try {
+                try {
+                    api.subscribe(scope, {}, { disconnects.incrementAndGet() })
+                    fail("must fail subscribe on HTTP 500")
+                } catch (rejected: OpenCodeRejected) {
+                    assertEquals(500, rejected.status)
+                }
+                delay(100)
+                assertEquals(0, disconnects.get())
+                assertFalse(api.connected)
+            } finally {
+                api.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test fun cancellingCoroutineAbortsInFlightOpenCodeRequest() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        Fixture {
+            entered.countDown()
+            try { release.await(10, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) { }
+        }.use { fixture ->
+            val api = OpenCodeClient(fixture.url, "fixture")
+            try {
+                val job = launch(Dispatchers.IO) { api.call("/slow") }
+                assertTrue(entered.await(3, java.util.concurrent.TimeUnit.SECONDS))
+                val started = System.nanoTime()
+                job.cancelAndJoin()
+                val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+                assertTrue("cancel took ${elapsedMs}ms", elapsedMs < 2_000L)
+            } finally {
+                release.countDown()
+                api.close()
+            }
+        }
+    }
+
+    @Test fun oversizedSseEventDisconnectsCleanly() = runBlocking {
+        val disconnected = CompletableDeferred<Throwable>()
+        Fixture { exchange ->
+            val output = exchange.socket.getOutputStream()
+            output.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".toByteArray())
+            output.flush()
+            val chunk = ("data: " + "a".repeat(1024 * 1024) + "\n").toByteArray()
+            repeat(9) {
+                try {
+                    output.write(chunk)
+                    output.flush()
+                } catch (_: IOException) {
+                    return@Fixture
+                }
+            }
+        }.use { fixture ->
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val api = OpenCodeClient(fixture.url, "fixture")
+            try {
+                api.subscribe(scope, {}, { disconnected.complete(it) })
+                val failure = withTimeout(5_000) { disconnected.await() }
+                assertTrue(failure is IOException)
+                assertFalse(api.connected)
+            } finally {
+                api.close()
+                scope.cancel()
+            }
+        }
+    }
+
     private class Fixture(handler: (Exchange) -> Unit) : AutoCloseable {
         val requests = CopyOnWriteArrayList<String>()
         private val sockets = CopyOnWriteArrayList<Socket>()

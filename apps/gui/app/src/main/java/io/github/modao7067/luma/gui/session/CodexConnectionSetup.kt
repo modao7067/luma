@@ -35,10 +35,12 @@ internal object CodexConnectionSetup {
 
     suspend fun loadedThreads(request: suspend (String, JSONObject) -> JSONObject): Set<String> {
         val loaded = mutableSetOf<String>(); var cursor: String? = null
+        val seenCursors = hashSetOf<String>()
         do {
             val page = request("thread/loaded/list", obj("limit" to 100, "cursor" to cursor))
             page.optJSONArray("data")?.let { data -> (0 until data.length()).forEach { loaded += data.getString(it) } }
-            cursor = page.stringOrNull("nextCursor")
+            val nextCursor = page.stringOrNull("nextCursor")
+            cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
         } while (cursor != null)
         return loaded
     }

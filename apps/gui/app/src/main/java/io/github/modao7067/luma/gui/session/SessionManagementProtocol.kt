@@ -22,7 +22,7 @@ internal object SessionManagementProtocol {
         if (action in setOf("create", "attach")) {
             require(text(request, "cli") in CliCatalog.ids) { tr("未知 CLI；先用 list 获取名称", "Unknown CLI; run list first") }
             val cwd = text(request, "cwd")
-            require(cwd.startsWith('/') && '\u0000' !in cwd) { tr("cwd 必须是当前环境的绝对目录", "cwd must be an absolute directory path") }
+            require(cwd.startsWith('/') && cwd.none { it.isISOControl() }) { tr("cwd 必须是当前环境的绝对目录", "cwd must be an absolute directory path") }
             if (request.has("title")) text(request, "title", blank = true)
             val protocols = CliCatalog.nativeProtocols[request.getString("cli")]
             if (request.has("nativeProtocol")) require(text(request, "nativeProtocol") in protocols.orEmpty()) { tr("此 CLI 未提供该 nativeProtocol；先用 list 获取可用协议", "nativeProtocol not supported by this CLI; check list") }

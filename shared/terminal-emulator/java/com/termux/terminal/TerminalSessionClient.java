@@ -14,6 +14,10 @@ public interface TerminalSessionClient {
 
     default void onEmulatorError(TerminalSession session,String message){logError("TerminalSession",message);}
 
+    default void onInputBufferFull(@NonNull TerminalSession session, int rejectedBytes) {
+        logWarn("TerminalSession", "Input buffer full; rejected " + rejectedBytes + " bytes");
+    }
+
     void onTitleChanged(@NonNull TerminalSession changedSession);
 
     default void onCommandStateChanged(@NonNull TerminalSession session) {}

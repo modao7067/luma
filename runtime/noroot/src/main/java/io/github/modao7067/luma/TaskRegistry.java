@@ -58,7 +58,7 @@ final class TaskRegistry implements AutoCloseable {
 
     interface ProcessOps {
         Process start(ProcessBuilder builder) throws IOException;
-        void kill(int pid, String token, long graceMs, boolean linux);
+        void kill(int pid, long expectedStarttime, String token, long graceMs, boolean linux);
     }
 
     private static final class SpawnAttempt {
@@ -156,7 +156,9 @@ final class TaskRegistry implements AutoCloseable {
         this.context = context;
         this.processOps = ops != null ? ops : new ProcessOps() {
             public Process start(ProcessBuilder builder) throws IOException { return builder.start(); }
-            public void kill(int pid, String token, long grace, boolean linux) { killTaskProcesses(pid, token, grace, linux); }
+            public void kill(int pid, long expectedStarttime, String token, long grace, boolean linux) {
+                killTaskProcesses(pid, expectedStarttime, token, grace, linux);
+            }
         };
         this.serviceDir = new File(context.getCacheDir(), "services");
         if (!serviceDir.isDirectory()) serviceDir.mkdirs();
@@ -224,12 +226,17 @@ final class TaskRegistry implements AutoCloseable {
                 if (!"exited".equals(phase)) {
                     boolean killed = false;
                     if (oldPid > 1 && !token.isEmpty() && verifyProcessIdentity(oldPid, oldStart, token)) {
-                        processOps.kill(oldPid, token, 0L, true);
+                        processOps.kill(oldPid, oldStart, token, 0L, true);
                         killed = true;
                     } else if (!token.isEmpty()) {
                         List<Integer> tagged = findProcessesByToken(token, -1);
                         if (!tagged.isEmpty()) {
-                            for (int p : tagged) try { Os.kill(p, OsConstants.SIGKILL); } catch (Exception ignored) {}
+                            for (int p : tagged) {
+                                long st = readProcStarttime(p);
+                                if (verifyProcessIdentity(p, st, token)) {
+                                    try { Os.kill(p, OsConstants.SIGKILL); } catch (Exception ignored) {}
+                                }
+                            }
                             killed = true;
                         }
                     }
@@ -306,7 +313,11 @@ final class TaskRegistry implements AutoCloseable {
         String defaultProbe = assignedPort > 0 ? "http" : "none";
         String probeType = probe != null ? probe.optString("type", defaultProbe) : req.optString("probeType", defaultProbe);
         String probePath = probe != null ? probe.optString("path", "/") : req.optString("probePath", "/");
+        if (probePath.isEmpty()) probePath = "/";
         if (!probePath.startsWith("/")) probePath = "/" + probePath;
+        if (hasInvalidUrlPathChar(probePath)) {
+            throw new IOException(com.termux.terminal.LumaLang.tr("非法探测路径", "Invalid probe path"));
+        }
         String probeOkStatus = probe != null ? probe.optString("okStatus", "any") : req.optString("probeOkStatus", "any");
         String regexStr = probe != null ? probe.optString("regex", "") : req.optString("probeRegex", "");
         Pattern probeRegex = regexStr.isEmpty() ? null : Pattern.compile(regexStr);
@@ -401,7 +412,15 @@ final class TaskRegistry implements AutoCloseable {
     private void stopOwnedProcess(ManagedTask task, SpawnAttempt attempt, long graceMs) {
         if (attempt != null && !attempt.cleanupClaimed.compareAndSet(false, true)) return;
         Process proc = task.process;
-        processOps.kill(task.pid, task.ownerToken, graceMs, "linux".equals(task.backend));
+        int pid;
+        long starttime;
+        String token;
+        synchronized (task.stateLock) {
+            pid = task.pid;
+            starttime = task.starttime;
+            token = task.ownerToken;
+        }
+        processOps.kill(pid, starttime, token, graceMs, "linux".equals(task.backend));
         if (proc != null && proc.isAlive()) proc.destroyForcibly();
     }
 
@@ -480,9 +499,10 @@ final class TaskRegistry implements AutoCloseable {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (pidFile.length() == 0L && proc.isAlive() && System.nanoTime() < deadline) Thread.sleep(10);
             int pid = readPidFile(pidFile);
+            long starttime = pid > 0 ? readProcStarttime(pid) : -1L;
             synchronized (task.stateLock) {
                 task.pid = pid;
-                task.starttime = pid > 0 ? readProcStarttime(pid) : -1L;
+                task.starttime = starttime;
                 task.startedAt = task.updatedAt = System.currentTimeMillis();
                 task.exitCode = -1;
                 task.exitedAt = 0L;
@@ -494,12 +514,16 @@ final class TaskRegistry implements AutoCloseable {
                 saveRecordLocked(task);
                 task.stateLock.notifyAll();
             }
-            startMonitorThreads(task, proc, pid, token);
+            startMonitorThreads(task, proc, pid, starttime, token);
             monitored = true;
         } catch (Exception e) {
             if (proc != null) {
                 int pid = pidFile == null ? -1 : readPidFile(pidFile);
-                processOps.kill(pid, token, 0L, "linux".equals(task.backend));
+                long starttime = task.starttime;
+                if (starttime <= 0 && pid > 1 && hasEnvToken(pid, token)) {
+                    starttime = readProcStarttime(pid);
+                }
+                processOps.kill(pid, starttime, token, 0L, "linux".equals(task.backend));
                 proc.destroyForcibly();
             }
             synchronized (task.stateLock) { markStartFailureLocked(task, "spawn_error"); }
@@ -516,7 +540,7 @@ final class TaskRegistry implements AutoCloseable {
         }
     }
 
-    private void startMonitorThreads(ManagedTask task, Process proc, int pid, String token) {
+    private void startMonitorThreads(ManagedTask task, Process proc, int pid, long starttime, String token) {
         Thread waiter = new Thread(() -> {
             int code = -1;
             try {
@@ -560,7 +584,7 @@ final class TaskRegistry implements AutoCloseable {
                 task.stateLock.notifyAll();
             }
             scheduleLogMaintenance(task);
-            processOps.kill(pid, token, 0L, false);
+            processOps.kill(-1, -1L, token, 0L, false);
             if (shouldRestart) {
                 try {
                     synchronized (task.stateLock) {
@@ -590,12 +614,12 @@ final class TaskRegistry implements AutoCloseable {
         waiter.setDaemon(true);
         waiter.start();
 
-        Thread prober = new Thread(() -> runProbeLoop(task, proc, pid, token), "LumaSvcProbe-" + task.id);
+        Thread prober = new Thread(() -> runProbeLoop(task, proc, pid, starttime, token), "LumaSvcProbe-" + task.id);
         prober.setDaemon(true);
         prober.start();
     }
 
-    private void runProbeLoop(ManagedTask task, Process proc, int pid, String token) {
+    private void runProbeLoop(ManagedTask task, Process proc, int pid, long starttime, String token) {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(task.startupTimeoutMs);
         try {
             if ("none".equals(task.probeType)) Thread.sleep(150);
@@ -637,7 +661,7 @@ final class TaskRegistry implements AutoCloseable {
                     }
                 }
                 if (timedOut) {
-                    processOps.kill(pid, token, 1000L, "linux".equals(task.backend));
+                    processOps.kill(pid, starttime, token, 1000L, "linux".equals(task.backend));
                     proc.destroyForcibly();
                     return;
                 }
@@ -681,8 +705,10 @@ final class TaskRegistry implements AutoCloseable {
                         task.probeWindowSize, StandardCharsets.UTF_8));
                     if (match.find()) {
                         if (match.end() == task.probeWindowSize && task.probeLogOffset < length) continue;
-                        if (match.groupCount() >= 1 && match.group(1) != null) task.detectedUrl = match.group(1);
-                        else if (match.group(0).startsWith("http")) task.detectedUrl = match.group(0);
+                        String candidate = null;
+                        if (match.groupCount() >= 1 && match.group(1) != null) candidate = match.group(1).trim();
+                        else if (match.group(0).startsWith("http")) candidate = match.group(0).trim();
+                        if (isSafeHttpUrl(candidate)) task.detectedUrl = candidate;
                         task.startupLogMatched = true;
                         return true;
                     }
@@ -707,6 +733,7 @@ final class TaskRegistry implements AutoCloseable {
                 return false;
             }
         }
+        if (hasInvalidUrlPathChar(task.probePath)) return false;
         try (Socket s = new Socket()) {
             s.setSoTimeout(1500);
             s.connect(new InetSocketAddress("127.0.0.1", port), 1000);
@@ -810,36 +837,42 @@ final class TaskRegistry implements AutoCloseable {
         }
     }
 
-    private void killTaskProcesses(int rootPid, String token, long graceMs, boolean linuxProot) {
+    private void killTaskProcesses(int rootPid, long expectedStarttime, String token, long graceMs, boolean linuxProot) {
+        boolean hasToken = token != null && !token.isEmpty();
         if (graceMs > 0) {
-            if (linuxProot && token != null && !token.isEmpty()) {
+            if (linuxProot && hasToken) {
                 List<Integer> guestPids = findProcessesByToken(token, rootPid);
                 if (!guestPids.isEmpty()) {
                     for (int p : guestPids) {
-                        try { Os.kill(p, OsConstants.SIGTERM); } catch (Exception ignored) {}
+                        long st = readProcStarttime(p);
+                        if (verifyProcessIdentity(p, st, token)) {
+                            try { Os.kill(p, OsConstants.SIGTERM); } catch (Exception ignored) {}
+                        }
                     }
-                } else if (rootPid > 1) {
+                } else if (verifyProcessIdentity(rootPid, expectedStarttime, token)) {
                     try { Os.kill(rootPid, OsConstants.SIGTERM); } catch (Exception ignored) {}
                 }
-            } else if (rootPid > 1) {
+            } else if (verifyProcessIdentity(rootPid, expectedStarttime, token)) {
                 try { Os.kill(-rootPid, OsConstants.SIGTERM); } catch (Exception ignored) {}
             }
             long deadline = System.currentTimeMillis() + graceMs;
             while (System.currentTimeMillis() < deadline) {
-                boolean rootAlive = rootPid > 1 && new File("/proc/" + rootPid).isDirectory();
-                List<Integer> remaining = (token != null && !token.isEmpty()) ? findProcessesByToken(token, -1) : Collections.emptyList();
+                boolean rootAlive = verifyProcessIdentity(rootPid, expectedStarttime, token);
+                List<Integer> remaining = hasToken ? findProcessesByToken(token, -1) : Collections.emptyList();
                 if (!rootAlive && remaining.isEmpty()) return;
                 try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
         }
-        if (rootPid > 1) {
+        if (verifyProcessIdentity(rootPid, expectedStarttime, token)) {
             try { Os.kill(-rootPid, OsConstants.SIGKILL); } catch (Exception ignored) {}
             try { Os.kill(rootPid, OsConstants.SIGKILL); } catch (Exception ignored) {}
         }
-        if (token != null && !token.isEmpty()) {
+        if (hasToken) {
             for (int p : findProcessesByToken(token, -1)) {
-                try { Os.kill(-p, OsConstants.SIGKILL); } catch (Exception ignored) {}
-                try { Os.kill(p, OsConstants.SIGKILL); } catch (Exception ignored) {}
+                long st = readProcStarttime(p);
+                if (verifyProcessIdentity(p, st, token)) {
+                    try { Os.kill(p, OsConstants.SIGKILL); } catch (Exception ignored) {}
+                }
             }
         }
     }
@@ -1008,7 +1041,7 @@ final class TaskRegistry implements AutoCloseable {
                     }
                 }
             }
-            if (task.detectedUrl != null && !task.detectedUrl.isEmpty()) {
+            if (isSafeHttpUrl(task.detectedUrl)) {
                 if (primaryUrl == null) primaryUrl = task.detectedUrl;
                 access.put(new JSONObject()
                     .put("url", task.detectedUrl)
@@ -1075,12 +1108,40 @@ final class TaskRegistry implements AutoCloseable {
         }
     }
 
-    private static String normalizeBasePath(String path) {
+    static boolean isSafeHttpUrl(String raw) {
+        if (raw == null || raw.isEmpty() || raw.length() > 2048) return false;
+        if (hasInvalidUrlPathChar(raw)) return false;
+        try {
+            java.net.URI uri = new java.net.URI(raw);
+            String scheme = uri.getScheme();
+            if (scheme == null) return false;
+            String lower = scheme.toLowerCase(Locale.ROOT);
+            if (!"http".equals(lower) && !"https".equals(lower)) return false;
+            String host = uri.getHost();
+            return host != null && !host.isEmpty();
+        } catch (java.net.URISyntaxException e) {
+            return false;
+        }
+    }
+
+    private static boolean hasInvalidUrlPathChar(String value) {
+        if (value == null) return true;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c <= 0x20 || c == 0x7f) return true;
+        }
+        return false;
+    }
+
+    private static String normalizeBasePath(String path) throws IOException {
         if (path == null) return "";
         String p = path.trim();
         if (p.isEmpty() || "/".equals(p)) return "";
         if (!p.startsWith("/")) p = "/" + p;
         while (p.length() > 1 && p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        if (hasInvalidUrlPathChar(p)) {
+            throw new IOException(com.termux.terminal.LumaLang.tr("非法基础路径", "Invalid base path"));
+        }
         return p;
     }
 
@@ -1120,7 +1181,7 @@ final class TaskRegistry implements AutoCloseable {
     }
 
     private static boolean verifyProcessIdentity(int pid, long expectedStarttime, String expectedToken) {
-        if (pid <= 1 || !new File("/proc/" + pid).isDirectory()) return false;
+        if (pid <= 1 || expectedToken == null || expectedToken.isEmpty() || !new File("/proc/" + pid).isDirectory()) return false;
         if (expectedStarttime > 0 && readProcStarttime(pid) != expectedStarttime) return false;
         return hasEnvToken(pid, expectedToken);
     }

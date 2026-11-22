@@ -209,7 +209,7 @@ internal fun SubAgentDetails(task: String, detail: String, status: String, id: S
                             .clip(LumaCardShape(8.dp))
                             .clickable {
                                 runCatching {
-                                    clipboard.setText(AnnotatedString(task.substring(0, minOf(task.length, 262_144))))
+                                    clipboard.setText(AnnotatedString(safeUtf16Prefix(task, 262_144)))
                                 }.onSuccess {
                                     copied = true
                                 }
@@ -471,7 +471,7 @@ internal fun SubAgentTaskBlock(
     val collapsible = task.length > 220 || lines.size > 5
     var expanded by rememberSaveable(identity, "task-expanded") { mutableStateOf(false) }
     val excerpt = remember(task, collapsible) {
-        if (!collapsible) task else lines.take(4).joinToString("\n").take(200).trimEnd() + "…"
+        if (!collapsible) task else safeUtf16Prefix(lines.take(4).joinToString("\n"), 200).trimEnd() + "…"
     }
     Column(
         Modifier.fillMaxWidth(),

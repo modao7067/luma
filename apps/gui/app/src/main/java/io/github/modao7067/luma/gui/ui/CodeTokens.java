@@ -2242,22 +2242,28 @@ public final class CodeTokens {
         return p < end && text.charAt(p) == '(';
     }
 
-    private static int findBalancedBrace(String text, int openStart, int end) {
+    private static final int MAX_JSX_LOOKAHEAD = 4096;
+
+    private static int findBalancedBrace(String text, int openStart, int end, Runnable checkpoint) {
+        int limitEnd = Math.min(end, openStart + MAX_JSX_LOOKAHEAD);
         int pos = openStart;
         int depth = 1;
-        while (pos < end && depth > 0) {
+        int steps = 0;
+        while (pos < limitEnd && depth > 0) {
+            if ((++steps & 1023) == 0 && checkpoint != null) checkpoint.run();
             char ch = text.charAt(pos);
-            if (ch == '/' && pos + 1 < end) {
+            if (ch == '/' && pos + 1 < limitEnd) {
                 char next = text.charAt(pos + 1);
                 if (next == '/') {
                     pos += 2;
-                    while (pos < end && text.charAt(pos) != '\n' && text.charAt(pos) != '\r') pos++;
+                    while (pos < limitEnd && text.charAt(pos) != '\n' && text.charAt(pos) != '\r') pos++;
                     continue;
                 }
                 if (next == '*') {
                     pos += 2;
-                    while (pos < end) {
-                        if (text.charAt(pos) == '*' && pos + 1 < end && text.charAt(pos + 1) == '/') {
+                    while (pos < limitEnd) {
+                        if ((++steps & 1023) == 0 && checkpoint != null) checkpoint.run();
+                        if (text.charAt(pos) == '*' && pos + 1 < limitEnd && text.charAt(pos + 1) == '/') {
                             pos += 2;
                             break;
                         }
@@ -2268,9 +2274,10 @@ public final class CodeTokens {
             }
             if (ch == '"' || ch == '\'' || ch == '`') {
                 pos++;
-                while (pos < end) {
+                while (pos < limitEnd) {
+                    if ((++steps & 1023) == 0 && checkpoint != null) checkpoint.run();
                     char q = text.charAt(pos++);
-                    if (q == '\\' && pos < end) pos++;
+                    if (q == '\\' && pos < limitEnd) pos++;
                     else if (q == ch) break;
                 }
                 continue;
@@ -2481,15 +2488,18 @@ public final class CodeTokens {
         if (afterTag != '>' && afterTag != '/' && afterTag != ' ' && afterTag != '\t' && afterTag != '\n' && afterTag != '\r') {
             return false;
         }
+        int lookaheadEnd = Math.min(c.end, c.at + MAX_JSX_LOOKAHEAD);
         int scan = pos;
         int closePos = -1;
-        while (scan < c.end) {
+        int steps = 0;
+        while (scan < lookaheadEnd) {
+            if ((++steps & 1023) == 0) checkpoint.run();
             char cur = text.charAt(scan);
             if (cur == '>') {
                 closePos = scan + 1;
                 break;
             }
-            if (cur == '/' && scan + 1 < c.end && text.charAt(scan + 1) == '>') {
+            if (cur == '/' && scan + 1 < lookaheadEnd && text.charAt(scan + 1) == '>') {
                 closePos = scan + 2;
                 break;
             }
@@ -2499,26 +2509,27 @@ public final class CodeTokens {
             }
             if (cur == '"' || cur == '\'') {
                 scan++;
-                while (scan < c.end) {
+                while (scan < lookaheadEnd) {
+                    if ((++steps & 1023) == 0) checkpoint.run();
                     char q = text.charAt(scan++);
-                    if (q == '\\' && scan < c.end) scan++;
+                    if (q == '\\' && scan < lookaheadEnd) scan++;
                     else if (q == cur) break;
                 }
                 continue;
             }
             if (cur == '{') {
-                int braceEnd = findBalancedBrace(text, scan + 1, c.end);
+                int braceEnd = findBalancedBrace(text, scan + 1, lookaheadEnd, checkpoint);
                 if (braceEnd < 0) return false;
                 scan = braceEnd + 1;
                 continue;
             }
             if (identStart(cur)) {
-                while (scan < c.end && (identPart(text.charAt(scan)) || text.charAt(scan) == '-' || text.charAt(scan) == ':')) scan++;
-                while (scan < c.end && (text.charAt(scan) == ' ' || text.charAt(scan) == '\t')) scan++;
-                if (scan < c.end && text.charAt(scan) == '=') {
+                while (scan < lookaheadEnd && (identPart(text.charAt(scan)) || text.charAt(scan) == '-' || text.charAt(scan) == ':')) scan++;
+                while (scan < lookaheadEnd && (text.charAt(scan) == ' ' || text.charAt(scan) == '\t')) scan++;
+                if (scan < lookaheadEnd && text.charAt(scan) == '=') {
                     scan++;
-                    while (scan < c.end && (text.charAt(scan) == ' ' || text.charAt(scan) == '\t')) scan++;
-                    if (scan >= c.end || (text.charAt(scan) != '"' && text.charAt(scan) != '\'' && text.charAt(scan) != '{')) return false;
+                    while (scan < lookaheadEnd && (text.charAt(scan) == ' ' || text.charAt(scan) == '\t')) scan++;
+                    if (scan >= lookaheadEnd || (text.charAt(scan) != '"' && text.charAt(scan) != '\'' && text.charAt(scan) != '{')) return false;
                 }
                 continue;
             }
@@ -3541,8 +3552,9 @@ public final class CodeTokens {
             Runnable checkpoint
     ) {
         int pos = rangeStart;
+        int lineSteps = 0;
         while (pos < rangeEnd && count[0] < limit) {
-            if ((pos & 4095) == 0) checkpoint.run();
+            if ((++lineSteps & 255) == 0) checkpoint.run();
             int lineStart = pos;
             int lineEnd = pos;
             while (lineEnd < rangeEnd && text.charAt(lineEnd) != '\n' && text.charAt(lineEnd) != '\r') lineEnd++;
@@ -3575,7 +3587,7 @@ public final class CodeTokens {
                     int closeEnd = -1;
                     pos = nextPos;
                     while (pos < rangeEnd) {
-                        if ((pos & 4095) == 0) checkpoint.run();
+                        if ((++lineSteps & 255) == 0) checkpoint.run();
                         int ls = pos;
                         int le = pos;
                         while (le < rangeEnd && text.charAt(le) != '\n' && text.charAt(le) != '\r') le++;
@@ -3637,36 +3649,66 @@ public final class CodeTokens {
                     p = d + 2;
                 }
             }
+            boolean noBacktick = false;
+            boolean noBold = false;
+            boolean noParen = false;
+            boolean noCommentClose = false;
+            int nextCloseBracket = -2;
+            int inlineSteps = 0;
             while (p < lineEnd && count[0] < limit) {
+                if ((++inlineSteps & 1023) == 0) checkpoint.run();
                 char ch = text.charAt(p);
                 if (ch == '`') {
-                    int close = text.indexOf('`', p + 1);
-                    if (close > p && close < lineEnd) {
-                        emitToken(sink, count, limit, p, close + 1, STRING);
-                        p = close + 1;
-                        continue;
+                    if (!noBacktick) {
+                        int close = indexOfCharInRange(text, '`', p + 1, lineEnd);
+                        if (close > p) {
+                            emitToken(sink, count, limit, p, close + 1, STRING);
+                            p = close + 1;
+                            continue;
+                        }
+                        noBacktick = true;
                     }
                 } else if (ch == '*' && p + 1 < lineEnd && text.charAt(p + 1) == '*') {
-                    int close = text.indexOf("**", p + 2);
-                    if (close > p + 1 && close < lineEnd) {
-                        emitToken(sink, count, limit, p, close + 2, TYPE);
-                        p = close + 2;
-                        continue;
+                    if (!noBold) {
+                        int close = indexOfTwoCharsInRange(text, '*', '*', p + 2, lineEnd);
+                        if (close > p + 1) {
+                            emitToken(sink, count, limit, p, close + 2, TYPE);
+                            p = close + 2;
+                            continue;
+                        }
+                        noBold = true;
                     }
                 } else if (ch == '[') {
-                    int closeBracket = text.indexOf(']', p + 1);
-                    if (closeBracket > p && closeBracket + 1 < lineEnd && text.charAt(closeBracket + 1) == '(') {
-                        int closeParen = text.indexOf(')', closeBracket + 2);
-                        if (closeParen > closeBracket + 1 && closeParen < lineEnd) {
-                            emitToken(sink, count, limit, p, closeBracket + 1, FUNCTION);
-                            emitToken(sink, count, limit, closeBracket + 2, closeParen, PROPERTY);
-                            p = closeParen + 1;
-                            continue;
+                    if (!noParen) {
+                        if (nextCloseBracket != -1 && nextCloseBracket <= p) {
+                            nextCloseBracket = indexOfCharInRange(text, ']', p + 1, lineEnd);
+                        }
+                        if (nextCloseBracket > p && nextCloseBracket + 1 < lineEnd && text.charAt(nextCloseBracket + 1) == '(') {
+                            int closeParen = indexOfCharInRange(text, ')', nextCloseBracket + 2, lineEnd);
+                            if (closeParen > nextCloseBracket + 1) {
+                                emitToken(sink, count, limit, p, nextCloseBracket + 1, FUNCTION);
+                                emitToken(sink, count, limit, nextCloseBracket + 2, closeParen, PROPERTY);
+                                p = closeParen + 1;
+                                continue;
+                            }
+                            if (closeParen < 0) {
+                                noParen = true;
+                            }
                         }
                     }
                 } else if (ch == '<' && p + 3 < lineEnd && text.regionMatches(p, "<!--", 0, 4)) {
-                    int close = text.indexOf("-->", p + 4);
-                    int end = (close >= 0 && close < lineEnd) ? close + 3 : lineEnd;
+                    int end;
+                    if (noCommentClose) {
+                        end = lineEnd;
+                    } else {
+                        int close = indexOfThreeCharsInRange(text, '-', '-', '>', p + 4, lineEnd);
+                        if (close < 0) {
+                            noCommentClose = true;
+                            end = lineEnd;
+                        } else {
+                            end = close + 3;
+                        }
+                    }
                     emitToken(sink, count, limit, p, end, COMMENT);
                     p = end;
                     continue;
@@ -3675,6 +3717,29 @@ public final class CodeTokens {
             }
             pos = nextPos;
         }
+    }
+
+    private static int indexOfCharInRange(String text, char target, int from, int end) {
+        for (int i = from; i < end; i++) {
+            if (text.charAt(i) == target) return i;
+        }
+        return -1;
+    }
+
+    private static int indexOfTwoCharsInRange(String text, char c0, char c1, int from, int end) {
+        int stop = end - 1;
+        for (int i = from; i < stop; i++) {
+            if (text.charAt(i) == c0 && text.charAt(i + 1) == c1) return i;
+        }
+        return -1;
+    }
+
+    private static int indexOfThreeCharsInRange(String text, char c0, char c1, char c2, int from, int end) {
+        int stop = end - 2;
+        for (int i = from; i < stop; i++) {
+            if (text.charAt(i) == c0 && text.charAt(i + 1) == c1 && text.charAt(i + 2) == c2) return i;
+        }
+        return -1;
     }
 
     private static boolean word(char c) { return Character.isLetterOrDigit(c) || c == '_'; }

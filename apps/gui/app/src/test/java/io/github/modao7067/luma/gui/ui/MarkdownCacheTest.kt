@@ -109,4 +109,24 @@ class MarkdownCacheTest {
         val doubleTilde = parser.parse("保留 ~~删除内容~~ 结尾", complete = true)
         assertTrue(doubleTilde.blocks.any { hasKind(it.node, MarkdownKind.STRIKE) })
     }
+    @Test fun largeDocumentRetainsSingleSlotRecentCacheEntry() {
+        val cache = MarkdownDocumentCache(sourceBudget = 2048, maxEntries = 8, maxSource = 128, nodeBudget = 256, maxNodes = 64)
+        val docParser = MarkdownDocumentParser()
+        val largeA = "paragraph ".repeat(40)
+        val largeB = "another ".repeat(40)
+        val parsedA = docParser.parse(largeA, complete = true)
+        val parsedB = docParser.parse(largeB, complete = true)
+        cache.put(parsedA)
+        assertSame(parsedA, cache.get(largeA))
+        cache.put(parsedB)
+        assertSame(parsedB, cache.get(largeB))
+        assertNull(cache.get(largeA))
+        assertEquals(2L, cache.usage().rejected)
+    }
+    @Test fun utf16SafeSlicingNeverSplitsSurrogatePairs() {
+        val text = "ab😀cd"
+        assertEquals("ab", safeUtf16Prefix(text, 3))
+        assertEquals("ab😀", safeUtf16Prefix(text, 4))
+        assertEquals(4, safeUtf16SliceStart(text, 3))
+    }
 }

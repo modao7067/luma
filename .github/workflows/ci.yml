@@ -20,9 +20,29 @@ jobs:
           python-version: '3.12'
       - name: Source and production gates
         run: ./tools/luma verify --static
+      - name: Hermetic Python unit tests
+        run: |
+          python3 tools/tests/browser/test_client.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          excluded = {
+              'test_kimi_web_native.py',
+              'test_native_owner_contract.py',
+              'test_claude_pty.py',
+              'test_idle_reclaim.py',
+          }
+          for test in sorted(Path('tools/tests/cli').glob('test_*.py')):
+              if test.name in excluded:
+                  continue
+              print('RUN', test, flush=True)
+              subprocess.run([sys.executable, str(test)], check=True)
+          PY
 
   android:
-    name: Compile, unit tests, lint
+    name: Compile, unit tests, lint, release packaging
     needs: static-gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -55,3 +75,5 @@ jobs:
           :apps:gui:lintDebug
           :runtime:noroot:lintDebug :runtime:root:lintDebug
           :shared:terminal-view:lintDebug :shared:terminal-emulator:lintDebug
+      - name: Unsigned release packaging
+        run: ./gradlew --console=plain :apps:gui:assembleRelease

@@ -98,10 +98,13 @@ internal fun MediaViewerHost(
         LocalMediaOwnerKey provides ownerKey,
     ) {
         Box(Modifier.fillMaxSize().onSizeChanged { rootSize = it }.testTag("media-host:$ownerKey").semantics { stateDescription = if (route != null) tr("正在查看媒体", "Viewing media") else tr("来源页面", "Source page") }) {
+            val contentInteractive = LocalSessionInteractive.current && route == null
             Box(Modifier.fillMaxSize().then(if (route == null && (previewFraction ?: animatedFraction) == 0f) Modifier else Modifier.clearAndSetSemantics {}.pointerInput(Unit) {
                 awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() } }
             })) {
-                content()
+                CompositionLocalProvider(LocalSessionInteractive provides contentInteractive) {
+                    content()
+                }
             }
             val displayed = route ?: retained
             if (spatialContentVisible(route != null, previewFraction ?: animatedFraction) && displayed != null) {
@@ -120,16 +123,18 @@ internal fun MediaViewerHost(
                 }
             }
         }
-        PredictiveBackHandler(enabled = route != null) { progress ->
-            try {
-                progress.collect { event ->
-                    backProgress = event.progress.coerceIn(0f, 1f)
+        if (route != null) {
+            PredictiveBackHandler(enabled = true) { progress ->
+                try {
+                    progress.collect { event ->
+                        backProgress = event.progress.coerceIn(0f, 1f)
+                    }
+                    backProgress = 0f
+                    route = null
+                } catch (cancelled: CancellationException) {
+                    backProgress = 0f
+                    throw cancelled
                 }
-                backProgress = 0f
-                route = null
-            } catch (cancelled: CancellationException) {
-                backProgress = 0f
-                throw cancelled
             }
         }
     }

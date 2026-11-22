@@ -3,9 +3,44 @@ package io.github.modao7067.luma.gui.runtime
 internal object RuntimeScripts {
     val mediaMetadata = """
 import json,mimetypes,os,stat,sys
-def _safe_guest_path(raw):
+def _safe_guest_path(raw,allowed_prefix=None):
+    err_pseudo=('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径')
+    err_loops=('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深')
+    norm_raw=os.path.normpath(os.path.abspath(raw))
+    if allowed_prefix:
+        prefix=os.path.normpath(os.path.abspath(allowed_prefix)).rstrip('/')
+        if not prefix.startswith('/proc/1/root/') or len(prefix)<=len('/proc/1/root/') or os.path.islink(prefix):
+            raise ValueError(err_pseudo)
+        if norm_raw!=prefix and not norm_raw.startswith(prefix+'/'):
+            raise ValueError(err_pseudo)
+        rel=norm_raw[len(prefix):].lstrip('/')
+        cur=prefix
+        stack=[s for s in rel.split('/') if s and s!='.']
+        hops=0
+        while stack:
+            seg=stack.pop(0)
+            if seg=='..':
+                if cur==prefix:raise ValueError(err_pseudo)
+                cur=os.path.dirname(cur.rstrip('/'))
+                if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                continue
+            nxt=os.path.join(cur,seg)
+            if os.path.islink(nxt):
+                hops+=1
+                if hops>40:raise ValueError(err_loops)
+                target=os.readlink(nxt)
+                joined=target if os.path.isabs(target) else os.path.join(cur,target)
+                norm_t=os.path.normpath(joined)
+                if norm_t!=prefix and not norm_t.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                cur=prefix
+                rel_t=norm_t[len(prefix):].lstrip('/')
+                stack=[s for s in rel_t.split('/') if s and s!='.']+stack
+            else:
+                cur=nxt
+        if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+        return cur
     cur='/'
-    stack=[s for s in os.path.normpath(os.path.abspath(raw)).split('/') if s and s!='.']
+    stack=[s for s in norm_raw.split('/') if s and s!='.']
     hops=0
     while stack:
         seg=stack.pop(0)
@@ -14,26 +49,27 @@ def _safe_guest_path(raw):
             continue
         nxt=os.path.join(cur,seg)
         if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):
-            raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+            raise ValueError(err_pseudo)
         if os.path.islink(nxt):
             hops+=1
-            if hops>40:raise ValueError(('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深'))
+            if hops>40:raise ValueError(err_loops)
             target=os.readlink(nxt)
             joined=target if os.path.isabs(target) else os.path.join(cur,target)
             norm_t=os.path.normpath(joined)
             if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):
-                raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+                raise ValueError(err_pseudo)
             cur='/'
             stack=[s for s in norm_t.split('/') if s and s!='.']+stack
         else:
             cur=nxt
     real=os.path.realpath(cur)
     if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):
-        raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+        raise ValueError(err_pseudo)
     return real
-try:p=_safe_guest_path(sys.argv[1])
+try:
+    p=_safe_guest_path(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)
+    s=os.lstat(p)
 except (OSError,ValueError) as error:raise SystemExit(str(error))
-s=os.stat(p)
 if stat.S_ISDIR(s.st_mode):
     print(json.dumps({'size':0,'mime':'inode/directory'}))
     sys.exit(0)
@@ -41,7 +77,8 @@ if not stat.S_ISREG(s.st_mode):raise SystemExit(('Only regular files can be read
 m=mimetypes.guess_type(p)[0] or ''
 if m in ('','application/octet-stream'):
     try:
-        with open(p,'rb') as f:b=f.read(8192)
+        fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as f:b=f.read(8192)
         if b and b'\x00' not in b:
             try:b.decode('utf-8');m='text/plain'
             except UnicodeDecodeError as e:
@@ -475,9 +512,44 @@ if __name__=='__main__':
 
     val listFiles = """
 import json,os,sys
-def _safe_guest_path(raw):
+def _safe_guest_path(raw,allowed_prefix=None):
+    err_pseudo=('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径')
+    err_loops=('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深')
+    norm_raw=os.path.normpath(os.path.abspath(raw))
+    if allowed_prefix:
+        prefix=os.path.normpath(os.path.abspath(allowed_prefix)).rstrip('/')
+        if not prefix.startswith('/proc/1/root/') or len(prefix)<=len('/proc/1/root/') or os.path.islink(prefix):
+            raise ValueError(err_pseudo)
+        if norm_raw!=prefix and not norm_raw.startswith(prefix+'/'):
+            raise ValueError(err_pseudo)
+        rel=norm_raw[len(prefix):].lstrip('/')
+        cur=prefix
+        stack=[s for s in rel.split('/') if s and s!='.']
+        hops=0
+        while stack:
+            seg=stack.pop(0)
+            if seg=='..':
+                if cur==prefix:raise ValueError(err_pseudo)
+                cur=os.path.dirname(cur.rstrip('/'))
+                if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                continue
+            nxt=os.path.join(cur,seg)
+            if os.path.islink(nxt):
+                hops+=1
+                if hops>40:raise ValueError(err_loops)
+                target=os.readlink(nxt)
+                joined=target if os.path.isabs(target) else os.path.join(cur,target)
+                norm_t=os.path.normpath(joined)
+                if norm_t!=prefix and not norm_t.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                cur=prefix
+                rel_t=norm_t[len(prefix):].lstrip('/')
+                stack=[s for s in rel_t.split('/') if s and s!='.']+stack
+            else:
+                cur=nxt
+        if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+        return cur
     cur='/'
-    stack=[s for s in os.path.normpath(os.path.abspath(raw)).split('/') if s and s!='.']
+    stack=[s for s in norm_raw.split('/') if s and s!='.']
     hops=0
     while stack:
         seg=stack.pop(0)
@@ -486,33 +558,34 @@ def _safe_guest_path(raw):
             continue
         nxt=os.path.join(cur,seg)
         if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):
-            raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+            raise ValueError(err_pseudo)
         if os.path.islink(nxt):
             hops+=1
-            if hops>40:raise ValueError(('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深'))
+            if hops>40:raise ValueError(err_loops)
             target=os.readlink(nxt)
             joined=target if os.path.isabs(target) else os.path.join(cur,target)
             norm_t=os.path.normpath(joined)
             if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):
-                raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+                raise ValueError(err_pseudo)
             cur='/'
             stack=[s for s in norm_t.split('/') if s and s!='.']+stack
         else:
             cur=nxt
     real=os.path.realpath(cur)
     if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):
-        raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+        raise ValueError(err_pseudo)
     return real
 try:
     raw_abs=os.path.abspath(sys.argv[1])
-    path=_safe_guest_path(raw_abs)
+    allowed=sys.argv[2] if len(sys.argv)>2 else None
+    path=_safe_guest_path(raw_abs,allowed)
     entries=list(os.scandir(path))
     if len(entries)>5000:raise ValueError(('Directory has over 5,000 entries; enter a more specific path' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '目录超过 5000 项，请输入更具体的路径'))
     def row(e):
         entry_logical=os.path.join(raw_abs,e.name) if raw_abs!='/' else '/'+e.name
         try:
-            resolved=_safe_guest_path(e.path)
-            st=os.stat(resolved)
+            resolved=_safe_guest_path(e.path,allowed)
+            st=os.lstat(resolved)
             is_dir=os.path.isdir(resolved)
         except (OSError,ValueError):
             return None
@@ -523,10 +596,45 @@ except (OSError,ValueError) as error:raise SystemExit(str(error))
 """.trimIndent()
 
     val readFile = """
-import os,pathlib,sys
-def _safe_guest_path(raw):
+import os,stat,sys
+def _safe_guest_path(raw,allowed_prefix=None):
+    err_pseudo=('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径')
+    err_loops=('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深')
+    norm_raw=os.path.normpath(os.path.abspath(raw))
+    if allowed_prefix:
+        prefix=os.path.normpath(os.path.abspath(allowed_prefix)).rstrip('/')
+        if not prefix.startswith('/proc/1/root/') or len(prefix)<=len('/proc/1/root/') or os.path.islink(prefix):
+            raise ValueError(err_pseudo)
+        if norm_raw!=prefix and not norm_raw.startswith(prefix+'/'):
+            raise ValueError(err_pseudo)
+        rel=norm_raw[len(prefix):].lstrip('/')
+        cur=prefix
+        stack=[s for s in rel.split('/') if s and s!='.']
+        hops=0
+        while stack:
+            seg=stack.pop(0)
+            if seg=='..':
+                if cur==prefix:raise ValueError(err_pseudo)
+                cur=os.path.dirname(cur.rstrip('/'))
+                if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                continue
+            nxt=os.path.join(cur,seg)
+            if os.path.islink(nxt):
+                hops+=1
+                if hops>40:raise ValueError(err_loops)
+                target=os.readlink(nxt)
+                joined=target if os.path.isabs(target) else os.path.join(cur,target)
+                norm_t=os.path.normpath(joined)
+                if norm_t!=prefix and not norm_t.startswith(prefix+'/'):raise ValueError(err_pseudo)
+                cur=prefix
+                rel_t=norm_t[len(prefix):].lstrip('/')
+                stack=[s for s in rel_t.split('/') if s and s!='.']+stack
+            else:
+                cur=nxt
+        if cur!=prefix and not cur.startswith(prefix+'/'):raise ValueError(err_pseudo)
+        return cur
     cur='/'
-    stack=[s for s in os.path.normpath(os.path.abspath(raw)).split('/') if s and s!='.']
+    stack=[s for s in norm_raw.split('/') if s and s!='.']
     hops=0
     while stack:
         seg=stack.pop(0)
@@ -535,26 +643,34 @@ def _safe_guest_path(raw):
             continue
         nxt=os.path.join(cur,seg)
         if nxt in ('/proc','/sys','/dev') or nxt.startswith(('/proc/','/sys/','/dev/')):
-            raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+            raise ValueError(err_pseudo)
         if os.path.islink(nxt):
             hops+=1
-            if hops>40:raise ValueError(('Too many levels of symbolic links' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '符号链接层级过深'))
+            if hops>40:raise ValueError(err_loops)
             target=os.readlink(nxt)
             joined=target if os.path.isabs(target) else os.path.join(cur,target)
             norm_t=os.path.normpath(joined)
             if norm_t in ('/proc','/sys','/dev') or norm_t.startswith(('/proc/','/sys/','/dev/')):
-                raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+                raise ValueError(err_pseudo)
             cur='/'
             stack=[s for s in norm_t.split('/') if s and s!='.']+stack
         else:
             cur=nxt
     real=os.path.realpath(cur)
     if real in ('/proc','/sys','/dev') or real.startswith(('/proc/','/sys/','/dev/')):
-        raise ValueError(('Accessing system pseudo-filesystem paths is not allowed' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '不允许访问系统伪文件系统路径'))
+        raise ValueError(err_pseudo)
     return real
 try:
-    safe_path=_safe_guest_path(os.path.abspath(sys.argv[1]))
-    with pathlib.Path(safe_path).open('rb') as source:data=source.read(524289)
+    safe_path=_safe_guest_path(os.path.abspath(sys.argv[1]),sys.argv[2] if len(sys.argv)>2 else None)
+    fd=os.open(safe_path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        st=os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):raise ValueError(('Only regular files can be read' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '只能读取普通文件'))
+        with os.fdopen(fd,'rb') as source:
+            fd=-1
+            data=source.read(524289)
+    finally:
+        if fd>=0:os.close(fd)
     if len(data)>524288:raise ValueError(('File exceeds 512 KiB; view it in the terminal' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '文件超过 512 KiB，请在终端查看'))
     try:text=data.decode('utf-8')
     except UnicodeDecodeError:raise ValueError(('Not a UTF-8 text file; preview it in the terminal' if os.environ.get('LUMA_LANG','zh').lower().startswith('en') else '该文件不是 UTF-8 文本，请在终端使用原生文件预览'))

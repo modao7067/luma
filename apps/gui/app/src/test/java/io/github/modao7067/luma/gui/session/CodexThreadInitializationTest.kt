@@ -99,4 +99,15 @@ class CodexThreadInitializationTest {
         } catch (_: IllegalStateException) { }
         assertTrue(r.needsName); assertEquals("native", r.threadId)
     }
+
+    @Test fun loadedThreadsStopsOnRepeatedPaginationCursor() = runBlocking {
+        var calls = 0
+        val loaded = CodexConnectionSetup.loadedThreads { _, _ ->
+            calls++
+            assertTrue(calls <= 3)
+            obj("data" to org.json.JSONArray(listOf("t-$calls")), "nextCursor" to "loop")
+        }
+        assertEquals(2, calls)
+        assertEquals(setOf("t-1", "t-2"), loaded)
+    }
 }

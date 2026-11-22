@@ -36,6 +36,21 @@ internal data class PunctuationTrim(
 
 internal interface TypesetMeasurer {
     fun measureWidth(text: String, start: Int, end: Int, styleId: Int): Float
+    fun measureCharAdvances(text: String, start: Int, end: Int, styleId: Int, outAdvances: FloatArray) {
+        val len = end - start
+        if (len <= 0) return
+        var i = 0
+        while (i < len) {
+            val absIdx = start + i
+            val gEnd = TypesetEngine.graphemeEnd(text, absIdx, end)
+            val gLen = gEnd - absIdx
+            outAdvances[i] = measureWidth(text, absIdx, gEnd, styleId)
+            for (k in 1 until gLen) {
+                outAdvances[i + k] = 0f
+            }
+            i += gLen
+        }
+    }
     fun measureSpaceWidth(styleId: Int): Float
     fun measureHyphenWidth(styleId: Int): Float
     fun measureEmWidth(styleId: Int): Float
@@ -1644,21 +1659,32 @@ internal object TypesetEngine {
             }
             return
         }
-        val rawTotal = measurer.measureWidth(text, pieceStart, pieceEnd, styleId)
+        val advances = FloatArray(len)
+        measurer.measureCharAdvances(text, pieceStart, pieceEnd, styleId, advances)
+        var rawTotal = 0f
+        for (k in 0 until len) {
+            val v = advances[k]
+            if (v > 0f && v.isFinite()) rawTotal += v
+        }
         val scale = if (rawTotal > 0.001f) totalWidth / rawTotal else 1f
-        var prevEnd = 0f
+        var acc = 0f
         var i = pieceStart
         while (i < pieceEnd) {
             val gEnd = nextGraphemeEnd(text, i, pieceEnd)
-            val prefixW = measurer.measureWidth(text, pieceStart, gEnd, styleId) * scale
-            val cLeft = startX + prevEnd
-            val cRight = startX + prefixW
+            var gAdv = 0f
+            for (c in i until gEnd) {
+                val v = advances[c - pieceStart]
+                if (v > 0f && v.isFinite()) gAdv += v
+            }
+            val nextAcc = acc + gAdv * scale
+            val cLeft = startX + acc
+            val cRight = startX + nextAcc
             for (c in i until gEnd) {
                 charLine[c] = lineIndex
                 charLeft[c] = cLeft
                 charRight[c] = cRight
             }
-            prevEnd = prefixW
+            acc = nextAcc
             i = gEnd
         }
     }
@@ -1684,6 +1710,9 @@ internal object TypesetEngine {
             }
         }
     }
+
+    internal fun graphemeEnd(text: String, index: Int, limit: Int): Int =
+        nextGraphemeEnd(text, index, limit)
 
     private fun nextGraphemeEnd(text: String, index: Int, limit: Int): Int {
         if (index >= limit) return limit

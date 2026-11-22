@@ -1,6 +1,7 @@
 package io.github.modao7067.luma.gui.camera
 
 import android.content.Context
+import android.database.Cursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -16,6 +17,30 @@ class PhotoCaptureProvider : FileProvider() {
         val store = PhotoCaptureStore(requireNotNull(context))
         store.fileForUri(uri) ?: throw FileNotFoundException("Invalid photo capture URI")
         return super.openFile(uri, mode) ?: throw FileNotFoundException("Photo capture unavailable")
+    }
+
+    override fun query(
+        uri: Uri,
+        projection: Array<out String>?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+        sortOrder: String?,
+    ): Cursor {
+        val store = PhotoCaptureStore(requireNotNull(context))
+        store.fileForUri(uri) ?: throw SecurityException("Invalid photo capture URI")
+        return super.query(uri, projection, selection, selectionArgs, sortOrder)
+    }
+
+    override fun getType(uri: Uri): String? {
+        val store = PhotoCaptureStore(requireNotNull(context))
+        store.fileForUri(uri) ?: return null
+        return super.getType(uri)
+    }
+
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+        val store = PhotoCaptureStore(requireNotNull(context))
+        store.fileForUri(uri) ?: throw SecurityException("Invalid photo capture URI")
+        return 0
     }
 }
 
@@ -67,12 +92,31 @@ internal class PhotoCaptureStore(private val context: Context) {
     }
 
     private fun prune() {
-        val before = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
-        directory.listFiles().orEmpty().filter { NAME.matches(it.name) && it.lastModified() < before }
-            .forEach { discard(it.name) }
+        pruneDirectory(directory)
     }
 
     companion object {
         private val NAME = Regex("capture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jpg")
+        private val READY_NAME = Regex("capture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jpg\\.ready")
+
+        internal fun pruneDirectory(
+            directory: File,
+            nowMs: Long = System.currentTimeMillis(),
+            onCleanupFailure: () -> Unit = { Log.w("PhotoCapture", "Capture cache cleanup failed") },
+        ) {
+            val before = nowMs - 24 * 60 * 60 * 1000L
+            for (entry in directory.listFiles().orEmpty()) {
+                if (NAME.matches(entry.name) && entry.lastModified() < before) {
+                    for (target in listOf(entry, File(directory, "${entry.name}.ready"))) {
+                        if (target.exists() && !target.delete()) onCleanupFailure()
+                    }
+                } else if (READY_NAME.matches(entry.name)) {
+                    val jpg = File(directory, entry.name.removeSuffix(".ready"))
+                    if (!jpg.isFile || entry.lastModified() < before) {
+                        if (entry.exists() && !entry.delete()) onCleanupFailure()
+                    }
+                }
+            }
+        }
     }
 }

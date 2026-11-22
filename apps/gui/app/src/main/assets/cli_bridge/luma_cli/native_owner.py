@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -893,9 +894,31 @@ class NativeOwner:
         if not (base / "tmux").is_file():
             archive = Path(__file__).parent.parent / "native/tmux-debian-arm64.zip"
             if not archive.is_file(): raise Rejected(tr("App 缺少原生终端运行依赖 tmux", "App is missing required native terminal dependency: tmux"))
-            base.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with zipfile.ZipFile(archive) as z: z.extractall(base)
-            os.chmod(base / "tmux", 0o700)
+            base.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_path = base.parent / ".tmux-debian-3.5a.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                if not (base / "tmux").is_file():
+                    stage = base.parent / f".tmux-debian-3.5a.{uuid.uuid4().hex}.tmp"
+                    stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    try:
+                        with zipfile.ZipFile(archive) as z:
+                            z.extractall(stage)
+                        os.chmod(stage / "tmux", 0o700)
+                        os.chmod(stage, 0o700)
+                        if base.exists():
+                            shutil.rmtree(base, ignore_errors=True)
+                        os.replace(stage, base)
+                    except BaseException:
+                        shutil.rmtree(stage, ignore_errors=True)
+                        raise
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(fd)
         return ["/lib/ld-linux-aarch64.so.1", "--library-path", str(base / "lib"), str(base / "tmux")]
 
     def alive(self):
@@ -921,8 +944,14 @@ class NativeOwner:
             raise Rejected(tr("原生控制端点已存在，拒绝覆盖", "Native control endpoint already exists; refusing to overwrite"))
         Path(self.socket + ".error").unlink(missing_ok=True)
         merged_env = {"LUMA_LANG": lang_code(), **(env or {})}
-        command = ["env", *[f"{k}={v}" for k, v in merged_env.items()], *argv]
-        self.tmux("new-session", "-d", "-s", "owner", "-x", "110", "-y", "40", "-c", self.session.config["cwd"], shlex.join(command),
+        lines = ["#!/bin/sh"]
+        for k, v in merged_env.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
+                raise Rejected(tr("无效环境变量名称", "Invalid environment variable name"))
+            lines.append(f"export {k}={shlex.quote(str(v))}")
+        lines.append("exec " + shlex.join([str(a) for a in argv]))
+        launcher = self.write_private_file("launch-tui.sh", "\n".join(lines) + "\n", mode=0o700)
+        self.tmux("new-session", "-d", "-s", "owner", "-x", "110", "-y", "40", "-c", self.session.config["cwd"], "exec " + shlex.quote(str(launcher)),
                   ";", "set-option", "-t", "owner", "remain-on-exit", "failed")
         tmux_cmd = self.tmux_command()
         handle_data = {"kind": "tmux", "hostKind": host_kind, "terminalSocket": self.tmux_socket, "tmuxCommand": tmux_cmd}
@@ -983,8 +1012,11 @@ class NativeOwner:
     def inject_text(self, body, submit=True, submit_delay=0.12):
         if not self.alive():
             raise Rejected(tr("原生执行宿主已退出", "Native execution host has exited"))
+        sanitized = body.replace("\x00", "")
+        while "\x1b[201~" in sanitized or "\x1b[200~" in sanitized:
+            sanitized = sanitized.replace("\x1b[201~", "").replace("\x1b[200~", "")
         buf = "luma-" + uuid.uuid4().hex[:12]
-        self.tmux("load-buffer", "-b", buf, "-", input_bytes=body.encode("utf-8"))
+        self.tmux("load-buffer", "-b", buf, "-", input_bytes=sanitized.encode("utf-8"))
         self.tmux("paste-buffer", "-b", buf, "-p", "-d", "-t", "owner")
         if submit:
             if submit_delay > 0:

@@ -759,8 +759,8 @@ public final class MainActivity extends Activity {
             startActivityForResult(intent, 20);
         } catch (ActivityNotFoundException e) {
             try {
-                Intent fallback = new Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-                fallback.setType("image/*");
+                Intent fallback = new Intent(Intent.ACTION_PICK);
+                fallback.setDataAndType(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*");
                 startActivityForResult(fallback, 20);
             } catch (ActivityNotFoundException ignored) {
                 Toast.makeText(this, com.termux.terminal.LumaLang.tr("未找到可用的相册或文件选择器", "No gallery or file picker found"), Toast.LENGTH_SHORT).show();
@@ -892,8 +892,9 @@ public final class MainActivity extends Activity {
                 LinearLayout actions = new LinearLayout(this);
                 actions.setOrientation(LinearLayout.HORIZONTAL);
 
-                if (!baseUrl.isEmpty() && active) {
+                if (TaskRegistry.isSafeHttpUrl(baseUrl) && active) {
                     TextView openBtn = LumaUi.chipButton(this, com.termux.terminal.LumaLang.tr("打开网页", "Open URL"), true, v -> {
+                        if (!TaskRegistry.isSafeHttpUrl(baseUrl)) return;
                         try {
                             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(baseUrl)));
                         } catch (Exception ignored) {}

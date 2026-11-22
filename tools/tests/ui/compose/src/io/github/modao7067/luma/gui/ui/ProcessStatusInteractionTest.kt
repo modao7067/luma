@@ -89,7 +89,7 @@ class ProcessStatusInteractionTest {
     @Test fun summaryStaysUnweightedAndOnlyTintsLiveVerbsAndEdits() {
         val settled = processSummaryText(listOf(ProcessSummaryPart("12 步"), ProcessSummaryPart("修改 3 处", emphasized = true), ProcessSummaryPart("2m3s")), androidx.compose.ui.graphics.Color.Red)
         assertEquals("12 步 · 修改 3 处 · 2m3s", settled.text)
-        assertEquals(listOf(7 to 12), settled.spanStyles.map { it.start to it.end })
+        assertEquals(listOf(7 to 13), settled.spanStyles.map { it.start to it.end })
         val live = processSummaryText(listOf(ProcessSummaryPart("正在执行命令…", emphasized = true)), androidx.compose.ui.graphics.Color.Red)
         assertEquals(listOf(0 to 7), live.spanStyles.map { it.start to it.end })
         assertTrue(live.spanStyles.all { it.item.fontWeight == null && it.item.color == androidx.compose.ui.graphics.Color.Red })
@@ -106,6 +106,10 @@ class ProcessStatusInteractionTest {
         assertEquals(androidx.compose.ui.graphics.Color(0xFF5E5D58), dark.completedDot)
         assertNotEquals(light.activeDot, light.completedDot)
         assertNotEquals(dark.activeDot, dark.completedDot)
+        assertEquals(light.emphasis, light.activeGroupTitle)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF95948E), dark.activeGroupTitle)
+        assertTrue(dark.activeGroupTitle.red < dark.emphasis.red)
+        assertTrue(dark.shimmerPeak.alpha >= 0.85f)
     }
 
     @Test fun shimmerClockStopsWhenDisabledOrMotionOffWithoutRecomposition() {

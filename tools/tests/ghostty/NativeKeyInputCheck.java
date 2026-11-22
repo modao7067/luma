@@ -324,6 +324,23 @@ public final class NativeKeyInputCheck {
                 "protocol-active encoder rejection does not fall back to legacy Ctrl bytes");
             failing.close();
 
+            Session imeKitty = new Session();
+            Flags imeFlags = new Flags();
+            TerminalView imeView = view(context, imeKitty.session, imeFlags);
+            feed(imeKitty.session, "\033[>8u");
+            imeKitty.capture.take();
+            android.view.inputmethod.EditorInfo editorInfo = new android.view.inputmethod.EditorInfo();
+            android.view.inputmethod.InputConnection ic = imeView.onCreateInputConnection(editorInfo);
+            ic.commitText("\n", 1);
+            String kittyEnter = imeKitty.await();
+            check(kittyEnter.startsWith("\033[13") && !kittyEnter.contains("109;5"),
+                "IME newline routes via GhosttyKey.ENTER instead of Ctrl+m");
+            ic.commitText("\t", 1);
+            String kittyTab = imeKitty.await();
+            check(kittyTab.startsWith("\033[9") && !kittyTab.contains("105;5"),
+                "IME tab routes via GhosttyKey.TAB instead of Ctrl+i");
+            imeKitty.close();
+
             a.close(); b.close(); sc.close(); comp.close(); compKitty.close(); shifted.close();
             System.out.println("NATIVE KEY INPUT OK checks=" + checks);
         } catch (Throwable t) {

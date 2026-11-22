@@ -175,10 +175,11 @@ private class OverscrollNode(
     private var lastPlacedOffset = 0f
     var offset = 0f
         private set(value) {
-            if (field != value) {
-                field = value
+            val safeValue = if (value.isFinite()) value else 0f
+            if (field != safeValue) {
+                field = safeValue
                 // Placement rounds to pixels, so invalidate only when the rounded offset changes.
-                val rounded = round(value)
+                val rounded = round(safeValue)
                 if (rounded != lastPlacedOffset) {
                     lastPlacedOffset = rounded
                     if (isAttached) invalidatePlacement()
@@ -227,11 +228,12 @@ private class OverscrollNode(
         cachedScrollRangeDensity = currentDensity
         cachedScrollRangeWindowInfo = currentWindowInfo
         scrollRange = with(currentDensity) {
-            if (isVertical) {
+            val raw = if (isVertical) {
                 currentWindowInfo.containerDpSize.height.toPx()
             } else {
                 currentWindowInfo.containerDpSize.width.toPx()
             }
+            if (raw.isFinite() && raw > 0f) raw else 0f
         }
     }
 
@@ -268,7 +270,7 @@ private class OverscrollNode(
     private fun shouldBypassForPullToRefresh(): Boolean = false
 
     private fun applyDrag(delta: Float) {
-        if (delta == 0f) return
+        if (delta == 0f || scrollRange <= 0f || !scrollRange.isFinite()) return
         rawTouchAccumulation += delta
         rawTouchAccumulation = rawTouchAccumulation.coerceIn(-scrollRange, scrollRange)
         val normalized = min(abs(rawTouchAccumulation) / scrollRange, 1.0f)
@@ -278,6 +280,10 @@ private class OverscrollNode(
 
     /** Invert the damping curve when a drag takes over a spring. */
     private fun syncRawAccumulationFromOffset() {
+        if (scrollRange <= 0f || !scrollRange.isFinite() || !offset.isFinite()) {
+            rawTouchAccumulation = 0f
+            return
+        }
         rawTouchAccumulation = sign(offset) * SpringMath.obtainTouchDistance(offset, scrollRange)
     }
 
@@ -298,10 +304,11 @@ private class OverscrollNode(
         val placeable = measurable.measure(constraints)
         return layout(placeable.width, placeable.height) {
             placeable.placeWithLayer(0, 0) {
+                val snapped = if (offset.isFinite()) round(offset) else 0f
                 if (isVertical) {
-                    translationY = round(offset)
+                    translationY = snapped
                 } else {
-                    translationX = round(offset)
+                    translationX = snapped
                 }
                 clip = true
             }

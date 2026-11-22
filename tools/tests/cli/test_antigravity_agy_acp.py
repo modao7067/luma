@@ -2277,5 +2277,36 @@ class SwarmProjectionAcpTests(unittest.TestCase):
         self.assertEqual(rows[1]["completedAtMs"], 1794996004000)
         self.assertEqual(rows[2]["timestampMs"], 1794996007000)
 
+    def test_background_task_live_log_tail_updates_and_settles_cleanly(self):
+        with tempfile.TemporaryDirectory() as td:
+            log_file = pathlib.Path(td) / "task-233.log"
+            log_file.write_text("  0 48.8M  0 3.3M\r 45 48.8M 45 22.0M\r", encoding="utf-8")
+            s = self._make_session("s-bg")
+            s.tail_thread = type("Dummy", (), {"is_alive": lambda self: True, "join": lambda self, timeout=None: None})()
+            bg_output = (
+                "Tool is running as a background task with task id: s-bg/task-233\n"
+                f"Task logs are available at: file://{log_file}\n"
+                "Log output:\n"
+                "  0 48.8M  0 3.3M\n"
+            )
+            s.event({"method": "session/update", "params": {"sessionId": "s-bg", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "tc-bg", "name": "run_command", "title": "Download",
+                "status": "in_progress", "rawInput": {"CommandLine": "curl -O ..."},
+            }}})
+            s.event({"method": "session/update", "params": {"sessionId": "s-bg", "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "tc-bg", "name": "run_command",
+                "status": "completed", "rawOutput": {"output": bg_output},
+            }}})
+            self.assertEqual(s.rows["tool-tc-bg"]["status"], "running")
+            s.refresh_background_task_logs()
+            self.assertEqual(s.rows["tool-tc-bg"]["outcome"], " 45 48.8M 45 22.0M")
+            log_file.write_text("header\n 45 48.8M 45 22.0M\r 92 48.8M 92 45.0M\r", encoding="utf-8")
+            s.refresh_background_task_logs()
+            self.assertEqual(s.rows["tool-tc-bg"]["outcome"], "header\n 92 48.8M 92 45.0M")
+            s._settle_background_task("s-bg/task-233", "completed", outcome="download ok", settled_at_ms=1795000000000)
+            self.assertEqual(s.rows["tool-tc-bg"]["status"], "completed")
+            self.assertEqual(s.rows["tool-tc-bg"]["outcome"], "download ok")
+            self.assertNotIn("s-bg/task-233", s.background_task_logs)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

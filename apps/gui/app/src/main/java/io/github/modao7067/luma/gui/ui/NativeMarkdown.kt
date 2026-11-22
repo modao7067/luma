@@ -38,7 +38,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.layoutId
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -56,6 +60,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.LineBreak
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -122,8 +127,16 @@ private fun ensureLatexInitialized(context: android.content.Context) {
     }
 }
 
-private val formulaBitmapCache = object : LruCache<FormulaCacheKey, RenderedFormula>(192) {
-    override fun sizeOf(key: FormulaCacheKey, value: RenderedFormula): Int = 1
+private const val FORMULA_CACHE_MAX_BYTES = 8 * 1024 * 1024
+private const val FORMULA_MAX_WIDTH_PX = 2048
+private const val FORMULA_MAX_HEIGHT_PX = 1024
+
+internal fun formulaBitmapSizeBytes(widthPx: Int, heightPx: Int): Int =
+    (widthPx.toLong() * heightPx.toLong() * 4L).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+
+private val formulaBitmapCache = object : LruCache<FormulaCacheKey, RenderedFormula>(FORMULA_CACHE_MAX_BYTES) {
+    override fun sizeOf(key: FormulaCacheKey, value: RenderedFormula): Int =
+        formulaBitmapSizeBytes(value.widthPx, value.heightPx)
 }
 
 private fun getCachedFormula(expression: String, sizePx: Float, argbColor: Int, padding: Int): RenderedFormula? {
@@ -146,11 +159,15 @@ private fun renderAndCacheFormula(
             val builder = JLatexMathDrawable.builder(expression).textSize(sizePx).color(argbColor)
             if (padding > 0) builder.padding(padding)
             val drawable = builder.build()
-            val w = drawable.intrinsicWidth.coerceIn(1, 8192)
-            val h = drawable.intrinsicHeight.coerceIn(1, 4096)
+            val rawW = drawable.intrinsicWidth.coerceAtLeast(1)
+            val rawH = drawable.intrinsicHeight.coerceAtLeast(1)
+            val scale = minOf(1f, FORMULA_MAX_WIDTH_PX.toFloat() / rawW, FORMULA_MAX_HEIGHT_PX.toFloat() / rawH)
+            val w = (rawW * scale).roundToInt().coerceIn(1, FORMULA_MAX_WIDTH_PX)
+            val h = (rawH * scale).roundToInt().coerceIn(1, FORMULA_MAX_HEIGHT_PX)
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = android.graphics.Canvas(bmp)
-            drawable.setBounds(0, 0, w, h)
+            if (scale < 1f) canvas.scale(scale, scale)
+            drawable.setBounds(0, 0, rawW, rawH)
             drawable.draw(canvas)
             val baseline = runCatching { drawable.icon().baseLine }.getOrDefault(0.78f)
                 .let { if (it.isFinite()) it.coerceIn(0.25f, 0.95f) else 0.78f }
@@ -535,6 +552,7 @@ private fun MarkdownBlock(
                     code = node.literal,
                     language = node.info,
                     visibleCharacters = budget,
+                    streaming = LocalMarkdownStreamingTail.current || budget < node.revealUnits,
                 )
             }
         }
@@ -742,10 +760,53 @@ private fun RichText(
     val density = LocalDensity.current
     val useEditorial = LocalEditorialMarkdown.current
     val streamingTail = LocalMarkdownStreamingTail.current
+    val inspection = LocalInspectionMode.current
     val sizePx = with(density) { (if (style.fontSize.isUnspecified) 16.sp else style.fontSize).toPx() }
+    val argbColor = color.toArgb()
     val signature = node
-    val rich = remember(signature, color, linkColor, inlineCodeColor, mono, sizePx, onFileLink, context) {
-        buildRichText(context, node, color, linkColor, inlineCodeColor, mono, sizePx, onFileLink)
+    val inlineExpressions = remember(signature) { collectInlineMathExpressions(node) }
+    val initialFormulas = remember(inlineExpressions, sizePx, argbColor, inspection, context) {
+        if (inlineExpressions.isEmpty()) {
+            emptyMap()
+        } else {
+            buildMap<String, RenderedFormula?>(inlineExpressions.size) {
+                for (expr in inlineExpressions) {
+                    val cached = getCachedFormula(expr, sizePx, argbColor, padding = 0)
+                    if (cached != null) {
+                        put(expr, cached)
+                    } else if (inspection) {
+                        put(expr, renderAndCacheFormula(context, expr, sizePx, argbColor, padding = 0))
+                    }
+                }
+            }
+        }
+    }
+    val resolvedFormulas by produceState(
+        initialValue = initialFormulas,
+        inlineExpressions,
+        sizePx,
+        argbColor,
+        context,
+        inspection,
+    ) {
+        value = initialFormulas
+        if (inspection || inlineExpressions.isEmpty() || initialFormulas.size == inlineExpressions.size) {
+            return@produceState
+        }
+        val missing = inlineExpressions.filterNot { it in initialFormulas }
+        if (missing.isEmpty()) return@produceState
+        val rendered = withContext(Dispatchers.Default) {
+            buildMap<String, RenderedFormula?>(missing.size) {
+                for (expr in missing) {
+                    ensureActive()
+                    put(expr, renderAndCacheFormula(context, expr, sizePx, argbColor, padding = 0))
+                }
+            }
+        }
+        value = initialFormulas + rendered
+    }
+    val rich = remember(signature, color, linkColor, inlineCodeColor, mono, onFileLink, resolvedFormulas) {
+        buildRichText(node, linkColor, inlineCodeColor, mono, onFileLink, resolvedFormulas)
     }
     val visible = remember(rich.first, budget) { visibleMarkdownText(rich.first, budget) }
     val media = remember(signature, resourceCards, emitMedia) {
@@ -824,18 +885,39 @@ internal fun markdownImages(node: MarkdownAst, resourceLinks: Boolean = true): L
 }
 
 private val inlineMath = Regex("\\\\\\((.+?)\\\\\\)|(?<!\\\\)\\$([^$\\n]+?)\\$")
+
+private fun collectInlineMathExpressions(node: MarkdownAst): List<String> {
+    var result: LinkedHashSet<String>? = null
+    fun visit(current: MarkdownAst) {
+        if (current.kind == MarkdownKind.TEXT) {
+            val rawText = current.literal
+            val text = if ("plugin-card" in rawText) pluginCardStripInlineRegex.replace(rawText, "") else rawText
+            if (text.indexOf('$') >= 0 || text.indexOf("\\(") >= 0) {
+                inlineMath.findAll(text).forEach { match ->
+                    val expression = match.groups[1]?.value ?: match.groups[2]!!.value
+                    if (expression.length <= MAX_INLINE_MATH_CHARS) {
+                        val set = result ?: LinkedHashSet<String>().also { result = it }
+                        set.add(expression)
+                    }
+                }
+            }
+        } else if (current.kind != MarkdownKind.CODE && current.kind != MarkdownKind.IMAGE) {
+            current.children.forEach(::visit)
+        }
+    }
+    visit(node)
+    return result?.toList() ?: emptyList()
+}
+
 private fun buildRichText(
-    context: android.content.Context,
     node: MarkdownAst,
-    color: Color,
     linkColor: Color,
     accent: Color,
     mono: FontFamily,
-    sizePx: Float,
     onFileLink: ((String) -> Unit)?,
+    resolvedFormulas: Map<String, RenderedFormula?>,
 ): Pair<AnnotatedString, Map<String, RenderedFormula>> {
     val images = linkedMapOf<String, RenderedFormula>()
-    val argb = color.toArgb()
     val codeStyle = SpanStyle(
         fontFamily = mono,
         fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
@@ -857,8 +939,10 @@ private fun buildRichText(
                 val expression = match.groups[1]?.value ?: match.groups[2]!!.value
                 if (expression.length > MAX_INLINE_MATH_CHARS) {
                     withStyle(codeStyle) { append(expression) }
+                } else if (expression !in resolvedFormulas) {
+                    withStyle(codeStyle) { append(expression) }
                 } else {
-                    val rendered = renderAndCacheFormula(context, expression, sizePx, argb, padding = 0)
+                    val rendered = resolvedFormulas[expression]
                     if (rendered == null) {
                         append(tr("[公式未能排版：${match.value}]", "[Formula render failed: ${match.value}]"))
                     } else {
@@ -1087,7 +1171,7 @@ internal fun MarkdownDocumentCard(
     val haptic = LocalHapticFeedback.current
     val copyMarkdown: () -> Unit = {
         haptic.tick()
-        runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }.onSuccess {
+        runCatching { clipboard.setText(AnnotatedString(safeUtf16Prefix(code, minOf(visibleEnd, 262_144)))) }.onSuccess {
             copied = true
         }
     }
@@ -1196,7 +1280,7 @@ internal fun MarkdownDocumentCard(
                     complete = isComplete,
                     animate = false,
                 ).also { retainedPresentationState.value = it }
-            } else if (!effectiveShowSource) {
+            } else if (!exceedsPreviewCap) {
                 retainedPresentationState.value
             } else {
                 null
@@ -1309,19 +1393,49 @@ internal fun MarkdownDocumentCard(
                             }
                         },
                         sourceContent = {
-                            val truncatedSource = if (exceedsPreviewCap) visibleCode.substring(0, MAX_CARD_MARKDOWN_CHARS) else visibleCode
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val truncatedSource = if (exceedsPreviewCap) safeUtf16Prefix(visibleCode, MAX_CARD_MARKDOWN_CHARS) else visibleCode
+                            val density = LocalDensity.current
+                            val fallbackWindowHeightPx = with(density) { 640.dp.toPx() }
+                            var windowTopPx by remember { mutableFloatStateOf(0f) }
+                            var windowHeightPx by remember { mutableFloatStateOf(0f) }
+                            val sourceStyle = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = terminalFont(),
+                                fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
+                                letterSpacing = 0.sp,
+                                lineHeight = 19.sp,
+                                lineBreak = LineBreak.Simple,
+                                hyphens = Hyphens.None,
+                                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                                lineHeightStyle = LineHeightStyle(
+                                    alignment = LineHeightStyle.Alignment.Center,
+                                    trim = LineHeightStyle.Trim.None,
+                                ),
+                            )
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { coords ->
+                                        if (coords.isAttached) {
+                                            windowTopPx = coords.positionInWindow().y
+                                            windowHeightPx = coords.findRootCoordinates().size.height.toFloat()
+                                        }
+                                    },
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
                                 LumaSelectionContainer {
-                                    Text(
-                                        rememberHighlightedCode(truncatedSource, language, colors),
-                                        Modifier.fillMaxWidth(),
-                                        fontFamily = terminalFont(),
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
-                                            letterSpacing = 0.sp,
-                                            lineHeight = 19.sp,
-                                        ),
-                                        softWrap = true,
+                                    ViewportWrappedCode(
+                                        code = truncatedSource,
+                                        visibleEnd = truncatedSource.length,
+                                        language = language,
+                                        colors = colors,
+                                        style = sourceStyle,
+                                        streamingHint = !isComplete,
+                                        viewportTopPx = { (-windowTopPx).coerceAtLeast(0f) },
+                                        viewportHeightPx = { if (windowHeightPx > 1f) windowHeightPx else fallbackWindowHeightPx },
+                                        showSoftWrapIndicators = false,
+                                        wrapIndicatorColor = Color.Transparent,
+                                        contentPaddingStart = 0.dp,
+                                        contentPaddingEnd = 0.dp,
                                     )
                                 }
                                 if (exceedsPreviewCap) {
@@ -1403,18 +1517,20 @@ private fun MarkdownModeCrossfade(
         modifier = Modifier.clipToBounds(),
     ) { measurables, constraints ->
         val loose = constraints.copy(minHeight = 0)
-        val previewPlaceable = measurables.firstOrNull { it.layoutId == "preview" }?.measure(loose)
-        val sourcePlaceable = measurables.firstOrNull { it.layoutId == "source" }?.measure(loose)
-        val previewH = previewPlaceable?.height ?: 0
-        val sourceH = sourcePlaceable?.height ?: previewH
         val f = currentFraction()
+        val measurePreview = !showSource || f < 1f
+        val measureSource = showSource || f > 0f
+        val previewPlaceable = if (measurePreview) measurables.firstOrNull { it.layoutId == "preview" }?.measure(loose) else null
+        val sourcePlaceable = if (measureSource) measurables.firstOrNull { it.layoutId == "source" }?.measure(loose) else null
+        val previewH = previewPlaceable?.height ?: sourcePlaceable?.height ?: 0
+        val sourceH = sourcePlaceable?.height ?: previewH
         val height = (previewH + (sourceH - previewH) * f).roundToInt()
         val width = maxOf(previewPlaceable?.width ?: 0, sourcePlaceable?.width ?: 0, constraints.minWidth)
         val previewAlpha = (1f - f / 0.35f).coerceIn(0f, 1f)
         val sourceAlpha = ((f - 0.25f) / 0.75f).coerceIn(0f, 1f)
         layout(width, constraints.constrainHeight(height)) {
-            if (previewAlpha > 0f) previewPlaceable?.placeRelative(0, 0)
-            if (sourceAlpha > 0f) sourcePlaceable?.placeRelative(0, 0)
+            if (previewPlaceable != null && previewAlpha > 0f) previewPlaceable.placeRelative(0, 0)
+            if (sourcePlaceable != null && sourceAlpha > 0f) sourcePlaceable.placeRelative(0, 0)
         }
     }
 }
@@ -1428,11 +1544,15 @@ internal fun CodeBlock(
     visibleCharacters: Int = Int.MAX_VALUE,
     caption: String = language.ifBlank { tr("代码", "Code") },
     softWrap: Boolean = true,
+    streaming: Boolean? = null,
 ) {
     val visibleEnd = markdownVisibleEnd(code, visibleCharacters)
     val clipboard = LocalClipboardManager.current
     val colors = MaterialTheme.colorScheme
     val dark = codePaletteDark(colors)
+    val density = LocalDensity.current
+    val fallbackViewportPx = with(density) { 242.dp.toPx() }
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -1444,8 +1564,22 @@ internal fun CodeBlock(
     val copiedTint = if (dark) Color(0xFF34D399) else Color(0xFF10B981)
     val headerCaption = if (caption == language && language.isNotBlank()) caption.lowercase() else caption
     val wrapIndicatorColor = colors.onSurfaceVariant.copy(alpha = if (dark) 0.46f else 0.40f)
-    val wrapPath = remember { Path() }
-    var codeLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val termFont = terminalFont()
+    val codeStyle = MaterialTheme.typography.bodySmall.copy(
+        fontFamily = termFont,
+        fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
+        fontSize = 12.5.sp,
+        letterSpacing = 0.sp,
+        lineHeight = 19.5.sp,
+        lineBreak = LineBreak.Simple,
+        hyphens = Hyphens.None,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.None,
+        ),
+    )
+    val streamingHint = streaming ?: if (visibleEnd < code.length) true else null
     Surface(
         shape = LumaCardShape(12.dp),
         color = blockColors.surface,
@@ -1465,14 +1599,14 @@ internal fun CodeBlock(
                     headerCaption,
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                     color = colors.onSurfaceVariant,
-                    fontFamily = terminalFont(),
+                    fontFamily = termFont,
                 )
                 Box(
                     Modifier
                         .size(28.dp)
                         .clip(LumaCardShape(8.dp))
                         .clickable {
-                            runCatching { clipboard.setText(AnnotatedString(code.substring(0, minOf(visibleEnd, 262_144)))) }.onSuccess {
+                            runCatching { clipboard.setText(AnnotatedString(safeUtf16Prefix(code, minOf(visibleEnd, 262_144)))) }.onSuccess {
                                 copied = true
                             }
                         }
@@ -1493,47 +1627,42 @@ internal fun CodeBlock(
                     .fillMaxWidth()
                     .then(if (softWrap) Modifier.padding(vertical = 9.dp) else Modifier.padding(horizontal = 12.dp, vertical = 9.dp))
                     .heightIn(max = 242.dp)
+                    .onSizeChanged { viewportHeightPx = it.height.toFloat() }
                     .clipToBounds()
                     .codeBlockScrollBoundary(bodyVerticalScrollState, if (softWrap) null else bodyHorizontalScrollState)
                     .verticalScroll(bodyVerticalScrollState),
             ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (softWrap) {
-                                Modifier
-                                    .drawBehind {
-                                        val margin = 260.dp.toPx()
-                                        val visTop = (bodyVerticalScrollState.value.toFloat() - margin).coerceAtLeast(0f)
-                                        val visBottom = bodyVerticalScrollState.value.toFloat() + margin * 2f
-                                        drawSoftWrapIndicators(codeLayout, wrapIndicatorColor, wrapPath, visTop, visBottom)
-                                    }
-                                    .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END)
-                            } else {
-                                Modifier
-                            },
-                        ),
-                ) {
+                if (softWrap) {
                     LumaSelectionContainer {
-                        Text(
-                            rememberHighlightedCode(code, language, colors).let { if (visibleEnd == code.length) it else it.subSequence(0, visibleEnd) },
-                            Modifier
-                                .fillMaxWidth()
-                                .then(if (softWrap) Modifier else Modifier.horizontalScroll(bodyHorizontalScrollState)),
-                            fontFamily = terminalFont(),
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFeatureSettings = com.termux.view.BundledTerminalFonts.FEATURE_SETTINGS,
-                                fontSize = 12.5.sp,
-                                letterSpacing = 0.sp,
-                                lineHeight = 19.5.sp,
-                                lineBreak = LineBreak.Simple,
-                                hyphens = Hyphens.None,
-                            ),
-                            softWrap = softWrap,
-                            onTextLayout = { codeLayout = it },
+                        ViewportWrappedCode(
+                            code = code,
+                            visibleEnd = visibleEnd,
+                            language = language,
+                            colors = colors,
+                            style = codeStyle,
+                            streamingHint = streamingHint,
+                            viewportTopPx = { bodyVerticalScrollState.value.toFloat() },
+                            viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                            showSoftWrapIndicators = true,
+                            wrapIndicatorColor = wrapIndicatorColor,
+                            contentPaddingStart = SOFT_WRAP_GUTTER_START,
+                            contentPaddingEnd = SOFT_WRAP_GUTTER_END,
                         )
                     }
+                } else {
+                    ViewportNoWrapCodeBlock(
+                        code = code,
+                        visibleEnd = visibleEnd,
+                        language = language,
+                        colors = colors,
+                        style = codeStyle,
+                        streamingHint = streamingHint,
+                        hScroll = bodyHorizontalScrollState,
+                        viewportTopPx = { bodyVerticalScrollState.value.toFloat() },
+                        viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                        contentPaddingHorizontal = 0.dp,
+                        contentPaddingVertical = 0.dp,
+                    )
                 }
             }
         }

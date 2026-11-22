@@ -44,7 +44,12 @@ internal fun fileBreadcrumbs(path: String): List<Pair<String, String>> {
 
 internal fun fileParent(path: String): String = path.trimEnd('/').substringBeforeLast('/', "").ifBlank { "/" }
 
-internal fun fileReferenceText(paths: Collection<String>): String = paths.joinToString(" ") { "@\"$it\"" }
+internal fun fileReferenceText(paths: Collection<String>): String = paths
+    .mapNotNull { raw ->
+        val sanitized = raw.replace("\r", "").replace("\n", "").replace("\"", "").trim()
+        sanitized.takeIf { it.isNotEmpty() }?.let { "@\"$it\"" }
+    }
+    .joinToString(" ")
 
 @Composable
 internal fun FileBrowserDialog(browser: FileBrowser, actions: CockpitActions) {
@@ -63,7 +68,7 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
     var typedPath by remember(browser.path) { mutableStateOf(browser.path) }
 
     fun navigate(to: String) {
-        if (to == browser.path) return
+        if (browser.loading || to == browser.path) return
         history.add(browser.path)
         editingPath = false
         actions.browseFiles(to)
@@ -79,8 +84,9 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
     }
     val scope = rememberCoroutineScope()
     val internalBackProgress = remember { Animatable(0f) }
+    val interactive = LocalSessionInteractive.current
     val hasInternalBack = editingPath || (!browser.picking && selecting) || history.isNotEmpty()
-    PredictiveBackHandler(enabled = hasInternalBack) { progress ->
+    PredictiveBackHandler(enabled = interactive && hasInternalBack) { progress ->
         try {
             progress.collect { event ->
                 internalBackProgress.snapTo(event.progress.coerceIn(0f, 1f))
@@ -137,8 +143,12 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                     }
                     .padding(top = padding.calculateTopPadding()),
             ) {
+                val crumbScroll = rememberScrollState()
+                LaunchedEffect(browser.path) {
+                    crumbScroll.scrollTo(crumbScroll.maxValue)
+                }
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState(Int.MAX_VALUE))
+                    Modifier.fillMaxWidth().horizontalScroll(crumbScroll)
                         .padding(horizontal = 16.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -175,7 +185,10 @@ internal fun FileBrowserScreen(browser: FileBrowser, actions: CockpitActions) {
                             modifier = Modifier.weight(1f),
                             singleLine = true,
                         )
-                        FilledTonalButton(onClick = { navigate(typedPath.trim()) }, enabled = typedPath.trim().startsWith('/')) { Text(tr("前往", "Go")) }
+                        FilledTonalButton(
+                            onClick = { navigate(typedPath.trim()) },
+                            enabled = typedPath.trim().startsWith('/') && !browser.loading,
+                        ) { Text(tr("前往", "Go")) }
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {

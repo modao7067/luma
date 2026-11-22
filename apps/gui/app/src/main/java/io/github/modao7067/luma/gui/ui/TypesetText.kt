@@ -599,6 +599,9 @@ internal fun TypesetText(
     val densityKey = remember(density) {
         (density.density * 100f).roundToInt() * 31 + (density.fontScale * 100f).roundToInt()
     }
+    val reusableMeasurer = remember(styleSignature, densityKey, fontFamilyResolver) {
+        AndroidTypesetMeasurer()
+    }
 
     val linkTapModifier = if (hasLinks) {
         Modifier.pointerInput(stateHolder) {
@@ -721,7 +724,7 @@ internal fun TypesetText(
                     density = density,
                     fontFamilyResolver = fontFamilyResolver,
                 )
-                val measurer = AndroidTypesetMeasurer(prepared)
+                val measurer = reusableMeasurer.bind(prepared)
                 val computed = TypesetEngine.layout(
                     text = prepared.text,
                     runs = prepared.runs,

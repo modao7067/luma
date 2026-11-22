@@ -161,21 +161,33 @@ public final class ShizukuBridge {
         }
     }
 
+    private static void resetCachedStateLocked() {
+        attached = false;
+        cachedServerUid = -1;
+        cachedServerVersion = -1;
+        cachedSELinuxContext = null;
+        cachedPermissionGranted = false;
+        cachedShouldShowRationale = false;
+    }
+
+    private static synchronized void clearDeadBinder(IBinder dead) {
+        if (serviceBinder == dead) {
+            serviceBinder = null;
+            resetCachedStateLocked();
+        }
+    }
+
     public static synchronized void onBinderReceived(IBinder newBinder, Context context) {
         if (newBinder == null || !newBinder.pingBinder()) return;
         if (serviceBinder == newBinder && attached) return;
         serviceBinder = newBinder;
-        attached = false;
+        resetCachedStateLocked();
         try {
             newBinder.linkToDeath(() -> {
                 synchronized (ShizukuBridge.class) {
                     if (serviceBinder == newBinder) {
                         serviceBinder = null;
-                        attached = false;
-                        cachedServerUid = -1;
-                        cachedServerVersion = -1;
-                        cachedSELinuxContext = null;
-                        cachedPermissionGranted = false;
+                        resetCachedStateLocked();
                     }
                 }
                 for (PermissionWaiter waiter : permissionWaiters.values()) {
@@ -186,6 +198,7 @@ public final class ShizukuBridge {
             }, 0);
         } catch (RemoteException e) {
             serviceBinder = null;
+            resetCachedStateLocked();
             return;
         }
         String packageName = context != null ? context.getPackageName() : "io.github.modao7067.luma";
@@ -277,7 +290,11 @@ public final class ShizukuBridge {
             cachedPermissionGranted = granted;
             return granted;
         } catch (Throwable e) {
-            return cachedPermissionGranted;
+            cachedPermissionGranted = false;
+            if (e instanceof android.os.DeadObjectException || !binder.pingBinder()) {
+                clearDeadBinder(binder);
+            }
+            return false;
         }
     }
 
@@ -351,7 +368,13 @@ public final class ShizukuBridge {
         if (cachedShouldShowRationale) {
             try {
                 cachedShouldShowRationale = transactBoolean(binder, TRANSACTION_shouldShowRequestPermissionRationale);
-            } catch (Throwable ignored) {}
+            } catch (Throwable e) {
+                cachedShouldShowRationale = false;
+                if (e instanceof android.os.DeadObjectException || !binder.pingBinder()) {
+                    clearDeadBinder(binder);
+                }
+                return false;
+            }
             if (cachedShouldShowRationale) return false;
         }
         int code = nextRequestCode.getAndIncrement();
@@ -493,12 +516,26 @@ public final class ShizukuBridge {
             }
         }
 
+        private static OutputStream emptyOutputStream() {
+            return new OutputStream() {
+                @Override public void write(int b) {}
+                @Override public void write(byte[] b, int off, int len) {}
+            };
+        }
+
+        private static InputStream emptyInputStream() {
+            return new InputStream() {
+                @Override public int read() { return -1; }
+                @Override public int read(byte[] b, int off, int len) { return -1; }
+            };
+        }
+
         @Override
         public synchronized OutputStream getOutputStream() {
             if (os == null) {
                 try {
                     ParcelFileDescriptor pfd = transactPfd(REMOTE_getOutputStream);
-                    os = pfd != null ? new ParcelFileDescriptor.AutoCloseOutputStream(pfd) : OutputStream.nullOutputStream();
+                    os = pfd != null ? new ParcelFileDescriptor.AutoCloseOutputStream(pfd) : emptyOutputStream();
                 } catch (RemoteException e) {
                     throw new RuntimeException(e);
                 }
@@ -511,7 +548,7 @@ public final class ShizukuBridge {
             if (is == null) {
                 try {
                     ParcelFileDescriptor pfd = transactPfd(REMOTE_getInputStream);
-                    is = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();
+                    is = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : emptyInputStream();
                 } catch (RemoteException e) {
                     throw new RuntimeException(e);
                 }
@@ -524,7 +561,7 @@ public final class ShizukuBridge {
             if (es == null) {
                 try {
                     ParcelFileDescriptor pfd = transactPfd(REMOTE_getErrorStream);
-                    es = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : InputStream.nullInputStream();
+                    es = pfd != null ? new ParcelFileDescriptor.AutoCloseInputStream(pfd) : emptyInputStream();
                 } catch (RemoteException e) {
                     throw new RuntimeException(e);
                 }
@@ -666,7 +703,9 @@ public final class ShizukuBridge {
     }
 
     public static final class RelaySession implements AutoCloseable {
+        private static final Set<String> ACTIVE_RELAYS = ConcurrentHashMap.newKeySet();
         private final Context context;
+        private final String relayId;
         private final File relayRoot;
         private final Map<File, FileSnapshot> stagedSnapshots = new HashMap<>();
         private boolean synced;
@@ -674,23 +713,20 @@ public final class ShizukuBridge {
 
         private static final class FileSnapshot {
             final long length;
-            final long lastModified;
             final byte[] sha256;
 
-            private FileSnapshot(long length, long lastModified, byte[] sha256) {
+            private FileSnapshot(long length, byte[] sha256) {
                 this.length = length;
-                this.lastModified = lastModified;
                 this.sha256 = sha256;
             }
 
             static FileSnapshot of(File file) throws IOException {
                 byte[] digest = sha256(file);
-                return new FileSnapshot(file.length(), file.lastModified(), digest);
+                return new FileSnapshot(file.length(), digest);
             }
 
             boolean matches(File file) {
-                if (!file.isFile() || file.length() != length) return false;
-                if (file.lastModified() == lastModified) return true;
+                if (!file.isFile() || Files.isSymbolicLink(file.toPath()) || file.length() != length) return false;
                 try {
                     return MessageDigest.isEqual(sha256, sha256(file));
                 } catch (IOException e) {
@@ -701,7 +737,7 @@ public final class ShizukuBridge {
             private static byte[] sha256(File file) throws IOException {
                 try {
                     MessageDigest md = MessageDigest.getInstance("SHA-256");
-                    try (InputStream in = Files.newInputStream(file.toPath())) {
+                    try (InputStream in = Files.newInputStream(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
                         byte[] buf = new byte[16384];
                         int n;
                         while ((n = in.read(buf)) != -1) md.update(buf, 0, n);
@@ -713,25 +749,51 @@ public final class ShizukuBridge {
             }
         }
 
-        public RelaySession(Context context) {
-            this.context = context;
+        private static File relayParentDir(Context context) {
             File cacheBase = context.getExternalCacheDir();
             if (cacheBase == null) cacheBase = new File(context.getCacheDir(), "external-cache");
-            File parent = new File(cacheBase, "shizuku-relay");
+            return new File(cacheBase, "shizuku-relay");
+        }
+
+        public static void cleanupStaleRelays(Context context) {
+            if (context == null) return;
+            cleanStaleRelayDirs(relayParentDir(context));
+        }
+
+        public RelaySession(Context context) {
+            this.context = context;
+            File parent = relayParentDir(context);
+            this.relayId = UUID.randomUUID().toString();
+            ACTIVE_RELAYS.add(this.relayId);
+            this.relayRoot = new File(parent, this.relayId);
             cleanStaleRelayDirs(parent);
-            this.relayRoot = new File(parent, UUID.randomUUID().toString());
         }
 
         public File relayRoot() {
             return relayRoot;
         }
 
+        private static long latestModifiedTime(File file) {
+            long latest = file.lastModified();
+            if (!Files.isSymbolicLink(file.toPath()) && file.isDirectory()) {
+                File[] entries = file.listFiles();
+                if (entries != null) {
+                    for (File entry : entries) {
+                        long childTime = latestModifiedTime(entry);
+                        if (childTime > latest) latest = childTime;
+                    }
+                }
+            }
+            return latest;
+        }
+
         private static void cleanStaleRelayDirs(File parent) {
             File[] children = parent.listFiles();
             if (children == null) return;
-            long cutoff = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1);
+            long cutoff = System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10);
             for (File child : children) {
-                if (child.lastModified() < cutoff) {
+                if (ACTIVE_RELAYS.contains(child.getName())) continue;
+                if (latestModifiedTime(child) < cutoff) {
                     deleteRecursively(child);
                 }
             }
@@ -859,6 +921,7 @@ public final class ShizukuBridge {
             File[] children = currentRelayDir.listFiles();
             if (children == null) return;
             String basePath = relayBase.getCanonicalPath();
+            String hostBaseCanonical = hostBase.getCanonicalPath();
             for (File child : children) {
                 if (Files.isSymbolicLink(child.toPath())) continue;
                 if (child.isDirectory()) {
@@ -871,12 +934,42 @@ public final class ShizukuBridge {
                     String childPath = child.getCanonicalPath();
                     if (!childPath.startsWith(basePath + File.separator)) continue;
                     String relative = childPath.substring(basePath.length() + 1);
-                    File dest = new File(hostBase, relative);
-                    File destParent = dest.getParentFile();
-                    if (destParent != null && !destParent.isDirectory() && !destParent.mkdirs()) {
-                        throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目标目录：", "Failed to create destination directory: ") + destParent);
+                    String[] segments = relative.split(Pattern.quote(File.separator));
+                    if (segments.length == 0) continue;
+                    boolean validSegments = true;
+                    for (String seg : segments) {
+                        if (seg.isEmpty() || ".".equals(seg) || "..".equals(seg)) {
+                            validSegments = false;
+                            break;
+                        }
                     }
-                    RuntimeAssets.write(dest, Files.readAllBytes(child.toPath()));
+                    if (!validSegments) continue;
+                    File cursor = hostBase;
+                    for (int i = 0; i < segments.length - 1; i++) {
+                        cursor = new File(cursor, segments[i]);
+                        if (Files.isSymbolicLink(cursor.toPath())) {
+                            throw new IOException(com.termux.terminal.LumaLang.tr("目标目录包含符号链接：", "Destination path contains a symbolic link: ") + cursor);
+                        }
+                        if (!Files.exists(cursor.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                            if (!cursor.mkdir() && !cursor.isDirectory()) {
+                                throw new IOException(com.termux.terminal.LumaLang.tr("无法创建目标目录：", "Failed to create destination directory: ") + cursor);
+                            }
+                            if (Files.isSymbolicLink(cursor.toPath())) {
+                                throw new IOException(com.termux.terminal.LumaLang.tr("目标目录包含符号链接：", "Destination path contains a symbolic link: ") + cursor);
+                            }
+                        } else if (!cursor.isDirectory()) {
+                            throw new IOException(com.termux.terminal.LumaLang.tr("目标父路径不是目录：", "Destination parent is not a directory: ") + cursor);
+                        }
+                    }
+                    String parentCanonical = cursor.getCanonicalPath();
+                    if (!parentCanonical.equals(hostBaseCanonical) && !parentCanonical.startsWith(hostBaseCanonical + File.separator)) {
+                        throw new IOException(com.termux.terminal.LumaLang.tr("目标目录越界：", "Destination directory escapes root: ") + cursor);
+                    }
+                    File dest = new File(cursor, segments[segments.length - 1]);
+                    if (Files.isSymbolicLink(dest.toPath())) {
+                        throw new IOException(com.termux.terminal.LumaLang.tr("目标路径为符号链接：", "Destination path is a symbolic link: ") + dest);
+                    }
+                    RuntimeAssets.copyAtomic(child, dest);
                 }
             }
         }
@@ -885,7 +978,11 @@ public final class ShizukuBridge {
         public synchronized void close() {
             if (closed) return;
             closed = true;
-            deleteRecursively(relayRoot);
+            try {
+                deleteRecursively(relayRoot);
+            } finally {
+                ACTIVE_RELAYS.remove(relayId);
+            }
         }
 
         private static void deleteRecursively(File file) {

@@ -22,10 +22,21 @@ internal class SessionManagementBinding(context: Context, server: (String) -> Se
         } catch (e: Exception) { binding.failWrite(output); transport.close(); throw e }
         for (name in listOf("luma-sessions", "SKILL.md")) {
             val target = File(context.filesDir, if (name == "SKILL.md") "runtime/$root/skills/luma-sessions/SKILL.md" else "runtime/bin/luma-sessions")
-            target.parentFile!!.mkdirs()
-            target.writeText(context.assets.open("sessions/$name").bufferedReader().use { it.readText() }
-                .replace("/opt/luma/agent", GuiProduct.runtimePath(context.filesDir, root)))
-            Os.chmod(target.absolutePath, if (name == "SKILL.md") 384 else 448)
+            val parent = target.parentFile!!
+            parent.mkdirs()
+            val text = context.assets.open("sessions/$name").bufferedReader().use { it.readText() }
+                .replace("/opt/luma/agent", GuiProduct.runtimePath(context.filesDir, root))
+            val mode = if (name == "SKILL.md") 384 else 448
+            val temp = File(parent, ".${target.name}.${java.util.UUID.randomUUID()}.tmp")
+            try {
+                temp.writeText(text)
+                Os.chmod(temp.absolutePath, mode)
+                if (!temp.renameTo(target)) throw java.io.IOException("Failed to install $name")
+            } catch (e: Exception) {
+                temp.delete()
+                transport.close()
+                throw e
+            }
         }
     }
 }

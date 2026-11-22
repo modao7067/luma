@@ -25,7 +25,7 @@ public final class GuiRuntimeBridge {
     public static void stopBackgroundService(Context context){ShellService.stopIfRunning(context.getApplicationContext());}
     public static void prepareEnvironmentHeadless(Context context,ProgressListener progress)throws Exception {
         Context app=context.getApplicationContext();
-        ShellService.stopIfRunning(app);
+        ShellService.stopIfRunningAndAwait(app,5_000L);
         EnvironmentInstaller.install(app,message->{if(progress!=null)progress.onProgress(message);});
         RuntimeAssets.ensure(app);
         LinuxEnvironment.updateDns(app);
@@ -45,7 +45,12 @@ public final class GuiRuntimeBridge {
             }
             public void onServiceDisconnected(ComponentName name){result.set(null);}
         };
-        Intent intent=new Intent(context,ShellService.class);context.startForegroundService(intent);
+        Intent intent=new Intent(context,ShellService.class);
+        try{
+            context.startForegroundService(intent);
+        }catch(android.app.ForegroundServiceStartNotAllowedException e){
+            throw new IOException(com.termux.terminal.LumaLang.tr("后台无法启动 Debian 前台服务，请先回到 Luma 前台后重试","Cannot start Debian foreground service from background; return to Luma foreground and retry"),e);
+        }
         boolean bound=context.bindService(intent,connection,Context.BIND_AUTO_CREATE);
         if(!bound)throw new IOException(com.termux.terminal.LumaLang.tr("无法连接 Debian 服务，请先打开 NoRoot 终端","Failed to connect to Debian service; open NoRoot terminal first"));
         try {

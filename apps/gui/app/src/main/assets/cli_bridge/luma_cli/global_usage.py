@@ -4,6 +4,7 @@ from __future__ import annotations
 import calendar
 import contextlib
 import datetime as dt
+import fcntl
 import glob
 import gzip
 import hashlib
@@ -41,7 +42,7 @@ def _tr(zh: str, en: str) -> str:
     return zh if _is_zh() else en
 
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 ARCHIVE_VERSION = 2
 SCANNER_REV = 5
 PRICING_CACHE_VERSION = 1
@@ -1249,11 +1250,55 @@ def _save_scan_cache(cache: dict[str, Any]) -> None:
     except Exception:
         pass
 
+def _cache_key_path(key: str) -> str:
+    if "::" in key:
+        prefix, rest = key.split("::", 1)
+        if prefix in ("grok_usage", "grok_unified", "dsh", "kimi"):
+            return rest
+    return key
+
+def _cache_entry_covers(entry: Any, cutoff_ms: int) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("records"), list):
+        return False
+    if not entry.get("truncated"):
+        return True
+    min_ts = entry.get("min_ts_ms")
+    return isinstance(min_ts, (int, float)) and cutoff_ms > 0 and cutoff_ms > min_ts
+
+def _trim_cache_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool, int | None]:
+    if len(records) <= MAX_RECORDS_PER_SOURCE:
+        return records, False, None
+    sorted_recs = sorted(records, key=lambda r: _safe_int(r.get("timestampMs")))
+    kept = sorted_recs[-MAX_RECORDS_PER_SOURCE:]
+    min_ts = _safe_int(kept[0].get("timestampMs")) if kept else None
+    return kept, True, min_ts
+
+def _build_cache_entry(
+    records: list[dict[str, Any]],
+    *,
+    prior_truncated: bool = False,
+    prior_min_ts_ms: int | float | None = None,
+    **meta: Any,
+) -> dict[str, Any]:
+    kept, truncated, min_ts = _trim_cache_records(records)
+    if prior_truncated:
+        truncated = True
+        if min_ts is None:
+            min_ts = _safe_int(prior_min_ts_ms) if isinstance(prior_min_ts_ms, (int, float)) else None
+        elif isinstance(prior_min_ts_ms, (int, float)):
+            min_ts = max(min_ts, _safe_int(prior_min_ts_ms))
+    entry: dict[str, Any] = {**meta, "records": kept}
+    if truncated:
+        entry["truncated"] = True
+        entry["min_ts_ms"] = min_ts
+    return entry
+
 def _read_jsonl_incremental(
     file_path: str,
     cache_files: dict[str, Any],
     line_parser,
     initial_state_fn=None,
+    cutoff_ms: int = 0,
 ) -> list[dict[str, Any]]:
     try:
         st = os.stat(file_path)
@@ -1269,7 +1314,7 @@ def _read_jsonl_incremental(
         isinstance(prev, dict)
         and prev.get("size") == size
         and prev.get("mtime_ns") == mtime_ns
-        and isinstance(prev.get("records"), list)
+        and _cache_entry_covers(prev, cutoff_ms)
     ):
         return prev["records"]
 
@@ -1277,12 +1322,14 @@ def _read_jsonl_incremental(
     guard_hash = ""
     records: list[dict[str, Any]] = []
     state = initial_state_fn() if initial_state_fn else {}
+    resumed_truncated = False
+    resumed_min_ts_ms: int | float | None = None
 
     if (
         isinstance(prev, dict)
         and isinstance(prev.get("resume_offset"), int)
         and 0 < prev["resume_offset"] <= size
-        and isinstance(prev.get("records"), list)
+        and _cache_entry_covers(prev, cutoff_ms)
     ):
         cand_offset = prev["resume_offset"]
         cand_guard = prev.get("guard_hash") or ""
@@ -1294,10 +1341,15 @@ def _read_jsonl_incremental(
                 if _fnv1a64(g_bytes) == cand_guard:
                     resume_offset = cand_offset
                     records = list(prev["records"])
+                    if prev.get("truncated"):
+                        resumed_truncated = True
+                        resumed_min_ts_ms = prev.get("min_ts_ms")
                     if isinstance(prev.get("state"), dict):
                         state = dict(prev["state"])
         except Exception:
             resume_offset = 0
+            resumed_truncated = False
+            resumed_min_ts_ms = None
 
     try:
         with open(file_path, "rb") as f:
@@ -1339,17 +1391,16 @@ def _read_jsonl_incremental(
     except Exception:
         return records
 
-    if len(records) > MAX_RECORDS_PER_SOURCE:
-        records = records[-MAX_RECORDS_PER_SOURCE:]
-
-    cache_files[file_path] = {
-        "size": size,
-        "mtime_ns": mtime_ns,
-        "resume_offset": resume_offset,
-        "guard_hash": guard_hash,
-        "state": state,
-        "records": records,
-    }
+    cache_files[file_path] = _build_cache_entry(
+        records,
+        prior_truncated=resumed_truncated,
+        prior_min_ts_ms=resumed_min_ts_ms,
+        size=size,
+        mtime_ns=mtime_ns,
+        resume_offset=resume_offset,
+        guard_hash=guard_hash,
+        state=state,
+    )
     return records
 
 def _scan_claude(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
@@ -1410,7 +1461,7 @@ def _scan_claude(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> lis
     deduped: dict[str, dict[str, Any]] = {}
     anonymous: list[dict[str, Any]] = []
     for fp in sorted(files):
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
+        for rec in _read_jsonl_incremental(fp, cache_files, parse_line, cutoff_ms=cutoff_ms):
             if rec["timestampMs"] < cutoff_ms:
                 continue
             dk = rec.get("dedupKey")
@@ -1622,6 +1673,7 @@ def _scan_codex(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
             cache_files,
             _codex_rollout_parse_line,
             _codex_rollout_init_state,
+            cutoff_ms=cutoff_ms,
         ):
             if rec["timestampMs"] >= cutoff_ms:
                 dkey = f"codex:{fname}:{_safe_int(rec.get('_lineOffset'))}"
@@ -1811,7 +1863,7 @@ def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
             continue
 
         cached_entry = cache_files.get(db_str)
-        if isinstance(cached_entry, dict) and cached_entry.get("fp_sig") == fp_sig and isinstance(cached_entry.get("records"), list):
+        if isinstance(cached_entry, dict) and cached_entry.get("fp_sig") == fp_sig and _cache_entry_covers(cached_entry, cutoff_ms):
             db_records = cached_entry["records"]
         else:
             db_records = []
@@ -1852,9 +1904,7 @@ def _scan_opencode(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
                 db_records = []
                 scan_ok = False
             if scan_ok:
-                if len(db_records) > MAX_RECORDS_PER_SOURCE:
-                    db_records = db_records[-MAX_RECORDS_PER_SOURCE:]
-                cache_files[db_str] = {"fp_sig": fp_sig, "records": db_records}
+                cache_files[db_str] = _build_cache_entry(db_records, fp_sig=fp_sig)
 
         for rec in db_records:
             if rec["timestampMs"] >= cutoff_ms:
@@ -1914,7 +1964,7 @@ def _scan_pi(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[di
 
     deduped: dict[str, dict[str, Any]] = {}
     for fp in sorted(files):
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
+        for rec in _read_jsonl_incremental(fp, cache_files, parse_line, cutoff_ms=cutoff_ms):
             if rec["timestampMs"] >= cutoff_ms:
                 deduped[rec["dedupKey"]] = rec
     return list(deduped.values())
@@ -2046,7 +2096,7 @@ def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
             cache_key = f"grok_usage::{uj_path}"
             fp_sig = f"{st.st_mtime_ns}:{st.st_size}"
             cached = cache_files.get(cache_key)
-            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and _cache_entry_covers(cached, cutoff_ms):
                 file_records = cached["records"]
             else:
                 file_records = []
@@ -2116,9 +2166,7 @@ def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
                                 )
                                 if rec:
                                     file_records.append(rec)
-                    if len(file_records) > MAX_RECORDS_PER_SOURCE:
-                        file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
-                    cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+                    cache_files[cache_key] = _build_cache_entry(file_records, fp_sig=fp_sig)
 
             for rec in file_records:
                 if rec["timestampMs"] >= cutoff_ms:
@@ -2212,7 +2260,7 @@ def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
 
         for fp in sorted(update_files):
             fp_sid = Path(fp).parent.name
-            recs = _read_jsonl_incremental(fp, cache_files, parse_line)
+            recs = _read_jsonl_incremental(fp, cache_files, parse_line, cutoff_ms=cutoff_ms)
             if recs:
                 covered_sids.add(fp_sid)
             for rec in recs:
@@ -2233,7 +2281,7 @@ def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
             u_cache_key = f"grok_unified::{unified_log}"
             u_fp_sig = f"{u_st.st_mtime_ns}:{u_st.st_size}"
             u_cached = cache_files.get(u_cache_key)
-            if isinstance(u_cached, dict) and u_cached.get("fp_sig") == u_fp_sig and isinstance(u_cached.get("records"), list):
+            if isinstance(u_cached, dict) and u_cached.get("fp_sig") == u_fp_sig and _cache_entry_covers(u_cached, cutoff_ms):
                 uni_records = u_cached["records"]
             else:
                 uni_records = []
@@ -2295,9 +2343,7 @@ def _scan_grok(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
                                 "reasoningTokens": r_tok,
                                 "dedupKey": f"grok-unified:{sid}:{idx}:{ts}",
                             })
-                    if len(uni_records) > MAX_RECORDS_PER_SOURCE:
-                        uni_records = uni_records[-MAX_RECORDS_PER_SOURCE:]
-                    cache_files[u_cache_key] = {"fp_sig": u_fp_sig, "records": uni_records}
+                    cache_files[u_cache_key] = _build_cache_entry(uni_records, fp_sig=u_fp_sig)
                 except OSError:
                     uni_records = []
 
@@ -2481,7 +2527,7 @@ def _scan_codebuddy(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> 
     deduped: dict[str, dict[str, Any]] = {}
     for fp in sorted(files):
         cur_fp_id = _fnv1a64(fp.encode("utf-8"))[:12]
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
+        for rec in _read_jsonl_incremental(fp, cache_files, parse_line, cutoff_ms=cutoff_ms):
             if rec["timestampMs"] >= cutoff_ms:
                 deduped[rec["dedupKey"]] = rec
     return list(deduped.values())
@@ -2642,7 +2688,7 @@ def _scan_deepseek(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
         cache_key = f"dsh::{path}"
         fp_sig = f"{st.st_mtime_ns}:{st.st_size}"
         cached = cache_files.get(cache_key)
-        if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+        if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and _cache_entry_covers(cached, cutoff_ms):
             file_records = cached["records"]
         else:
             ok_boundary, seed_cut, missing_tagged_cut = _dsh_fork_boundary_stream(path)
@@ -2807,9 +2853,7 @@ def _scan_deepseek(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> l
             if not _iter_dsh_json_objects(path, _on_dsh_obj):
                 continue
 
-            if len(file_records) > MAX_RECORDS_PER_SOURCE:
-                file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
-            cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+            cache_files[cache_key] = _build_cache_entry(file_records, fp_sig=fp_sig)
 
         for rec in file_records:
             if rec["timestampMs"] >= cutoff_ms:
@@ -2903,7 +2947,7 @@ def _scan_kimi(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
 
             cache_key = f"kimi::{wire_path}"
             cached = cache_files.get(cache_key)
-            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and isinstance(cached.get("records"), list):
+            if isinstance(cached, dict) and cached.get("fp_sig") == fp_sig and _cache_entry_covers(cached, cutoff_ms):
                 file_records = cached["records"]
             else:
                 file_records = []
@@ -3033,9 +3077,7 @@ def _scan_kimi(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[
                 except OSError:
                     continue
 
-                if len(file_records) > MAX_RECORDS_PER_SOURCE:
-                    file_records = file_records[-MAX_RECORDS_PER_SOURCE:]
-                cache_files[cache_key] = {"fp_sig": fp_sig, "records": file_records}
+                cache_files[cache_key] = _build_cache_entry(file_records, fp_sig=fp_sig)
 
             for rec in file_records:
                 if rec["timestampMs"] >= cutoff_ms:
@@ -3244,7 +3286,7 @@ def _scan_qoder(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
     deduped: dict[str, dict[str, Any]] = {}
     for fp in sorted(files):
         cur_fp_id = _fnv1a64(fp.encode("utf-8"))[:12]
-        for rec in _read_jsonl_incremental(fp, cache_files, parse_line):
+        for rec in _read_jsonl_incremental(fp, cache_files, parse_line, cutoff_ms=cutoff_ms):
             if rec["timestampMs"] >= cutoff_ms:
                 deduped[rec["dedupKey"]] = rec
     return list(deduped.values())
@@ -4201,6 +4243,12 @@ def collect_summary(
     records.extend(_scan_qoder(home, cache_files, scan_cutoff_ms))
     records.extend(_scan_codebuddy(home, cache_files, scan_cutoff_ms))
 
+    for dead_key in [
+        k for k in list(cache_files.keys())
+        if not isinstance(k, str) or not os.path.exists(_cache_key_path(k))
+    ]:
+        cache_files.pop(dead_key, None)
+
     _save_scan_cache(scan_cache)
 
     scan_start_day_key = (
@@ -4221,7 +4269,8 @@ def collect_summary(
         if tot_tok <= 0:
             continue
         rec_dt = dt.datetime.fromtimestamp(ts_ms / 1000.0, tz=dt.timezone.utc).astimezone(tz)
-        priced_records.append((rec, rec_dt, priced))
+        if hourly and ts_ms >= period_cutoff_ms:
+            priced_records.append((rec, rec_dt, priced))
 
         day_key = rec_dt.strftime("%Y-%m-%d")
         if scan_start_day_key and day_key < scan_start_day_key:
@@ -5649,6 +5698,15 @@ def _extract_grok_oauth(home: Path) -> dict[str, Any] | None:
     if not client_id and scope_key and "::" in scope_key:
         client_id = scope_key.split("::", 1)[1].strip()
 
+    if scope_key and (_oauth_recovery_path("grok")).is_file():
+        with _oauth_refresh_lock("grok"):
+            recovered = _replay_grok_oauth_recovery(auth_file, scope_key)
+        if recovered is not None:
+            token = recovered["token"]
+            ref = recovered["refreshToken"]
+            if recovered.get("expiresAt") is not None:
+                exp_sec = recovered["expiresAt"]
+
     return {
         "token": token,
         "email": email,
@@ -5661,71 +5719,348 @@ def _extract_grok_oauth(home: Path) -> dict[str, Any] | None:
     }
 
 
-def _refresh_grok_access_token(auth: dict[str, Any]) -> str | None:
-    ref = str(auth.get("refreshToken") or "").strip()
-    client_id = str(auth.get("oidcClientId") or "").strip()
-    if not ref or not client_id:
-        return None
-    safe_issuer = _validate_http_url(auth.get("oidcIssuer") or "https://auth.x.ai")
-    if safe_issuer is None:
-        return None
-    issuer = safe_issuer.rstrip("/")
-    body_bytes = urllib.parse.urlencode({
-        "grant_type": "refresh_token",
-        "client_id": client_id,
-        "refresh_token": ref,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{issuer}/oauth2/token",
-        data=body_bytes,
-        method="POST",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": "Grok Build",
-        },
-    )
+@contextlib.contextmanager
+def _oauth_refresh_lock(name: str):
+    lock_path = _cache_dir() / f".{name}-oauth.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        with urllib.request.urlopen(req, timeout=4.5) as resp:
-            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    new_tok = str(payload.get("access_token") or "").strip()
-    if not new_tok:
-        return None
-    new_ref = str(payload.get("refresh_token") or ref).strip()
-    exp_in = _safe_float(payload.get("expires_in")) or 3600.0
-    new_exp = time.time() + exp_in
-
-    auth_file = auth.get("authFile")
-    scope_key = auth.get("scopeKey")
-    if isinstance(auth_file, Path):
-        if not isinstance(scope_key, str) or not auth_file.is_file():
-            return None
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
         try:
-            raw = json.loads(auth_file.read_text("utf-8"))
-            if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
-                return None
-            entry = raw[scope_key]
-            if "access_token" in entry and "key" not in entry:
-                entry["access_token"] = new_tok
-            else:
-                entry["key"] = new_tok
-            entry["refresh_token"] = new_ref
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _oauth_recovery_path(name: str) -> Path:
+    return _cache_dir() / f"{name}-oauth-recovery.json"
+
+
+def _unlink_oauth_recovery(name: str) -> None:
+    try:
+        _oauth_recovery_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_oauth_recovery(name: str) -> dict[str, Any] | None:
+    target = _oauth_recovery_path(name)
+    if not target.is_file():
+        return None
+    try:
+        data = json.loads(target.read_text("utf-8"))
+    except Exception:
+        _unlink_oauth_recovery(name)
+        return None
+    if not isinstance(data, dict):
+        _unlink_oauth_recovery(name)
+        return None
+    return data
+
+
+def _write_oauth_recovery(name: str, payload: dict[str, Any]) -> None:
+    try:
+        target = _oauth_recovery_path(name)
+        tmp = target.parent / f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
+
+def _save_grok_entry(auth_file: Path, scope_key: str, new_tok: str, new_ref: str, new_exp: float | None) -> bool:
+    try:
+        raw = json.loads(auth_file.read_text("utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
+            return False
+        entry = raw[scope_key]
+        if "access_token" in entry and "key" not in entry:
+            entry["access_token"] = new_tok
+        else:
+            entry["key"] = new_tok
+        entry["refresh_token"] = new_ref
+        if new_exp is not None:
             old_exp = entry.get("expires_at")
             if isinstance(old_exp, str) and "-" in old_exp:
                 entry["expires_at"] = dt.datetime.fromtimestamp(new_exp, tz=dt.timezone.utc).isoformat()
             else:
                 entry["expires_at"] = int(new_exp)
-            _atomic_write_text(auth_file, json.dumps(raw, ensure_ascii=False, indent=2), mode=0o600)
+        _atomic_write_text(auth_file, json.dumps(raw, ensure_ascii=False, indent=2), mode=0o600)
+        return True
+    except Exception:
+        return False
+
+
+def _save_kimi_entry(
+    cred_file: Path,
+    new_acc: str,
+    new_ref: str,
+    new_exp: float | None,
+    scope: str = "",
+    token_type: str = "",
+    exp_in: float | None = None,
+) -> bool:
+    try:
+        existing: dict[str, Any] = {}
+        if cred_file.is_file():
+            try:
+                loaded = json.loads(cred_file.read_text("utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
+        existing.update({
+            "access_token": new_acc,
+            "refresh_token": new_ref,
+            "scope": str(scope or existing.get("scope") or ""),
+            "token_type": str(token_type or existing.get("token_type") or "Bearer"),
+        })
+        if new_exp is not None:
+            existing["expires_at"] = new_exp
+        if exp_in is not None:
+            existing["expires_in"] = exp_in
+        _atomic_write_text(cred_file, json.dumps(existing, ensure_ascii=False), mode=0o600)
+        return True
+    except Exception:
+        return False
+
+
+def _same_path(first: Path, raw_second: Any) -> bool:
+    if not isinstance(raw_second, str) or not raw_second.strip():
+        return False
+    try:
+        return first.resolve() == Path(raw_second).resolve()
+    except OSError:
+        return str(first) == raw_second
+
+
+def _replay_grok_oauth_recovery(auth_file: Path, scope_key: str) -> dict[str, Any] | None:
+    rec = _read_oauth_recovery("grok")
+    if rec is None:
+        return None
+    rec_tok = str(rec.get("access_token") or "").strip()
+    rec_ref = str(rec.get("refresh_token") or "").strip()
+    if not rec_tok or not rec_ref:
+        _unlink_oauth_recovery("grok")
+        return None
+    if not _same_path(auth_file, rec.get("authFile")) or rec.get("scopeKey") != scope_key:
+        return None
+    rec_exp_ms = _parse_ts_ms(rec.get("expires_at"))
+    rec_exp = (rec_exp_ms / 1000.0) if rec_exp_ms is not None else _safe_float(rec.get("expires_at"))
+    saved_at = _safe_float(rec.get("savedAtEpoch")) or 0.0
+    replaced_tok = str(rec.get("replacedAccessToken") or "").strip()
+    replaced_ref = str(rec.get("replacedRefreshToken") or "").strip()
+    try:
+        raw = json.loads(auth_file.read_text("utf-8"))
+    except Exception:
+        return {"token": rec_tok, "refreshToken": rec_ref, "expiresAt": rec_exp}
+    if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
+        return None
+    entry = raw[scope_key]
+    disk_tok = str(entry.get("key") or entry.get("access_token") or "").strip()
+    disk_ref = str(entry.get("refresh_token") or "").strip()
+    disk_exp_ms = _parse_ts_ms(entry.get("expires_at"))
+    disk_exp = (disk_exp_ms / 1000.0) if disk_exp_ms is not None else _safe_float(entry.get("expires_at"))
+    if disk_tok == rec_tok and disk_ref == rec_ref:
+        _unlink_oauth_recovery("grok")
+        return None
+    disk_matches_replaced = (
+        (bool(replaced_ref) and disk_ref == replaced_ref)
+        or (bool(replaced_tok) and disk_tok == replaced_tok)
+    )
+    if not disk_matches_replaced:
+        try:
+            disk_mtime = auth_file.stat().st_mtime
+        except OSError:
+            disk_mtime = 0.0
+        disk_is_newer = (
+            (disk_exp is not None and rec_exp is not None and disk_exp >= rec_exp)
+            or (saved_at > 0.0 and disk_mtime > saved_at + 1.0)
+        )
+        if disk_is_newer:
+            _unlink_oauth_recovery("grok")
+            return None
+    if _save_grok_entry(auth_file, scope_key, rec_tok, rec_ref, rec_exp):
+        _unlink_oauth_recovery("grok")
+    return {"token": rec_tok, "refreshToken": rec_ref, "expiresAt": rec_exp}
+
+
+def _replay_kimi_oauth_recovery(cred_file: Path) -> dict[str, Any] | None:
+    rec = _read_oauth_recovery("kimi")
+    if rec is None:
+        return None
+    rec_acc = str(rec.get("access_token") or "").strip()
+    rec_ref = str(rec.get("refresh_token") or "").strip()
+    if not rec_acc or not rec_ref:
+        _unlink_oauth_recovery("kimi")
+        return None
+    if not _same_path(cred_file, rec.get("credFile")):
+        return None
+    rec_exp = _safe_float(rec.get("expires_at"))
+    rec_exp_in = _safe_float(rec.get("expires_in"))
+    rec_scope = str(rec.get("scope") or "")
+    rec_token_type = str(rec.get("token_type") or "")
+    saved_at = _safe_float(rec.get("savedAtEpoch")) or 0.0
+    replaced_acc = str(rec.get("replacedAccessToken") or "").strip()
+    replaced_ref = str(rec.get("replacedRefreshToken") or "").strip()
+    if cred_file.is_file():
+        try:
+            loaded = json.loads(cred_file.read_text("utf-8"))
+        except Exception:
+            loaded = None
+        if isinstance(loaded, dict):
+            disk_acc = str(loaded.get("access_token") or "").strip()
+            disk_ref = str(loaded.get("refresh_token") or "").strip()
+            disk_exp = _safe_float(loaded.get("expires_at"))
+            if disk_acc == rec_acc and disk_ref == rec_ref:
+                _unlink_oauth_recovery("kimi")
+                return None
+            disk_matches_replaced = (
+                (bool(replaced_ref) and disk_ref == replaced_ref)
+                or (bool(replaced_acc) and disk_acc == replaced_acc)
+            )
+            if not disk_matches_replaced:
+                try:
+                    disk_mtime = cred_file.stat().st_mtime
+                except OSError:
+                    disk_mtime = 0.0
+                disk_is_newer = (
+                    (disk_exp is not None and rec_exp is not None and disk_exp >= rec_exp)
+                    or (saved_at > 0.0 and disk_mtime > saved_at + 1.0)
+                )
+                if disk_is_newer:
+                    _unlink_oauth_recovery("kimi")
+                    return None
+    if _save_kimi_entry(cred_file, rec_acc, rec_ref, rec_exp, rec_scope, rec_token_type, rec_exp_in):
+        _unlink_oauth_recovery("kimi")
+    return {"accessToken": rec_acc, "refreshToken": rec_ref, "expiresAt": rec_exp}
+
+
+def _refresh_grok_access_token(auth: dict[str, Any]) -> str | None:
+    ref = str(auth.get("refreshToken") or "").strip()
+    client_id = str(auth.get("oidcClientId") or "").strip()
+    orig_tok = str(auth.get("token") or "").strip()
+    if not ref or not client_id:
+        return None
+    safe_issuer = _validate_http_url(auth.get("oidcIssuer") or "https://auth.x.ai")
+    if safe_issuer is None:
+        return None
+    auth_file = auth.get("authFile")
+    scope_key = auth.get("scopeKey")
+    if auth_file is not None:
+        if not isinstance(auth_file, Path) or not isinstance(scope_key, str) or not scope_key or not auth_file.is_file():
+            return None
+    issuer = safe_issuer.rstrip("/")
+    with _oauth_refresh_lock("grok"):
+        if isinstance(auth_file, Path) and isinstance(scope_key, str):
+            recovered = _replay_grok_oauth_recovery(auth_file, scope_key)
+            if recovered is not None:
+                rec_tok = recovered["token"]
+                rec_ref = recovered["refreshToken"]
+                rec_exp = recovered.get("expiresAt")
+                if (
+                    rec_tok
+                    and (rec_tok != orig_tok or (rec_ref and rec_ref != ref))
+                    and (rec_exp is None or rec_exp > time.time() + 60)
+                ):
+                    auth["token"] = rec_tok
+                    auth["refreshToken"] = rec_ref
+                    if rec_exp is not None:
+                        auth["expiresAt"] = rec_exp
+                    return rec_tok
+                if rec_ref:
+                    ref = rec_ref
+            try:
+                raw = json.loads(auth_file.read_text("utf-8"))
+            except Exception:
+                return None
+            if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
+                return None
+            entry = raw[scope_key]
+            disk_tok = str(entry.get("key") or entry.get("access_token") or "").strip()
+            disk_ref = str(entry.get("refresh_token") or "").strip()
+            disk_exp_ms = _parse_ts_ms(entry.get("expires_at"))
+            disk_exp = (disk_exp_ms / 1000.0) if disk_exp_ms is not None else _safe_float(entry.get("expires_at"))
+            if (
+                disk_tok
+                and (disk_tok != orig_tok or (disk_ref and disk_ref != ref))
+                and (disk_exp is None or disk_exp > time.time() + 60)
+            ):
+                auth["token"] = disk_tok
+                if disk_ref:
+                    auth["refreshToken"] = disk_ref
+                if disk_exp is not None:
+                    auth["expiresAt"] = disk_exp
+                return disk_tok
+            if disk_ref and recovered is None:
+                ref = disk_ref
+        body_bytes = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": ref,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{issuer}/oauth2/token",
+            data=body_bytes,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": "Grok Build",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=4.5) as resp:
+                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         except Exception:
             return None
-    auth["token"] = new_tok
-    auth["refreshToken"] = new_ref
-    auth["expiresAt"] = new_exp
-    return new_tok
+        if not isinstance(payload, dict):
+            return None
+        new_tok = str(payload.get("access_token") or "").strip()
+        if not new_tok:
+            return None
+        new_ref = str(payload.get("refresh_token") or ref).strip()
+        exp_in = _safe_float(payload.get("expires_in")) or 3600.0
+        new_exp = time.time() + exp_in
+
+        auth["token"] = new_tok
+        auth["refreshToken"] = new_ref
+        auth["expiresAt"] = new_exp
+
+        if isinstance(auth_file, Path) and isinstance(scope_key, str):
+            saved = _save_grok_entry(auth_file, scope_key, new_tok, new_ref, new_exp)
+            if saved:
+                _unlink_oauth_recovery("grok")
+            else:
+                _write_oauth_recovery("grok", {
+                    "authFile": str(auth_file),
+                    "scopeKey": scope_key,
+                    "access_token": new_tok,
+                    "refresh_token": new_ref,
+                    "expires_at": int(new_exp),
+                    "savedAtEpoch": int(time.time()),
+                    "replacedAccessToken": orig_tok,
+                    "replacedRefreshToken": ref,
+                })
+        return new_tok
 
 
 def _probe_grok_limits(home: Path) -> dict[str, Any]:
@@ -6163,6 +6498,14 @@ def _extract_kimi_oauth(home: Path) -> dict[str, Any] | None:
                 acc = str(raw_cred.get("access_token") or "").strip()
                 ref = str(raw_cred.get("refresh_token") or "").strip()
                 exp = _safe_float(raw_cred.get("expires_at"))
+                if _oauth_recovery_path("kimi").is_file():
+                    with _oauth_refresh_lock("kimi"):
+                        recovered = _replay_kimi_oauth_recovery(cred_file)
+                    if recovered is not None:
+                        acc = recovered["accessToken"]
+                        ref = recovered["refreshToken"]
+                        if recovered.get("expiresAt") is not None:
+                            exp = recovered["expiresAt"]
                 if acc or ref:
                     return {
                         "accessToken": acc,
@@ -6197,67 +6540,119 @@ def _extract_kimi_oauth(home: Path) -> dict[str, Any] | None:
 
 def _refresh_kimi_access_token(auth: dict[str, Any]) -> str | None:
     ref = str(auth.get("refreshToken") or "").strip()
+    orig_acc = str(auth.get("accessToken") or "").strip()
     if not ref:
         return None
     safe_oauth_host = _validate_http_url(auth.get("oauthHost") or "https://auth.kimi.com")
     if safe_oauth_host is None:
         return None
-    oauth_host = safe_oauth_host.rstrip("/")
-    form_body = urllib.parse.urlencode({
-        "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
-        "grant_type": "refresh_token",
-        "refresh_token": ref,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{oauth_host}/api/oauth/token",
-        data=form_body,
-        method="POST",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "X-Msh-Platform": "kimi_cli",
-            "User-Agent": "kimi-cli/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    new_acc = str(payload.get("access_token") or "").strip()
-    if not new_acc:
-        return None
-    exp_in = _safe_float(payload.get("expires_in")) or 3600.0
-    new_ref = str(payload.get("refresh_token") or ref).strip()
-    new_exp = time.time() + exp_in
     cred_file = auth.get("credFile")
-    if isinstance(cred_file, Path):
+    if cred_file is not None:
+        if not isinstance(cred_file, Path) or (cred_file.exists() and not cred_file.is_file()):
+            return None
+    oauth_host = safe_oauth_host.rstrip("/")
+    with _oauth_refresh_lock("kimi"):
+        recovered = None
+        if isinstance(cred_file, Path):
+            recovered = _replay_kimi_oauth_recovery(cred_file)
+            if recovered is not None:
+                rec_acc = recovered["accessToken"]
+                rec_ref = recovered["refreshToken"]
+                rec_exp = recovered.get("expiresAt")
+                if (
+                    rec_acc
+                    and (rec_acc != orig_acc or (rec_ref and rec_ref != ref))
+                    and (rec_exp is None or rec_exp > time.time() + 60)
+                ):
+                    auth["accessToken"] = rec_acc
+                    auth["refreshToken"] = rec_ref
+                    if rec_exp is not None:
+                        auth["expiresAt"] = rec_exp
+                    return rec_acc
+                if rec_ref:
+                    ref = rec_ref
+        if isinstance(cred_file, Path) and cred_file.is_file():
+            try:
+                loaded = json.loads(cred_file.read_text("utf-8"))
+            except Exception:
+                loaded = None
+            if isinstance(loaded, dict):
+                disk_acc = str(loaded.get("access_token") or "").strip()
+                disk_ref = str(loaded.get("refresh_token") or "").strip()
+                disk_exp = _safe_float(loaded.get("expires_at"))
+                if (
+                    disk_acc
+                    and (disk_acc != orig_acc or (disk_ref and disk_ref != ref))
+                    and (disk_exp is None or disk_exp > time.time() + 60)
+                ):
+                    auth["accessToken"] = disk_acc
+                    if disk_ref:
+                        auth["refreshToken"] = disk_ref
+                    if disk_exp is not None:
+                        auth["expiresAt"] = disk_exp
+                    return disk_acc
+                if disk_ref and recovered is None:
+                    ref = disk_ref
+        form_body = urllib.parse.urlencode({
+            "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
+            "grant_type": "refresh_token",
+            "refresh_token": ref,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{oauth_host}/api/oauth/token",
+            data=form_body,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "X-Msh-Platform": "kimi_cli",
+                "User-Agent": "kimi-cli/1.0",
+            },
+        )
         try:
-            existing: dict[str, Any] = {}
-            if cred_file.is_file():
-                try:
-                    loaded = json.loads(cred_file.read_text("utf-8"))
-                    if isinstance(loaded, dict):
-                        existing = loaded
-                except Exception:
-                    existing = {}
-            existing.update({
-                "access_token": new_acc,
-                "refresh_token": new_ref,
-                "expires_at": new_exp,
-                "scope": str(payload.get("scope") or existing.get("scope") or ""),
-                "token_type": str(payload.get("token_type") or existing.get("token_type") or "Bearer"),
-                "expires_in": exp_in,
-            })
-            _atomic_write_text(cred_file, json.dumps(existing, ensure_ascii=False), mode=0o600)
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         except Exception:
             return None
-    auth["accessToken"] = new_acc
-    auth["refreshToken"] = new_ref
-    auth["expiresAt"] = new_exp
-    return new_acc
+        if not isinstance(payload, dict):
+            return None
+        new_acc = str(payload.get("access_token") or "").strip()
+        if not new_acc:
+            return None
+        exp_in = _safe_float(payload.get("expires_in")) or 3600.0
+        new_ref = str(payload.get("refresh_token") or ref).strip()
+        new_exp = time.time() + exp_in
+
+        auth["accessToken"] = new_acc
+        auth["refreshToken"] = new_ref
+        auth["expiresAt"] = new_exp
+
+        if isinstance(cred_file, Path):
+            saved = _save_kimi_entry(
+                cred_file,
+                new_acc,
+                new_ref,
+                new_exp,
+                str(payload.get("scope") or ""),
+                str(payload.get("token_type") or ""),
+                exp_in,
+            )
+            if saved:
+                _unlink_oauth_recovery("kimi")
+            else:
+                _write_oauth_recovery("kimi", {
+                    "credFile": str(cred_file),
+                    "access_token": new_acc,
+                    "refresh_token": new_ref,
+                    "expires_at": new_exp,
+                    "expires_in": exp_in,
+                    "scope": str(payload.get("scope") or ""),
+                    "token_type": str(payload.get("token_type") or ""),
+                    "savedAtEpoch": int(time.time()),
+                    "replacedAccessToken": orig_acc,
+                    "replacedRefreshToken": ref,
+                })
+        return new_acc
 
 
 def _kimi_reset_iso(data: dict[str, Any], now_sec: float) -> str | None:

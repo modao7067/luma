@@ -58,12 +58,21 @@ public class TextSelectionCursorController implements CursorController {
 
     @Override
     public boolean hide() {
-        if (!isActive()) return false;
+        return hide(true);
+    }
 
-        // prevent hide calls right after a show call, like long pressing the down key
-        // 300ms seems long enough that it wouldn't cause hide problems if action button
-        // is quickly clicked after the show, otherwise decrease it
-        if (System.currentTimeMillis() - mShowStartTime < 300) {
+    public boolean hide(boolean force) {
+        if (!isActive()) {
+            if (mActionMode != null) {
+                ActionMode mode = mActionMode;
+                mActionMode = null;
+                mode.finish();
+                return true;
+            }
+            return false;
+        }
+
+        if (!force && System.currentTimeMillis() - mShowStartTime < 300) {
             return false;
         }
 
@@ -71,13 +80,16 @@ public class TextSelectionCursorController implements CursorController {
         mEndHandle.hide();
 
         if (mActionMode != null) {
-            // This will hide the TextSelectionCursorController
-            mActionMode.finish();
+            ActionMode mode = mActionMode;
+            mActionMode = null;
+            mode.finish();
         }
 
         mSelX1 = mSelY1 = mSelX2 = mSelY2 = -1;
         mIsSelectingText = false;
-        terminalView.mEmulator.clearSelectionRange();
+        if (terminalView.mEmulator != null) {
+            terminalView.mEmulator.clearSelectionRange();
+        }
 
         return true;
     }
@@ -173,6 +185,7 @@ public class TextSelectionCursorController implements CursorController {
 
             @Override
             public void onDestroyActionMode(ActionMode mode) {
+                if (mActionMode == mode) mActionMode = null;
             }
 
         };
@@ -201,7 +214,7 @@ public class TextSelectionCursorController implements CursorController {
 
             @Override
             public void onDestroyActionMode(ActionMode mode) {
-                // Ignore.
+                callback.onDestroyActionMode(mode);
             }
 
             @Override
@@ -231,6 +244,7 @@ public class TextSelectionCursorController implements CursorController {
     @Override
     public void updatePosition(TextSelectionHandleView handle, int x, int y) {
         syncNativeSelection();
+        if (!mIsSelectingText || terminalView.mEmulator == null) return;
         TerminalBuffer screen = terminalView.mEmulator.getScreen();
         final int scrollRows = terminalView.mEmulator.getViewportHistoryRows();
         if (handle == mStartHandle) {
@@ -325,12 +339,24 @@ public class TextSelectionCursorController implements CursorController {
             terminalView.mEmulator.setSelectionRange(mSelX1, mSelY1, mSelX2, mSelY2);
     }
     private void syncNativeSelection() {
-        if (!mIsSelectingText || !terminalView.mEmulator.usesNativeViewport()) return;
+        if (!mIsSelectingText || terminalView.mEmulator == null || !terminalView.mEmulator.usesNativeViewport()) return;
         int[] range = terminalView.mEmulator.getSelectionRange();
         if (range == null) {
-            mIsSelectingText = false; mStartHandle.hide(); mEndHandle.hide();
+            mIsSelectingText = false;
+            mStartHandle.hide();
+            mEndHandle.hide();
+            if (mActionMode != null) {
+                ActionMode mode = mActionMode;
+                mActionMode = null;
+                mode.finish();
+            }
             mSelX1 = mSelY1 = mSelX2 = mSelY2 = -1;
-        } else { mSelX1 = range[0]; mSelY1 = range[1]; mSelX2 = range[2]; mSelY2 = range[3]; }
+            if (terminalView.mClient != null) {
+                terminalView.mClient.copyModeChanged(false);
+            }
+        } else {
+            mSelX1 = range[0]; mSelY1 = range[1]; mSelX2 = range[2]; mSelY2 = range[3];
+        }
     }
 
     private int getValidCurX(TerminalBuffer screen, int cy, int cx) {

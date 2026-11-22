@@ -1870,6 +1870,11 @@ sys.stdin.read()
             self.assertIsNone(gu._refresh_grok_access_token(grok_auth))
 
             grok_auth["oidcIssuer"] = "https://auth.x.ai"
+            missing_scope = {**grok_auth, "scopeKey": "missing-scope"}
+            with patch.object(gu.urllib.request, "urlopen") as m_open:
+                self.assertIsNone(gu._refresh_grok_access_token(missing_scope))
+                m_open.assert_not_called()
+
             with patch.object(
                 gu.urllib.request,
                 "urlopen",
@@ -1883,12 +1888,24 @@ sys.stdin.read()
             self.assertEqual(saved_grok["https://accounts.x.ai/sign-in"]["email"], "u@example.com")
             self.assertEqual(saved_grok["https://accounts.x.ai/sign-in"]["refresh_token"], "new_g_ref")
 
+            stale_grok_auth = {**grok_auth, "token": "old_g_acc", "refreshToken": "old_g_ref", "expiresAt": 1000}
+            with patch.object(gu.urllib.request, "urlopen") as m_open:
+                reused = gu._refresh_grok_access_token(stale_grok_auth)
+                m_open.assert_not_called()
+            self.assertEqual(reused, "new_g_acc")
+            self.assertEqual(stale_grok_auth["refreshToken"], "new_g_ref")
+
             with (
-                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "bad_g", "refresh_token": "bad_ref"})),
+                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "rot_g", "refresh_token": "rot_g_ref"})),
                 patch.object(gu, "_atomic_write_text", side_effect=OSError("disk full")),
             ):
-                self.assertIsNone(gu._refresh_grok_access_token(grok_auth))
-            self.assertEqual(grok_auth["token"], "new_g_acc")
+                self.assertEqual(gu._refresh_grok_access_token(grok_auth), "rot_g")
+            self.assertEqual(grok_auth["token"], "rot_g")
+            self.assertEqual(grok_auth["refreshToken"], "rot_g_ref")
+            grok_rec = gu._cache_dir() / "grok-oauth-recovery.json"
+            self.assertTrue(grok_rec.is_file())
+            self.assertEqual(stat.S_IMODE(grok_rec.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(grok_rec.read_text("utf-8"))["refresh_token"], "rot_g_ref")
 
             kimi_file = root / "kimi-code.json"
             kimi_file.write_text(
@@ -1917,12 +1934,323 @@ sys.stdin.read()
             self.assertEqual(saved_kimi["device_id"], "d1")
             self.assertEqual(saved_kimi["refresh_token"], "new_k_ref")
 
+            stale_kimi_auth = {**kimi_auth, "accessToken": "old_k", "refreshToken": "old_k_ref", "expiresAt": 1000}
+            with patch.object(gu.urllib.request, "urlopen") as m_open:
+                reused_k = gu._refresh_kimi_access_token(stale_kimi_auth)
+                m_open.assert_not_called()
+            self.assertEqual(reused_k, "new_k")
+            self.assertEqual(stale_kimi_auth["refreshToken"], "new_k_ref")
+
             with (
-                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "fail_k", "refresh_token": "fail_ref"})),
+                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "rot_k", "refresh_token": "rot_k_ref"})),
                 patch.object(gu, "_atomic_write_text", side_effect=OSError("ro")),
             ):
-                self.assertIsNone(gu._refresh_kimi_access_token(kimi_auth))
-            self.assertEqual(kimi_auth["accessToken"], "new_k")
+                self.assertEqual(gu._refresh_kimi_access_token(kimi_auth), "rot_k")
+            self.assertEqual(kimi_auth["accessToken"], "rot_k")
+            self.assertEqual(kimi_auth["refreshToken"], "rot_k_ref")
+            kimi_rec = gu._cache_dir() / "kimi-oauth-recovery.json"
+            self.assertTrue(kimi_rec.is_file())
+            self.assertEqual(stat.S_IMODE(kimi_rec.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(kimi_rec.read_text("utf-8"))["refresh_token"], "rot_k_ref")
+
+            grok_home = root / ".grok"
+            grok_home.mkdir()
+            grok_home_file = grok_home / "auth.json"
+            grok_home_file.write_text(
+                json.dumps({"https://accounts.x.ai/sign-in": {"key": "init_g", "refresh_token": "init_g_ref", "expires_at": int(time.time()) - 60}}),
+                "utf-8",
+            )
+            grok_rec_data = json.loads(grok_rec.read_text("utf-8"))
+            grok_rec_data["authFile"] = str(grok_home_file)
+            grok_rec_data["replacedAccessToken"] = "init_g"
+            grok_rec_data["replacedRefreshToken"] = "init_g_ref"
+            grok_rec_data["expires_at"] = int(time.time()) + 1800
+            grok_rec.write_text(json.dumps(grok_rec_data), "utf-8")
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False):
+                reloaded_grok = gu._extract_grok_oauth(root)
+            self.assertIsNotNone(reloaded_grok)
+            self.assertEqual(reloaded_grok["token"], "rot_g")
+            self.assertEqual(reloaded_grok["refreshToken"], "rot_g_ref")
+            self.assertFalse(grok_rec.exists())
+            self.assertEqual(json.loads(grok_home_file.read_text("utf-8"))["https://accounts.x.ai/sign-in"]["refresh_token"], "rot_g_ref")
+
+            grok_rec_expired = {
+                "authFile": str(grok_home_file),
+                "scopeKey": "https://accounts.x.ai/sign-in",
+                "access_token": "exp_g_tok",
+                "refresh_token": "exp_g_ref",
+                "expires_at": int(time.time()) - 30,
+                "savedAtEpoch": int(time.time()),
+                "replacedAccessToken": "rot_g",
+                "replacedRefreshToken": "rot_g_ref",
+            }
+            gu._write_oauth_recovery("grok", grok_rec_expired)
+            sent_bodies = []
+
+            def _capture_grok_refresh(req, timeout=4.5):
+                sent_bodies.append(req.data.decode("utf-8"))
+                return _JsonResp({"access_token": "next_g_tok", "refresh_token": "next_g_ref", "expires_in": 1800})
+
+            stale_next_proc_grok = {
+                "token": "rot_g",
+                "refreshToken": "rot_g_ref",
+                "oidcIssuer": "https://auth.x.ai",
+                "oidcClientId": "cid-1",
+                "authFile": grok_home_file,
+                "scopeKey": "https://accounts.x.ai/sign-in",
+            }
+            with patch.object(gu.urllib.request, "urlopen", side_effect=_capture_grok_refresh):
+                self.assertEqual(gu._refresh_grok_access_token(stale_next_proc_grok), "next_g_tok")
+            self.assertEqual(len(sent_bodies), 1)
+            self.assertIn("refresh_token=exp_g_ref", sent_bodies[0])
+            self.assertNotIn("rot_g_ref", sent_bodies[0])
+            self.assertFalse(grok_rec.exists())
+
+            gu._write_oauth_recovery("grok", {
+                "authFile": str(grok_home_file),
+                "scopeKey": "https://accounts.x.ai/sign-in",
+                "access_token": "old_rec_tok",
+                "refresh_token": "old_rec_ref",
+                "expires_at": int(time.time()) + 100,
+                "savedAtEpoch": int(time.time()) - 100,
+                "replacedAccessToken": "ancient_tok",
+                "replacedRefreshToken": "ancient_ref",
+            })
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False):
+                kept_newer = gu._extract_grok_oauth(root)
+            self.assertEqual(kept_newer["token"], "next_g_tok")
+            self.assertFalse(grok_rec.exists())
+
+            kimi_home = root / ".kimi"
+            (kimi_home / "credentials").mkdir(parents=True)
+            kimi_home_file = kimi_home / "credentials" / "kimi-code.json"
+            kimi_home_file.write_text(
+                json.dumps({"access_token": "init_k", "refresh_token": "init_k_ref", "expires_at": time.time() - 60}),
+                "utf-8",
+            )
+            kimi_rec_data = json.loads(kimi_rec.read_text("utf-8"))
+            kimi_rec_data["credFile"] = str(kimi_home_file)
+            kimi_rec_data["replacedAccessToken"] = "init_k"
+            kimi_rec_data["replacedRefreshToken"] = "init_k_ref"
+            kimi_rec_data["expires_at"] = time.time() + 1800
+            kimi_rec.write_text(json.dumps(kimi_rec_data), "utf-8")
+            with patch.dict(os.environ, {"KIMI_SHARE_DIR": str(kimi_home)}, clear=False):
+                reloaded_kimi = gu._extract_kimi_oauth(root)
+            self.assertIsNotNone(reloaded_kimi)
+            self.assertEqual(reloaded_kimi["accessToken"], "rot_k")
+            self.assertEqual(reloaded_kimi["refreshToken"], "rot_k_ref")
+            self.assertFalse(kimi_rec.exists())
+            self.assertEqual(json.loads(kimi_home_file.read_text("utf-8"))["refresh_token"], "rot_k_ref")
+
+            kimi_rec.write_text("{corrupt", "utf-8")
+            with patch.dict(os.environ, {"KIMI_SHARE_DIR": str(kimi_home)}, clear=False):
+                after_corrupt = gu._extract_kimi_oauth(root)
+            self.assertEqual(after_corrupt["accessToken"], "rot_k")
+            self.assertFalse(kimi_rec.exists())
+
+    def test_scan_cache_prunes_dead_entries_and_preserves_history_above_per_source_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cache_dir = Path(tmp) / "cache"
+            oc_dir = home / ".local" / "share" / "opencode"
+            oc_dir.mkdir(parents=True)
+            db_path = oc_dir / "opencode.db"
+            con = sqlite3.connect(str(db_path))
+            con.execute("CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER, data TEXT)")
+            now_dt = dt.datetime.now(dt.timezone.utc)
+            for idx in range(12):
+                day_dt = now_dt - dt.timedelta(days=idx)
+                ts_ms = int(day_dt.timestamp() * 1000)
+                payload = json.dumps({
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4-6",
+                    "time": {"completed": ts_ms},
+                    "tokens": {"input": 100, "output": 50, "cache": {"read": 0, "write": 0}},
+                })
+                con.execute("INSERT INTO message VALUES (?, ?, ?)", (f"m{idx}", ts_ms, payload))
+            con.commit()
+            con.close()
+
+            live_kimi = home / ".kimi-code" / "sessions" / "w1" / "session_s1" / "agents" / "main" / "wire.jsonl"
+            live_kimi.parent.mkdir(parents=True)
+            live_kimi.write_text("", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home), "XDG_CACHE_HOME": str(cache_dir), "XDG_DATA_HOME": str(home / ".local" / "share")}):
+                with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 5):
+                    report = gu.collect_summary(period="all", tz_name="UTC", sync_pricing=False)
+                self.assertEqual(report["totals"]["events"], 12)
+                saved = gu._load_scan_cache()["files"]
+                self.assertIn(str(db_path), saved)
+                self.assertTrue(saved[str(db_path)].get("truncated"))
+                self.assertEqual(len(saved[str(db_path)]["records"]), 5)
+
+                saved[str(home / "deleted.jsonl")] = {"size": 1, "mtime_ns": 1, "records": []}
+                saved[f"kimi::{home / 'deleted-wire.jsonl'}"] = {"fp_sig": "1:1", "records": []}
+                saved[f"kimi::{live_kimi}"] = {"fp_sig": "1:1", "records": []}
+                gu._save_scan_cache({"version": gu.CACHE_VERSION, "files": saved})
+                with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 5):
+                    gu.collect_summary(period="week", tz_name="UTC", refresh=False, sync_pricing=False)
+                pruned = gu._load_scan_cache()["files"]
+                self.assertNotIn(str(home / "deleted.jsonl"), pruned)
+                self.assertNotIn(f"kimi::{home / 'deleted-wire.jsonl'}", pruned)
+                self.assertIn(f"kimi::{live_kimi}", pruned)
+                self.assertIn(str(db_path), pruned)
+
+    def test_incremental_scan_preserves_truncated_coverage_bound(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "session.jsonl"
+            log.write_text(
+                "\n".join([
+                    json.dumps({"ts": 1, "usage": 10}),
+                    json.dumps({"ts": 2, "usage": 20}),
+                    json.dumps({"ts": 3, "usage": 30}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            cache_files = {}
+
+            def parser(obj, _state):
+                if "usage" not in obj:
+                    return None
+                return {"timestampMs": obj["ts"], "usage": obj["usage"]}
+
+            with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 2):
+                first = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+                self.assertEqual([r["timestampMs"] for r in first], [1, 2, 3])
+                self.assertTrue(cache_files[str(log)].get("truncated"))
+                self.assertEqual(cache_files[str(log)].get("min_ts_ms"), 2)
+
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"ts": 4, "note": "non-usage"}) + "\n")
+
+                inc = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=3)
+                self.assertEqual([r["timestampMs"] for r in inc], [2, 3])
+                self.assertTrue(cache_files[str(log)].get("truncated"))
+                self.assertEqual(cache_files[str(log)].get("min_ts_ms"), 2)
+
+                all_time = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+                self.assertEqual([r["timestampMs"] for r in all_time], [1, 2, 3])
+
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"ts": 5, "usage": 50}) + "\n")
+                inc2 = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=3)
+                self.assertEqual([r["timestampMs"] for r in inc2], [2, 3, 5])
+                self.assertTrue(cache_files[str(log)].get("truncated"))
+                self.assertEqual(cache_files[str(log)].get("min_ts_ms"), 3)
+                all_time2 = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+                self.assertEqual([r["timestampMs"] for r in all_time2], [1, 2, 3, 5])
+
+    def test_upgrade_invalidates_legacy_v6_scan_cache_and_recovers_all_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cache_dir = Path(tmp) / "cache"
+            oc_dir = home / ".local" / "share" / "opencode"
+            oc_dir.mkdir(parents=True)
+            db_path = oc_dir / "opencode.db"
+            con = sqlite3.connect(str(db_path))
+            con.execute("CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER, data TEXT)")
+            now_dt = dt.datetime.now(dt.timezone.utc)
+            for idx, inp in enumerate((100, 200, 300)):
+                ts_ms = int((now_dt - dt.timedelta(days=2 - idx)).timestamp() * 1000)
+                payload = json.dumps({
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4-6",
+                    "time": {"completed": ts_ms},
+                    "tokens": {"input": inp, "output": 50, "cache": {"read": 0, "write": 0}},
+                })
+                con.execute("INSERT INTO message VALUES (?, ?, ?)", (f"m{idx}", ts_ms, payload))
+            con.commit()
+            con.close()
+
+            log = Path(tmp) / "legacy.jsonl"
+            log.write_text(
+                "\n".join([
+                    json.dumps({"ts": 1, "usage": 10}),
+                    json.dumps({"ts": 2, "usage": 20}),
+                    json.dumps({"ts": 3, "usage": 30}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            st = os.stat(log)
+
+            def parser(obj, _state):
+                return {"timestampMs": obj["ts"], "usage": obj["usage"]}
+
+            with patch.dict(os.environ, {"HOME": str(home), "XDG_CACHE_HOME": str(cache_dir), "XDG_DATA_HOME": str(home / ".local" / "share")}):
+                with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 2):
+                    seed_report = gu.collect_summary(period="all", tz_name="UTC", sync_pricing=False)
+                self.assertEqual(seed_report["totals"]["events"], 3)
+                seeded = gu._load_scan_cache()
+                legacy_db_entry = dict(seeded["files"][str(db_path)])
+                legacy_db_entry.pop("truncated", None)
+                legacy_db_entry.pop("min_ts_ms", None)
+                self.assertEqual(len(legacy_db_entry["records"]), 2)
+                legacy_cache = {
+                    "version": 6,
+                    "files": {
+                        str(db_path): legacy_db_entry,
+                        str(log): {
+                            "size": st.st_size,
+                            "mtime_ns": st.st_mtime_ns,
+                            "records": [{"timestampMs": 2, "usage": 20}, {"timestampMs": 3, "usage": 30}],
+                        },
+                    },
+                }
+                gu._save_scan_cache(legacy_cache)
+                archive_file = gu._cache_dir() / f"usage-daily-archive-v{gu.ARCHIVE_VERSION}.json"
+                if archive_file.exists():
+                    archive_file.unlink()
+
+                loaded = gu._load_scan_cache()
+                self.assertEqual(loaded["version"], gu.CACHE_VERSION)
+                self.assertGreater(gu.CACHE_VERSION, 6)
+                self.assertEqual(loaded["files"], {})
+
+                with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 2):
+                    all_rows = gu._read_jsonl_incremental(str(log), loaded["files"], parser, cutoff_ms=0)
+                self.assertEqual([r["timestampMs"] for r in all_rows], [1, 2, 3])
+                self.assertTrue(loaded["files"][str(log)].get("truncated"))
+
+                gu._save_scan_cache(legacy_cache)
+                with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 2):
+                    upgraded = gu.collect_summary(period="all", tz_name="UTC", refresh=False, sync_pricing=False)
+                self.assertEqual(upgraded["totals"]["events"], 3)
+                self.assertEqual(upgraded["totals"]["totalTokens"], 750)
+                rebuilt = gu._load_scan_cache()
+                self.assertEqual(rebuilt["version"], gu.CACHE_VERSION)
+                self.assertTrue(rebuilt["files"][str(db_path)].get("truncated"))
+
+    def test_truncated_cache_boundary_tie_falls_back_to_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "tie.jsonl"
+            log.write_text(
+                "\n".join([
+                    json.dumps({"id": "A", "ts": 10, "usage": 100}),
+                    json.dumps({"id": "B", "ts": 10, "usage": 200}),
+                    json.dumps({"id": "C", "ts": 11, "usage": 300}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            cache_files = {}
+
+            def parser(obj, _state):
+                return {"id": obj["id"], "timestampMs": obj["ts"], "usage": obj["usage"]}
+
+            with patch.object(gu, "MAX_RECORDS_PER_SOURCE", 2):
+                initial = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+                self.assertEqual([(r["id"], r["timestampMs"], r["usage"]) for r in initial], [("A", 10, 100), ("B", 10, 200), ("C", 11, 300)])
+                entry = cache_files[str(log)]
+                self.assertTrue(entry.get("truncated"))
+                self.assertEqual(entry.get("min_ts_ms"), 10)
+                self.assertEqual([r["id"] for r in entry["records"]], ["B", "C"])
+                self.assertFalse(gu._cache_entry_covers(entry, 10))
+                self.assertTrue(gu._cache_entry_covers(entry, 11))
+
+                at_boundary = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=10)
+                self.assertEqual([(r["id"], r["timestampMs"], r["usage"]) for r in at_boundary], [("A", 10, 100), ("B", 10, 200), ("C", 11, 300)])
+
+                above_boundary = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=11)
+                self.assertEqual([(r["id"], r["timestampMs"], r["usage"]) for r in above_boundary], [("B", 10, 200), ("C", 11, 300)])
 
     def test_pricing_lowercase_claude_offline_backoff_and_reprice_tiers_mixed(self):
         self.assertIsNotNone(gu._lookup_model_rate("claude-4.5-sonnet"))

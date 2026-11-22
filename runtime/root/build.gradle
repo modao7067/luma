@@ -4,7 +4,7 @@ android {
     enableKotlin = false
     namespace 'io.github.modao7067.luma.root'
     lint { baseline = file('lint-baseline.xml') }
-    androidResources { ignoreAssetsPattern = '!.svn:!.git:!.DS_Store:!*~' }
+    androidResources { ignoreAssetsPattern = '!.svn:!.git:!.DS_Store:!*~:!__pycache__:!*.pyc:!*.pyo' }
 }
 apply from: rootProject.file('gradle/terminal-ui.gradle')
 dependencies {

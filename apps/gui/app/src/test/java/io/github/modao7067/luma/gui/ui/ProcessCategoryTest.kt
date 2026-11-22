@@ -437,6 +437,139 @@ class ProcessCategoryTest {
         assertSame(multiEditPreview, parseProcessEditPreview(multiEditItem, "Claude Code"))
     }
 
+    @Test fun terminalToolSummariesDriveRowContextAndShellPresentation() {
+        val piBash = named("bash").copy(
+            text = "bash · CANDIDATES=(",
+            input = """{"command":"CANDIDATES=(\n  node-a\n)\necho done","displaySummary":"复测多个节点确认可用性稳定性"}""",
+        )
+        assertEquals("复测多个节点确认可用性稳定性", processEntryContext(piBash, "pi"))
+        assertEquals(
+            ProcessInputPresentation("CANDIDATES=(\n  node-a\n)\necho done", "shell", "shell"),
+            processInputPresentation(piBash, "pi"),
+        )
+
+        val piBashWithTimeout = named("bash").copy(
+            text = "bash · sleep 5",
+            input = """{"command":"sleep 5","timeout":30,"displaySummary":"\u001b[32m等待服务\n就绪\u001b[0m"}""",
+        )
+        assertEquals("等待服务 就绪", processEntryContext(piBashWithTimeout, "pi"))
+        assertEquals("Parameters", processInputPresentation(piBashWithTimeout, "pi").caption)
+
+        val piBashNoSummary = named("bash").copy(
+            text = "bash · git status",
+            input = """{"command":"git status"}""",
+        )
+        assertEquals("git status", processEntryContext(piBashNoSummary, "pi"))
+
+        val piBashRedundantSummary = named("bash").copy(
+            text = "bash · git status",
+            input = """{"command":"git status","displaySummary":"bash"}""",
+        )
+        assertEquals("git status", processEntryContext(piBashRedundantSummary, "pi"))
+
+        val claudeBash = named("Bash").copy(
+            text = "Bash",
+            input = """{"command":"./gradlew test","description":"Run unit tests"}""",
+        )
+        assertEquals("Run unit tests", processEntryContext(claudeBash, "Claude Code"))
+
+        val claudeBashNoDescription = named("Bash").copy(
+            text = "Bash",
+            input = """{"command":"/usr/bin/zsh -lc 'git status\ngit diff'"}""",
+        )
+        assertEquals("git status", processEntryContext(claudeBashNoDescription, "Claude Code"))
+
+        val openCodeShell = named("shell").copy(
+            text = "shell",
+            input = """{"command":"ls -la","description":"List workspace entries"}""",
+        )
+        assertEquals("List workspace entries", processEntryContext(openCodeShell, "OpenCode"))
+
+        val agyRun = named("run_command").copy(
+            text = "run_command",
+            input = """{"CommandLine":"echo hi","toolSummary":"Print greeting","WaitMsBeforeAsync":5000}""",
+        )
+        assertEquals("Print greeting", processEntryContext(agyRun, "Antigravity"))
+
+        val mcpCustom = named("custom_search").copy(
+            text = "Run custom_search",
+            input = """{"query":"foo","toolSummary":"Search workspace"}""",
+        )
+        assertEquals("Search workspace", processEntryContext(mcpCustom, "Antigravity"))
+
+        val nonTerminalExplicit = named("custom_search").copy(
+            text = "Explicit label",
+            input = """{"query":"foo","toolSummary":"Should not override"}""",
+        )
+        assertEquals("Explicit label", processEntryContext(nonTerminalExplicit, "Antigravity"))
+
+        assertEquals(ProcessCategory.Terminal, processCategory(named("PowerShell"), "Claude Code"))
+        val claudePowerShell = named("PowerShell").copy(
+            text = "PowerShell",
+            input = """{"command":"Get-ChildItem","description":"List directory entries","run_in_background":false}""",
+        )
+        assertEquals("List directory entries", processEntryContext(claudePowerShell, "Claude Code"))
+        assertEquals(
+            ProcessInputPresentation("Get-ChildItem", "shell", "shell"),
+            processInputPresentation(claudePowerShell, "Claude Code"),
+        )
+
+        val claudeBgTrue = named("Bash").copy(
+            text = "Bash",
+            input = """{"command":"npm run dev","description":"Start dev server","run_in_background":true}""",
+        )
+        assertEquals("Start dev server", processEntryContext(claudeBgTrue, "Claude Code"))
+        assertEquals("Parameters", processInputPresentation(claudeBgTrue, "Claude Code").caption)
+
+        val dshForeground = named("bash").copy(
+            text = "bash",
+            input = """{"command":"git log -1","description":"Show latest commit","background":false}""",
+        )
+        assertEquals(
+            ProcessInputPresentation("git log -1", "shell", "shell"),
+            processInputPresentation(dshForeground, "DeepSeek Harness"),
+        )
+
+        val grokForeground = named("bash").copy(
+            text = "bash",
+            input = """{"command":"ls","is_background":false}""",
+        )
+        assertEquals(
+            ProcessInputPresentation("ls", "shell", "shell"),
+            processInputPresentation(grokForeground, "Grok Build"),
+        )
+
+        val claudeGrep = named("Grep").copy(
+            text = "Grep",
+            input = """{"pattern":"processEntryContext","path":"apps/gui"}""",
+        )
+        assertEquals("processEntryContext (apps/gui)", processEntryContext(claudeGrep, "Claude Code"))
+
+        val agyGrep = named("grep_search").copy(
+            text = "grep_search",
+            input = """{"Query":"terminalJsonInput","SearchPath":"apps/gui"}""",
+        )
+        assertEquals("terminalJsonInput (apps/gui)", processEntryContext(agyGrep, "Antigravity"))
+
+        val openCodeWebSearch = named("websearch").copy(
+            text = "websearch",
+            input = """{"query":"Compose remember keys"}""",
+        )
+        assertEquals("Compose remember keys", processEntryContext(openCodeWebSearch, "OpenCode"))
+
+        val claudeWebFetch = named("WebFetch").copy(
+            text = "WebFetch",
+            input = """{"url":"https://example.invalid/docs"}""",
+        )
+        assertEquals("https://example.invalid/docs", processEntryContext(claudeWebFetch, "Claude Code"))
+
+        val openCodeRead = named("read").copy(
+            text = "read",
+            input = """{"file_path":"src/Main.kt"}""",
+        )
+        assertEquals("src/Main.kt", processEntryContext(openCodeRead, "OpenCode"))
+    }
+
     @Test fun lightweightReadTabHeadersMatchFullReadPreviewLabels() {
         val cases = listOf(
             named("read_file").copy(

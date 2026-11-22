@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='luma-gates-') as temp:
     (tools/'luma').write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nprint((Path(__file__).parent/"paths.txt").read_text(),end="")\n')
     (tools/'luma').chmod(0o755)
     tests=tools/'tests';tests.mkdir()
-    for name in ('verify-production-gates','verify-layout','verify-build-entry','test_native_builds','test_source_hygiene','verify-row-projection','verify-root-hook','verify-session-policy','verify-font-coverage','verify-font-cache','verify-terminal-interaction','verify-terminal-scroll','verify-root-keeper','verify-root-mode-state'):
+    for name in ('verify-production-gates','verify-layout','verify-build-entry','test_native_builds','test_tools_scripts','test_source_hygiene','verify-row-projection','verify-root-hook','verify-session-policy','verify-font-coverage','verify-font-cache','verify-terminal-interaction','verify-terminal-scroll','verify-root-keeper','verify-root-mode-state'):
         (tests/(name+'.py')).write_text('')
     shutil.copy2(REPO/'tools/tests/verify-no-host-paths.py',tests/'verify-no-host-paths.py')
     shutil.copy2(REPO/'tools/tests/verify-jvm-comments.py',tests/'verify-jvm-comments.py')

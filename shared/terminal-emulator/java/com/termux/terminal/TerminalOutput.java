@@ -15,6 +15,11 @@ public abstract class TerminalOutput {
     /** Write bytes to the terminal client. */
     public abstract void write(byte[] data, int offset, int count);
 
+    public boolean writeChecked(byte[] data, int offset, int count) {
+        write(data, offset, count);
+        return true;
+    }
+
     /** Notify the terminal client that the terminal title has changed. */
     public abstract void titleChanged(String oldTitle, String newTitle);
 

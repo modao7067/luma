@@ -4,6 +4,7 @@ import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.i18n.tr
 
 import android.net.Uri
+import java.util.IdentityHashMap
 import kotlin.math.roundToInt
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
@@ -430,8 +431,9 @@ internal fun ProcessGroup(
     val hasActiveEntries = processGroupHasActive(entries, turnOpen = turnOpen)
     val liveStoreDurationMs = if (inspection) null else ProcessDurationStore.observe(effectiveDurationKey, hasActiveEntries)
     val recordedDurationMs = durationMsOverride ?: liveStoreDurationMs ?: fallbackDurationMs
-    val summary = remember(entries, cli, langCode, recordedDurationMs, turnOpen, palette.emphasis) {
-        processSummaryText(processGroupSummary(entries, cli, recordedDurationMs, turnOpen), palette.emphasis)
+    val summaryEmphasis = if (hasActiveEntries) palette.activeGroupTitle else palette.emphasis
+    val summary = remember(entries, cli, langCode, recordedDurationMs, turnOpen, summaryEmphasis) {
+        processSummaryText(processGroupSummary(entries, cli, recordedDurationMs, turnOpen), summaryEmphasis)
     }
     var groupIntroduced by rememberSaveable { mutableStateOf(!animateInitialArrival) }
     LaunchedEffect(Unit) { groupIntroduced = true }
@@ -443,55 +445,66 @@ internal fun ProcessGroup(
     val groupFractionProvider: () -> Float = {
         (previewGroupFraction ?: revealFraction(animatedFractionState.value)).coerceIn(0f, 1f)
     }
-    val settledEntryIds = remember { HashSet<String>().apply { addAll(entries.map { it.id }) } }
-    val prevEntryIds = remember { mutableListOf<String>().apply { addAll(entries.map { it.id }) } }
+    val entryRenderKeys = remember(entries) { uniqueProcessRenderKeys(entries.map { it.id }) }
+    val entryRenderKeyByRef = remember(entries, entryRenderKeys) {
+        IdentityHashMap<ConversationItem, String>(entries.size).apply {
+            entries.forEachIndexed { idx, item -> put(item, entryRenderKeys[idx]) }
+        }
+    }
+    fun renderKeyOf(entry: ConversationItem): String = entryRenderKeyByRef[entry] ?: entry.id
+    val settledEntryIds = remember { HashSet<String>().apply { addAll(entryRenderKeys) } }
+    val prevEntryIds = remember { mutableListOf<String>().apply { addAll(entryRenderKeys) } }
     if (prevEntryIds.isNotEmpty()) {
-        val currentIds = entries.map { it.id }.toSet()
+        val currentIds = entryRenderKeys.toSet()
         val prevIdSet = prevEntryIds.toSet()
         entries.forEachIndexed { idx, entry ->
             val oldId = prevEntryIds.getOrNull(idx)
-            if (oldId != null && oldId != entry.id && oldId !in currentIds && entry.id !in prevIdSet) {
-                settledEntryIds.add(entry.id)
+            val currentKey = entryRenderKeys[idx]
+            if (oldId != null && oldId != currentKey && oldId !in currentIds && currentKey !in prevIdSet) {
+                settledEntryIds.add(currentKey)
                 expansion.remapEntryId(oldId, entry.id)
             }
         }
     }
     SideEffect {
-        settledEntryIds.addAll(entries.map { it.id })
+        settledEntryIds.addAll(entryRenderKeys)
         prevEntryIds.clear()
-        prevEntryIds.addAll(entries.map { it.id })
+        prevEntryIds.addAll(entryRenderKeys)
     }
-    val arrivalStates = entries.associate { entry ->
-        key(entry.id) {
-            val initiallySettled = remember(entry.id) { entry.id in settledEntryIds }
+    val arrivalStates = entries.indices.associate { idx ->
+        val renderKey = entryRenderKeys[idx]
+        key(renderKey) {
+            val initiallySettled = remember(renderKey) { renderKey in settledEntryIds }
             if (initiallySettled) {
-                entry.id to StaticOneState
+                renderKey to StaticOneState
             } else {
-                var introduced by rememberSaveable(entry.id) { mutableStateOf(false) }
+                var introduced by rememberSaveable(renderKey) { mutableStateOf(false) }
                 val arrivalState = animateFloatAsState(
                     targetValue = if (introduced) 1f else 0f,
                     animationSpec = revealSpring(),
                     label = "process-arrival-reveal",
                 )
                 LaunchedEffect(Unit) { introduced = true }
-                entry.id to arrivalState
+                renderKey to arrivalState
             }
         }
     }
-    val retentionStates = entries.associate { entry ->
-        key(entry.id) {
+    val retentionStates = entries.indices.associate { idx ->
+        val entry = entries[idx]
+        val renderKey = entryRenderKeys[idx]
+        key(renderKey) {
             val targetRetained = processEntryRetained(entry) || expansion.isItemPinned(entry.id)
-            var everDynamic by remember(entry.id) { mutableStateOf(targetRetained) }
+            var everDynamic by remember(renderKey) { mutableStateOf(targetRetained) }
             if (targetRetained) everDynamic = true
             if (!everDynamic) {
-                entry.id to StaticZeroState
+                renderKey to StaticZeroState
             } else {
                 val retainedState = animateFloatAsState(
                     targetValue = if (targetRetained) 1f else 0f,
                     animationSpec = revealSpring(),
                     label = "process-completion-reveal",
                 )
-                entry.id to retainedState
+                renderKey to retainedState
             }
         }
     }
@@ -503,11 +516,11 @@ internal fun ProcessGroup(
     }
     if (expanded || hasPinnedEntries) childrenEverVisible = true
     if (!childrenEverVisible) {
-        val childrenVisible by remember(expanded, previewGroupFraction, entries, expansion) {
+        val childrenVisible by remember(expanded, previewGroupFraction, entries, expansion, entryRenderKeyByRef) {
             derivedStateOf {
                 val gf = groupFractionProvider()
                 spatialContentVisible(expanded, gf) || entries.any {
-                    processEntryRetained(it) || expansion.isItemPinned(it.id) || revealFraction(retentionStates[it.id]?.value ?: 0f) > 0f
+                    processEntryRetained(it) || expansion.isItemPinned(it.id) || revealFraction(retentionStates[renderKeyOf(it)]?.value ?: 0f) > 0f
                 }
             }
         }
@@ -552,13 +565,13 @@ internal fun ProcessGroup(
                 }
                 val latestRetentionStates by rememberUpdatedState(retentionStates)
                 val latestArrivalStates by rememberUpdatedState(arrivalStates)
-                val sliceSignatures by remember(allSlices, previewGroupFraction, expansion) {
+                val sliceSignatures by remember(allSlices, previewGroupFraction, expansion, entryRenderKeyByRef) {
                     derivedStateOf {
                         allSlices.map { slice ->
                             val sliceEntries = slice.entriesList()
                             val retained = sliceEntries.any { processEntryRetained(it) || expansion.isItemPinned(it.id) }
-                            val retiring = !retained && sliceEntries.any { revealFraction(latestRetentionStates[it.id]?.value ?: 0f) > 0f }
-                            val arriving = sliceEntries.all { revealFraction(latestArrivalStates[it.id]?.value ?: 1f) < 1f }
+                            val retiring = !retained && sliceEntries.any { revealFraction(latestRetentionStates[renderKeyOf(it)]?.value ?: 0f) > 0f }
+                            val arriving = sliceEntries.all { revealFraction(latestArrivalStates[renderKeyOf(it)]?.value ?: 1f) < 1f }
                             Triple(retained, retiring, arriving)
                         }
                     }
@@ -585,15 +598,15 @@ internal fun ProcessGroup(
                 ) {
                     dynamicRuns.forEachIndexed { runIndex, (runRetained, runSlices) ->
                         val runEntries = remember(runSlices) { runSlices.flatMap { it.entriesList() } }
-                        val firstId = runEntries.first().id
+                        val firstId = renderKeyOf(runEntries.first())
                         val isFirstRun = runIndex == 0
                         key(firstId) {
-                            val runFractionProvider = remember(firstId, runEntries, runRetained, previewGroupFraction) {
+                            val runFractionProvider = remember(firstId, runEntries, runRetained, previewGroupFraction, entryRenderKeyByRef) {
                                 {
                                     val gf = groupFractionProvider()
-                                    val maxRetention = runEntries.maxOfOrNull { revealFraction(latestRetentionStates[it.id]?.value ?: 0f) } ?: 0f
+                                    val maxRetention = runEntries.maxOfOrNull { revealFraction(latestRetentionStates[renderKeyOf(it)]?.value ?: 0f) } ?: 0f
                                     val rf = if (runRetained) 1f else maxOf(gf, maxRetention)
-                                    val af = runEntries.maxOfOrNull { revealFraction(latestArrivalStates[it.id]?.value ?: 1f) } ?: 1f
+                                    val af = runEntries.maxOfOrNull { revealFraction(latestArrivalStates[renderKeyOf(it)]?.value ?: 1f) } ?: 1f
                                     (rf * af).coerceIn(0f, 1f)
                                 }
                             }
@@ -607,7 +620,7 @@ internal fun ProcessGroup(
                                     runSlices.forEach { slice ->
                                         when (slice) {
                                             is ProcessRunSlice.ReadBatch -> {
-                                                val batchId = "read-batch:${slice.entries.first().id}"
+                                                val batchId = "read-batch:${renderKeyOf(slice.entries.first())}"
                                                 val batchEntryIds = slice.entries.map { it.id }
                                                 val batchExpanded = expansion.isAnyExpanded(batchEntryIds)
                                                 val batchSelectedId = expansion.selectedBatchItem(batchEntryIds, initiallyOpenItem)
@@ -629,7 +642,7 @@ internal fun ProcessGroup(
                                                 }
                                             }
                                             is ProcessRunSlice.EditGroup -> {
-                                                val editGroupId = "edit-group:${slice.entries.first().id}"
+                                                val editGroupId = "edit-group:${renderKeyOf(slice.entries.first())}"
                                                 key(editGroupId) {
                                                     Column(Modifier.padding(bottom = 2.dp)) {
                                                         ProcessEditCardGroup(
@@ -646,15 +659,16 @@ internal fun ProcessGroup(
                                             }
                                             is ProcessRunSlice.Single -> {
                                                 val entry = slice.entry
-                                                key(entry.id) {
-                                                    val entryRetention = retentionStates[entry.id]
-                                                    val isRetiring by remember(entry.id, runRetained, entryRetention) {
+                                                val entryKey = renderKeyOf(entry)
+                                                key(entryKey) {
+                                                    val entryRetention = retentionStates[entryKey]
+                                                    val isRetiring by remember(entryKey, runRetained, entryRetention) {
                                                         derivedStateOf {
                                                             !runRetained && revealFraction(entryRetention?.value ?: 0f) > 0f
                                                         }
                                                     }
                                                     Column(Modifier.padding(bottom = 2.dp)) {
-                                                        entryState.SaveableStateProvider(entry.id) {
+                                                        entryState.SaveableStateProvider(entryKey) {
                                                             ProcessEntry(
                                                                 entry,
                                                                 cli = cli,
@@ -722,7 +736,19 @@ private fun ProcessEntry(
             ProcessCategory.Tool -> MenuSymbol.TOOLBOX
         }
     }
-    val cleanTitle = processEntryContext(item, cli)
+    val cleanTitle = remember(
+        item.text,
+        if (reasoning) item.detail else "",
+        item.input,
+        item.kind,
+        item.toolName,
+        item.toolKind,
+        item.outcome,
+        item.commandActions,
+        cli,
+    ) {
+        processEntryContext(item, cli)
+    }
     val canExpand = !(reasoning && item.detail.isBlank())
     val onManualLayoutToggle = LocalManualLayoutToggle.current
     Column(Modifier.fillMaxWidth()) {
@@ -888,10 +914,10 @@ private fun ProcessMergedToolCard(
     val singleLineHeightDp = rememberLineDividerHeightDp(codeStyle)
     val dividerColor = colors.outlineVariant.copy(alpha = 0.45f)
     val wrapIndicatorColor = colors.onSurfaceVariant.copy(alpha = if (dark) 0.46f else 0.40f)
-    val inputWrapPath = remember { Path() }
-    val outputWrapPath = remember { Path() }
-    var inputLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    var outputLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val density = LocalDensity.current
+    val fallbackViewportPx = with(density) { 260.dp.toPx() }
+    val padVPx = with(density) { 8.dp.toPx() }
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
     var outputOffsetY by remember { mutableFloatStateOf(0f) }
 
     Surface(
@@ -922,7 +948,7 @@ private fun ProcessMergedToolCard(
                             .clip(LumaCardShape(8.dp))
                             .clickable {
                                 runCatching {
-                                    clipboard.setText(AnnotatedString(inputCode.substring(0, minOf(inputCode.length, 262_144))))
+                                    clipboard.setText(AnnotatedString(safeUtf16Prefix(inputCode, 262_144)))
                                 }.onSuccess {
                                     copied = true
                                 }
@@ -940,6 +966,7 @@ private fun ProcessMergedToolCard(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(max = 260.dp)
+                    .onSizeChanged { viewportHeightPx = it.height.toFloat() }
                     .clipToBounds()
                     .nestedScroll(scrollBoundary)
                     .verticalScroll(vScroll)
@@ -947,27 +974,21 @@ private fun ProcessMergedToolCard(
             ) {
                 Column(Modifier.fillMaxWidth()) {
                     if (hasInput) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .drawBehind {
-                                    val margin = 280.dp.toPx()
-                                    val visTop = (vScroll.value.toFloat() - margin).coerceAtLeast(0f)
-                                    val visBottom = vScroll.value.toFloat() + margin * 2f
-                                    drawSoftWrapIndicators(inputLayout, wrapIndicatorColor, inputWrapPath, visTop, visBottom)
-                                }
-                                .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END),
-                        ) {
-                            LumaSelectionContainer {
-                                Text(
-                                    rememberHighlightedCode(inputCode, inputPresentation.language, colors),
-                                    Modifier.fillMaxWidth(),
-                                    fontFamily = termFont,
-                                    style = codeStyle,
-                                    softWrap = true,
-                                    onTextLayout = { inputLayout = it },
-                                )
-                            }
+                        LumaSelectionContainer {
+                            ViewportWrappedCode(
+                                code = inputCode,
+                                visibleEnd = inputCode.length,
+                                language = inputPresentation.language,
+                                colors = colors,
+                                style = codeStyle,
+                                streamingHint = running && !hasOutput,
+                                viewportTopPx = { vScroll.value.toFloat() - padVPx },
+                                viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                                showSoftWrapIndicators = true,
+                                wrapIndicatorColor = wrapIndicatorColor,
+                                contentPaddingStart = SOFT_WRAP_GUTTER_START,
+                                contentPaddingEnd = SOFT_WRAP_GUTTER_END,
+                            )
                         }
                     }
                     if (showDivider) {
@@ -986,38 +1007,36 @@ private fun ProcessMergedToolCard(
                         Box(
                             Modifier
                                 .fillMaxWidth()
-                                .onGloballyPositioned { coords -> outputOffsetY = coords.positionInParent().y }
-                                .drawBehind {
-                                    if (hasOutput) {
-                                        val margin = 280.dp.toPx()
-                                        val localY = vScroll.value.toFloat() - outputOffsetY
-                                        val visTop = (localY - margin).coerceAtLeast(0f)
-                                        val visBottom = localY + margin * 2f
-                                        drawSoftWrapIndicators(outputLayout, wrapIndicatorColor, outputWrapPath, visTop, visBottom)
-                                    }
-                                }
-                                .padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END),
+                                .onGloballyPositioned { coords -> outputOffsetY = coords.positionInParent().y },
                         ) {
                             if (hasOutput) {
                                 LumaSelectionContainer {
-                                    Text(
-                                        rememberHighlightedCode(displayDetail, processOutputLanguage(item), colors),
-                                        Modifier.fillMaxWidth(),
-                                        fontFamily = termFont,
+                                    ViewportWrappedCode(
+                                        code = displayDetail,
+                                        visibleEnd = displayDetail.length,
+                                        language = processOutputLanguage(item),
+                                        colors = colors,
                                         style = codeStyle,
-                                        softWrap = true,
-                                        onTextLayout = { outputLayout = it },
+                                        streamingHint = running,
+                                        viewportTopPx = { vScroll.value.toFloat() - padVPx - outputOffsetY },
+                                        viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                                        showSoftWrapIndicators = true,
+                                        wrapIndicatorColor = wrapIndicatorColor,
+                                        contentPaddingStart = SOFT_WRAP_GUTTER_START,
+                                        contentPaddingEnd = SOFT_WRAP_GUTTER_END,
                                     )
                                 }
                             } else {
-                                Text(
-                                    if (running) tr("等待工具输出…", "Waiting for tool output…") else tr("工具未返回文本输出。", "Tool returned no text output."),
-                                    fontFamily = termFont,
-                                    style = codeStyle,
-                                    color = colors.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                Box(Modifier.padding(start = SOFT_WRAP_GUTTER_START, end = SOFT_WRAP_GUTTER_END)) {
+                                    Text(
+                                        if (running) tr("等待工具输出…", "Waiting for tool output…") else tr("工具未返回文本输出。", "Tool returned no text output."),
+                                        fontFamily = termFont,
+                                        style = codeStyle,
+                                        color = colors.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
                         }
                     }
@@ -1214,7 +1233,7 @@ private fun ProcessReadBatchEntry(
                             } else {
                                 preview.cleanText
                             }
-                            highlightedCode(cappedText, preview.language, dark) { coroutineContext.ensureActive() }
+                            codeTokenIndex(cappedText, preview.language) { coroutineContext.ensureActive() }
                         }
                     }
                 }
@@ -1528,8 +1547,8 @@ private fun ProcessReadFileBody(
         ),
     )
     val gutterTextStyle = codeStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f))
-    val readTextMeasurer = rememberTextMeasurer(cacheSize = 256)
-    var readCodeLayout by remember(displayLines) { mutableStateOf<TextLayoutResult?>(null) }
+    val density = LocalDensity.current
+    val fallbackViewportPx = with(density) { 236.dp.toPx() }
     var viewportHeightPx by remember { mutableFloatStateOf(0f) }
 
     Box(
@@ -1542,78 +1561,28 @@ private fun ProcessReadFileBody(
             .verticalScroll(vScroll),
     ) {
         Column(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .drawBehind {
-                        if (!preview.sourceLinesKnown) return@drawBehind
-                        val gutterW = readGutterWidth.toPx()
-                        val padV = 8.dp.toPx()
-                        val padH = 6.dp.toPx()
-                        val fallbackH = 19.sp.toPx()
-                        val viewH = if (viewportHeightPx > 1f) viewportHeightPx else 236.dp.toPx()
-                        val bufferPx = fallbackH * 4f
-                        val scrollY = vScroll.value.toFloat()
-                        val visibleTop = (scrollY - bufferPx).coerceAtLeast(0f)
-                        val visibleBottom = (scrollY + viewH + bufferPx).coerceAtLeast(0f)
-                        val layout = readCodeLayout
-                        drawRect(gutterBg, Offset.Zero, Size(gutterW, size.height))
-                        val lineTotal = displayLines.size
-                        if (lineTotal <= 0 || visibleBottom <= 0f || visibleTop > size.height) return@drawBehind
-                        val firstIdx: Int
-                        val lastIdx: Int
-                        if (layout != null && layout.lineCount > 0) {
-                            firstIdx = layout.getLineForVerticalPosition((visibleTop - padV).coerceAtLeast(0f)).coerceIn(0, lineTotal - 1)
-                            lastIdx = layout.getLineForVerticalPosition((visibleBottom - padV).coerceAtLeast(0f)).coerceIn(firstIdx, lineTotal - 1)
-                        } else {
-                            firstIdx = ((visibleTop - padV) / fallbackH).toInt().coerceIn(0, lineTotal - 1)
-                            lastIdx = ((visibleBottom - padV) / fallbackH).toInt().coerceIn(firstIdx, lineTotal - 1)
-                        }
-                        for (idx in firstIdx..lastIdx) {
-                            val rLine = displayLines[idx]
-                            val top: Float
-                            val bottom: Float
-                            if (layout != null && idx < layout.lineCount) {
-                                top = padV + layout.getLineTop(idx)
-                                bottom = padV + layout.getLineBottom(idx)
-                            } else {
-                                top = padV + idx * fallbackH
-                                bottom = top + fallbackH
-                            }
-                            if (bottom < visibleTop || top > visibleBottom) continue
-                            val m = readTextMeasurer.measure(rLine.lineNumber.toString(), style = gutterTextStyle, softWrap = false, maxLines = 1)
-                            val x = (gutterW - padH - m.size.width).coerceAtLeast(2f)
-                            val y = if (layout != null && idx < layout.lineCount) {
-                                padV + layout.getLineBaseline(idx) - m.firstBaseline
-                            } else {
-                                top + (fallbackH - m.size.height) / 2f
-                            }
-                            drawText(m, topLeft = Offset(x, y))
-                        }
-                    },
-            ) {
-                if (preview.sourceLinesKnown) {
-                    Spacer(Modifier.width(readGutterWidth))
-                }
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    LumaSelectionContainer {
-                        Text(
-                            rememberHighlightedCode(displayCleanText, preview.language, colors, streamingHint = false),
-                            Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(hScroll),
-                            fontFamily = termFont,
-                            style = codeStyle,
-                            softWrap = false,
-                            onTextLayout = { readCodeLayout = it },
-                        )
-                    }
-                }
-            }
+            ViewportNoWrapCodeBlock(
+                code = displayCleanText,
+                language = preview.language,
+                colors = colors,
+                style = codeStyle,
+                streamingHint = false,
+                hScroll = hScroll,
+                viewportTopPx = { vScroll.value.toFloat() },
+                viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                gutterWidth = if (preview.sourceLinesKnown) readGutterWidth else 0.dp,
+                gutterBg = gutterBg,
+                gutterDividerColor = borderColor,
+                gutterTextStyle = gutterTextStyle,
+                gutterPadEnd = 6.dp,
+                lineNumberAt = if (preview.sourceLinesKnown) {
+                    { idx -> displayLines.getOrNull(idx)?.lineNumber?.toString() ?: "" }
+                } else {
+                    null
+                },
+                contentPaddingHorizontal = 12.dp,
+                contentPaddingVertical = 8.dp,
+            )
             if (omittedLineCount > 0) {
                 HorizontalDivider(thickness = 1.dp, color = borderColor.copy(alpha = 0.28f))
                 Box(
@@ -1701,6 +1670,7 @@ internal fun ProcessEditCardGroup(
     }
     val langCode = LumaI18n.langCode()
     val mergedEdits = remember(entries, cli, langCode) { mergeConsecutiveProcessEdits(entries, cli) }
+    val mergedRenderKeys = remember(mergedEdits) { uniqueProcessRenderKeys(mergedEdits.map { it.id }, prefix = "edit") }
     val colors = MaterialTheme.colorScheme
     val dark = codePaletteDark(colors)
     val headerBg = contentBlockColors(colors).header
@@ -1716,7 +1686,8 @@ internal fun ProcessEditCardGroup(
     val toggleHandlers = ArrayList<() -> Unit>(mergedEdits.size)
 
     mergedEdits.forEachIndexed { index, merged ->
-        key(merged.id) {
+        val renderKey = mergedRenderKeys[index]
+        key(renderKey) {
             val mergedEntryIds = merged.entries.map { it.id }
             val isInitiallyOpen = initiallyOpenItem != null && merged.entries.any { it.id == initiallyOpenItem }
             val expanded = activeExpansion.isAnyExpanded(mergedEntryIds)
@@ -1740,8 +1711,9 @@ internal fun ProcessEditCardGroup(
     val palette = remember(colors) { processRowPalette(colors) }
     Column(Modifier.fillMaxWidth()) {
         mergedEdits.forEachIndexed { index, merged ->
-            key(merged.id) {
-                entryState.SaveableStateProvider(merged.id) {
+            val renderKey = mergedRenderKeys[index]
+            key(renderKey) {
+                entryState.SaveableStateProvider(renderKey) {
                     val running = merged.outcome == "running"
                     val labelColor = palette.emphasis
                     val contextColor = palette.text
@@ -1905,6 +1877,23 @@ internal fun ProcessEditCardGroup(
     }
 }
 
+internal fun uniqueProcessRenderKeys(ids: List<String>, prefix: String = "entry"): List<String> {
+    val used = HashSet<String>(ids.size * 2)
+    return ids.mapIndexed { index, raw ->
+        val base = raw.takeIf { it.isNotBlank() } ?: "$prefix#$index"
+        var candidate = base
+        if (!used.add(candidate)) {
+            candidate = "$base#$index"
+            var suffix = 1
+            while (!used.add(candidate)) {
+                candidate = "$base#$index:$suffix"
+                suffix++
+            }
+        }
+        candidate
+    }
+}
+
 @Composable
 private fun StreamingDiffViewer(
     hunks: List<ProcessEditHunk>,
@@ -1983,6 +1972,9 @@ private fun StreamingDiffViewer(
         else -> 80.dp
     }
 
+    val density = LocalDensity.current
+    val fallbackViewportPx = with(density) { 260.dp.toPx() }
+    val globalWidestLineWidthPx = rememberDiffWidestLineWidthPx(displayHunks, codeStyle)
     var viewportHeightPx by remember { mutableFloatStateOf(0f) }
 
     Box(
@@ -2016,114 +2008,32 @@ private fun StreamingDiffViewer(
                     HorizontalDivider(thickness = 1.dp, color = borderColor.copy(alpha = 0.28f))
                 }
                 val vPad = if (hunkIdx == 0 && displayHunks.size == 1 && omittedDiffRows == 0) 6.dp else 5.dp
-                val highlighted = rememberHighlightedDiffHunk(hunk.diffLines, language, colors)
-                var codeLayout by remember(hunk.diffLines) { mutableStateOf<TextLayoutResult?>(null) }
                 var rowOffsetInColumn by remember(hunkIdx) { mutableFloatStateOf(0f) }
-
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned { coords ->
-                            rowOffsetInColumn = coords.positionInParent().y
-                        }
-                        .drawBehind {
-                            val fallbackLineH = 19.sp.toPx()
-                            val padPx = vPad.toPx()
-                            val barW = 2.dp.toPx()
-                            val gutterW = gutterWidthDp.toPx()
-                            val dividerW = 1.dp.toPx()
-                            val colPad = 4.dp.toPx()
-                            val colGap = 4.dp.toPx()
-                            val singleColW = ((gutterW - colPad * 2f - colGap) / 2f).coerceAtLeast(8f)
-                            val viewH = if (viewportHeightPx > 1f) viewportHeightPx else 260.dp.toPx()
-                            val bufferPx = fallbackLineH * 4f
-                            val localScrollY = vScroll.value.toFloat() - rowOffsetInColumn
-                            val visibleTop = (localScrollY - bufferPx).coerceAtLeast(0f)
-                            val visibleBottom = (localScrollY + viewH + bufferPx).coerceAtLeast(0f)
-                            val layout = codeLayout
-
-                            drawRect(gutterDefaultBg, Offset.Zero, Size(gutterW, size.height))
-                            val lineTotal = hunk.diffLines.size
-                            if (lineTotal > 0 && visibleBottom > 0f && visibleTop <= size.height) {
-                                val firstIdx: Int
-                                val lastIdx: Int
-                                if (layout != null && layout.lineCount > 0) {
-                                    firstIdx = layout.getLineForVerticalPosition((visibleTop - padPx).coerceAtLeast(0f)).coerceIn(0, lineTotal - 1)
-                                    lastIdx = layout.getLineForVerticalPosition((visibleBottom - padPx).coerceAtLeast(0f)).coerceIn(firstIdx, lineTotal - 1)
-                                } else {
-                                    firstIdx = ((visibleTop - padPx) / fallbackLineH).toInt().coerceIn(0, lineTotal - 1)
-                                    lastIdx = ((visibleBottom - padPx) / fallbackLineH).toInt().coerceIn(firstIdx, lineTotal - 1)
-                                }
-                                for (idx in firstIdx..lastIdx) {
-                                    val dLine = hunk.diffLines[idx]
-                                    val top: Float
-                                    val bottom: Float
-                                    val rowH: Float
-                                    val baselineY: Float?
-                                    if (layout != null && idx < layout.lineCount) {
-                                        top = padPx + layout.getLineTop(idx)
-                                        bottom = padPx + layout.getLineBottom(idx)
-                                        rowH = (bottom - top).coerceAtLeast(1f)
-                                        baselineY = padPx + layout.getLineBaseline(idx)
-                                    } else {
-                                        top = padPx + idx * fallbackLineH
-                                        bottom = top + fallbackLineH
-                                        rowH = fallbackLineH
-                                        baselineY = null
-                                    }
-                                    if (bottom < visibleTop || top > visibleBottom) continue
-
-                                    when (dLine.kind) {
-                                        DiffLineKind.ADDITION -> {
-                                            drawRect(addGutterBg, Offset(0f, top), Size(gutterW, rowH))
-                                            drawRect(addRowBg, Offset(gutterW + dividerW, top), Size((size.width - gutterW - dividerW).coerceAtLeast(0f), rowH))
-                                            drawRect(addBarColor, Offset(0f, top), Size(barW, rowH))
-                                        }
-                                        DiffLineKind.DELETION -> {
-                                            drawRect(delGutterBg, Offset(0f, top), Size(gutterW, rowH))
-                                            drawRect(delRowBg, Offset(gutterW + dividerW, top), Size((size.width - gutterW - dividerW).coerceAtLeast(0f), rowH))
-                                            drawRect(delBarColor, Offset(0f, top), Size(barW, rowH))
-                                        }
-                                        DiffLineKind.CONTEXT -> Unit
-                                    }
-
-                                    dLine.oldLine?.let { oldNum ->
-                                        val m = textMeasurer.measure(oldNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
-                                        val x = (colPad + singleColW - m.size.width).coerceAtLeast(1f)
-                                        val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
-                                        drawText(m, topLeft = Offset(x, y))
-                                    }
-                                    dLine.newLine?.let { newNum ->
-                                        val m = textMeasurer.measure(newNum.toString(), style = gutterNumStyle, softWrap = false, maxLines = 1)
-                                        val x = (gutterW - colPad - m.size.width).coerceAtLeast(colPad + singleColW + colGap)
-                                        val y = if (baselineY != null) baselineY - m.firstBaseline else top + (rowH - m.size.height) / 2f
-                                        drawText(m, topLeft = Offset(x, y))
-                                    }
-                                }
-                            }
-                            drawRect(borderColor, Offset(gutterW, 0f), Size(dividerW, size.height))
-                        },
-                ) {
-                    Spacer(Modifier.width(gutterWidthDp + 1.dp))
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .padding(horizontal = 8.dp, vertical = vPad),
-                    ) {
-                        LumaSelectionContainer {
-                            Text(
-                                highlighted,
-                                Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(hScroll),
-                                fontFamily = termFont,
-                                style = codeStyle,
-                                softWrap = false,
-                                onTextLayout = { codeLayout = it },
-                            )
-                        }
-                    }
-                }
+                ViewportDiffHunkView(
+                    diffLines = hunk.diffLines,
+                    language = language,
+                    colors = colors,
+                    codeStyle = codeStyle,
+                    gutterNumStyle = gutterNumStyle,
+                    gutterWidthDp = gutterWidthDp,
+                    gutterDefaultBg = gutterDefaultBg,
+                    borderColor = borderColor,
+                    addGutterBg = addGutterBg,
+                    addRowBg = addRowBg,
+                    addBarColor = addBarColor,
+                    delGutterBg = delGutterBg,
+                    delRowBg = delRowBg,
+                    delBarColor = delBarColor,
+                    vPad = vPad,
+                    hScroll = hScroll,
+                    minCodeContentWidthPx = globalWidestLineWidthPx,
+                    viewportTopPx = { vScroll.value.toFloat() - rowOffsetInColumn },
+                    viewportHeightPx = { if (viewportHeightPx > 1f) viewportHeightPx else fallbackViewportPx },
+                    gutterMeasurer = textMeasurer,
+                    modifier = Modifier.onGloballyPositioned { coords ->
+                        rowOffsetInColumn = coords.positionInParent().y
+                    },
+                )
             }
             if (omittedDiffRows > 0) {
                 HorizontalDivider(thickness = 1.dp, color = borderColor.copy(alpha = 0.28f))

@@ -59,4 +59,50 @@ class SessionManagementProtocolTest {
             assertFalse(call("").getBoolean("ok")); assertEquals(1, calls.get())
         } finally { server.close(); scope.cancel() }
     }
+    @Test fun cwdRejectsIsoControlCharacters() {
+        for (badCwd in listOf("/work\nnext", "/work\rnext", "/work\tnext", "/work\u0000next")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                SessionManagementProtocol.validate(JSONObject()
+                    .put("action", "create").put("cli", "Codex").put("cwd", badCwd).put("requestId", "req_1"))
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                SessionManagementProtocol.validate(JSONObject()
+                    .put("action", "attach").put("cli", "Codex").put("cwd", badCwd).put("nativeId", "thread-1"))
+            }
+        }
+    }
+    @Test fun serverEnforcesTotalReadDeadlineAndRethrowsCancellation() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val server = SessionManagementServer("secret-token", { request ->
+            if (request.optString("id") == "cancel-me") throw CancellationException("cancelled")
+            JSONObject().put("ok", true).put("id", request.getString("id"))
+        }, scope, Dispatchers.Unconfined)
+        try {
+            val started = System.nanoTime()
+            Socket("127.0.0.1", server.port).use { socket ->
+                socket.soTimeout = 5000
+                socket.getOutputStream().write("{\"action\":\"status\"".toByteArray())
+                socket.getOutputStream().flush()
+                val line = socket.getInputStream().bufferedReader().readLine()
+                val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+                assertTrue("Expected bounded timeout, elapsed=${elapsedMs}ms", elapsedMs in 2_000L..4_800L)
+                if (line != null) assertFalse(JSONObject(line).getBoolean("ok"))
+            }
+            Socket("127.0.0.1", server.port).use { socket ->
+                socket.soTimeout = 3000
+                socket.getOutputStream().write((JSONObject().put("action", "status").put("id", "cancel-me").put("token", "secret-token").toString() + "\n").toByteArray())
+                assertNull(socket.getInputStream().bufferedReader().readLine())
+            }
+            Socket("127.0.0.1", server.port).use { socket ->
+                socket.soTimeout = 3000
+                socket.getOutputStream().write((JSONObject().put("action", "status").put("id", "healthy").put("token", "secret-token").toString() + "\n").toByteArray())
+                val reply = JSONObject(socket.getInputStream().bufferedReader().readLine())
+                assertTrue(reply.getBoolean("ok"))
+                assertEquals("healthy", reply.getString("id"))
+            }
+        } finally {
+            server.close()
+            scope.cancel()
+        }
+    }
 }

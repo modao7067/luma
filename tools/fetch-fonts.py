@@ -18,8 +18,10 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import shutil
 import sys
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -55,14 +57,55 @@ SOURCES = [
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
-def download(url, cache):
+def fetch_to_cache(url, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print('download', url)
+    fd, tmp_name = tempfile.mkstemp(prefix=target.name + '.', suffix='.tmp', dir=target.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'wb') as out, urllib.request.urlopen(url, timeout=120) as response:
+            shutil.copyfileobj(response, out)
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def load_verified_font(name, url, member, archive_hash, expected, cache):
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / url.rsplit('/', 1)[-1]
-    if not target.exists():
-        print('download', url)
-        with urllib.request.urlopen(url, timeout=120) as response:
-            target.write_bytes(response.read())
-    return target.read_bytes()
+    for attempt in range(2):
+        from_cache = target.is_file()
+        if not from_cache:
+            fetch_to_cache(url, target)
+        raw = target.read_bytes()
+        if archive_hash and sha256(raw) != archive_hash:
+            target.unlink(missing_ok=True)
+            if from_cache and attempt == 0:
+                continue
+            print(f'FAIL archive hash mismatch for {url}', file=sys.stderr)
+            return None
+        try:
+            if member:
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    blob = archive.read(member)
+            else:
+                blob = raw
+        except (zipfile.BadZipFile, KeyError) as exc:
+            target.unlink(missing_ok=True)
+            if from_cache and attempt == 0:
+                continue
+            print(f'FAIL {name}: {exc}', file=sys.stderr)
+            return None
+        if sha256(blob) != expected:
+            target.unlink(missing_ok=True)
+            if from_cache and attempt == 0:
+                continue
+            print(f'FAIL {name}: sha256 {sha256(blob)} != manifest {expected}', file=sys.stderr)
+            return None
+        return blob
+    return None
+
 
 def main():
     parser = argparse.ArgumentParser(description=COMMAND_DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -75,19 +118,12 @@ def main():
         if expected and all((d / name).is_file() and sha256((d / name).read_bytes()) == expected for d in DIRS):
             print('ok  ', name)
             continue
-        blob = download(url, args.cache)
-        if archive_hash and sha256(blob) != archive_hash:
-            print(f'FAIL archive hash mismatch for {url}', file=sys.stderr)
-            failed = True
-            continue
-        if member:
-            with zipfile.ZipFile(io.BytesIO(blob)) as archive:
-                blob = archive.read(member)
-        if sha256(blob) != pinned.get(name):
-            print(f'FAIL {name}: sha256 {sha256(blob)} != manifest {pinned.get(name)}', file=sys.stderr)
+        blob = load_verified_font(name, url, member, archive_hash, expected, args.cache)
+        if blob is None:
             failed = True
             continue
         for directory in DIRS:
+            directory.mkdir(parents=True, exist_ok=True)
             (directory / name).write_bytes(blob)
         print('ok  ', name)
     if failed:

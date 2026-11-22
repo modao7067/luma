@@ -95,6 +95,7 @@ int luma_open_frame_file(const uint8_t *path,size_t len) {
 #define FEED_MODES_MAYBE_CHANGED (1 << 11)
 
 #define REPLY_CAP (1024u * 1024u)
+#define CLIPBOARD_MAX_BYTES (256u * 1024u)
 #define PASTE_MAX_BYTES (256u * 1024u)
 #define PASTE_OUT_CAP (PASTE_MAX_BYTES + 16u)
 #define GRAPHEME_CAP 4096u
@@ -202,12 +203,15 @@ static bool drain_replies_to_host(LumaVT *vt) {
     JNIEnv *env = vt->call_env;
     if (!vt->host || !env || !vt->host_replies || (*env)->ExceptionCheck(env)) return false;
     jbyteArray bytes = (*env)->NewByteArray(env, (jsize)vt->reply_len);
-    if (!bytes) return false;
+    if (!bytes) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        return false;
+    }
     if (vt->reply_len)
         (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)vt->reply_len, (const jbyte *)vt->replies);
     (*env)->CallVoidMethod(env, vt->host, vt->host_replies, bytes);
     (*env)->DeleteLocalRef(env, bytes);
-    if ((*env)->ExceptionCheck(env)) return false;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return false; }
     vt->reply_len = 0;
     return true;
 }
@@ -321,6 +325,7 @@ static void on_reset(GhosttyTerminal terminal, void *userdata) {
     (void)terminal; LumaVT *vt=userdata;
     free(vt->iterm_data); vt->iterm_data=NULL; vt->iterm_len=vt->iterm_capacity=0;
     vt->iterm_args[0]=0; vt->iterm_invalid=false; vt->last_compressed_pages=0;
+    vt->hold_active=0; vt->hold_deadline_ms=0; vt->hold_ignored=false;
     vt->maybe_restored_cold_page=false; vt->force_full_snapshot=true; vt->palette_valid=false;
     queue_event(userdata, 5, 0);
 }
@@ -332,7 +337,7 @@ static void on_clipboard(GhosttyTerminal terminal, void *userdata, const Ghostty
     for (size_t i = 0; i < write->contents_len; i++) {
         const GhosttyClipboardContent *content = &write->contents[i];
         if (content->mime.len < 10 || memcmp(content->mime.ptr, "text/plain", 10) != 0) continue;
-        if (content->data.len > REPLY_CAP) { reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA; break; }
+        if (content->data.len > CLIPBOARD_MAX_BYTES) { reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA; break; }
         uint8_t *copy = malloc(content->data.len ? content->data.len : 1);
         if (!copy) { reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR; break; }
         if (content->data.len) memcpy(copy, content->data.ptr, content->data.len);
@@ -353,8 +358,13 @@ static void on_render_hold(GhosttyTerminal terminal, void *userdata, bool held) 
     if (held) {
         ghostty_render_state_update(vt->render, terminal);
         ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &vt->hold_bar);
-    }    if (vt->host && vt->call_env)
-        (*vt->call_env)->CallVoidMethod(vt->call_env, vt->host, vt->host_hold, held ? JNI_TRUE : JNI_FALSE);
+    }
+    if (vt->host && vt->call_env && vt->host_hold) {
+        JNIEnv *env = vt->call_env;
+        if ((*env)->ExceptionCheck(env)) return;
+        (*env)->CallVoidMethod(env, vt->host, vt->host_hold, held ? JNI_TRUE : JNI_FALSE);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
 }
 
 JNIEXPORT jint JNICALL Java_io_github_modao7067_luma_ghostty_GhosttyNative_destroyChecked(JNIEnv*,jclass,jlong);
@@ -499,6 +509,7 @@ JNIEXPORT jlong JNICALL Java_io_github_modao7067_luma_ghostty_GhosttyNative_crea
     }
     vt->force_full_snapshot = true;
     vt->palette_gen = 1;
+    vt->call_env = NULL;
     uint64_t id = registry_add(vt);
     if (!id) {
         ghostty_render_state_row_iterator_free(vt->row_iter);
@@ -580,12 +591,13 @@ JNIEXPORT jint JNICALL Java_io_github_modao7067_luma_ghostty_GhosttyNative_feed(
 
 JNIEXPORT jint JNICALL Java_io_github_modao7067_luma_ghostty_GhosttyNative_resize(
         JNIEnv *env, jclass cls, jlong handle, jint cols, jint rows, jint cellWidth, jint cellHeight) {
-    (void)env; (void)cls;
+    (void)cls;
     LumaVT *vt = registry_get(handle);
     if (!vt || cols < 1 || rows < 1 || cols > 65535 || rows > 65535) return -1;
     if ((uint64_t)cols * (uint64_t)rows > 1048576u) return -1;
     uint32_t cell_w = cellWidth > 0 ? (uint32_t)cellWidth : 0;
     uint32_t cell_h = cellHeight > 0 ? (uint32_t)cellHeight : 0;
+    vt->call_env = env;
     ghostty_terminal_resize(vt->terminal, (uint16_t)cols, (uint16_t)rows,
                             cell_w ? cell_w : 1, cell_h ? cell_h : 1);
     vt->cell_width = cell_w;
@@ -1567,22 +1579,30 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 static bool decode_android_png(void *userdata, const GhosttyAllocator *allocator,
         const uint8_t *data, size_t len, GhosttySysImage *out) {
     (void)userdata; JNIEnv *env = NULL;
-    if (!g_vm || !g_decoder || len > 8u*1024u*1024u || (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return false;
-    jbyteArray encoded = (*env)->NewByteArray(env, (jsize)len); if (!encoded) return false;
+    if (!g_vm || !g_decoder || !g_decode_png || len > 8u*1024u*1024u || (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || !env) return false;
+    if ((*env)->ExceptionCheck(env)) return false;
+    jbyteArray encoded = (*env)->NewByteArray(env, (jsize)len);
+    if (!encoded) { if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); return false; }
     (*env)->SetByteArrayRegion(env, encoded, 0, (jsize)len, (const jbyte *)data);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); (*env)->DeleteLocalRef(env, encoded); return false; }
     jintArray decoded = (jintArray)(*env)->CallStaticObjectMethod(env, g_decoder, g_decode_png, encoded);
     (*env)->DeleteLocalRef(env, encoded);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return false; }
-    if (!decoded || (*env)->GetArrayLength(env, decoded) < 2) return false;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); if (decoded) (*env)->DeleteLocalRef(env, decoded); return false; }
+    if (!decoded) return false;
+    jsize length = (*env)->GetArrayLength(env, decoded);
+    if (length < 2) { (*env)->DeleteLocalRef(env, decoded); return false; }
     jint dims[2]; (*env)->GetIntArrayRegion(env, decoded, 0, 2, dims);
     uint64_t count = (uint64_t)(uint32_t)dims[0]*(uint32_t)dims[1];
-    if (dims[0] <= 0 || dims[1] <= 0 || count > 2u*1024u*1024u || count+2 != (uint64_t)(*env)->GetArrayLength(env,decoded)) {
+    if (dims[0] <= 0 || dims[1] <= 0 || count > 2u*1024u*1024u || count+2 != (uint64_t)length) {
         (*env)->DeleteLocalRef(env,decoded); return false;
     }
     size_t bytes = (size_t)count*4; uint8_t *rgba = ghostty_alloc(allocator,bytes);
     if (!rgba) { (*env)->DeleteLocalRef(env,decoded); return false; }
     jint *argb = (*env)->GetIntArrayElements(env,decoded,NULL);
-    if (!argb) { ghostty_free(allocator,rgba,bytes); (*env)->DeleteLocalRef(env,decoded); return false; }
+    if (!argb) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        ghostty_free(allocator,rgba,bytes); (*env)->DeleteLocalRef(env,decoded); return false;
+    }
     for (size_t i=0;i<count;i++) {
         uint32_t pixel=(uint32_t)argb[i+2]; rgba[i*4]=(uint8_t)(pixel>>16); rgba[i*4+1]=(uint8_t)(pixel>>8);
         rgba[i*4+2]=(uint8_t)pixel; rgba[i*4+3]=(uint8_t)(pixel>>24);
@@ -1748,6 +1768,7 @@ static int inline_dimension(const char *value,uint32_t cell,int count) {
 static void finish_inline_image(LumaVT *vt) {
     if (!vt->call_env || !g_decoder || vt->iterm_invalid || !vt->iterm_len) goto cleanup;
     JNIEnv *env=vt->call_env;
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
     uint32_t pixel_width=0,pixel_height=0;
     ghostty_terminal_get(vt->terminal,GHOSTTY_TERMINAL_DATA_WIDTH_PX,&pixel_width);
     ghostty_terminal_get(vt->terminal,GHOSTTY_TERMINAL_DATA_HEIGHT_PX,&pixel_height);
@@ -1759,18 +1780,23 @@ static void finish_inline_image(LumaVT *vt) {
         else if(!strncmp(part,"preserveAspectRatio=",20))preserve=strcmp(part+20,"0")!=0;
     }
     if(!inline_image||width<0||height<0)goto cleanup;
-    jmethodID decode=(*env)->GetStaticMethodID(env,g_decoder,"decodeBase64Image","([BIIZ)[I");if(!decode)goto cleanup;
-    jbyteArray data=(*env)->NewByteArray(env,(jsize)vt->iterm_len);if(!data)goto cleanup;
+    jmethodID decode=(*env)->GetStaticMethodID(env,g_decoder,"decodeBase64Image","([BIIZ)[I");
+    if(!decode){if((*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);goto cleanup;}
+    jbyteArray data=(*env)->NewByteArray(env,(jsize)vt->iterm_len);
+    if(!data){if((*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);goto cleanup;}
     (*env)->SetByteArrayRegion(env,data,0,(jsize)vt->iterm_len,(const jbyte *)vt->iterm_data);
+    if((*env)->ExceptionCheck(env)){(*env)->ExceptionClear(env);(*env)->DeleteLocalRef(env,data);goto cleanup;}
     jintArray decoded=(jintArray)(*env)->CallStaticObjectMethod(env,g_decoder,decode,data,width,height,preserve?JNI_TRUE:JNI_FALSE);
     (*env)->DeleteLocalRef(env,data);
-    if((*env)->ExceptionCheck(env)){(*env)->ExceptionClear(env);goto cleanup;}
+    if((*env)->ExceptionCheck(env)){(*env)->ExceptionClear(env);if(decoded)(*env)->DeleteLocalRef(env,decoded);goto cleanup;}
     if(!decoded)goto cleanup;
     jint dims[2];jsize length=(*env)->GetArrayLength(env,decoded);
     if(length<2){(*env)->DeleteLocalRef(env,decoded);goto cleanup;}
     (*env)->GetIntArrayRegion(env,decoded,0,2,dims);uint64_t count=(uint64_t)(uint32_t)dims[0]*(uint32_t)dims[1];
     if(dims[0]<=0||dims[1]<=0||count>4u*1024u*1024u||count+2!=(uint64_t)length){(*env)->DeleteLocalRef(env,decoded);goto cleanup;}
-    jint *pixels=(*env)->GetIntArrayElements(env,decoded,NULL);uint8_t *rgba=malloc((size_t)count*4);
+    jint *pixels=(*env)->GetIntArrayElements(env,decoded,NULL);
+    if(!pixels&&(*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);
+    uint8_t *rgba=pixels?malloc((size_t)count*4):NULL;
     if(pixels&&rgba){for(size_t i=0;i<count;i++){uint32_t c=(uint32_t)pixels[i+2];rgba[i*4]=(uint8_t)(c>>16);rgba[i*4+1]=(uint8_t)(c>>8);rgba[i*4+2]=(uint8_t)c;rgba[i*4+3]=(uint8_t)(c>>24);}
         luma_ghostty_inline_add(vt->terminal,rgba,(uint32_t)dims[0],(uint32_t)dims[1]);}
     free(rgba);if(pixels)(*env)->ReleaseIntArrayElements(env,decoded,pixels,JNI_ABORT);(*env)->DeleteLocalRef(env,decoded);

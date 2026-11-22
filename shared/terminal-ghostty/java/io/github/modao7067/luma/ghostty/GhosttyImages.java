@@ -19,7 +19,9 @@ final class GhosttyImages {
     long revision;
     List<TerminalImage> capture(long handle, int cellWidth, int cellHeight) {
         long[] raw = GhosttyNative.imagePlacements(handle);
-        if (raw == null || raw.length < 2) throw new IllegalStateException("native image geometry unavailable");
+        if (raw == null || raw.length < 2) return empty();
+        long count = raw[1];
+        if (count < 0 || 2L + count * STRIDE > raw.length) return empty();
         if (cellWidth == lastCellWidth && cellHeight == lastCellHeight && Arrays.equals(lastGeometry, raw)) {
             return lastResult;
         }
@@ -27,13 +29,18 @@ final class GhosttyImages {
         lastCellWidth = cellWidth; lastCellHeight = cellHeight;
         List<TerminalImage> result = new ArrayList<>(); Set<Integer> used = new HashSet<>();
         float cw = Math.max(1,cellWidth), ch = Math.max(1,cellHeight);
-        for (int i = 0; i < raw[1]; i++) {
+        for (int i = 0; i < count; i++) {
             int p = 2 + i * STRIDE, id = (int)raw[p]; long generation = raw[p+13];
             Cached image = cache.get(id);
             if (image == null || image.generation != generation) {
                 long width = raw[p+14], height = raw[p+15];
                 if (width <= 0 || height <= 0 || width > 4L * 1024 * 1024 / height) continue;
-                Bitmap bitmap = Bitmap.createBitmap((int)width, (int)height, Bitmap.Config.ARGB_8888);
+                Bitmap bitmap;
+                try {
+                    bitmap = Bitmap.createBitmap((int)width, (int)height, Bitmap.Config.ARGB_8888);
+                } catch (OutOfMemoryError ignored) {
+                    continue;
+                }
                 if (!GhosttyNative.copyImage(handle, id, bitmap)) { bitmap.recycle(); continue; }
                 bitmap.prepareToDraw();
                 image = new Cached(generation,bitmap); cache.put(id,image);

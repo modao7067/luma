@@ -125,5 +125,29 @@ print(json.dumps({'type':'result','result':'native outcome','is_error':False}),f
         s.call=lambda method,*a,**kw:replies.get(method,{})
         s.refresh();self.assertIn('live',s.rows)
         replies['get_state']['isStreaming']=False;s.refresh();self.assertNotIn('live',s.rows)
+    def test_pi_tool_title_prefers_display_summary_and_falls_back_to_command(self):
+        from luma_cli.pi import _pi_tool_title
+        s=PiSession({'cli':'pi','cwd':'/tmp'},lambda:None);s.run_revision=0;s.active_message=None
+        self.assertEqual(
+            'bash · Check node stability',
+            _pi_tool_title('bash', {'command': 'CANDIDATES=(\n  a\n)', 'displaySummary': '\x1b[32mCheck node\n  stability\x1b[0m'}),
+        )
+        self.assertEqual(
+            'bash · git status',
+            _pi_tool_title('bash', {'command': '\n  git status\ngit diff', 'displaySummary': '   '}),
+        )
+        self.assertEqual(
+            'bash · git status',
+            _pi_tool_title('bash', {'command': 'git status', 'displaySummary': 'bash'}),
+        )
+        self.assertEqual(
+            'custom_tool · Fetch manifest',
+            _pi_tool_title('custom_tool', {'url': 'https://example.invalid', 'displaySummary': 'Fetch manifest'}),
+        )
+        s.event({'type': 'tool_execution_start', 'toolCallId': 'call-1', 'toolName': 'bash',
+                 'args': {'command': 'CANDIDATES=(\n  a\n)', 'displaySummary': 'Verify endpoints'}})
+        self.assertEqual('bash · Verify endpoints', s.rows['tool-call-1']['text'])
+        s.project({'role': 'toolResult', 'toolCallId': 'call-1', 'toolName': 'bash', 'content': [{'type': 'text', 'text': 'ok'}]}, 'res-1')
+        self.assertEqual('bash · Verify endpoints', s.rows['tool-call-1']['text'])
 
 if __name__=='__main__':unittest.main(verbosity=2)

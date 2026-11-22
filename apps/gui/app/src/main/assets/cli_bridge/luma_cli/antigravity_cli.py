@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -318,6 +319,7 @@ _AGY_TASK_RESULT_HEADER_RE = re.compile(
 
 _BG_LAUNCH_TOOLS = {"run_command", "schedule", "run_workflow"}
 _BG_HEADER_LINE_RE = re.compile(r"^Tool is running as a background task with task id:\s*([A-Za-z0-9_./:-]{1,200})\s*$")
+_BG_LOG_URI_RE = re.compile(r"^Task logs are available at:\s*file://(\S+)\s*$")
 _CRON_CANCELLED_MSG_RE = re.compile(r'^Cron schedule "([^"]+)" cancelled\b', re.M)
 _TASK_KILLED_MSG_RE = re.compile(r'^Task id "[^"]+" (?:killed|was cancel+ed|terminated|aborted)\b', re.I)
 
@@ -370,6 +372,59 @@ def extract_agy_bg_task_id(raw, tool_name="", generic_state=None):
         if match:
             return match.group(1)
     return ""
+
+def extract_agy_bg_log_path(raw):
+    body, _ = unwrap_agy_tool_text(raw)
+    if not body or "file://" not in body:
+        return ""
+    for ln in body.lstrip().splitlines()[:8]:
+        match = _BG_LOG_URI_RE.match(ln.strip())
+        if match:
+            path = urllib.parse.unquote(match.group(1)).strip()
+            if path.startswith("/"):
+                return path
+    return ""
+
+def read_agy_bg_log_tail(log_path, prev_stat=None, max_bytes=16384):
+    if not isinstance(log_path, str) or not log_path.startswith("/"):
+        return None, prev_stat
+    try:
+        st = os.stat(log_path)
+    except OSError:
+        return None, prev_stat
+    if not stat.S_ISREG(st.st_mode):
+        return None, prev_stat
+    sig = (st.st_mtime_ns, st.st_size)
+    if sig == prev_stat:
+        return None, prev_stat
+    if st.st_size <= 0:
+        return "", sig
+    try:
+        with open(log_path, "rb") as handle:
+            start = max(0, st.st_size - max_bytes)
+            if start > 0:
+                handle.seek(start)
+            raw = handle.read(max_bytes)
+    except OSError:
+        return None, prev_stat
+    if start > 0:
+        cut_nl = raw.find(b"\n")
+        cut_cr = raw.find(b"\r")
+        cuts = [c for c in (cut_nl, cut_cr) if c >= 0]
+        if cuts:
+            raw = raw[min(cuts) + 1:]
+    decoded = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    out_lines = []
+    for line in decoded.split("\n"):
+        if "\r" in line:
+            parts = [part for part in line.split("\r") if part]
+            out_lines.append(parts[-1] if parts else "")
+        else:
+            out_lines.append(line)
+    cleaned = "\n".join(out_lines).rstrip()
+    if len(cleaned) > 16000:
+        cleaned = cleaned[-16000:]
+    return cleaned, sig
 
 def is_agy_oneshot_timer(raw_outcome, tool_name="", params=None):
     body, _ = unwrap_agy_tool_text(raw_outcome)
@@ -1407,6 +1462,8 @@ class AntigravityCliSession(AgyChildTailMixin, Session):
             self.checkpoint(force=True); return
         if status == "SUCCESS": self.accept_submission()
         turn = self.current_submission
+        if status != "SUCCESS" and turn and self.config.get("receipts", {}).get(turn) != "accepted":
+            self.settle_uncertain(turn)
         cancelled = status in ("CANCELED", "INTERRUPTED") or (status == "ERROR" and
             (result.get("error") == "interrupted" or result.get("finished_reason") == "interrupted"))
         if not self.turn_has_output and result.get("response"):

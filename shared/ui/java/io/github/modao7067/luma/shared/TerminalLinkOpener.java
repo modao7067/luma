@@ -19,6 +19,8 @@ import java.util.concurrent.*;
 final class TerminalLinkOpener implements AutoCloseable {
     static final int INSTALL_PERMISSION_REQUEST=7342;
     interface Reader {void copy(String path,int pid,File destination,long limit,boolean highlight,int columns)throws IOException;}
+    static final long RECENT_FILE_WINDOW_MS = 5L * 60L * 1000L;
+    static final long CACHE_BUDGET_BYTES = 128L * 1024L * 1024L;
     private final Activity activity;
     private final Reader reader;
     private final ThreadPoolExecutor worker=new ThreadPoolExecutor(1,1,0,TimeUnit.SECONDS,new ArrayBlockingQueue<>(1),
@@ -26,16 +28,22 @@ final class TerminalLinkOpener implements AutoCloseable {
     private TerminalPreviewView active;
     private TerminalView owner;
     private Future<?> pending;
-    private File pdf,pendingInstall;
+    private volatile TerminalFileTransfer.Cancellation activeTransfer;
+    private volatile File pdf,pendingInstall;
     private String pendingInstallName;
     private int generation,fontSize,page,pageCount,pageGeneration,requestedPage;
     private int[] palette;
     private boolean closed,pageBusy;
     TerminalLinkOpener(Activity activity,Reader reader){this.activity=activity;this.reader=reader;}
     boolean isShowing(){return active!=null;}
+    private void cancelTransfer(){
+        TerminalFileTransfer.Cancellation current=activeTransfer;
+        activeTransfer=null;
+        if(current!=null)current.cancel();
+    }
     boolean dismiss(){
         if(active==null)return false;
-        generation++;pageGeneration++;if(pending!=null)pending.cancel(true);
+        generation++;pageGeneration++;cancelTransfer();if(pending!=null)pending.cancel(true);
         if(owner!=null)owner.setFilePreview(null);
         active.clear();if(active.getParent() instanceof ViewGroup)((ViewGroup)active.getParent()).removeView(active);
         active=null;owner=null;if(pdf!=null){pdf.delete();pdf=null;}pageBusy=false;return true;
@@ -49,7 +57,7 @@ final class TerminalLinkOpener implements AutoCloseable {
         if(path==null||path.isEmpty()||path.indexOf('\0')>=0)return false;
         path=path.replaceFirst("(?::[0-9]+(?::[0-9]+)?(?:[-–][0-9]+(?::[0-9]+)?)?|#L[0-9]+(?:C[0-9]+)?(?:-L?[0-9]+(?:C[0-9]+)?)?)$","");
         if(closed||activity.isDestroyed())return true;
-        dismiss();owner=source;fontSize=source.getTextSize();palette=source.getTerminalPalette();
+        dismiss();cancelTransfer();owner=source;fontSize=source.getTextSize();palette=source.getTerminalPalette();
         active=new TerminalPreviewView(activity,source,this::dismiss);owner.setFilePreview(active);
         ((FrameLayout)activity.findViewById(android.R.id.content)).addView(active,new FrameLayout.LayoutParams(-1,-1));
         showMessage(com.termux.terminal.LumaLang.tr("正在打开…","Opening…"));final int ticket=++generation;
@@ -57,12 +65,17 @@ final class TerminalLinkOpener implements AutoCloseable {
         final boolean image=lower.matches(".*\\.(png|jpe?g|webp|gif|bmp|avif|heic|heif)$"),document=TerminalDocuments.isText(name),isPdf=lower.endsWith(".pdf");
         final int pid=source.getCurrentSession()==null ? 0 : source.getCurrentSession().getPid();
         final int width=source.getWidth(),height=source.getHeight(),textSize=fontSize,columns=source.getFilePreviewColumns();final int[] colors=palette.clone();
+        final TerminalFileTransfer.Cancellation transfer=new TerminalFileTransfer.Cancellation();
+        activeTransfer=transfer;
         pending=worker.submit(()->{
             File staged=null;
+            TerminalFileTransfer.Cancellation previous=TerminalFileTransfer.bindCancellation(transfer);
             try{
+                if(transfer.isCancelled()||Thread.currentThread().isInterrupted())return;
                 File dir=new File(activity.getCacheDir(),"terminal-open");if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException(com.termux.terminal.LumaLang.tr("无法创建预览缓存","Failed to create preview cache"));
                 staged=File.createTempFile("open-",".data",dir);
-                reader.copy(requested,pid,staged,image ? WallpaperImages.MAX_SOURCE_BYTES : document ? 9L*1024*1024 : 512L*1024*1024,document,columns);trim(dir,staged);
+                reader.copy(requested,pid,staged,image ? WallpaperImages.MAX_SOURCE_BYTES : document ? 9L*1024*1024 : 512L*1024*1024,document,columns);
+                trim(dir,staged);
                 Bitmap bitmap=null;TerminalPreviewScreen.PreparedText text=null;int pages=0;
                 if(image)bitmap=WallpaperImages.decode(staged,width,height);
                 else if(document)text=TerminalPreviewScreen.prepareText(Files.readAllBytes(staged.toPath()));
@@ -78,7 +91,11 @@ final class TerminalLinkOpener implements AutoCloseable {
                 });
             }catch(Exception e){
                 if(staged!=null)staged.delete();
-                activity.runOnUiThread(()->{if(current(ticket))showMessage("\033[31m"+(e.getMessage()==null ? com.termux.terminal.LumaLang.tr("无法打开文件","Failed to open file") : e.getMessage())+"\033[0m");});
+                if(!transfer.isCancelled()){
+                    activity.runOnUiThread(()->{if(current(ticket))showMessage("\033[31m"+(e.getMessage()==null ? com.termux.terminal.LumaLang.tr("无法打开文件","Failed to open file") : e.getMessage())+"\033[0m");});
+                }
+            }finally{
+                TerminalFileTransfer.bindCancellation(previous);
             }
         });return true;
     }
@@ -118,14 +135,37 @@ final class TerminalLinkOpener implements AutoCloseable {
         if(request!=INSTALL_PERMISSION_REQUEST)return false;File file=pendingInstall;String name=pendingInstallName;pendingInstall=null;pendingInstallName=null;
         if(file!=null){if(activity.getPackageManager().canRequestPackageInstalls())openExternal(file,name);else{file.delete();message(com.termux.terminal.LumaLang.tr("未允许安装应用","App installation permission not granted"));}}return true;
     }
-    private static void trim(File dir,File keep){
+    private void trim(File dir,File keep){
+        trim(dir,keep,pendingInstall,pdf,System.currentTimeMillis(),CACHE_BUDGET_BYTES);
+    }
+    static void trim(File dir,File keep,File pendingInstall,File activePdf,long nowMs,long budgetBytes){
         File[]files=dir.listFiles((d,n)->n.startsWith("open-")&&!n.startsWith("open-media-"));
         if(files==null)return;
-        for(File f:files)if(!f.equals(keep))f.delete();
+        List<File> recentInactive=new ArrayList<>();
+        long inactiveBytes=0L;
+        for(File f:files){
+            if(f.equals(keep)||f.equals(pendingInstall)||f.equals(activePdf))continue;
+            long modified=f.lastModified();
+            if(modified<=0L||nowMs-modified>=RECENT_FILE_WINDOW_MS){
+                f.delete();
+            }else{
+                recentInactive.add(f);
+                inactiveBytes+=Math.max(0L,f.length());
+            }
+        }
+        if(inactiveBytes>budgetBytes){
+            recentInactive.sort(Comparator.comparingLong(File::lastModified));
+            for(File f:recentInactive){
+                if(inactiveBytes<=budgetBytes)break;
+                long size=Math.max(0L,f.length());
+                if(f.delete())inactiveBytes-=size;
+            }
+        }
     }
     private void message(String text){Toast.makeText(activity,text,Toast.LENGTH_LONG).show();}
     @Override public void close(){
-        closed=true;dismiss();if(pendingInstall!=null)pendingInstall.delete();
+        closed=true;dismiss();cancelTransfer();if(pending!=null)pending.cancel(true);
+        if(pendingInstall!=null){pendingInstall.delete();pendingInstall=null;}
         File[]files=new File(activity.getCacheDir(),"terminal-open").listFiles((d,n)->n.startsWith("open-")&&!n.startsWith("open-media-"));
         if(files!=null)for(File f:files)f.delete();
         worker.shutdownNow();

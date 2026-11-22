@@ -70,8 +70,12 @@ class CodeBlockLongOutputTest {
         rule.onNodeWithContentDescription("复制").assertIsDisplayed().performClick()
         assertEquals(code, copied?.text)
         rule.runOnIdle { runBlocking { vertical.scrollTo(vertical.maxValue) } }
-        rule.onNodeWithText(code).assertExists()
-        println("PASS full ${code.length} chars, fixed shell, inner reading anchor, five streaming updates, exact copy including tail")
+        rule.waitForIdle()
+        rule.onNodeWithText("最后一行🙂", substring = true).assertExists()
+        rule.onNodeWithText("stream 4 val 42", substring = true).assertExists()
+        val renderedNodes = rule.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.Text), useUnmergedTree = true).fetchSemanticsNodes()
+        assertTrue("long output must virtualize to a bounded visible chunk window", renderedNodes.size <= 12)
+        println("PASS full ${code.length} chars, fixed shell, inner reading anchor, five streaming updates, exact copy including tail, windowed=${renderedNodes.size} nodes")
     }
     @Test fun adaptiveSoftWrapRespondsToViewportWidthAcrossCodeBlockAndToolCard() {
         val codeBlockText = "val first = \"short\"\nval longPath = \"" + "segment/".repeat(60) + "example.kt\""

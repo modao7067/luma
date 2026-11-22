@@ -41,8 +41,7 @@ class BrowserActivity : ComponentActivity() {
                             active = true,
                             onBack = ::finish,
                             onQuoteSelection = { quote ->
-                                val existing = app.sessions.state.value.selected?.draft.orEmpty()
-                                app.sessions.draft(if (existing.isBlank()) quote else existing.trimEnd() + "\n\n" + quote)
+                                app.sessions.appendDraft(owner, quote)
                                 finish()
                             },
                         )

@@ -26,6 +26,8 @@ public final class ShellService extends Service {
     private Thread installer;
     private volatile boolean destroyed;
     private boolean cleanupStarted;
+    private final java.util.concurrent.CountDownLatch cleanupDone=new java.util.concurrent.CountDownLatch(1);
+    private static final int MAX_CLIPBOARD_CHARS=262_144;
     private PowerManager.WakeLock wakeLock;
     private boolean wakeLockEnabled;
     private NativeBridge nativeBridge;
@@ -282,6 +284,14 @@ public final class ShellService extends Service {
         if(current!=null)current.shutdown();
         try{context.stopService(new Intent(context,ShellService.class));}catch(Exception ignored){}
     }
+    static boolean stopIfRunningAndAwait(Context context,long timeoutMs){
+        ShellService current=activeInstance;
+        if(current!=null)current.shutdown();
+        try{context.stopService(new Intent(context,ShellService.class));}catch(Exception ignored){}
+        if(current==null)return true;
+        try{return current.cleanupDone.await(Math.max(0L,timeoutMs),java.util.concurrent.TimeUnit.MILLISECONDS);}
+        catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
+    }
     private void shutdown(){
         final NativeBridge bridge;
         final ArrayList<TerminalSession> closing;
@@ -300,7 +310,11 @@ public final class ShellService extends Service {
             try{
                 if(bridge!=null)bridge.close();
             }finally{
-                for(TerminalSession window:closing)window.finishIfRunning();
+                try{
+                    for(TerminalSession window:closing)window.finishIfRunning();
+                }finally{
+                    cleanupDone.countDown();
+                }
             }
         },()->{releaseWakeLock();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();},main::post);
     }
@@ -313,8 +327,34 @@ public final class ShellService extends Service {
         session=null;
         super.onDestroy();
     }
+    private static String clampClipboardText(CharSequence input){
+        if(input==null)return "";
+        int len=input.length();
+        if(len<=MAX_CLIPBOARD_CHARS)return input.toString();
+        int end=MAX_CLIPBOARD_CHARS;
+        if(end>0 && Character.isHighSurrogate(input.charAt(end-1)))end--;
+        return input.subSequence(0,end).toString();
+    }
+    private String readBoundedClipboardUri(android.net.Uri uri){
+        try(android.content.res.AssetFileDescriptor afd=getContentResolver().openTypedAssetFileDescriptor(uri,"text/*",null)){
+            if(afd==null)return null;
+            try(java.io.Reader reader=new java.io.InputStreamReader(afd.createInputStream(),java.nio.charset.StandardCharsets.UTF_8)){
+                StringBuilder out=new StringBuilder();
+                char[] buf=new char[8192];
+                int n;
+                while(out.length()<MAX_CLIPBOARD_CHARS && (n=reader.read(buf,0,Math.min(buf.length,MAX_CLIPBOARD_CHARS-out.length())))!=-1){
+                    out.append(buf,0,n);
+                }
+                if(out.length()>0 && Character.isHighSurrogate(out.charAt(out.length()-1)))out.setLength(out.length()-1);
+                return out.toString();
+            }
+        }catch(Exception ignored){
+            return null;
+        }
+    }
     private final class Client extends LogCallbacks implements TerminalSessionClient {
         public void onEmulatorError(TerminalSession s,String message){if(listener!=null)listener.onTerminalError(message);}
+        public void onInputBufferFull(TerminalSession s,int rejectedBytes){if(listener!=null)listener.onTerminalError(LumaLang.tr("终端输入缓冲区已满，本次输入未写入","Terminal input buffer is full; input was not written"));}
         public void onTextChanged(TerminalSession s){if(listener!=null && sessions.contains(s))listener.onScreenChanged(s);}
         public void onTitleChanged(TerminalSession s){}
         public void onCommandStateChanged(TerminalSession s){if(listener!=null && sessions.contains(s))listener.onSessionStateChanged(s);}
@@ -325,14 +365,33 @@ public final class ShellService extends Service {
         public Integer getTerminalCursorStyle(){return 1;}
         public void onBell(TerminalSession s){}
         public void onCopyTextToClipboard(TerminalSession s,String text){
-            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Terminal",text));
+            if(text==null)return;
+            ClipboardManager cm=getSystemService(ClipboardManager.class);
+            if(cm==null)return;
+            try{
+                cm.setPrimaryClip(ClipData.newPlainText("Terminal",clampClipboardText(text)));
+            }catch(RuntimeException ignored){}
         }
         public void onPasteTextFromClipboard(TerminalSession s){
+            if(s==null || s.getEmulator()==null)return;
             ClipboardManager cm=getSystemService(ClipboardManager.class);
-            if(cm.hasPrimaryClip()){
-                CharSequence t=cm.getPrimaryClip().getItemAt(0).coerceToText(ShellService.this);
-                if(t!=null && s.getEmulator()!=null)s.getEmulator().paste(t.toString());
+            if(cm==null || !cm.hasPrimaryClip())return;
+            ClipData clip;
+            try{clip=cm.getPrimaryClip();}catch(RuntimeException ignored){return;}
+            if(clip==null || clip.getItemCount()==0)return;
+            ClipData.Item item=clip.getItemAt(0);
+            if(item==null)return;
+            CharSequence raw=item.getText();
+            String pasted=null;
+            if(raw!=null){
+                pasted=clampClipboardText(raw);
+            }else if(item.getUri()!=null){
+                pasted=readBoundedClipboardUri(item.getUri());
+            }else{
+                Intent intent=item.getIntent();
+                if(intent!=null)pasted=clampClipboardText(intent.toUri(Intent.URI_INTENT_SCHEME));
             }
+            if(pasted!=null && !pasted.isEmpty() && s.getEmulator()!=null)s.getEmulator().paste(pasted);
         }
     }
 }

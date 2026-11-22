@@ -138,6 +138,14 @@ private const val MAX_HIGHLIGHT_CACHE_CHARS = 512 * 1024
 private const val MAX_CACHED_CODE_CHARS = 128 * 1024
 private const val MAX_DIFF_CACHE_ENTRIES = 64
 private const val MAX_DIFF_CACHE_CHARS = 256 * 1024
+private const val MAX_TOKEN_INDEX_CACHE_ENTRIES = 96
+private const val MAX_TOKEN_INDEX_CACHE_CHARS = 1024 * 1024
+private const val MAX_CACHED_TOKEN_INDEX_CHARS = 256 * 1024
+private const val MAX_DIFF_TOKEN_INDEX_CACHE_ENTRIES = 64
+private const val MAX_DIFF_TOKEN_INDEX_CACHE_CHARS = 512 * 1024
+internal const val INDEX_LIBRARY_HIGHLIGHT_LIMIT = 64_000
+internal const val INDEX_RICH_SPAN_LIMIT = 16_384
+internal const val INDEX_DISPLAY_SPAN_LIMIT = 8_192
 
 private class CharBudgetLruCache<K, V>(
     private val maxEntries: Int,
@@ -167,6 +175,8 @@ private class CharBudgetLruCache<K, V>(
 
 private data class HighlightKey(val code: String, val language: String, val dark: Boolean)
 private data class DiffHighlightKey(val lines: List<DiffLine>, val language: String, val dark: Boolean)
+private data class TokenIndexKey(val code: String, val language: String)
+private data class DiffTokenIndexKey(val lines: List<DiffLine>, val language: String)
 
 private val highlightCache = CharBudgetLruCache<HighlightKey, AnnotatedString>(
     maxEntries = MAX_HIGHLIGHT_CACHE_ENTRIES,
@@ -176,6 +186,355 @@ private val diffHighlightCache = CharBudgetLruCache<DiffHighlightKey, AnnotatedS
     maxEntries = MAX_DIFF_CACHE_ENTRIES,
     maxChars = MAX_DIFF_CACHE_CHARS,
 )
+private val tokenIndexCache = CharBudgetLruCache<TokenIndexKey, CodeTokenIndex>(
+    maxEntries = MAX_TOKEN_INDEX_CACHE_ENTRIES,
+    maxChars = MAX_TOKEN_INDEX_CACHE_CHARS,
+)
+private val diffTokenIndexCache = CharBudgetLruCache<DiffTokenIndexKey, DiffTokenIndex>(
+    maxEntries = MAX_DIFF_TOKEN_INDEX_CACHE_ENTRIES,
+    maxChars = MAX_DIFF_TOKEN_INDEX_CACHE_CHARS,
+)
+
+internal fun normalizeCodeLanguage(language: String): String =
+    language.trim().substringBefore(' ').lowercase()
+
+internal fun isPlainCodeLanguage(code: String, language: String): Boolean {
+    val normalized = normalizeCodeLanguage(language)
+    if (normalized in plainLanguages) return true
+    if (normalized == "output" && !jsonContainer(code)) return true
+    return false
+}
+
+internal class CodeTokenIndex(
+    val code: String,
+    val language: String,
+    val tokenStarts: IntArray,
+    val tokenEnds: IntArray,
+    val tokenKinds: IntArray,
+    val maxEndPrefix: IntArray,
+    val tokenCount: Int,
+    val isPlain: Boolean,
+) {
+    fun slice(
+        targetCode: String,
+        startChar: Int,
+        endChar: Int,
+        palette: CodePalette,
+    ): AnnotatedString {
+        val safeStart = startChar.coerceIn(0, targetCode.length)
+        val safeEnd = endChar.coerceIn(safeStart, targetCode.length)
+        val text = if (safeStart == 0 && safeEnd == targetCode.length) {
+            targetCode
+        } else {
+            targetCode.substring(safeStart, safeEnd)
+        }
+        if (isPlain || tokenCount == 0 || safeStart >= safeEnd || safeStart >= code.length) {
+            return AnnotatedString(text)
+        }
+        val limitEnd = minOf(safeEnd, code.length)
+        val firstCandidate = findFirstTokenCandidate(maxEndPrefix, tokenCount, safeStart)
+        if (firstCandidate >= tokenCount || tokenStarts[firstCandidate] >= limitEnd) {
+            return AnnotatedString(text)
+        }
+        val builder = AnnotatedString.Builder(text)
+        var i = firstCandidate
+        while (i < tokenCount) {
+            val tStart = tokenStarts[i]
+            if (tStart >= limitEnd) break
+            val tEnd = tokenEnds[i]
+            if (tEnd > safeStart) {
+                val localStart = maxOf(tStart, safeStart) - safeStart
+                val localEnd = minOf(tEnd, limitEnd) - safeStart
+                if (localEnd > localStart) {
+                    addTokenSpan(builder, localStart, localEnd, tokenColor(tokenKinds[i], palette))
+                }
+            }
+            i++
+        }
+        return builder.toAnnotatedString()
+    }
+}
+
+internal class DiffTokenIndex(
+    val lines: List<DiffLine>,
+    val language: String,
+    val cleanCode: String,
+    val cleanLineStarts: IntArray,
+    val cleanIndex: CodeTokenIndex,
+) {
+    fun sliceLines(
+        startLine: Int,
+        endLineExclusive: Int,
+        palette: CodePalette,
+    ): AnnotatedString {
+        val safeStart = startLine.coerceIn(0, lines.size)
+        val safeEnd = endLineExclusive.coerceIn(safeStart, lines.size)
+        val count = safeEnd - safeStart
+        if (count <= 0) return AnnotatedString("")
+        val chunkLineStarts = IntArray(count)
+        val chunkBuilder = StringBuilder()
+        for (localIdx in 0 until count) {
+            if (localIdx > 0) chunkBuilder.append('\n')
+            chunkLineStarts[localIdx] = chunkBuilder.length
+            val line = lines[safeStart + localIdx]
+            val prefix = when (line.kind) {
+                DiffLineKind.ADDITION -> "+ "
+                DiffLineKind.DELETION -> "- "
+                DiffLineKind.CONTEXT -> "  "
+            }
+            chunkBuilder.append(prefix).append(line.text)
+        }
+        val chunkCode = chunkBuilder.toString()
+        val builder = AnnotatedString.Builder(chunkCode)
+        for (localIdx in 0 until count) {
+            val line = lines[safeStart + localIdx]
+            val prefixColor = when (line.kind) {
+                DiffLineKind.ADDITION -> palette.added
+                DiffLineKind.DELETION -> palette.removed
+                DiffLineKind.CONTEXT -> null
+            }
+            if (prefixColor != null) {
+                val hStart = chunkLineStarts[localIdx]
+                addTokenSpan(builder, hStart, hStart + 1, prefixColor)
+            }
+        }
+        if (!cleanIndex.isPlain && cleanIndex.tokenCount > 0) {
+            val cleanRangeStart = cleanLineStarts[safeStart]
+            val lastGlobal = safeEnd - 1
+            val cleanRangeEnd = cleanLineStarts[lastGlobal] + lines[lastGlobal].text.length
+            if (cleanRangeEnd > cleanRangeStart) {
+                val firstCandidate = findFirstTokenCandidate(cleanIndex.maxEndPrefix, cleanIndex.tokenCount, cleanRangeStart)
+                var ti = firstCandidate
+                while (ti < cleanIndex.tokenCount) {
+                    val tStart = cleanIndex.tokenStarts[ti]
+                    if (tStart >= cleanRangeEnd) break
+                    val tEnd = cleanIndex.tokenEnds[ti]
+                    if (tEnd > cleanRangeStart) {
+                        val color = tokenColor(cleanIndex.tokenKinds[ti], palette)
+                        if (color != null) {
+                            val spanStart = maxOf(tStart, cleanRangeStart)
+                            val spanEnd = minOf(tEnd, cleanRangeEnd)
+                            var lineIdx = findLineForCleanOffset(cleanLineStarts, safeStart, safeEnd, spanStart)
+                            while (lineIdx < safeEnd) {
+                                val lineStart = cleanLineStarts[lineIdx]
+                                if (lineStart >= spanEnd) break
+                                val lineEnd = lineStart + lines[lineIdx].text.length
+                                val segStart = maxOf(spanStart, lineStart)
+                                val segEnd = minOf(spanEnd, lineEnd)
+                                if (segEnd > segStart) {
+                                    val localLine = lineIdx - safeStart
+                                    val targetStart = chunkLineStarts[localLine] + 2 + (segStart - lineStart)
+                                    val targetEnd = chunkLineStarts[localLine] + 2 + (segEnd - lineStart)
+                                    addTokenSpan(builder, targetStart, targetEnd, color)
+                                }
+                                lineIdx++
+                            }
+                        }
+                    }
+                    ti++
+                }
+            }
+        }
+        return builder.toAnnotatedString()
+    }
+}
+
+private fun findFirstTokenCandidate(maxEndPrefix: IntArray, count: Int, targetOffset: Int): Int {
+    var lo = 0
+    var hi = count
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (maxEndPrefix[mid] <= targetOffset) {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+private fun findLineForCleanOffset(cleanLineStarts: IntArray, fromLine: Int, toLineExclusive: Int, offset: Int): Int {
+    var lo = fromLine
+    var hi = toLineExclusive - 1
+    var ans = fromLine
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        if (cleanLineStarts[mid] <= offset) {
+            ans = mid
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    return ans
+}
+
+private class TokenCollector(initialCapacity: Int) {
+    var starts = IntArray(initialCapacity.coerceAtLeast(16))
+    var ends = IntArray(initialCapacity.coerceAtLeast(16))
+    var kinds = IntArray(initialCapacity.coerceAtLeast(16))
+    var size = 0
+    private var prevStart = Int.MIN_VALUE
+    private var needsSort = false
+
+    fun add(start: Int, end: Int, kind: Int) {
+        if (end <= start) return
+        if (size == starts.size) {
+            val nextCap = starts.size * 2
+            starts = starts.copyOf(nextCap)
+            ends = ends.copyOf(nextCap)
+            kinds = kinds.copyOf(nextCap)
+        }
+        if (start < prevStart) needsSort = true
+        prevStart = start
+        starts[size] = start
+        ends[size] = end
+        kinds[size] = kind
+        size++
+    }
+
+    fun build(code: String, language: String, isPlain: Boolean): CodeTokenIndex {
+        if (size == 0) {
+            val empty = IntArray(0)
+            return CodeTokenIndex(code, language, empty, empty, empty, empty, 0, isPlain)
+        }
+        if (needsSort) {
+            for (i in 1 until size) {
+                val s = starts[i]
+                val e = ends[i]
+                val k = kinds[i]
+                var j = i - 1
+                while (j >= 0 && starts[j] > s) {
+                    starts[j + 1] = starts[j]
+                    ends[j + 1] = ends[j]
+                    kinds[j + 1] = kinds[j]
+                    j--
+                }
+                starts[j + 1] = s
+                ends[j + 1] = e
+                kinds[j + 1] = k
+            }
+        }
+        val outStarts = if (size == starts.size) starts else starts.copyOf(size)
+        val outEnds = if (size == ends.size) ends else ends.copyOf(size)
+        val outKinds = if (size == kinds.size) kinds else kinds.copyOf(size)
+        val maxEndPrefix = IntArray(size)
+        var runningMax = 0
+        for (i in 0 until size) {
+            val e = outEnds[i]
+            if (e > runningMax) runningMax = e
+            maxEndPrefix[i] = runningMax
+        }
+        return CodeTokenIndex(code, language, outStarts, outEnds, outKinds, maxEndPrefix, size, isPlain)
+    }
+}
+
+private fun plainCodeTokenIndex(code: String, normalized: String): CodeTokenIndex {
+    val empty = IntArray(0)
+    return CodeTokenIndex(code, normalized, empty, empty, empty, empty, 0, isPlain = true)
+}
+
+internal fun cachedCodeTokenIndex(code: String, language: String): CodeTokenIndex? {
+    val normalized = normalizeCodeLanguage(language)
+    if (isPlainCodeLanguage(code, normalized)) return plainCodeTokenIndex(code, normalized)
+    return tokenIndexCache.get(TokenIndexKey(code, normalized))
+}
+
+internal fun codeTokenIndex(
+    code: String,
+    language: String,
+    checkpoint: () -> Unit = {},
+): CodeTokenIndex {
+    val normalized = normalizeCodeLanguage(language)
+    if (normalized in plainLanguages) return plainCodeTokenIndex(code, normalized)
+    val json = normalized in jsonLanguages || (normalized in setOf("params", "参数", "output") && jsonContainer(code))
+    if (normalized == "output" && !json) return plainCodeTokenIndex(code, normalized)
+    val key = TokenIndexKey(code, normalized)
+    tokenIndexCache.get(key)?.let { return it }
+    val spanLimit = if (code.length <= INDEX_LIBRARY_HIGHLIGHT_LIMIT) INDEX_RICH_SPAN_LIMIT else INDEX_DISPLAY_SPAN_LIMIT
+    val collector = TokenCollector((code.length / 10).coerceIn(32, 2048))
+    val sink = CodeTokens.Sink { start, end, kind -> collector.add(start, end, kind) }
+    val result = when {
+        json -> {
+            val valid = CodeTokens.scanJson(code, normalized == "jsonc" || normalized == "json5", spanLimit, sink, checkpoint)
+            if (valid) collector.build(code, normalized, false) else plainCodeTokenIndex(code, normalized)
+        }
+        normalized in shellLanguages -> {
+            CodeTokens.scanShell(code, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        normalized in configLanguages -> {
+            CodeTokens.scanConfig(code, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        normalized in markupLanguages -> {
+            CodeTokens.scanMarkup(code, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        normalized in styleLanguages -> {
+            CodeTokens.scanStyle(code, normalized != "css", spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        normalized in markdownLanguages && code.length <= INDEX_LIBRARY_HIGHLIGHT_LIMIT -> {
+            CodeTokens.scanMarkdown(code, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        normalized in setOf("diff", "patch") -> {
+            CodeTokens.scan(code, true, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        code.length <= INDEX_LIBRARY_HIGHLIGHT_LIMIT -> {
+            CodeTokens.scanCode(code, codeLanguageFamily(normalized), spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+        else -> {
+            CodeTokens.scan(code, false, spanLimit, sink, checkpoint)
+            collector.build(code, normalized, false)
+        }
+    }
+    if (code.length <= MAX_CACHED_TOKEN_INDEX_CHARS) {
+        tokenIndexCache.put(key, result, code.length)
+    }
+    return result
+}
+
+internal fun cachedDiffTokenIndex(lines: List<DiffLine>, language: String): DiffTokenIndex? =
+    diffTokenIndexCache.get(DiffTokenIndexKey(lines, normalizeCodeLanguage(language)))
+
+internal fun diffTokenIndex(
+    lines: List<DiffLine>,
+    language: String,
+    checkpoint: () -> Unit = {},
+): DiffTokenIndex {
+    val normalized = normalizeCodeLanguage(language)
+    val key = DiffTokenIndexKey(lines, normalized)
+    diffTokenIndexCache.get(key)?.let { return it }
+    if (lines.isEmpty()) {
+        return DiffTokenIndex(lines, normalized, "", IntArray(0), plainCodeTokenIndex("", normalized))
+    }
+    val cleanLineStarts = IntArray(lines.size)
+    val cleanBuilder = StringBuilder()
+    lines.forEachIndexed { idx, line ->
+        if (idx > 0) cleanBuilder.append('\n')
+        cleanLineStarts[idx] = cleanBuilder.length
+        cleanBuilder.append(line.text)
+    }
+    val cleanCode = cleanBuilder.toString()
+    val base = codeTokenIndex(cleanCode, normalized, checkpoint)
+    val cleanIndex = if (normalized in jsonLanguages && base.tokenCount == 0 && cleanCode.isNotBlank()) {
+        val limit = if (cleanCode.length <= INDEX_LIBRARY_HIGHLIGHT_LIMIT) INDEX_RICH_SPAN_LIMIT else INDEX_DISPLAY_SPAN_LIMIT
+        val collector = TokenCollector((cleanCode.length / 10).coerceIn(32, 2048))
+        CodeTokens.scanJsonFragment(cleanCode, limit, { start, end, kind -> collector.add(start, end, kind) }, checkpoint)
+        collector.build(cleanCode, normalized, false)
+    } else {
+        base
+    }
+    val result = DiffTokenIndex(lines, normalized, cleanCode, cleanLineStarts, cleanIndex)
+    if (cleanCode.length <= MAX_CACHED_TOKEN_INDEX_CHARS) {
+        diffTokenIndexCache.put(key, result, cleanCode.length)
+    }
+    return result
+}
 
 internal fun cachedHighlight(code: String, language: String, dark: Boolean): AnnotatedString? =
     highlightCache.get(HighlightKey(code, language, dark))
@@ -217,7 +576,7 @@ internal fun highlightedCode(
         normalized in configLanguages -> configHighlight(code, spanLimit, palette, checkpoint)
         normalized in markupLanguages -> markupHighlight(code, spanLimit, palette, checkpoint)
         normalized in styleLanguages -> styleHighlight(code, normalized != "css", spanLimit, palette, checkpoint)
-        normalized in markdownLanguages -> markdownHighlight(code, spanLimit, palette, checkpoint)
+        normalized in markdownLanguages && code.length <= LIBRARY_HIGHLIGHT_LIMIT -> markdownHighlight(code, spanLimit, palette, checkpoint)
         normalized in setOf("diff", "patch") -> scannerHighlight(code, true, spanLimit, palette, checkpoint)
         code.length <= LIBRARY_HIGHLIGHT_LIMIT -> codeHighlight(code, codeLanguageFamily(normalized), CodeTokens.RICH_SPAN_LIMIT, palette, checkpoint)
         else -> scannerHighlight(code, false, CodeTokens.DISPLAY_SPAN_LIMIT, palette, checkpoint)

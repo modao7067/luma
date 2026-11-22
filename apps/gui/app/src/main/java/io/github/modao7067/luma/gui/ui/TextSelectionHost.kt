@@ -41,6 +41,15 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -119,8 +128,34 @@ internal class TextSelectionWindow(
             if (!toolbar.scopedToEditor && toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
         }
     }
+    fun allowKeyboardSelection() {
+        toolbars.forEach { toolbar ->
+            if (toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
+        }
+    }
     fun notifyScrollMovement() { active?.onScrollMovement() }
     fun activate(toolbar: NativeSelectionToolbar) { if (active !== toolbar) active?.hide(); active = toolbar }
+}
+
+internal fun isSelectionOrNavigationKeyEvent(event: KeyEvent): Boolean {
+    if (event.type != KeyEventType.KeyDown) return false
+    val key = event.key
+    if (key == Key.Menu) return true
+    if (event.isShiftPressed && (
+            key == Key.DirectionLeft ||
+            key == Key.DirectionRight ||
+            key == Key.DirectionUp ||
+            key == Key.DirectionDown ||
+            key == Key.MoveHome ||
+            key == Key.MoveEnd ||
+            key == Key.PageUp ||
+            key == Key.PageDown ||
+            key == Key.F10
+        )
+    ) {
+        return true
+    }
+    return (event.isCtrlPressed || event.isMetaPressed) && (key == Key.A || key == Key.C || key == Key.X || key == Key.V)
 }
 private val LocalSelectionWindow = staticCompositionLocalOf<TextSelectionWindow?> { null }
 
@@ -216,10 +251,16 @@ internal fun LumaSelectionContainer(
 
     SimpleLayout(
         modifier = modifier
+            .onPreviewKeyEvent { event ->
+                if (isSelectionOrNavigationKeyEvent(event) && nativeToolbar != null && nativeToolbar.status == TextToolbarStatus.Hidden) {
+                    nativeToolbar.allowNextGesture()
+                }
+                false
+            }
             .then(manager.modifier)
             .onGloballyPositioned { coords ->
                 filteredRegistrar.containerCoordinates = coords
-                if (nativeToolbar != null && manager.hasFocus && selection != null && manager.showToolbar && manager.isInTouchMode) {
+                if (nativeToolbar != null && manager.hasFocus && selection != null && manager.showToolbar && (manager.isInTouchMode || nativeToolbar.status == TextToolbarStatus.Shown)) {
                     nativeToolbar.refreshSelectionAnchor {
                         manager.showToolbar = true
                     }
@@ -336,7 +377,14 @@ private fun NativeTextSelectionWindow(content: @Composable () -> Unit) {
         LocalAutofillManager provides null,
     ) {
         SelectionToolbarProvider {
-            Box(Modifier.pointerInput(window) {
+            Box(Modifier
+                .onPreviewKeyEvent { event ->
+                    if (isSelectionOrNavigationKeyEvent(event)) {
+                        window.allowKeyboardSelection()
+                    }
+                    false
+                }
+                .pointerInput(window) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
                     val shown = window.active
@@ -402,12 +450,19 @@ internal fun SelectionToolbarProvider(
     DisposableEffect(window, toolbar) { window.register(toolbar); onDispose { window.unregister(toolbar) } }
     if (editor != null) {
         Box(
-            Modifier.pointerInput(toolbar) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    if (toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
+            Modifier
+                .onPreviewKeyEvent { event ->
+                    if (isSelectionOrNavigationKeyEvent(event) && toolbar.status == TextToolbarStatus.Hidden) {
+                        toolbar.allowNextGesture()
+                    }
+                    false
                 }
-            },
+                .pointerInput(toolbar) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        if (toolbar.status == TextToolbarStatus.Hidden) toolbar.allowNextGesture()
+                    }
+                },
             propagateMinConstraints = true,
         ) {
             CompositionLocalProvider(LocalTextToolbar provides toolbar, content = content)

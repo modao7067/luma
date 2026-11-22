@@ -307,7 +307,9 @@ internal class OpenCodeSession(
                             throw e
                         } catch (e: Exception) {
                             if (e is IOException && e !is OpenCodeRejected) {
-                                runCatching { rebindIfBridgeDead(active) }
+                                try { rebindIfBridgeDead(active) }
+                                catch (ce: CancellationException) { throw ce }
+                                catch (_: Exception) { }
                             }
                             throw e
                         }
@@ -323,9 +325,11 @@ internal class OpenCodeSession(
                         if (state.connected && !state.recovering) reconcileUnconfirmedIdle()
                         publish()
                     }).also { it.start() }
+            } catch (e: CancellationException) {
+                client?.close(); client = null; job.cancel(); throw e
             } catch (e: Exception) {
                 view = view.copy(connected = false, loading = false, canOpenTui = false, error = e.message, connection = tr("未连接", "Disconnected"))
-                client?.close(); job.cancel(); publish(); throw e
+                client?.close(); client = null; job.cancel(); publish(); throw e
             }
         }
     }
@@ -447,15 +451,17 @@ internal class OpenCodeSession(
         val api = client ?: return@withLock
         if (all) {
             val rows = linkedMapOf<String, JSONObject>(); var cursor: String? = null
+            val seenCursors = hashSetOf<String>()
             do {
                 val page = api.call(path + "/message?limit=100" + if (cursor == null) "&order=asc" else "&cursor=${encode(cursor)}")
                 page.getJSONArray("data").objects().forEach { rows[it.getString("id")] = it }
-                cursor = page.optJSONObject("cursor")?.stringOrNull("next")
+                val nextCursor = page.optJSONObject("cursor")?.stringOrNull("next")
+                cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
             } while (cursor != null)
             history.clear(); history.putAll(rows)
         } else ids.forEach { id ->
             try { history[id] = api.call(path + "/message/" + encode(id)).getJSONObject("data") }
-            catch (e: OpenCodeRejected) { if (e.status != 404) throw e }
+            catch (e: OpenCodeRejected) { if (e.status == 404) history.remove(id) else throw e }
         }
         syncHistoryIndexLocked()
         if (all) {
@@ -619,10 +625,12 @@ internal class OpenCodeSession(
             if (full) {
                 val rows = linkedMapOf<String, JSONObject>()
                 var cursor: String? = null
+                val seenCursors = hashSetOf<String>()
                 do {
                     val page = api.call(childPath + "/message?limit=100" + if (cursor == null) "&order=asc" else "&cursor=${encode(cursor)}")
                     page.getJSONArray("data").objects().forEach { rows[it.getString("id")] = it }
-                    cursor = page.optJSONObject("cursor")?.stringOrNull("next")
+                    val nextCursor = page.optJSONObject("cursor")?.stringOrNull("next")
+                    cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
                 } while (cursor != null)
                 read.messages.clear(); read.messages.putAll(rows)
             } else dirty.forEach { messageId ->
@@ -713,7 +721,7 @@ internal class OpenCodeSession(
     fun configure(model: String, effort: String) {
         if (view.configuring) return
         run {
-            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { tr("请在任务与队列结束后修改模型", "Wait for active turn and queue to finish before changing model") }
+            check(view.connected && view.activeTurnId == null && view.queue.isEmpty() && !SubmissionLedger.pending(record)) { tr("请在任务与队列结束后修改模型", "Wait for active turn and queue to finish before changing model") }
             val option = models.find { it.id == model } ?: error(tr("模型不在原生列表中", "Model is not in native catalog"))
             check(effort.isEmpty() || effort in option.efforts)
             view = view.copy(configuring = true); publish()
@@ -724,7 +732,7 @@ internal class OpenCodeSession(
     fun configurePermission(agentId: String) {
         if (view.configuring) return
         run {
-            check(view.connected && view.activeTurnId == null && view.queue.isEmpty()) { tr("请在任务与队列结束后修改权限模式", "Wait for active turn and queue to finish before changing permission mode") }
+            check(view.connected && view.activeTurnId == null && view.queue.isEmpty() && !SubmissionLedger.pending(record)) { tr("请在任务与队列结束后修改权限模式", "Wait for active turn and queue to finish before changing permission mode") }
             check(view.permissions.any { it.id == agentId }) { tr("CLI 未允许此权限配置", "Permission mode not allowed by CLI") }
             view = view.copy(configuring = true); publish()
             try { client!!.call(path + "/agent", "POST", obj("agent" to agentId)); synchronizer?.invalidate(all = true) }
@@ -757,9 +765,21 @@ internal class OpenCodeSession(
                 else { check(choice in listOf("once", "always", "reject")); obj("decision" to choice) }
             answering.add(id); view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) }); publish()
             val currentSync = synchronizer
-            try { client!!.call(path + (if (isForm) "/form/" else "/permission/") + encode(nativeId) + (if (skip) "" else "/reply"), if (skip) "DELETE" else "POST", body) }
-            catch (e: OpenCodeRejected) { if (e.status in listOf(400, 422)) answering.remove(id); throw e }
-            finally { if (currentCoroutineContext().isActive && synchronizer === currentSync) currentSync?.invalidate(all = true) }
+            try {
+                client!!.call(path + (if (isForm) "/form/" else "/permission/") + encode(nativeId) + (if (skip) "" else "/reply"), if (skip) "DELETE" else "POST", body)
+            } catch (e: CancellationException) {
+                answering.remove(id)
+                view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) })
+                publish()
+                throw e
+            } catch (e: Exception) {
+                answering.remove(id)
+                view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) })
+                publish()
+                throw e
+            } finally {
+                if (currentCoroutineContext().isActive && synchronizer === currentSync) currentSync?.invalidate(all = true)
+            }
         }
     }
     fun rename(title: String) = run { check(view.connected) { tr("请先连接会话", "Connect the session first") }; require(title.isNotBlank()); client!!.call(path, "PATCH", obj("title" to title.trim())); synchronizer?.invalidate(all = true) }
@@ -805,7 +825,7 @@ internal class OpenCodeSession(
         }
         synchronizer?.close(); synchronizer = null; connectionNotice = null
         catalogInitialized = false; nativeAgents = JSONArray()
-        client?.close(); job.cancel(); childReads.clear(); childSnapshots.clear(); dirtyChildren.clear(); childHistoryLoaded = false; activeIds = emptySet(); answering.clear(); admitting.clear()
+        client?.close(); client = null; job.cancel(); childReads.clear(); childSnapshots.clear(); dirtyChildren.clear(); childHistoryLoaded = false; activeIds = emptySet(); answering.clear(); admitting.clear()
         view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"))
     }
     private fun encode(text: String) = URLEncoder.encode(text, "UTF-8")

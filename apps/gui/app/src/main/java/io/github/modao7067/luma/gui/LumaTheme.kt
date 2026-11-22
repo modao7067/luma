@@ -25,9 +25,7 @@ internal fun LumaTheme(
     val view = LocalView.current
     val inspection = LocalInspectionMode.current
     if (!inspection) {
-        SideEffect {
-            io.github.modao7067.luma.gui.i18n.LumaI18n.onConfigurationChanged(configuration)
-        }
+        io.github.modao7067.luma.gui.i18n.LumaI18n.onConfigurationChanged(configuration)
     }
     val seed = seedArgb ?: remember(context, configuration) { systemThemeSeed(context).argb }
     val colors = remember(seed, darkTheme) { lumaColorScheme(seed, darkTheme) }

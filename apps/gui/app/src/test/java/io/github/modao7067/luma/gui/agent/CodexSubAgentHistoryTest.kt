@@ -136,4 +136,37 @@ class CodexSubAgentHistoryTest {
         history.event(event("item/completed", "child", "turnId" to "turn", "item" to obj("type" to "userMessage", "id" to "u-native", "clientId" to "u-client", "content" to JSONArray().put(obj("type" to "text", "text" to "prompt")))))
         assertEquals(listOf("u-client", "output"), history.messages.map { it.id })
     }
+
+    @Test fun repeatedPaginationCursorStopsLooping() = runBlocking {
+        var itemPages = 0
+        var turnPages = 0
+        val history = CodexSubAgentHistory("parent", "child", { method, params ->
+            when (method) {
+                "thread/read" -> obj("thread" to metadata())
+                "thread/items/list" -> {
+                    itemPages++
+                    assertTrue(itemPages <= 3)
+                    obj(
+                        "data" to JSONArray().put(obj("turnId" to "turn", "item" to message("item-$itemPages"))),
+                        "nextCursor" to "stuck-cursor",
+                    )
+                }
+                "thread/turns/list" -> if (params.optString("sortDirection") == "desc") {
+                    obj("data" to JSONArray().put(obj("id" to "turn", "status" to "completed")), "backwardsCursor" to "tail-cursor")
+                } else {
+                    turnPages++
+                    assertTrue(turnPages <= 3)
+                    obj(
+                        "data" to JSONArray().put(obj("id" to "turn", "status" to "completed", "items" to JSONArray().put(message("turn-$turnPages")))),
+                        "nextCursor" to "tail-cursor",
+                    )
+                }
+                else -> error(method)
+            }
+        }, { it })
+        history.refresh()
+        assertEquals(2, itemPages)
+        history.refresh()
+        assertEquals(1, turnPages)
+    }
 }

@@ -74,8 +74,8 @@ internal fun CompactComposer(
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val imeVisible = !suppressIme && WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    var editing by remember { mutableStateOf(ComposerFocusState()) }
-    var menus by remember { mutableStateOf(ComposerMenuState(previewMenuAnchor ?: ComposerMenuAnchor.Plus.takeIf { previewMenu })) }
+    var editing by remember(view.summary.id) { mutableStateOf(ComposerFocusState()) }
+    var menus by remember(view.summary.id) { mutableStateOf(ComposerMenuState(previewMenuAnchor ?: ComposerMenuAnchor.Plus.takeIf { previewMenu })) }
     val plusAnchor = rememberMorphAnchor()
     val modelAnchor = rememberMorphAnchor()
     val permissionAnchor = rememberMorphAnchor()
@@ -83,7 +83,7 @@ internal fun CompactComposer(
     val permissions = sessionInteractive && menus.active == ComposerMenuAnchor.Permission
     val models = sessionInteractive && menus.active == ComposerMenuAnchor.Model
     var pluginExpanded by remember(view.summary.id) { mutableStateOf(previewPlugins) }
-    var pasteNotice by remember { mutableStateOf<String?>(null) }
+    var pasteNotice by remember(view.summary.id) { mutableStateOf<String?>(null) }
     SideEffect {
         if (!plusMenu && pluginExpanded) pluginExpanded = false
         if ((!sessionInteractive || view.preparingFirstSend) && menus.active != null) {

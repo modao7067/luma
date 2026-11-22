@@ -26,13 +26,28 @@ public final class ImeChecks {
  static class Preview {boolean key(int code){return true;}}
  Preview mFilePreview;
  Object mEmulator=new Object(); Client mClient=new Client();StringBuilder sent=new StringBuilder();
+ boolean protocolActive;
  static class Client {
   boolean isTerminalViewSelected(){return true;} int getInputMode(){return 0;}
-  boolean readShiftKey(){return false;}void logInfo(String tag,String message){}
+  boolean ctrlLatched,altLatched,shiftLatched;
+  int ctrlReads,altReads,shiftReads;
+  boolean readControlKey(){ctrlReads++;boolean v=ctrlLatched;ctrlLatched=false;return v;}
+  boolean readAltKey(){altReads++;boolean v=altLatched;altLatched=false;return v;}
+  boolean readShiftKey(){shiftReads++;boolean v=shiftLatched;shiftLatched=false;return v;}
+  void logInfo(String tag,String message){}
  }
  void stopTextSelectionMode(){}
- void inputCodePoint(int source,int code,boolean ctrl,boolean alt){sent.appendCodePoint(ctrl?code&31:code);}
- void inputCodePoint(int source,int code,boolean ctrl,boolean alt,boolean shift){inputCodePoint(source,code,ctrl,alt);}
+ void sendCommittedEnterOrTab(boolean isEnter,boolean ctrl,boolean alt,boolean shift){
+  if(protocolActive){sent.append(isEnter?"<ENTER":"<TAB").append(ctrl?"+C":"").append(alt?"+A":"").append(shift?"+S":"").append(">");}
+  else if(isEnter){if(alt)sent.append('\033');sent.append('\r');}
+  else if(shift&&!ctrl&&!alt){sent.append("\033[Z");}
+  else{if(alt)sent.append('\033');sent.append('\t');}
+ }
+ void inputCodePointResolved(int source,int code,boolean ctrl,boolean alt,boolean shift){
+  if(protocolActive&&(ctrl||alt||shift)){sent.append("<CP:").append(code).append(ctrl?"+C":"").append(alt?"+A":"").append(shift?"+S":"").append(">");return;}
+  if(alt)sent.append('\033');
+  sent.appendCodePoint(ctrl?code&31:code);
+ }
  static class Editable implements CharSequence {
   StringBuilder text=new StringBuilder();int cursor=0;
   public int length(){return text.length();}public char charAt(int i){return text.charAt(i);}
@@ -79,9 +94,23 @@ public final class ImeChecks {
   check(sent.length()==0,"raw DEL key pair while composing stays local");
   ic.finishComposingText();ic.deleteSurroundingText(2,1);
   check(sent.toString().equals("<DEL><DEL><FDEL>"),"committed terminal text supports backward and forward deletion");
+  sent.setLength(0);ic.deleteSurroundingText(500,500);
+  check(sent.toString().equals("<DEL>".repeat(128)+"<FDEL>".repeat(128)),"deleteSurroundingText clamps large counts to 128");
+  sent.setLength(0);ic.deleteSurroundingText(-10,-5);
+  check(sent.length()==0,"deleteSurroundingText clamps negative counts to 0");
   sent.setLength(0);ic.commitText("git status 😀\n",1);
   check(sent.toString().equals("git status 😀\r"),"ASCII, spaces, supplementary Unicode and terminal Enter preserved");
   ic.finishComposingText();check(sent.toString().equals("git status 😀\r"),"finish after commit does not duplicate text");
+  sent.setLength(0);protocolActive=true;ic.commitText("\n\r\t",1);
+  check(sent.toString().equals("<ENTER><ENTER><TAB>"),"protocol-active newline, CR and tab route directly as Enter/Tab");
+  sent.setLength(0);mClient.ctrlReads=mClient.altReads=mClient.shiftReads=0;
+  mClient.ctrlLatched=true;mClient.altLatched=true;mClient.shiftLatched=true;
+  ic.commitText("",1);
+  check(mClient.ctrlLatched&&mClient.altLatched&&mClient.shiftLatched,"empty commit preserves latched modifiers");
+  ic.commitText("ab",1);
+  check(mClient.ctrlReads==1&&mClient.altReads==1&&mClient.shiftReads==1,"latched modifiers read once before loop without short-circuit");
+  check(sent.toString().equals("<CP:65+C+A+S><CP:66+C+A+S>"),"latched modifiers apply consistently across multi-char commit");
+  protocolActive=false;
   sent.setLength(0);mFilePreview=new Preview();ic.setComposingText("pinyin",1);ic.commitText("输入",1);ic.deleteSurroundingText(1,0);ic.sendKeyEvent(new KeyEvent(0,67));
   check(sent.length()==0,"preview blocks IME commits, composition, deletion and raw key forwarding into main PTY");
   mFilePreview=null;ic.commitText("继续",1);check(sent.toString().equals("继续"),"IME resumes on main terminal after preview closes");

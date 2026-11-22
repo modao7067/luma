@@ -19,12 +19,14 @@ from .antigravity_cli import (
     agy_timer_condition,
     child_log_path,
     clean_agy_tool_output,
+    extract_agy_bg_log_path,
     extract_agy_bg_task_id,
     extract_agy_task_result,
     extract_agy_tool_timestamps,
     invoke_child,
     is_agy_oneshot_timer,
     parse_system_message,
+    read_agy_bg_log_tail,
     read_full_step,
     read_transcript,
     transcript_args,
@@ -189,6 +191,9 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             self.background_tasks = set()
             self.settled_background_tasks = set()
             self.background_task_rows = {}
+            self.background_task_logs = {}
+            self.background_task_log_state = {}
+            self.background_task_tailed = set()
             self.oneshot_timers = set()
             self.conditional_timers = {}
             self.in_autonomous_turn = False
@@ -421,6 +426,12 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             if not settle_rows:
                 self.settled_background_tasks.clear()
             self.background_task_rows.clear()
+            if hasattr(self, "background_task_logs"):
+                self.background_task_logs.clear()
+            if hasattr(self, "background_task_log_state"):
+                self.background_task_log_state.clear()
+            if hasattr(self, "background_task_tailed"):
+                self.background_task_tailed.clear()
             self.oneshot_timers.clear()
             self.conditional_timers.clear()
             self.in_autonomous_turn = False
@@ -732,6 +743,14 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                         if tid not in self.settled_background_tasks:
                             self.background_tasks.add(tid)
                             self.background_task_rows[tid] = ident
+                            log_path = extract_agy_bg_log_path(raw_outcome)
+                            if log_path:
+                                if not hasattr(self, "background_task_logs"):
+                                    self.background_task_logs = {}
+                                self.background_task_logs[tid] = log_path
+                                if getattr(self, "history_loaded", False):
+                                    self.ensure_child_tail()
+                                    self._wake_transcript_tail()
                             if is_agy_oneshot_timer(raw_outcome, tool_name, raw_params):
                                 self.oneshot_timers.add(tid)
                                 cond = agy_timer_condition(raw_params)
@@ -968,6 +987,13 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.background_tasks.discard(tid)
         self.oneshot_timers.discard(tid)
         self.conditional_timers.pop(tid, None)
+        if hasattr(self, "background_task_logs"):
+            self.background_task_logs.pop(tid, None)
+        if hasattr(self, "background_task_log_state"):
+            self.background_task_log_state.pop(tid, None)
+        was_tailed = hasattr(self, "background_task_tailed") and tid in self.background_task_tailed
+        if hasattr(self, "background_task_tailed"):
+            self.background_task_tailed.discard(tid)
         rid = self.background_task_rows.pop(tid, "")
         if rid and rid in self.rows:
             cur = self.rows[rid]
@@ -977,8 +1003,11 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 if settled_at_ms > 0:
                     updates["completedAtMs"] = settled_at_ms
             if outcome:
-                existing = (cur.get("outcome") or "").strip()
-                updates["outcome"] = f"{existing}\n{outcome}" if existing and outcome not in existing else outcome
+                if was_tailed:
+                    updates["outcome"] = outcome
+                else:
+                    existing = (cur.get("outcome") or "").strip()
+                    updates["outcome"] = f"{existing}\n{outcome}" if existing and outcome not in existing else outcome
             if updates:
                 self.row({**cur, **updates})
 
@@ -1126,6 +1155,12 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                         self.background_tasks.clear()
                         self.settled_background_tasks.clear()
                         self.background_task_rows.clear()
+                        if hasattr(self, "background_task_logs"):
+                            self.background_task_logs.clear()
+                        if hasattr(self, "background_task_log_state"):
+                            self.background_task_log_state.clear()
+                        if hasattr(self, "background_task_tailed"):
+                            self.background_task_tailed.clear()
                         self.oneshot_timers.clear()
                         self.conditional_timers.clear()
                         self.in_autonomous_turn = False
@@ -1364,7 +1399,9 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                                         except (ValueError, TypeError):
                                             pass
                                     final_out = _plan_tool_outcome(plan_kind, old_params, cleaned_output, tool_status) if plan_kind else cleaned_output
-                                    if not final_out and old_tool.get("outcome"):
+                                    if tid and tid in getattr(self, "background_task_tailed", ()) and old_tool.get("outcome"):
+                                        final_out = old_tool["outcome"]
+                                    elif not final_out and old_tool.get("outcome"):
                                         final_out = old_tool["outcome"]
                                     gen_media = self._resolve_transcript_media(step.get("media")) if hydrate_history and step.get("media") else []
                                     tool_updates = {
@@ -1381,6 +1418,11 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                             if tid:
                                 if tid not in self.settled_background_tasks:
                                     self.background_tasks.add(tid)
+                                    log_path = extract_agy_bg_log_path(output)
+                                    if log_path:
+                                        if not hasattr(self, "background_task_logs"):
+                                            self.background_task_logs = {}
+                                        self.background_task_logs[tid] = log_path
                                     if is_agy_oneshot_timer(output, head_name, head_params):
                                         self.oneshot_timers.add(tid)
                                         cond = agy_timer_condition(head_params)
@@ -1528,6 +1570,37 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 protected=("manage_subagents", "server_restart", "swarm:killed"),
             )
 
+    def refresh_background_task_logs(self):
+        with self.lock:
+            if self.close_pending or self.released or not getattr(self, "background_tasks", None):
+                return
+            logs = getattr(self, "background_task_logs", {})
+            states = getattr(self, "background_task_log_state", {})
+            targets = [
+                (tid, self.background_task_rows.get(tid, ""), logs.get(tid, ""), states.get(tid))
+                for tid in list(self.background_tasks)
+            ]
+        for tid, rid, log_path, prev_stat in targets:
+            if not rid or not log_path:
+                continue
+            tailed, next_stat = read_agy_bg_log_tail(log_path, prev_stat=prev_stat)
+            if tailed is None:
+                continue
+            with self.lock:
+                if self.close_pending or self.released or tid not in self.background_tasks:
+                    continue
+                if not hasattr(self, "background_task_log_state"):
+                    self.background_task_log_state = {}
+                self.background_task_log_state[tid] = next_stat
+                cur = self.rows.get(rid)
+                if not cur or cur.get("status") not in ("running", "in_progress", "pending"):
+                    continue
+                if tailed and cur.get("outcome") != tailed:
+                    if not hasattr(self, "background_task_tailed"):
+                        self.background_task_tailed = set()
+                    self.background_task_tailed.add(tid)
+                    self.row({**cur, "outcome": tailed})
+
     def sync_transcripts_once(self, settle_exited=False, hydrate_history=False):
         with self.lock:
             if self.close_pending or self.released:
@@ -1546,6 +1619,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 if self.close_pending or self.released:
                     return
             self.refresh_child_log(ident, path)
+        self.refresh_background_task_logs()
         if settle_exited:
             with self.lock:
                 if self.close_pending or self.released:

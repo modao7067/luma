@@ -79,9 +79,9 @@ internal fun ModelMenu(expanded: Boolean, dismiss: () -> Unit, state: CockpitSta
                 verticalPadding = 4.dp,
             ) {
                 val options = when (name) {
-                    "模型" -> remember(state.models) { state.models.map { RequestChoice(it.id, it.label) } }
-                    "思考强度" -> remember(model?.efforts) { model?.efforts.orEmpty().map { RequestChoice(it, it) } }
-                    else -> model?.speeds.orEmpty()
+                    "模型" -> remember(state.models) { state.models.distinctBy { it.id }.map { RequestChoice(it.id, it.label) } }
+                    "思考强度" -> remember(model?.efforts) { model?.efforts.orEmpty().distinct().map { RequestChoice(it, it) } }
+                    else -> remember(model?.speeds) { model?.speeds.orEmpty().distinctBy { it.id } }
                 }
                 if (options.isEmpty()) {
                     Text(

@@ -95,14 +95,25 @@ class CodeBuddyProjection(AcpSession):
         self.row(item(ident,"user",payload.get("text",""),origin="local"))
         blocks=([{"type":"text","text":payload["text"]}] if payload.get("text") else [])+image_blocks(payload.get("images",[]))
         def dispatch():
+            uncertain = False
+            def on_uncertain(error):
+                nonlocal uncertain
+                uncertain = True
+                self.diagnostic("codebuddy-steer-result-unknown", error)
             try:
                 result=self.call("session/steer",{"sessionId":self.data["nativeId"],"contentBlocks":blocks,"clientUserMessageId":ident,
-                    "_meta":{"lumaSubmissionId":ident}},on_uncertain=lambda error:self.diagnostic("codebuddy-steer-result-unknown",error))
+                    "_meta":{"lumaSubmissionId":ident}},on_uncertain=on_uncertain)
                 if result.get("steered") is True:self.receipt(ident,"accepted")
                 elif result.get("steered") is False:
                     reason = str(result.get("reason","not-steered"))
                     self.receipt(ident,"rejected");self.update(error=tr(f"CodeBuddy 未接纳插话（{reason}）", f"CodeBuddy did not accept steer ({reason})"))
                 else:raise ConnectionError(tr("CodeBuddy 插话返回缺少原生受理结果", "CodeBuddy steer response lacked native acceptance result"))
+            except Rejected as exc:
+                if uncertain:
+                    self.settle_uncertain(ident)
+                else:
+                    self.receipt(ident,"rejected")
+                self.update(error=str(exc))
             except Exception as error:
                 self.diagnostic("codebuddy-steer-result-unknown",error)
                 self.update(error=tr(f"CodeBuddy 插话结果待确认（{type(error).__name__}）", f"CodeBuddy steer result pending confirmation ({type(error).__name__})"))
@@ -152,11 +163,15 @@ class CodeBuddyProjection(AcpSession):
         params=frame.get("params",{}); expected=self.data["nativeId"]
         if expected and params.get("sessionId") and params["sessionId"] != expected: return
         if frame.get("method")=="_codebuddy.ai/question" and "id" in frame:
-            questions=params.get("schema",{}).get("questions",[])
-            if params.get("inputType")!="question" or not isinstance(questions,list):raise Rejected(tr("CodeBuddy 未提供可识别的问题表单", "CodeBuddy did not return a recognized question form"))
+            schema=params.get("schema") if isinstance(params.get("schema"),dict) else {}
+            questions=schema.get("questions")
+            if params.get("inputType")!="question" or not isinstance(questions,list) or not all(isinstance(q,dict) and "id" in q for q in questions):
+                if getattr(self,"peer",None) is not None:
+                    self.peer.send({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32602,"message":tr("CodeBuddy 未提供可识别的问题表单", "CodeBuddy did not return a recognized question form")}})
+                return
             raw={**frame,"_codebuddyQuestion":True,"_cancelChoice":"cancel"}
             self.request(str(frame["id"]),raw,"Answer","",[{"id":"submit","label":tr("提交", "Submit")},{"id":"cancel","label":tr("取消", "Cancel")}],
-                [{"id":q["id"],"header":q.get("header",""),"prompt":q.get("question",""),"options":[v["label"] for v in q.get("options",[])],"multiple":bool(q.get("multiSelect"))} for q in questions],submit_choice="submit",skip_choice="cancel")
+                [{"id":q["id"],"header":q.get("header",""),"prompt":q.get("question",""),"options":[v["label"] for v in q.get("options",[]) if isinstance(v,dict) and "label" in v],"multiple":bool(q.get("multiSelect"))} for q in questions],submit_choice="submit",skip_choice="cancel")
             return
         if frame.get("method")=="session/request_permission" and "id" in frame:
             tool_id=params.get("toolCall",{}).get("toolCallId")
@@ -269,19 +284,24 @@ class CodeBuddyProjection(AcpSession):
         try:super().event(frame)
         finally:self.current_submission=active
         if kind in ("tool_call","tool_call_update"):
-            tool_name=meta.get("codebuddy.ai/toolName") or update.get("toolName")
-            if tool_name:
-                ident="tool-"+update["toolCallId"]
-                self.row({**self.rows[ident],"toolName":tool_name})
-            ident="codebuddy-task:"+update["toolCallId"]
-            if meta.get("codebuddy.ai/isSubagent") is True:
-                self.subagent(ident,itemId="tool-"+update["toolCallId"],name=meta.get("codebuddy.ai/description", ""),
-                    role=meta.get("codebuddy.ai/subagentType", ""),task=update.get("rawInput",{}).get("prompt", ""),
-                    background=meta.get("codebuddy.ai/isBackground") is True,status="running")
-            agent=self.subagents.get(ident)
-            if agent and not agent.get("background") and update.get("status") in ("completed","failed","cancelled"):
-                self.subagent(ident,status={"completed":"succeeded","failed":"failed","cancelled":"cancelled"}[update["status"]],
-                    detail=self.rows["tool-"+update["toolCallId"]].get("outcome",agent.get("detail","")))
+            tc_id=update.get("toolCallId")
+            if isinstance(tc_id,str) and tc_id:
+                tool_ident="tool-"+tc_id
+                tool_name=meta.get("codebuddy.ai/toolName") or update.get("toolName")
+                if tool_name and tool_ident in self.rows:
+                    self.row({**self.rows[tool_ident],"toolName":tool_name})
+                task_ident="codebuddy-task:"+tc_id
+                if meta.get("codebuddy.ai/isSubagent") is True:
+                    raw_input=update.get("rawInput")
+                    task_prompt=raw_input.get("prompt","") if isinstance(raw_input,dict) else ""
+                    self.subagent(task_ident,itemId=tool_ident,name=meta.get("codebuddy.ai/description", ""),
+                        role=meta.get("codebuddy.ai/subagentType", ""),task=task_prompt,
+                        background=meta.get("codebuddy.ai/isBackground") is True,status="running")
+                agent=self.subagents.get(task_ident)
+                if agent and not agent.get("background") and update.get("status") in ("completed","failed","cancelled"):
+                    row_obj=self.rows.get(tool_ident,{})
+                    self.subagent(task_ident,status={"completed":"succeeded","failed":"failed","cancelled":"cancelled"}[update["status"]],
+                        detail=row_obj.get("outcome",agent.get("detail","")))
             if exact:self.receipt(active,"accepted");self.consumed(active)
 
 class CodeBuddySession(CodeBuddyProjection):
@@ -291,26 +311,49 @@ class CodeBuddySession(CodeBuddyProjection):
     release_empty = True
 
     def connect(self):
+        self._launched_owner = False
         self.external_request = None; self.replaying_history = True; self.history_seen = set()
         if self.config.setdefault("nativeProtocol","codebuddy-http-acp") != "codebuddy-http-acp":raise Rejected(tr("CodeBuddy 原生协议身份不匹配", "CodeBuddy native protocol identity mismatch"))
         self.save()
         self.model_metadata = {}
-        try: AcpSession.connect(self)
-        finally: self.replaying_history = False
-        self.finish_chunk(); self.chunk_kind = self.chunk_id = None
-        self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False,
-            capabilities={**self.data["capabilities"],"steer":True})
-        controls=self.config.get("codebuddyControls",{})
-        if any(self.data.get(k)!=v for k,v in controls.items()):raise Rejected(tr("CodeBuddy 尚未恢复已确认的会话设置", "CodeBuddy has not restored confirmed session settings"))
-        self.update_model_capabilities()
-        self.refresh()
+        try:
+            try: AcpSession.connect(self)
+            finally: self.replaying_history = False
+            self.finish_chunk(); self.chunk_kind = self.chunk_id = None
+            self.update(nativeProtocol="codebuddy-http-acp", canOpenTui=False,
+                capabilities={**self.data["capabilities"],"steer":True})
+            controls=self.config.get("codebuddyControls",{})
+            if any(self.data.get(k)!=v for k,v in controls.items()):raise Rejected(tr("CodeBuddy 尚未恢复已确认的会话设置", "CodeBuddy has not restored confirmed session settings"))
+            self.update_model_capabilities()
+            self.refresh()
+        except Exception:
+            if self._launched_owner and hasattr(self,"owner") and not self.config.get("creationUnknown"):
+                try:
+                    self.owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._launched_owner = False
 
     def start(self, argv, env_overrides=None):
         from .codebuddy_owner import CodeBuddyOwner
         self.owner=CodeBuddyOwner(self)
-        self.owner.launch(env_overrides)
-        self.peer=self.owner.connect_http(self.event,self.exited,lambda:bool(self.pending_requests))
-        self.peer.start_read()
+        launched=bool(self.owner.launch(env_overrides))
+        self._launched_owner=launched
+        try:
+            self.peer=self.owner.connect_http(self.event,self.exited,lambda:bool(self.pending_requests))
+            self.peer.start_read()
+        except Exception:
+            if launched and not self.config.get("creationUnknown"):
+                try:
+                    self.owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
+                self._launched_owner=False
+            raise
 
     def call(self,method,params=None,**kwargs):
         if method=="initialize":

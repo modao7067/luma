@@ -1,11 +1,16 @@
 package io.github.modao7067.luma.gui.agent
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.net.ServerSocket
 import java.net.InetAddress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
@@ -64,5 +69,27 @@ class NativeCliClientTest {
             assertTrue(runCatching { api.call("/send", JSONObject("""{"submissionId":"unique"}""")) }.isFailure)
             assertEquals(1, server.calls.get())
         } finally { api.close(); server.close() }
+    }
+    @Test fun cancellingCoroutineAbortsInFlightNativeCliCall() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val server = Fixture { _, _, _ ->
+            entered.countDown()
+            try { release.await(10, TimeUnit.SECONDS) } catch (_: InterruptedException) { }
+            200 to "{}"
+        }
+        val api = NativeCliClient(server.url, "fixture")
+        try {
+            val job = launch(Dispatchers.IO) { api.call("/slow") }
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val started = System.nanoTime()
+            job.cancelAndJoin()
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            assertTrue("cancel took ${elapsedMs}ms", elapsedMs < 2_000L)
+        } finally {
+            release.countDown()
+            api.close()
+            server.close()
+        }
     }
 }

@@ -83,22 +83,45 @@ class PiNativeSession(PiSession):
                    "sessionFile": saved_file if has_saved_file else None,
                    "model": self.config.get("model"), "effort": self.config.get("effort"), "skills": skills,
                    "agentDir": os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent"))}
-        file = directory / "host.json"
+        launched_owner = False
         if not self.owner.handle.get("kind"):
-            file.write_text(json.dumps(options)); os.chmod(file, 0o600)
+            file = self.owner.write_private_file("host.json", json.dumps(options), mode=0o600)
             env = {"TERM": "xterm-256color"}
             if self.config.get("browserConfig"): env["LUMA_BROWSER_CONFIG"] = self.config["browserConfig"]
             host_script = self.owner.stage_native("pi-host.mjs")
-            self.owner.launch_tui([shutil.which("node") or "node", str(host_script), str(file)], env)
+            launched_owner = bool(self.owner.launch_tui([shutil.which("node") or "node", str(host_script), str(file)], env))
+        self._launched_owner = launched_owner
         self.update(canOpenTui=True, ownerInstanceId=self.owner.handle["instanceId"])
-        self.peer = self.owner.connect(self.event, self.exited)
-        self.peer.start_read()
+        try:
+            self.peer = self.owner.connect(self.event, self.exited)
+            self.peer.start_read()
+        except Exception:
+            if launched_owner and not self.config.get("creationUnknown"):
+                try:
+                    self.owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
+                self._launched_owner = False
+            raise
 
     def call(self, method, params=None, **kwargs):
         return super().call(method, {**(params or {}), "nativeId": self.config.get("nativeId")}, **kwargs)
 
     def connect(self):
-        super().connect()
+        self._launched_owner = False
+        try:
+            super().connect()
+        except Exception:
+            if self._launched_owner and hasattr(self, "owner") and not self.config.get("creationUnknown"):
+                try:
+                    self.owner.stop(force=True)
+                    self.save()
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._launched_owner = False
         self.update(canOpenTui=True, ownerInstanceId=self.owner.handle["instanceId"])
 
     def refresh(self):

@@ -230,12 +230,14 @@ static void ashv_check_pid()
 // higher 16 bits.
 static int ashv_shmid_from_counter(unsigned int counter)
 {
-	return ashv_local_socket_id * 0x10000 + counter;
+	unsigned int id = (((unsigned int) ashv_local_socket_id & 0x7fffu) << 16) | (counter & 0x7fffu);
+	if (id == 0) id = 1;
+	return (int) id;
 }
 
 static int ashv_socket_id_from_shmid(int shmid)
 {
-	return shmid / 0x10000;
+	return (int) (((unsigned int) shmid) >> 16);
 }
 
 static int ashv_find_local_index(int shmid)
@@ -331,19 +333,26 @@ static int ashv_read_remote_segment(int shmid)
 	int size = ashmem_get_size_region(descriptor);
 	if (size == 0 || size == -1) {
 		DBG ("%s: ERROR: ashmem_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
+		close(descriptor);
 		return -1;
 	}
 
-	int idx = shmem_amount;
-	shmem_amount ++;
-	shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
+	size_t idx = shmem_amount;
+	shmem_t* resized = realloc(shmem, (shmem_amount + 1) * sizeof(shmem_t));
+	if (resized == NULL) {
+		close(descriptor);
+		errno = ENOMEM;
+		return -1;
+	}
+	shmem = resized;
+	shmem_amount++;
 	shmem[idx].id = shmid;
 	shmem[idx].descriptor = descriptor;
 	shmem[idx].size = size;
 	shmem[idx].addr = NULL;
 	shmem[idx].markedForDeletion = false;
 	shmem[idx].key = key;
-	return idx;
+	return (int) idx;
 }
 
 /* Get shared memory area identifier. */
@@ -358,7 +367,7 @@ int shmget(key_t key, size_t size, int flags)
 
 	if (!ashv_listening_thread_id) {
 		int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (!sock) {
+		if (sock < 0) {
 			DBG ("%s: cannot create UNIX socket: %s", __PRETTY_FUNCTION__, strerror(errno));
 			errno = EINVAL;
 			return -1;
@@ -369,7 +378,7 @@ int shmget(key_t key, size_t size, int flags)
 			int len;
 			memset (&addr, 0, sizeof(addr));
 			addr.sun_family = AF_UNIX;
-			ashv_local_socket_id = (getpid() + i) & 0xffff;
+			ashv_local_socket_id = (getpid() + i) & 0x7fff;
 			sprintf(&addr.sun_path[1], ANDROID_SHMEM_SOCKNAME, ashv_local_socket_id);
 			len = sizeof(addr.sun_family) + strlen(&addr.sun_path[1]) + 1;
 			if (bind(sock, (struct sockaddr *)&addr, len) != 0) continue;
@@ -378,18 +387,34 @@ int shmget(key_t key, size_t size, int flags)
 		}
 		if (i == 4096) {
 			DBG("%s: cannot bind UNIX socket, bailing out", __PRETTY_FUNCTION__);
+			close(sock);
 			ashv_local_socket_id = 0;
 			errno = ENOMEM;
 			return -1;
 		}
 		if (listen(sock, 4) != 0) {
 			DBG("%s: listen failed", __PRETTY_FUNCTION__);
+			close(sock);
+			ashv_local_socket_id = 0;
 			errno = ENOMEM;
 			return -1;
 		}
 		int* socket_arg = malloc(sizeof(int));
+		if (socket_arg == NULL) {
+			close(sock);
+			ashv_local_socket_id = 0;
+			errno = ENOMEM;
+			return -1;
+		}
 		*socket_arg = sock;
-		pthread_create(&ashv_listening_thread_id, NULL, &ashv_thread_function, socket_arg);
+		if (pthread_create(&ashv_listening_thread_id, NULL, &ashv_thread_function, socket_arg) != 0) {
+			free(socket_arg);
+			close(sock);
+			ashv_local_socket_id = 0;
+			ashv_listening_thread_id = 0;
+			errno = ENOMEM;
+			return -1;
+		}
 	}
 
 	int shmid = -1;
@@ -456,17 +481,24 @@ int shmget(key_t key, size_t size, int flags)
 	}
 
 
-	int idx = shmem_amount;
+	size_t idx = shmem_amount;
 	char buf[256];
-	sprintf(buf, ANDROID_SHMEM_SOCKNAME "-%d", ashv_local_socket_id, idx);
+	sprintf(buf, ANDROID_SHMEM_SOCKNAME "-%zu", ashv_local_socket_id, idx);
 
-	shmem_amount++;
 	if (shmid == -1) {
 		shmem_counter = (shmem_counter + 1) & 0x7fff;
 		shmid = ashv_shmid_from_counter(shmem_counter);
 	}
 
-	shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
+	shmem_t* resized = realloc(shmem, (shmem_amount + 1) * sizeof(shmem_t));
+	if (resized == NULL) {
+		if (key != IPC_PRIVATE) unlink(symlink_path);
+		pthread_mutex_unlock(&mutex);
+		errno = ENOMEM;
+		return -1;
+	}
+	shmem = resized;
+	shmem_amount++;
 	size = ROUND_UP(size, getpagesize());
 	shmem[idx].size = size;
 	shmem[idx].descriptor = ashmem_create_region(buf, size);
@@ -476,10 +508,19 @@ int shmget(key_t key, size_t size, int flags)
 	shmem[idx].key = key;
 
 	if (shmem[idx].descriptor < 0) {
-		DBG("%s: ashmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
-		shmem_amount --;
-		shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
-		pthread_mutex_unlock (&mutex);
+		int saved_errno = errno;
+		DBG("%s: ashmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(saved_errno));
+		shmem_amount--;
+		if (shmem_amount == 0) {
+			free(shmem);
+			shmem = NULL;
+		} else {
+			shmem_t* shrunk = realloc(shmem, shmem_amount * sizeof(shmem_t));
+			if (shrunk != NULL) shmem = shrunk;
+		}
+		if (key != IPC_PRIVATE) unlink(symlink_path);
+		pthread_mutex_unlock(&mutex);
+		errno = saved_errno;
 		return -1;
 	}
 	//DBG("%s: ID %d shmid %x FD %d size %zu", __PRETTY_FUNCTION__, idx, shmid, shmem[idx].descriptor, shmem[idx].size);

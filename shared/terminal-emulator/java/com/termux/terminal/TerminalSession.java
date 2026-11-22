@@ -68,7 +68,7 @@ public final class TerminalSession extends TerminalOutput {
      * A queue written to from the main thread due to user interaction, and read by another thread which forwards by
      * writing to the {@link #mTerminalFileDescriptor}.
      */
-    final ByteQueue mTerminalToProcessIOQueue = new ByteQueue(4096);
+    final ByteQueue mTerminalToProcessIOQueue = new ByteQueue(4096, 1024 * 1024);
     /** Buffer to write translate code points into utf8 before writing to mTerminalToProcessIOQueue */
     private final byte[] mUtf8InputBuffer = new byte[5];
 
@@ -167,6 +167,7 @@ public final class TerminalSession extends TerminalOutput {
                 while ((count = mTerminalToProcessIOQueue.read(buffer, true)) > 0) output.write(buffer, 0, count);
             } catch (IOException ignored) {
             } finally {
+                mTerminalToProcessIOQueue.close();
                 try { output.close(); } catch (IOException ignored) {}
                 finished.run();
             }
@@ -293,7 +294,17 @@ public final class TerminalSession extends TerminalOutput {
             readFd = android.os.ParcelFileDescriptor.fromFd(mTerminalFileDescriptor);
             try { writeFd = android.os.ParcelFileDescriptor.fromFd(mTerminalFileDescriptor); }
             catch (IOException e) { readFd.close(); throw e; }
-        } catch (IOException e) { JNI.close(mTerminalFileDescriptor); throw new IllegalStateException("Unable to duplicate PTY", e); }
+        } catch (IOException e) {
+            JNI.close(mTerminalFileDescriptor);
+            mTerminalFileDescriptor = -1;
+            int pid = mShellPid;
+            mShellPid = -1;
+            if (pid > 0) {
+                try { mProcessTerminator.terminate(pid); } catch (ErrnoException ignored) {}
+            }
+            disposeEmulator();
+            throw new IllegalStateException("Unable to duplicate PTY", e);
+        }
 
         new Thread("TermSessionInputReader[pid=" + mShellPid + "]") {
             @Override
@@ -324,6 +335,8 @@ public final class TerminalSession extends TerminalOutput {
                     }
                 } catch (IOException e) {
                     // Ignore.
+                } finally {
+                    mTerminalToProcessIOQueue.close();
                 }
             }
         }.start();
@@ -338,10 +351,19 @@ public final class TerminalSession extends TerminalOutput {
 
     }
 
+    @Override
+    public boolean writeChecked(byte[] data, int offset, int count) {
+        if (data == null || count <= 0 || mShellPid <= 0) return false;
+        return mTerminalToProcessIOQueue.writeNonBlocking(data, offset, count);
+    }
+
     /** Write data to the shell process. */
     @Override
     public void write(byte[] data, int offset, int count) {
-        if (mShellPid > 0) mTerminalToProcessIOQueue.write(data, offset, count);
+        if (data == null || count <= 0 || mShellPid <= 0) return;
+        if (!writeChecked(data, offset, count) && mClient != null) {
+            mClient.onInputBufferFull(this, count);
+        }
     }
 
     /** Write the Unicode code point to the terminal encoded in UTF-8. */
@@ -408,6 +430,7 @@ public final class TerminalSession extends TerminalOutput {
 
     /** Reset state for terminal emulator state. */
     public void reset() {
+        if (mEmulator == null) return;
         mEmulator.reset();
         notifyScreenUpdate();
     }

@@ -28,14 +28,20 @@ static int gpu(int execute) {
     VkInstance instance;VK(vkCreateInstance(&ici,NULL,&instance));
     uint32_t count=0;VK(vkEnumeratePhysicalDevices(instance,&count,NULL));
     if(!count){fprintf(stderr,"No Vulkan device\n");vkDestroyInstance(instance,NULL);return 1;}
-    VkPhysicalDevice *devices=calloc(count,sizeof(*devices));VK(vkEnumeratePhysicalDevices(instance,&count,devices));
+    VkPhysicalDevice *devices=calloc(count,sizeof(*devices));
+    if(!devices){fprintf(stderr,"Out of memory\n");vkDestroyInstance(instance,NULL);return 1;}
+    VkResult enum_res=vkEnumeratePhysicalDevices(instance,&count,devices);
+    if(enum_res!=VK_SUCCESS){fprintf(stderr,"vkEnumeratePhysicalDevices: VkResult %d\n",enum_res);free(devices);vkDestroyInstance(instance,NULL);return 1;}
     VkPhysicalDevice physical=VK_NULL_HANDLE;uint32_t family=0;
     for(uint32_t i=0;i<count;i++) {
         VkPhysicalDeviceProperties p;vkGetPhysicalDeviceProperties(devices[i],&p);
         printf("VULKAN_DEVICE name=%s type=%u api=%u.%u.%u\n",p.deviceName,p.deviceType,VK_VERSION_MAJOR(p.apiVersion),VK_VERSION_MINOR(p.apiVersion),VK_VERSION_PATCH(p.apiVersion));
         if(p.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU)continue;
         uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(devices[i],&n,NULL);
-        VkQueueFamilyProperties *q=calloc(n,sizeof(*q));vkGetPhysicalDeviceQueueFamilyProperties(devices[i],&n,q);
+        if(n==0)continue;
+        VkQueueFamilyProperties *q=calloc(n,sizeof(*q));
+        if(!q){fprintf(stderr,"Out of memory\n");free(devices);vkDestroyInstance(instance,NULL);return 1;}
+        vkGetPhysicalDeviceQueueFamilyProperties(devices[i],&n,q);
         for(uint32_t j=0;j<n;j++)if(q[j].queueCount && (q[j].queueFlags&VK_QUEUE_COMPUTE_BIT)){physical=devices[i];family=j;break;}
         free(q);if(physical)break;
     }
@@ -53,7 +59,13 @@ static int gpu(int execute) {
     VkPhysicalDeviceMemoryProperties memory;vkGetPhysicalDeviceMemoryProperties(physical,&memory);
     uint32_t memory_type=UINT32_MAX;
     for(uint32_t i=0;i<memory.memoryTypeCount;i++)if((required.memoryTypeBits&(1u<<i)) && (memory.memoryTypes[i].propertyFlags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){memory_type=i;break;}
-    if(memory_type==UINT32_MAX){fprintf(stderr,"No coherent host-visible buffer memory\n");return 1;}
+    if(memory_type==UINT32_MAX){
+        fprintf(stderr,"No coherent host-visible buffer memory\n");
+        vkDestroyBuffer(device,buffer,NULL);
+        vkDestroyDevice(device,NULL);
+        vkDestroyInstance(instance,NULL);
+        return 1;
+    }
     VkMemoryAllocateInfo mai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=required.size,.memoryTypeIndex=memory_type};
     VkDeviceMemory allocation;VK(vkAllocateMemory(device,&mai,NULL,&allocation));VK(vkBindBufferMemory(device,buffer,allocation,0));
     uint32_t *values;VK(vkMapMemory(device,allocation,0,VK_WHOLE_SIZE,0,(void**)&values));

@@ -384,9 +384,10 @@ function(request) {
       }
       if (node.tagName === 'A') {
         const label = cleanSpace(Array.from(node.childNodes).map(inlineText).join(''));
-        const href = node.getAttribute('href') || '';
+        const href = (node.getAttribute('href') || '').trim();
         if (!label) return '';
-        if (href && !href.startsWith('javascript:') && !href.startsWith('#')) return `[${label}](${href})`;
+        const cleanHref = href.replace(/[\u0000-\u0020]+/g, '').toLowerCase();
+        if (href && !href.startsWith('#') && !cleanHref.startsWith('javascript:') && !cleanHref.startsWith('data:') && !cleanHref.startsWith('vbscript:')) return `[${label}](${href})`;
         return label;
       }
       return Array.from(node.childNodes).map(inlineText).join('');
@@ -1020,6 +1021,7 @@ function(request) {
     if (request.action === 'select') {
       const selNode = wrappedCtrl?.tagName === 'SELECT' ? wrappedCtrl : e;
       const desired = String(request.text ?? request.value ?? '').trim();
+      if (!desired) fail('OPTION_NOT_FOUND', tr('下拉选项不能为空', 'Dropdown option cannot be empty'));
       if (selNode.tagName === 'SELECT') {
         const opts = Array.from(selNode.options || []);
         const match = opts.find(o => o.value === desired || cleanSpace(o.text) === desired)
@@ -1027,13 +1029,43 @@ function(request) {
         if (!match) fail('OPTION_NOT_FOUND', tr(`未找到下拉选项：${desired}`, `Dropdown option not found: ${desired}`));
         selNode.focus();
         setTextFieldValue(selNode, match.value);
+        if (request.submit) triggerSubmit(selNode);
         return {ok: true, dispatched: true, value: match.value, text: cleanSpace(match.text)};
       }
-      const optionNodes = Array.from(selNode.ownerDocument.querySelectorAll('[role="option"]')).filter(o => shown(o));
+      const seenOptions = new Set();
+      const scopedOptions = [];
+      const addOptions = container => {
+        if (!container) return;
+        if (container.getAttribute?.('role') === 'option' && shown(container) && !seenOptions.has(container)) {
+          seenOptions.add(container);
+          scopedOptions.push(container);
+        }
+        for (const o of Array.from(container.querySelectorAll?.('[role="option"]') || [])) {
+          if (shown(o) && !seenOptions.has(o)) {
+            seenOptions.add(o);
+            scopedOptions.push(o);
+          }
+        }
+      };
+      addOptions(selNode);
+      const rootNode = typeof selNode.getRootNode === 'function' ? selNode.getRootNode() : selNode.ownerDocument;
+      for (const attr of ['aria-controls', 'aria-owns']) {
+        const rawIds = (selNode.getAttribute(attr) || '').trim();
+        if (!rawIds) continue;
+        for (const id of rawIds.split(/\s+/)) {
+          const target = (typeof rootNode?.getElementById === 'function' ? rootNode.getElementById(id) : null)
+            || selNode.ownerDocument.getElementById(id);
+          addOptions(target);
+        }
+      }
+      const optionNodes = scopedOptions.length
+        ? scopedOptions
+        : Array.from(selNode.ownerDocument.querySelectorAll('[role="option"]')).filter(o => shown(o));
       const match = optionNodes.find(o => cleanSpace(o.innerText) === desired || o.getAttribute('data-value') === desired)
         || optionNodes.find(o => cleanSpace(o.innerText).toLowerCase().includes(desired.toLowerCase()));
       if (!match) fail('OPTION_NOT_FOUND', tr(`未找到下拉选项：${desired}`, `Dropdown option not found: ${desired}`));
       dispatchRealisticClick(match);
+      if (request.submit) triggerSubmit(selNode);
       return {ok: true, dispatched: true, text: cleanSpace(match.innerText)};
     }
 

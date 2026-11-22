@@ -687,8 +687,8 @@ public final class MainActivity extends Activity {
             startActivityForResult(intent, 20);
         } catch (ActivityNotFoundException e) {
             try {
-                Intent fallback = new Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-                fallback.setType("image/*");
+                Intent fallback = new Intent(Intent.ACTION_PICK);
+                fallback.setDataAndType(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*");
                 startActivityForResult(fallback, 20);
             } catch (ActivityNotFoundException ignored) {
                 Toast.makeText(this, com.termux.terminal.LumaLang.tr("未找到可用的相册或文件选择器", "No gallery or file picker found"), Toast.LENGTH_SHORT).show();
@@ -811,7 +811,7 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         foregroundHandler.removeCallbacks(foregroundHeartbeat);
         ForegroundTerminalTracker.clear(this, foregroundToken);
-        if(backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
+        if(Build.VERSION.SDK_INT>=33&&backCallback!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         pendingPaste.cancel();
         dismissActiveSheet();
         synchronized (wallpaperLock) { wallpaperGeneration++; }

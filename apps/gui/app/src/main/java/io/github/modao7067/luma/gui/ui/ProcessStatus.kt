@@ -42,6 +42,7 @@ import kotlin.math.sin
 internal data class ProcessRowPalette(
     val dark: Boolean,
     val emphasis: Color,
+    val activeGroupTitle: Color,
     val text: Color,
     val separator: Color,
     val iconTint: Color,
@@ -56,12 +57,13 @@ internal fun processRowPalette(colors: ColorScheme): ProcessRowPalette {
     return ProcessRowPalette(
         dark = dark,
         emphasis = emphasis,
+        activeGroupTitle = if (dark) Color(0xFF95948E) else emphasis,
         text = if (dark) Color(0xFF8E8D87) else Color(0xFF87857F),
         separator = if (dark) Color(0xFF666560) else Color(0xFF9E9C95),
         iconTint = emphasis,
         activeDot = if (dark) Color(0xFFD97757) else Color(0xFFC6613F),
         completedDot = if (dark) Color(0xFF5E5D58) else Color(0xFFB4B2AB),
-        shimmerPeak = if (dark) Color(0x78FFFFFF) else Color(0x80FFFFFF),
+        shimmerPeak = if (dark) Color(0xE6FFFFFF) else Color(0x80FFFFFF),
     )
 }
 
@@ -203,10 +205,12 @@ internal fun Modifier.processRowShimmer(
             val t = (rawPhase / 0.6667f).coerceIn(0f, 1f)
             val bandW = maxOf(size.width * 0.6f, minBandWidth.toPx())
             val startX = (-1.1f * bandW) + (size.width + 1.1f * bandW + 0.3f * size.height) * t
+            val shoulder = shimmerPeak.copy(alpha = shimmerPeak.alpha * 0.28f)
             val brush = Brush.linearGradient(
                 0.0f to Color.Transparent,
-                0.4f to shimmerPeak,
-                0.6f to shimmerPeak,
+                0.25f to shoulder,
+                0.5f to shimmerPeak,
+                0.75f to shoulder,
                 1.0f to Color.Transparent,
                 start = Offset(startX, 0f),
                 end = Offset(startX + bandW, bandW * 0.268f),

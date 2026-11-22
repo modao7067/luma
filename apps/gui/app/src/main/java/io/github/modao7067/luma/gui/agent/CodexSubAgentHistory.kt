@@ -55,6 +55,8 @@ internal class CodexSubAgentHistory(
         }
         if (turnCursor != null) {
             var cursor = turnCursor
+            val seenCursors = hashSetOf<String>()
+            cursor?.let(seenCursors::add)
             do {
                 val pageBefore = buffered.size
                 val page = request("thread/turns/list", obj("threadId" to childThreadId, "cursor" to cursor, "limit" to 100, "sortDirection" to "asc", "itemsView" to "full"))
@@ -62,7 +64,8 @@ internal class CodexSubAgentHistory(
                 page.optJSONArray("data")?.objects().orEmpty().forEach { turn ->
                     turn.optJSONArray("items")?.objects().orEmpty().forEach { add(it, turn.optString("id"), turn.optString("status") != "inProgress", pageBefore, pageAfter) }
                 }
-                cursor = page.stringOrNull("nextCursor")
+                val nextCursor = page.stringOrNull("nextCursor")
+                cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
             } while (cursor != null)
         } else if (thread.optString("historyMode") == "legacy") {
             val pageBefore = buffered.size
@@ -74,6 +77,7 @@ internal class CodexSubAgentHistory(
             }
         } else {
             var cursor: String? = null
+            val seenCursors = hashSetOf<String>()
             do {
                 val pageBefore = buffered.size
                 val page = request("thread/items/list", obj("threadId" to childThreadId, "limit" to 100, "sortDirection" to "asc", "cursor" to cursor))
@@ -81,7 +85,8 @@ internal class CodexSubAgentHistory(
                 page.optJSONArray("data")?.objects().orEmpty().forEach { entry ->
                     add(entry.getJSONObject("item"), entry.optString("turnId"), !entry.isNull("completedAtMs"), pageBefore, pageAfter)
                 }
-                cursor = page.stringOrNull("nextCursor")
+                val nextCursor = page.stringOrNull("nextCursor")
+                cursor = if (nextCursor != null && seenCursors.add(nextCursor)) nextCursor else null
             } while (cursor != null)
         }
         turnCursor = nextAnchor ?: turnCursor

@@ -62,6 +62,24 @@ public final class NativeEventQueueCheck {
             int[] active=e.adapter().wordBounds(row-historyRows,5);
             check(Arrays.equals(active,new int[]{3,row-historyRows,10,row-historyRows}),"Java selection retains active-screen history contract at row "+row);
         }
+        String maxClip = "B".repeat(262_144);
+        String b64Max = java.util.Base64.getEncoder().encodeToString(maxClip.getBytes(StandardCharsets.UTF_8));
+        sink.clipboard = null;
+        feed(e, "\033]52;c;" + b64Max + "\007");
+        check(maxClip.equals(sink.clipboard),
+            "OSC 52 clipboard accepts exact 262144-byte boundary");
+        String overClip = "A".repeat(262_145);
+        String b64Over = java.util.Base64.getEncoder().encodeToString(overClip.getBytes(StandardCharsets.UTF_8));
+        sink.clipboard = null;
+        feed(e, "\033]52;c;" + b64Over + "\007");
+        check(sink.clipboard == null,
+            "OSC 52 clipboard rejects payload above 262144 bytes");
+        feed(e, "\033[?2026h");
+        long[] holdBeforeReset = GhosttyNative.holdState(e.adapter().handle());
+        check(holdBeforeReset != null && holdBeforeReset[0] == 1, "DEC 2026 activates render hold before reset");
+        e.reset();
+        long[] holdAfterReset = GhosttyNative.holdState(e.adapter().handle());
+        check(holdAfterReset != null && holdAfterReset[0] == 0, "reset cancels active render hold");
         e.dispose();System.out.println("NATIVE EVENT QUEUE OK checks="+checks);
     }catch(Throwable t){t.printStackTrace();System.exit(1);}}
 }

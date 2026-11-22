@@ -15,6 +15,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import io.github.modao7067.luma.gui.camera.PhotoCaptureStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal data class PhotoCaptureHandle(val available: Boolean, val busy: Boolean, val launch: () -> Unit)
 
@@ -39,8 +44,10 @@ internal fun rememberPhotoCapture(
     val currentEnabled by rememberUpdatedState(enabled)
     val imageCallback by rememberUpdatedState(onImage)
     val errorCallback by rememberUpdatedState(onError)
+    val scope = rememberCoroutineScope()
     var pendingName by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingOwner by rememberSaveable { mutableStateOf<String?>(null) }
+    var preparing by remember { mutableStateOf(false) }
     val available = remember(context) {
         Intent(MediaStore.ACTION_IMAGE_CAPTURE).resolveActivity(context.packageManager) != null
     }
@@ -70,21 +77,47 @@ internal fun rememberPhotoCapture(
             }
         }
     }
-    return PhotoCaptureHandle(available && enabled, pendingName != null) {
-        if (pendingName == null && currentEnabled) {
+    return PhotoCaptureHandle(available && enabled, pendingName != null || preparing) {
+        if (pendingName == null && !preparing && currentEnabled) {
             if (!available) errorCallback(tr("未找到相机应用", "No camera app found"))
             else {
-                var created: String? = null
-                try {
-                    val owner = currentOwner()
-                    check(owner.isNotBlank())
-                    created = store.create()
-                    pendingName = created; pendingOwner = owner
-                    launcher.launch(store.uri(created))
-                } catch (_: Exception) {
-                    pendingName = null; pendingOwner = null
-                    created?.let { revoke(it); store.discard(it) }
+                val owner = currentOwner()
+                if (owner.isBlank()) {
                     errorCallback(tr("无法打开相机，请重试", "Unable to open camera; please try again"))
+                } else {
+                    preparing = true
+                    scope.launch {
+                        var created: String? = null
+                        try {
+                            val (name, uri) = withContext(Dispatchers.IO) {
+                                val next = store.create()
+                                next to store.uri(next)
+                            }
+                            created = name
+                            if (!currentEnabled || currentOwner() != owner) {
+                                withContext(Dispatchers.IO) { store.discard(name) }
+                                return@launch
+                            }
+                            pendingName = name; pendingOwner = owner
+                            launcher.launch(uri)
+                        } catch (e: CancellationException) {
+                            created?.let { name ->
+                                pendingName = null; pendingOwner = null
+                                revoke(name)
+                                withContext(NonCancellable + Dispatchers.IO) { store.discard(name) }
+                            }
+                            throw e
+                        } catch (_: Exception) {
+                            pendingName = null; pendingOwner = null
+                            created?.let { name ->
+                                revoke(name)
+                                withContext(Dispatchers.IO) { store.discard(name) }
+                            }
+                            errorCallback(tr("无法打开相机，请重试", "Unable to open camera; please try again"))
+                        } finally {
+                            preparing = false
+                        }
+                    }
                 }
             }
         }

@@ -12,9 +12,26 @@ export const canonical=value=>JSON.stringify(value,(_k,v)=>v&&typeof v==='object
 export function hostServer(options, identity, handler) {
  const clients=new Set();const requests=new Map();
  const emit=value=>{const data=JSON.stringify({...value,_nativeId:identity()})+'\n';for(const s of clients)if(!s.destroyed)s.write(data)};
- let socketInode;const server=net.createServer(s=>{clients.add(s);let buffer='';s.on('error',()=>{});s.on('close',()=>clients.delete(s));s.on('data',data=>{
-  buffer+=data;if(Buffer.byteLength(buffer)>32*1024*1024){s.destroy();return;}let end;
-  while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())void dispatch(line,s);}
+ const MAX_LINE_BYTES=32*1024*1024;
+ let socketInode;const server=net.createServer(s=>{clients.add(s);let chunks=[];let totalBytes=0;s.on('error',()=>{});s.on('close',()=>{chunks=[];totalBytes=0;clients.delete(s);});s.on('data',raw=>{
+  const data=Buffer.isBuffer(raw)?raw:Buffer.from(raw);
+  let offset=0;
+  while(offset<data.length){
+   const nl=data.indexOf(0x0a,offset);
+   if(nl<0){
+    const part=offset===0?data:data.subarray(offset);
+    totalBytes+=part.length;
+    if(totalBytes>MAX_LINE_BYTES){chunks=[];totalBytes=0;s.destroy();return;}
+    chunks.push(part);
+    break;
+   }
+   const part=data.subarray(offset,nl);
+   if(totalBytes+part.length>MAX_LINE_BYTES){chunks=[];totalBytes=0;s.destroy();return;}
+   const lineBuf=chunks.length?Buffer.concat([...chunks,part],totalBytes+part.length):part;
+   chunks=[];totalBytes=0;offset=nl+1;
+   const line=lineBuf.toString('utf8');
+   if(line.trim())void dispatch(line,s);
+  }
  });});
  async function dispatch(line,s){let p;try{p=JSON.parse(line);if(p.nativeId&&p.nativeId!==identity())throw Error(tr('原生前台会话已改变，请重新核对身份','Native foreground session changed; please re-verify identity'));
   const data=await handler(p);if(!s.destroyed)s.write(JSON.stringify({id:p.id,type:'response',success:true,data})+'\n');

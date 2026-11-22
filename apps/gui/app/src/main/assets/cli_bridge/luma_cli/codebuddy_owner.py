@@ -15,7 +15,7 @@ class CodeBuddyOwner(NativeOwner):
     def launch(self,overrides=None):
         if self.handle.get("kind"):
             if self.handle["kind"]!="codebuddy-server" or not self.alive():raise Rejected(tr("CodeBuddy 原生执行所有者不可用", "CodeBuddy native execution owner unavailable"))
-            return
+            return False
         binary=shutil.which("codebuddy")
         if not binary:raise Rejected(tr("未找到 CodeBuddy Code；请在当前 Linux 终端安装 @tencent-ai/codebuddy-code 并运行 codebuddy → /login", "CodeBuddy Code not found; install @tencent-ai/codebuddy-code in the current Linux terminal and run codebuddy -> /login"))
         try:
@@ -28,8 +28,7 @@ class CodeBuddyOwner(NativeOwner):
             raise Rejected(tr("CodeBuddy GUI 需要 2.180.0 或更新版本；请核对已安装版本", "CodeBuddy GUI requires 2.180.0 or newer; check the installed version"))
         sock=socket.socket();sock.bind(("127.0.0.1",0));port=sock.getsockname()[1];sock.close()
         password=secrets.token_urlsafe(36)
-        file=self.directory/"codebuddy-gateway-password"
-        with file.open("w") as out:os.chmod(file,0o600);out.write(password)
+        self.write_private_file("codebuddy-gateway-password",password,mode=0o600)
         argv=[binary,"--serve","--host","127.0.0.1","--port",str(port),"--auth","password"]
         controls=self.session.config.get("codebuddyControls",{})
         if controls.get("permission"):argv += ["--permission-mode",controls["permission"]]
@@ -42,6 +41,7 @@ class CodeBuddyOwner(NativeOwner):
         self.proc=proc
         self.handle.update(kind="codebuddy-server",pid=proc.pid,processStart=process_start(proc.pid),port=port)
         self.session.save()
+        return True
 
     def connect_http(self,event,exited,waiting_for_user):
         password=(self.directory/"codebuddy-gateway-password").read_text().strip()
@@ -56,20 +56,29 @@ class CodeBuddyOwner(NativeOwner):
                 time.sleep(.1)
 
     def stop(self, force=False):
-        if self.handle.get("kind")!="codebuddy-server":return
+        if self.handle.get("kind")!="codebuddy-server":
+            if not self.directory.is_symlink():
+                shutil.rmtree(self.directory, ignore_errors=True)
+            return True
         pid=self.handle.get("pid");start=self.handle.get("processStart")
-        if not pid or process_start(pid)!=start:return
-        try: os.kill(pid,signal.SIGTERM)
-        except ProcessLookupError: return
-        until=time.monotonic()+5
-        while process_start(pid)==start and time.monotonic()<until:time.sleep(.05)
-        if force and process_start(pid)==start:
-            try: os.kill(pid,signal.SIGKILL)
+        if pid and process_start(pid)==start:
+            try: os.kill(pid,signal.SIGTERM)
             except ProcessLookupError: pass
-            until=time.monotonic()+1
+            until=time.monotonic()+5
             while process_start(pid)==start and time.monotonic()<until:time.sleep(.05)
-        if not force and process_start(pid)==start:raise OSError(tr("CodeBuddy 原生进程尚未退出", "CodeBuddy native process has not exited"))
-        proc=getattr(self,"proc",None)
-        if proc is not None:
-            try: proc.wait(timeout=1)
-            except subprocess.TimeoutExpired: pass
+            if force and process_start(pid)==start:
+                try: os.kill(pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                until=time.monotonic()+1
+                while process_start(pid)==start and time.monotonic()<until:time.sleep(.05)
+            if not force and process_start(pid)==start:raise OSError(tr("CodeBuddy 原生进程尚未退出", "CodeBuddy native process has not exited"))
+            proc=getattr(self,"proc",None)
+            if proc is not None:
+                try: proc.wait(timeout=1)
+                except subprocess.TimeoutExpired: pass
+        if not self.directory.is_symlink():
+            shutil.rmtree(self.directory, ignore_errors=True)
+        self.session.config.pop("nativeOwner", None)
+        if not force:
+            self.session.save()
+        return True

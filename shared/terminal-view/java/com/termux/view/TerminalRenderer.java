@@ -437,7 +437,7 @@ public final class TerminalRenderer {
                         || Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
 
                     if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideSelection != lastRunInsideSelection || fontWidthMismatch || lastRunFontWidthMismatch) {
-                        if (column == 0 || column == lastRunStartColumn) {
+                        if (lastRunStartColumn < 0 || column == lastRunStartColumn) {
                             // Skip first column as there is nothing to draw, just record the current style.
                         } else {
                             final int columnWidthSinceLastRun = column - lastRunStartColumn;
@@ -480,7 +480,7 @@ public final class TerminalRenderer {
                 if (lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK) {
                     invertCursorTextColor = true;
                 }
-                if (columnWidthSinceLastRun > 0) drawTextRun(canvas, line, palette, heightOffset, rowBgTop, rowBgBottom, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
+                if (lastRunStartColumn >= 0 && columnWidthSinceLastRun > 0) drawTextRun(canvas, line, palette, heightOffset, rowBgTop, rowBgBottom, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
                     measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection, paintBackground, paintText);
                 if (kittyUnderText && pass == 0) {
 

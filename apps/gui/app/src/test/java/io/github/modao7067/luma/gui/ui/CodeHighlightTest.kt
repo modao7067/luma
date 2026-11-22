@@ -457,4 +457,23 @@ class CodeHighlightTest {
         assertEquals(LightCodePalette.number, diffHl.colorAt("42"))
         assertSame(diffHl, cachedDiffHighlight(hunk, "kotlin", false))
     }
+
+    @Test fun `unclosed markdown delimiters and oversized markdown stay linear and cancellable`() {
+        val pathological = "[a".repeat(8000) + "] `" + "**".repeat(4000)
+        var checks = 0
+        val index = codeTokenIndex(pathological, "markdown") { checks++ }
+        assertTrue(checks > 0)
+        assertEquals(pathological.length, index.code.length)
+
+        val oversizedMd = ("# Heading\n`code` **bold** [link](url)\n").repeat(INDEX_LIBRARY_HIGHLIGHT_LIMIT / 30)
+        assertTrue(oversizedMd.length > INDEX_LIBRARY_HIGHLIGHT_LIMIT)
+        val oversizedIndex = codeTokenIndex(oversizedMd, "markdown")
+        assertTrue(oversizedIndex.tokenCount <= INDEX_DISPLAY_SPAN_LIMIT)
+
+        val unclosedJsx = "<Panel data={" + "{a:1,".repeat(3000)
+        var jsxChecks = 0
+        val jsxHighlighted = highlightedCode(unclosedJsx, "tsx", colors) { jsxChecks++ }
+        assertTrue(jsxChecks > 0)
+        assertEquals(unclosedJsx, jsxHighlighted.text)
+    }
 }

@@ -7,6 +7,9 @@ import android.util.AtomicFile
 import io.github.modao7067.luma.gui.agent.obj
 import io.github.modao7067.luma.gui.agent.objects
 import io.github.modao7067.luma.gui.agent.stringOrNull
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -201,8 +204,9 @@ class SessionStore internal constructor(
     internal var navigation = SessionNavigation(); private set
     fun load(): List<SessionRecord> {
         drainWrites(baseFile.absolutePath, rethrowError = false)
-        if (!baseFile.exists()) return emptyList()
-        val bytes = AtomicFile(baseFile).readFully()
+        if (!baseFile.exists() && !File("${baseFile.path}.bak").exists()) return emptyList()
+        val atomic = AtomicFile(baseFile)
+        val bytes = atomic.readFully()
         val root = JSONObject(String(bytes, Charsets.UTF_8))
         val records = decodeSessionIndex(root)
         navigation = decodeNavigation(root.optJSONObject("navigation"))
@@ -214,14 +218,22 @@ class SessionStore internal constructor(
             throw IOException(tr("会话存储路径不可写: ${baseFile.path}", "Session store path is not writable: ${baseFile.path}"))
         }
     }
-    fun save(records: Collection<SessionRecord>) {
+    fun save(records: Collection<SessionRecord>, onCommitted: (() -> Unit)? = null) {
         verifyWritableTarget()
-        enqueueWrite(baseFile, records.map { it.snapshot() }, navigation.snapshot(), writer)
+        enqueueWrite(baseFile, records.map { it.snapshot() }, navigation.snapshot(), writer, onCommitted)
     }
     fun saveDurable(records: Collection<SessionRecord>) {
         verifyWritableTarget()
-        val seq = enqueueWrite(baseFile, records.map { it.snapshot() }, navigation.snapshot(), writer)
+        val seq = enqueueWrite(baseFile, records.map { it.snapshot() }, navigation.snapshot(), writer, null)
         awaitWrite(baseFile.absolutePath, seq)
+    }
+    suspend fun saveDurableAsync(
+        records: Collection<SessionRecord>,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ) {
+        verifyWritableTarget()
+        val seq = enqueueWrite(baseFile, records.map { it.snapshot() }, navigation.snapshot(), writer, null)
+        withContext(dispatcher) { awaitWrite(baseFile.absolutePath, seq) }
     }
     fun flush() = drainWrites(baseFile.absolutePath, rethrowError = true)
     private data class PendingWrite(
@@ -230,6 +242,7 @@ class SessionStore internal constructor(
         val records: List<SessionRecord>,
         val navigation: SessionNavigation,
         val writer: (File, ByteArray) -> Unit,
+        val callbacks: List<() -> Unit>,
     )
     private companion object {
         private val writeLock = Object()
@@ -238,7 +251,6 @@ class SessionStore internal constructor(
         private val completedSeq = HashMap<String, Long>()
         private val batchErrors = HashMap<String, Pair<Long, Throwable>>()
         private var nextSeq = 0L
-        private var activeWrites = 0
         private var workerStarted = false
         private fun defaultWriteAtomic(target: File, bytes: ByteArray) {
             val atomic = AtomicFile(target)
@@ -263,7 +275,6 @@ class SessionStore internal constructor(
                             writeLock.wait()
                         }
                         val firstKey = pendingWrites.keys.first()
-                        activeWrites++
                         activeByKey[firstKey] = (activeByKey[firstKey] ?: 0) + 1
                         firstKey to pendingWrites.remove(firstKey)!!
                     }
@@ -274,7 +285,6 @@ class SessionStore internal constructor(
                         writeFailure = failure
                     } finally {
                         synchronized(writeLock) {
-                            activeWrites--
                             val rem = (activeByKey[key] ?: 1) - 1
                             if (rem <= 0) activeByKey.remove(key) else activeByKey[key] = rem
                             val prevSeq = completedSeq[key] ?: 0L
@@ -288,6 +298,9 @@ class SessionStore internal constructor(
                             }
                             writeLock.notifyAll()
                         }
+                        if (writeFailure == null && next.callbacks.isNotEmpty()) {
+                            next.callbacks.forEach { callback -> runCatching { callback() } }
+                        }
                     }
                 }
             }, "LumaSessionStore").apply {
@@ -300,11 +313,16 @@ class SessionStore internal constructor(
             records: List<SessionRecord>,
             navigation: SessionNavigation,
             writer: (File, ByteArray) -> Unit,
+            onCommitted: (() -> Unit)?,
         ): Long = synchronized(writeLock) {
             ensureWorkerLocked()
             val seq = ++nextSeq
             val key = target.absolutePath
-            pendingWrites[key] = PendingWrite(seq, target, records, navigation, writer)
+            val merged = buildList {
+                pendingWrites[key]?.callbacks?.let(::addAll)
+                if (onCommitted != null) add(onCommitted)
+            }
+            pendingWrites[key] = PendingWrite(seq, target, records, navigation, writer, merged)
             writeLock.notifyAll()
             seq
         }
@@ -322,7 +340,7 @@ class SessionStore internal constructor(
         }
         private fun drainWrites(key: String, rethrowError: Boolean) {
             synchronized(writeLock) {
-                while (pendingWrites.isNotEmpty() || activeWrites > 0) {
+                while (pendingWrites.containsKey(key) || (activeByKey[key] ?: 0) > 0) {
                     writeLock.wait()
                 }
                 val err = batchErrors.remove(key)
