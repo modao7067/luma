@@ -21,6 +21,18 @@ sys.path.insert(0, str(REPO / "apps/gui/app/src/main/assets/cli_bridge"))
 from luma_cli import balances
 from luma_cli import global_usage as gu
 
+
+def _write_zstd_events(path, events):
+    payload = ("\n".join(json.dumps(event) for event in events) + "\n").encode("utf-8")
+    try:
+        from compression import zstd
+    except ImportError:
+        compressed = subprocess.run(["zstd", "-qc"], input=payload, stdout=subprocess.PIPE, check=True).stdout
+    else:
+        compressed = zstd.compress(payload)
+    path.write_bytes(compressed)
+
+
 class GlobalUsageTest(unittest.TestCase):
     def setUp(self):
         self._cache_tmp = tempfile.TemporaryDirectory()
@@ -1373,9 +1385,7 @@ sys.stdin.read()
                     },
                 },
             ]
-            raw_dsh = "\n".join(json.dumps(e) for e in dsh_events) + "\n"
-            from compression import zstd
-            (dsh_dir / "session.v4.jsonl.zstd").write_bytes(zstd.compress(raw_dsh.encode("utf-8")))
+            _write_zstd_events(dsh_dir / "session.v4.jsonl.zstd", dsh_events)
 
             kimi_cli_root = home / ".kimi"
             kimi_sess = kimi_cli_root / "sessions" / "grp1" / "uuid-1"
@@ -1661,7 +1671,6 @@ sys.stdin.read()
                 "DEEPSEEK_API_KEY: sk-test-ds\n",
                 "utf-8",
             )
-            from compression import zstd
             v3_events = [
                 {"type": "session", "seq": 0, "time": now_ms - 5000, "id": "forked-v3", "isSeeded": True},
                 {
@@ -1694,7 +1703,7 @@ sys.stdin.read()
                     },
                 },
             ]
-            (dsh_sess / "session.v3.jsonl.zst").write_bytes(zstd.compress(("\n".join(json.dumps(e) for e in v3_events) + "\n").encode("utf-8")))
+            _write_zstd_events(dsh_sess / "session.v3.jsonl.zst", v3_events)
 
             kimi_code = home / ".kimi-code" / "sessions" / "ws" / "s1" / "agents" / "main"
             kimi_code.mkdir(parents=True)
