@@ -76,7 +76,7 @@ internal fun MenuIcon(
         MenuSymbol.EDIT_DOCUMENT -> R.drawable.ic_menu_edit_document
         MenuSymbol.DELETE -> R.drawable.ic_menu_delete
         MenuSymbol.MODEL -> R.drawable.ic_menu_smart_toy
-        MenuSymbol.THINKING -> R.drawable.ic_menu_psychology
+        MenuSymbol.THINKING -> R.drawable.ic_menu_lightbulb
         MenuSymbol.LIGHTBULB -> R.drawable.ic_menu_lightbulb
         MenuSymbol.SPEED -> R.drawable.ic_menu_speed
         MenuSymbol.LOCK -> R.drawable.ic_menu_lock

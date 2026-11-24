@@ -176,6 +176,9 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
 
     def __init__(self, config, save):
         super().__init__(config, save)
+        self.data["model"] = config.get("selectedModel") or config.get("model", "")
+        self.data["effort"] = config.get("selectedEffort", "")
+        self.data["catalogState"] = "loading"
         self.tail_stop = threading.Event()
         self.tail_wake = threading.Event()
         self.tail_thread = None
@@ -1644,22 +1647,34 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             self.sync_transcripts_once()
 
     def _restore_native_options(self, is_new):
-        wanted_model = self.config.get("selectedModel") or (self.config.get("model") if is_new else None)
+        pending_initial = self.config.get("pendingInitialModel")
+        wanted_model = self.config.get("selectedModel") or (
+            self.config.get("model") if is_new else pending_initial
+        )
         if wanted_model:
             catalog_models = {m["id"] for m in self.data["models"]}
             if is_new or wanted_model in catalog_models:
                 if wanted_model != self.data["model"]:
                     AcpSession.configure(self, {"model": wanted_model})
                 self.config["selectedModel"] = self.data["model"]
+                self.config.pop("pendingInitialModel", None)
                 self.save()
+            elif pending_initial and not self.config.get("selectedModel"):
+                raise Rejected(tr(
+                    f"新建会话指定的模型 {wanted_model} 不在当前 agy 目录中；已保留所选模型，请核对后重连",
+                    f"Initial model {wanted_model} is not in the current agy catalog; selection preserved, check and reconnect",
+                ))
         wanted_effort = self.config.get("selectedEffort")
-        efforts = next((m.get("efforts", []) for m in self.data["models"] if m["id"] == self.data["model"]), [])
-        if not efforts:
-            if "selectedEffort" in self.config:
-                self.config.pop("selectedEffort", None)
-                self.save()
-        elif wanted_effort and wanted_effort in efforts and wanted_effort != self.data["effort"]:
-            AcpSession.configure(self, {"effort": wanted_effort})
+        current_model_entry = next((m for m in self.data["models"] if m["id"] == self.data["model"]), None)
+        model_matched = not wanted_model or self.data["model"] == wanted_model
+        if current_model_entry is not None:
+            efforts = current_model_entry.get("efforts", [])
+            if not efforts:
+                if model_matched and "selectedEffort" in self.config:
+                    self.config.pop("selectedEffort", None)
+                    self.save()
+            elif wanted_effort and wanted_effort in efforts and wanted_effort != self.data["effort"]:
+                AcpSession.configure(self, {"effort": wanted_effort})
         mode_opt = self._primary_mode_option()
         if mode_opt is not None:
             native_modes = {v["value"] for v in self.flatten(mode_opt.get("options", []))}
@@ -1694,11 +1709,38 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         with self.lock:
             self._reset_parent_tracking()
             self.subagents.clear()
+            self.update(
+                connected=False,
+                connecting=True,
+                catalogState="loading",
+                historyReady=False,
+                models=[],
+                model="",
+                effort="",
+            )
         try:
             AcpSession.connect(self)
+            model_opt = next(
+                (o for o in self.options if o.get("type") == "select" and o.get("category", o.get("id")) == "model"),
+                None,
+            )
+            handshake_models = self.flatten(model_opt.get("options", [])) if model_opt else []
+            if not handshake_models or not self.data["models"]:
+                raise Rejected(tr(
+                    "agy 未返回可用模型目录（可能因网络异常或代理未就绪）；已关闭本次不完整连接，请检查网络后重连",
+                    "agy did not return an available model catalog (network or proxy may be unavailable); closed incomplete connection, check network and reconnect",
+                ))
             self._restore_native_options(is_new)
         except Exception:
             self._close_current_peer()
+            self.update(
+                connected=False,
+                connecting=False,
+                catalogState="error",
+                models=[],
+                model=self.config.get("selectedModel") or self.config.get("model", ""),
+                effort=self.config.get("selectedEffort", ""),
+            )
             raise
         hydrate = bool(getattr(self, "_resumed_from_transcript", False))
         self._resumed_from_transcript = False
@@ -1709,6 +1751,8 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.restart_child_tail()
         self.update(
             connected=True,
+            connecting=False,
+            catalogState="ready",
             capabilities={**self.data["capabilities"], "steer": True},
             historyReady=True,
         )
@@ -1751,6 +1795,9 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                               "Previous native session creation result is unknown; attach using the original ID from CLI session list instead of recreating"))
         self.discover_binary()
         is_new = not bool(self.config.get("nativeId"))
+        if is_new and self.config.get("model") and not self.config.get("selectedModel") and self.config.get("pendingInitialModel") != self.config.get("model"):
+            self.config["pendingInitialModel"] = self.config["model"]
+            self.save()
         self._connect_acp(is_new)
 
     def _validate_effort_against_current_options(self, effort_value):
@@ -1807,6 +1854,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             if p.get("model"):
                 AcpSession.configure(self, {"model": p["model"]})
                 self.config["selectedModel"] = self.data["model"]
+                self.config.pop("pendingInitialModel", None)
             if p.get("effort"):
                 self._validate_effort_against_current_options(p["effort"])
                 AcpSession.configure(self, {"effort": p["effort"]})
@@ -1832,6 +1880,8 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
             cur_efforts = next((m.get("efforts", []) for m in self.data["models"] if m["id"] == self.data["model"]), [])
             if not cur_efforts or not self.data.get("effort"):
                 self.config.pop("selectedEffort", None)
+            elif p.get("model") and not p.get("effort"):
+                self.config["selectedEffort"] = self.data["effort"]
             elif self.config.get("selectedEffort") and self.config["selectedEffort"] not in cur_efforts:
                 self.config["selectedEffort"] = self.data["effort"]
             self.save()
@@ -1839,7 +1889,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
 
         prev_saved = {
             k: self.config.get(k)
-            for k in ("selectedModel", "selectedEffort", "selectedPermission", "skipPermissions", "selectedBaseMode", "selectedPlanMode", "selectedNativeMode")
+            for k in ("selectedModel", "pendingInitialModel", "selectedEffort", "selectedPermission", "skipPermissions", "selectedBaseMode", "selectedPlanMode", "selectedNativeMode")
         }
         prev_rows = copy.deepcopy(self.rows)
         prev_subagents = copy.deepcopy(self.subagents)
@@ -1847,6 +1897,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         next_effort = p.get("effort") or self.config.get("selectedEffort") or self.data["effort"]
         if next_model:
             self.config["selectedModel"] = next_model
+            self.config.pop("pendingInitialModel", None)
         if next_effort:
             self.config["selectedEffort"] = next_effort
         self.config["skipPermissions"] = next_skip
@@ -1857,7 +1908,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
         self.config["selectedPermission"] = FULL_ACCESS if next_skip else next_base
         self.save()
 
-        self.update(historyReady=False)
+        self.update(connected=False, connecting=True, catalogState="loading", historyReady=False)
         self._close_current_peer()
         with self.lock:
             self.rows.clear()
@@ -1870,6 +1921,7 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self.config["selectedEffort"] = self.data["effort"]
                 self.save()
         except Exception:
+            self._close_current_peer()
             for k, v in prev_saved.items():
                 if v is None:
                     self.config.pop(k, None)
@@ -1884,7 +1936,15 @@ class AntigravityAgyAcpSession(AgyChildTailMixin, AntigravitySession):
                 self.rows.update(prev_rows)
                 self.subagents.clear()
                 self.subagents.update(prev_subagents)
-            self.update(connected=False, historyReady=True)
+            self.update(
+                connected=False,
+                connecting=False,
+                catalogState="error",
+                models=[],
+                model=self.config.get("selectedModel") or self.config.get("model", ""),
+                effort=self.config.get("selectedEffort", ""),
+                historyReady=True,
+            )
             raise
         return {}
 

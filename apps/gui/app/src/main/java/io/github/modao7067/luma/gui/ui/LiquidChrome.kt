@@ -325,7 +325,7 @@ internal object ComposerGlassDefaults {
 
 @Composable
 internal fun ComposerGlass(modifier: Modifier = Modifier, content: @Composable () -> Unit) = LiquidGlass(
-    modifier = modifier.blockHorizontalPageSwipe(),
+    modifier = modifier.blockHorizontalPageSwipe(allowVerticalScroll = true, allowChildScroll = true),
     cornerRadius = 24.dp,
     style = PrismGlassStyle.dock(MaterialTheme.colorScheme),
     shadow = GlassShadow.Dock,

@@ -1349,6 +1349,209 @@ class AntigravityAgyAcpTests(unittest.TestCase):
             self.assertEqual(snap["hostQueue"], [])
             self.assertIn("reply:/help", [r["text"] for r in snap["messages"] if r["role"] == "assistant"])
 
+    def test_degraded_cold_start_without_model_catalog_rejects_and_preserves_saved_model_and_effort(self):
+        state_dir = self.root / "state-degraded"
+        mode_only = [o for o in AGY_ACP_OPTIONS if o["id"] == "mode"]
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_RESUME_CAP="1")):
+            manager = Manager(state_dir)
+            s = manager.connect({"id": "cold", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+            self.sessions.append(s)
+            s.configure({"effort": "high"})
+            native_id = s.data["nativeId"]
+            self.assertEqual(s.config.get("selectedModel"), "claude-opus-5-5")
+            self.assertEqual(s.config.get("selectedEffort"), "high")
+            manager.release("cold", {"nativeId": native_id, "nativeProtocol": AGY_ACP_PROTOCOL})
+
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_OPTIONS=json.dumps(mode_only), LUMA_FIXTURE_RESUME_CAP="1")):
+            bg = manager.connect({
+                "id": "cold",
+                "cli": "Antigravity",
+                "cwd": str(self.root),
+                "nativeId": native_id,
+                "nativeProtocol": AGY_ACP_PROTOCOL,
+            }, background=True)
+            self.wait(lambda: not bg.data.get("connecting"))
+            self.assertFalse(bg.data["connected"])
+            self.assertEqual(bg.data["models"], [])
+            self.assertIsNone(bg.peer)
+            self.assertTrue(bg.data.get("error"))
+            saved = json.loads((state_dir / "cold.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved.get("selectedModel"), "claude-opus-5-5")
+            self.assertEqual(saved.get("selectedEffort"), "high")
+
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_RESUME_CAP="1")):
+            recovered = manager.connect({
+                "id": "cold",
+                "cli": "Antigravity",
+                "cwd": str(self.root),
+                "nativeId": native_id,
+                "nativeProtocol": AGY_ACP_PROTOCOL,
+            })
+            self.sessions.append(recovered)
+            self.assertTrue(recovered.data["connected"])
+            self.assertEqual(recovered.data["model"], "claude-opus-5-5")
+            self.assertEqual(recovered.data["effort"], "high")
+            self.assertEqual([m["id"] for m in recovered.data["models"]], [
+                "gemini-4-argon",
+                "claude-opus-5-5",
+                "gemini-pro-orchestrator",
+            ])
+            opus_entry = next(m for m in recovered.data["models"] if m["id"] == "claude-opus-5-5")
+            self.assertEqual(opus_entry["efforts"], ["low", "medium", "high"])
+
+    def test_new_session_degraded_catalog_retry_restores_initial_model_and_model_switch_syncs_effort(self):
+        state_dir = self.root / "state-new-degraded"
+        mode_only = [o for o in AGY_ACP_OPTIONS if o["id"] == "mode"]
+        manager = Manager(state_dir)
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_OPTIONS=json.dumps(mode_only))):
+            with self.assertRaises(Rejected):
+                manager.connect({"id": "newcold", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+        saved = json.loads((state_dir / "newcold.json").read_text(encoding="utf-8"))
+        self.assertTrue(saved.get("nativeId"))
+        self.assertEqual(saved.get("model"), "claude-opus-5-5")
+
+        with patch.dict(os.environ, self.env()):
+            recovered = manager.connect({
+                "id": "newcold",
+                "cli": "Antigravity",
+                "cwd": str(self.root),
+                "nativeId": saved["nativeId"],
+                "nativeProtocol": AGY_ACP_PROTOCOL,
+            })
+            self.sessions.append(recovered)
+            self.assertTrue(recovered.data["connected"])
+            self.assertEqual(recovered.data["model"], "claude-opus-5-5")
+            self.assertEqual(recovered.config.get("selectedModel"), "claude-opus-5-5")
+            recovered.configure({"effort": "low"})
+            self.assertEqual(recovered.config.get("selectedEffort"), "low")
+            recovered.configure({"model": "gemini-4-argon"})
+            self.assertEqual(recovered.data["model"], "gemini-4-argon")
+            self.assertEqual(recovered.config.get("selectedEffort"), recovered.data["effort"])
+
+    def test_permission_relaunch_without_model_catalog_rejects_and_preserves_effort_without_stale_models(self):
+        state_dir = self.root / "state-relaunch-degraded"
+        mode_only = [o for o in AGY_ACP_OPTIONS if o["id"] == "mode"]
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(state_dir)
+            s = manager.connect({"id": "rel", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+            self.sessions.append(s)
+            s.configure({"effort": "high"})
+            self.assertEqual(s.data["model"], "claude-opus-5-5")
+            self.assertEqual(s.data["effort"], "high")
+            with patch.dict(os.environ, self.env(LUMA_FIXTURE_OPTIONS=json.dumps(mode_only))):
+                with self.assertRaises(Rejected):
+                    s.configure({"permission": "always-proceed"})
+            self.assertFalse(s.data["connected"])
+            self.assertEqual(s.data["models"], [])
+            saved = json.loads((state_dir / "rel.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved.get("selectedModel"), "claude-opus-5-5")
+            self.assertEqual(saved.get("selectedEffort"), "high")
+            self.assertFalse(saved.get("skipPermissions"))
+
+    def test_attach_without_bridge_config_does_not_override_native_model_with_ui_cache(self):
+        state_dir = self.root / "state-attach-cache"
+        (self.store / "existing-native-id.json").parent.mkdir(parents=True, exist_ok=True)
+        (self.store / "existing-native-id.json").write_text(json.dumps({"turns": []}), encoding="utf-8")
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(state_dir)
+            s = manager.connect({
+                "id": "att",
+                "cli": "Antigravity",
+                "cwd": str(self.root),
+                "nativeId": "existing-native-id",
+                "nativeProtocol": AGY_ACP_PROTOCOL,
+                "model": "claude-opus-5-5",
+            })
+            self.sessions.append(s)
+            self.assertTrue(s.data["connected"])
+            self.assertEqual(s.data["model"], "gemini-4-argon")
+            rpc_methods = [json.loads(line)["method"] for line in (self.store / "rpc_methods.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("session/set_config_option", rpc_methods)
+
+    def test_pending_initial_model_missing_on_partial_retry_rejects_preserves_and_restores_later(self):
+        state_dir = self.root / "state-partial-initial"
+        mode_only = [o for o in AGY_ACP_OPTIONS if o["id"] == "mode"]
+        partial_options = copy.deepcopy(AGY_ACP_OPTIONS)
+        partial_options[0]["options"] = [o for o in partial_options[0]["options"] if o["value"] != "claude-opus-5-5"]
+        manager = Manager(state_dir)
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_OPTIONS=json.dumps(mode_only))):
+            with self.assertRaises(Rejected):
+                manager.connect({"id": "partinit", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+        saved = json.loads((state_dir / "partinit.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved.get("pendingInitialModel"), "claude-opus-5-5")
+
+        with patch.dict(os.environ, self.env(LUMA_FIXTURE_OPTIONS=json.dumps(partial_options))):
+            with self.assertRaisesRegex(Rejected, "claude-opus-5-5"):
+                manager.connect({
+                    "id": "partinit",
+                    "cli": "Antigravity",
+                    "cwd": str(self.root),
+                    "nativeId": saved["nativeId"],
+                    "nativeProtocol": AGY_ACP_PROTOCOL,
+                })
+        saved_after_partial = json.loads((state_dir / "partinit.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_after_partial.get("pendingInitialModel"), "claude-opus-5-5")
+        self.assertNotIn("selectedModel", saved_after_partial)
+
+        with patch.dict(os.environ, self.env()):
+            recovered = manager.connect({
+                "id": "partinit",
+                "cli": "Antigravity",
+                "cwd": str(self.root),
+                "nativeId": saved["nativeId"],
+                "nativeProtocol": AGY_ACP_PROTOCOL,
+            })
+            self.sessions.append(recovered)
+            self.assertTrue(recovered.data["connected"])
+            self.assertEqual(recovered.data["catalogState"], "ready")
+            self.assertEqual(recovered.data["model"], "claude-opus-5-5")
+            self.assertEqual(recovered.config.get("selectedModel"), "claude-opus-5-5")
+            self.assertNotIn("pendingInitialModel", recovered.config)
+
+    def test_permission_relaunch_mid_handshake_snapshot_is_not_catalog_ready(self):
+        state_dir = self.root / "state-relaunch-mid"
+        with patch.dict(os.environ, self.env()):
+            manager = Manager(state_dir)
+            s = manager.connect({"id": "relmid", "cli": "Antigravity", "cwd": str(self.root), "model": "claude-opus-5-5"})
+            self.sessions.append(s)
+            s.configure({"effort": "high"})
+            entered_init = threading.Event()
+            release_init = threading.Event()
+            orig_call = s.call
+
+            def paused_call(method, params=None, **kw):
+                if method == "initialize":
+                    entered_init.set()
+                    release_init.wait(timeout=3.0)
+                return orig_call(method, params, **kw)
+
+            error_box = []
+            def do_relaunch():
+                try:
+                    s.configure({"permission": "always-proceed"})
+                except Exception as exc:
+                    error_box.append(exc)
+
+            with patch.object(s, "call", side_effect=paused_call):
+                t = threading.Thread(target=do_relaunch, daemon=True)
+                t.start()
+                self.assertTrue(entered_init.wait(timeout=3.0))
+                mid = s.snapshot()
+                self.assertFalse(mid["connected"])
+                self.assertTrue(mid["connecting"])
+                self.assertEqual(mid["catalogState"], "loading")
+                self.assertEqual(mid["models"], [])
+                release_init.set()
+                t.join(timeout=5.0)
+            self.assertEqual(error_box, [])
+            final = s.snapshot()
+            self.assertTrue(final["connected"])
+            self.assertFalse(final["connecting"])
+            self.assertEqual(final["catalogState"], "ready")
+            self.assertEqual(final["model"], "claude-opus-5-5")
+            self.assertEqual(final["effort"], "high")
+            self.assertEqual(final["permission"], "always-proceed")
+
 class SwarmProjectionAcpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="luma-agy-swarm-")

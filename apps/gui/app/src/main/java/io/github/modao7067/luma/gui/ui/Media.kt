@@ -193,8 +193,19 @@ private fun rememberMediaFrame(resource: MediaResource, maxDimension: Int, page:
 }
 
 @Composable
-internal fun ImageThumbnail(source: String, name: String, busy: Boolean = false) {
-    MediaImageCard(MediaResource(source, name, "image/*"), Modifier.size(84.dp), busy, crop = true)
+internal fun ImageThumbnail(
+    source: String,
+    name: String,
+    busy: Boolean = false,
+    blockHorizontalSwipe: Boolean = true,
+) {
+    MediaImageCard(
+        MediaResource(source, name, "image/*"),
+        Modifier.size(84.dp),
+        busy,
+        crop = true,
+        blockHorizontalSwipe = blockHorizontalSwipe,
+    )
 }
 
 internal data class MediaCardLayout(
@@ -239,6 +250,7 @@ internal fun MediaImageCard(
     busy: Boolean = false,
     crop: Boolean = false,
     collapseOnFailure: Boolean = false,
+    blockHorizontalSwipe: Boolean = true,
     onLoadFailed: (() -> Unit)? = null,
 ) {
     val bound = resource.inContext(LocalMediaContext.current)
@@ -267,7 +279,7 @@ internal fun MediaImageCard(
         modifier = modifier.then(sizeModifier)
             .onGloballyPositioned { origin = it.positionInRoot() + Offset(it.size.width / 2f, it.size.height / 2f) }
             .clip(LumaCardShape(corner))
-            .blockHorizontalPageSwipe(enabled = open != null && interactive && !busy, allowVerticalScroll = true)
+            .blockHorizontalPageSwipe(enabled = blockHorizontalSwipe && open != null && interactive && !busy, allowVerticalScroll = true)
             .clickable(enabled = open != null && interactive && !busy) {
                 haptic.tick()
                 open?.invoke(bound, origin)

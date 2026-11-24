@@ -4,7 +4,14 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 
 import io.github.modao7067.luma.gui.i18n.tr
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
 import android.view.View
 import android.widget.FrameLayout
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,13 +42,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -57,11 +65,13 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -78,9 +88,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import io.github.modao7067.luma.gui.LumaApplication
 import io.github.modao7067.luma.gui.browser.AgentBrowser
 import io.github.modao7067.luma.gui.browser.BrowserPolicy
+import kotlin.coroutines.resume
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -95,6 +108,23 @@ private class InFlightFileChooserHolder {
 private class WebViewHostHolder {
     var host: FrameLayout? = null
     var attachedTab: AgentBrowser.Tab? = null
+}
+
+private class BrowserMenuBackdropSnapshot(
+    val image: ImageBitmap,
+    val offsetX: Int,
+    val offsetY: Int,
+    val widthPx: Int,
+    val heightPx: Int,
+)
+
+private fun Context.findBrowserActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 @Composable
@@ -385,64 +415,127 @@ internal fun AttachedBrowserPane(
     }
 
     val density = LocalDensity.current
+    val context = LocalContext.current
+    val hostView = LocalView.current
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val backdropBlur = rememberPrismBackdropBlur(density.density)
-    val backdrop = rememberGraphicsLayer()
-    val regularBackdrop = rememberGraphicsLayer()
-    val hazeBackdrop = rememberGraphicsLayer()
-    val glassScene = remember(backdrop, regularBackdrop, hazeBackdrop, backdropBlur) {
-        GlassScene(backdrop, regularBackdrop, hazeBackdrop, backdropBlur.regularScale, backdropBlur.hazeScale)
+    val backdropLayer = rememberGraphicsLayer()
+    val regularLayer = rememberGraphicsLayer()
+    val hazeLayer = rememberGraphicsLayer()
+    val glassScene = remember(backdropLayer, regularLayer, hazeLayer, backdropBlur) {
+        GlassScene(backdropLayer, regularLayer, hazeLayer, backdropBlur.regularScale, backdropBlur.hazeScale)
     }
     val menuHost = remember { MorphMenuHost() }
     val moreAnchor = rememberMorphAnchor()
     val moreElastic = rememberElasticPress()
     val moreFill = if (colors.surface.luminance() > 0.5f) colors.surfaceContainerLowest else colors.surfaceContainerHigh
+    var rootWindowOffset by remember { mutableStateOf(IntOffset.Zero) }
+    var rootSizePx by remember { mutableStateOf(IntSize.Zero) }
+    var menuBackdrop by remember(sessionId) { mutableStateOf<BrowserMenuBackdropSnapshot?>(null) }
+    var capturingBackdrop by remember(sessionId) { mutableStateOf(false) }
+    val recordedBackdrop = remember(sessionId) { arrayOfNulls<BrowserMenuBackdropSnapshot>(1) }
+    val recordedSize = remember(sessionId) { arrayOf(androidx.compose.ui.geometry.Size.Zero) }
+    val captureTicket = remember(sessionId) { intArrayOf(0) }
+
+    LaunchedEffect(active) {
+        if (!active) {
+            captureTicket[0]++
+            capturingBackdrop = false
+            menuBackdrop = null
+            recordedBackdrop[0] = null
+        }
+    }
+
+    LaunchedEffect(moreOpen, menuHost.entries.size) {
+        if (!moreOpen && menuHost.entries.isEmpty()) {
+            captureTicket[0]++
+            capturingBackdrop = false
+            menuBackdrop = null
+            recordedBackdrop[0] = null
+        }
+    }
+
+    val openMoreMenu: () -> Unit = {
+        if (moreOpen || menuHost.entries.isNotEmpty()) {
+            moreOpen = true
+        } else {
+            val ticket = ++captureTicket[0]
+            val window = if (!inspection && Build.VERSION.SDK_INT >= 26 && hostView.isHardwareAccelerated) {
+                context.findBrowserActivity()?.window
+            } else null
+            val decor = window?.decorView
+            val decorW = decor?.width ?: 0
+            val decorH = decor?.height ?: 0
+            val rawLeft = rootWindowOffset.x
+            val rawTop = rootWindowOffset.y
+            val clippedLeft = rawLeft.coerceIn(0, decorW)
+            val clippedTop = rawTop.coerceIn(0, decorH)
+            val clippedRight = (rawLeft + rootSizePx.width).coerceIn(0, decorW)
+            val clippedBottom = (rawTop + rootSizePx.height).coerceIn(0, decorH)
+            val srcW = clippedRight - clippedLeft
+            val srcH = clippedBottom - clippedTop
+            if (window != null && decor != null && decor.isAttachedToWindow && srcW > 16 && srcH > 16) {
+                val dstW = ceil(srcW * backdropBlur.regularScale).toInt().coerceAtLeast(1)
+                val dstH = ceil(srcH * backdropBlur.regularScale).toInt().coerceAtLeast(1)
+                val srcRect = android.graphics.Rect(clippedLeft, clippedTop, clippedRight, clippedBottom)
+                capturingBackdrop = true
+                moreOpen = true
+                scope.launch {
+                    try {
+                        val bitmap = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
+                        val copied = withTimeoutOrNull(80L) {
+                            suspendCancellableCoroutine<Boolean> { cont ->
+                                runCatching {
+                                    PixelCopy.request(window, srcRect, bitmap, { code ->
+                                        if (cont.isActive) cont.resume(code == PixelCopy.SUCCESS)
+                                    }, mainHandler)
+                                }.onFailure {
+                                    if (cont.isActive) cont.resume(false)
+                                }
+                            }
+                        } == true
+                        if (ticket != captureTicket[0]) return@launch
+                        if (copied) {
+                            recordedBackdrop[0] = null
+                            menuBackdrop = BrowserMenuBackdropSnapshot(
+                                image = bitmap.asImageBitmap(),
+                                offsetX = clippedLeft - rawLeft,
+                                offsetY = clippedTop - rawTop,
+                                widthPx = srcW,
+                                heightPx = srcH,
+                            )
+                        } else {
+                            menuBackdrop = null
+                        }
+                    } finally {
+                        if (ticket == captureTicket[0]) {
+                            capturingBackdrop = false
+                        }
+                    }
+                }
+            } else {
+                capturingBackdrop = false
+                menuBackdrop = null
+                moreOpen = true
+            }
+        }
+    }
 
     CompositionLocalProvider(LocalMorphMenuHost provides menuHost) {
         Box(
             modifier
                 .fillMaxSize()
                 .onGloballyPositioned {
-                    glassScene.rootCoordinates = it
                     menuHost.root = it
+                    glassScene.rootCoordinates = it
+                    rootSizePx = it.size
+                    val pos = it.positionInWindow()
+                    rootWindowOffset = IntOffset(pos.x.roundToInt(), pos.y.roundToInt())
                 },
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .drawWithCache {
-                        val regularSize = IntSize(
-                            ceil(size.width * backdropBlur.regularScale).toInt().coerceAtLeast(1),
-                            ceil(size.height * backdropBlur.regularScale).toInt().coerceAtLeast(1),
-                        )
-                        val hazeSize = IntSize(
-                            ceil(size.width * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
-                            ceil(size.height * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
-                        )
-                        val hazeStepScale = backdropBlur.hazeScale / backdropBlur.regularScale
-                        regularBackdrop.renderEffect = backdropBlur.regularEffect
-                        hazeBackdrop.renderEffect = backdropBlur.hazeEffect
-                        onDrawWithContent {
-                            if (menuHost.entries.isNotEmpty()) {
-                                backdrop.record {
-                                    drawRect(colors.background)
-                                    this@onDrawWithContent.drawContent()
-                                }
-                                drawLayer(backdrop)
-                                regularBackdrop.record(size = regularSize) {
-                                    scale(backdropBlur.regularScale, backdropBlur.regularScale, pivot = Offset.Zero) {
-                                        drawLayer(backdrop)
-                                    }
-                                }
-                                hazeBackdrop.record(size = hazeSize) {
-                                    scale(hazeStepScale, hazeStepScale, pivot = Offset.Zero) {
-                                        drawLayer(regularBackdrop)
-                                    }
-                                }
-                            } else {
-                                this@onDrawWithContent.drawContent()
-                            }
-                        }
-                    }
                     .background(colors.background)
                     .testTag("attached-browser-pane"),
             ) {
@@ -543,7 +636,7 @@ internal fun AttachedBrowserPane(
                                         enabled = true,
                                         elastic = moreElastic,
                                         sourceColor = moreFill,
-                                        onOpen = { moreOpen = true },
+                                        onOpen = openMoreMenu,
                                     )
                                     .semantics { contentDescription = tr("更多", "More") }
                                     .testTag("browser-more-button"),
@@ -870,10 +963,55 @@ internal fun AttachedBrowserPane(
             }
         }
             }
+            val activeBackdrop = menuBackdrop
+            if (activeBackdrop != null) {
+                val backdropFill = colors.background
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .drawBehind {
+                            if (recordedBackdrop[0] !== activeBackdrop || recordedSize[0] != size) {
+                                val regSize = IntSize(
+                                    ceil(size.width * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                                    ceil(size.height * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                                )
+                                val hzSize = IntSize(
+                                    ceil(size.width * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                                    ceil(size.height * backdropBlur.hazeScale).toInt().coerceAtLeast(1),
+                                )
+                                val hazeStepScale = backdropBlur.hazeScale / backdropBlur.regularScale
+                                regularLayer.renderEffect = backdropBlur.regularEffect
+                                hazeLayer.renderEffect = backdropBlur.hazeEffect
+                                regularLayer.record(size = regSize) {
+                                    drawRect(backdropFill)
+                                    drawImage(
+                                        image = activeBackdrop.image,
+                                        dstOffset = IntOffset(
+                                            (activeBackdrop.offsetX * backdropBlur.regularScale).roundToInt(),
+                                            (activeBackdrop.offsetY * backdropBlur.regularScale).roundToInt(),
+                                        ),
+                                        dstSize = IntSize(
+                                            ceil(activeBackdrop.widthPx * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                                            ceil(activeBackdrop.heightPx * backdropBlur.regularScale).toInt().coerceAtLeast(1),
+                                        ),
+                                    )
+                                }
+                                hazeLayer.record(size = hzSize) {
+                                    scale(hazeStepScale, hazeStepScale, pivot = Offset.Zero) {
+                                        drawLayer(regularLayer)
+                                    }
+                                }
+                                recordedBackdrop[0] = activeBackdrop
+                                recordedSize[0] = size
+                            }
+                        },
+                )
+            }
             MorphMenuLayer(
                 menuHost,
-                glassScene,
+                if (activeBackdrop != null) glassScene else null,
                 WindowInsets.safeDrawing.union(WindowInsets.ime),
+                readyToReveal = !capturingBackdrop,
             )
         }
     }

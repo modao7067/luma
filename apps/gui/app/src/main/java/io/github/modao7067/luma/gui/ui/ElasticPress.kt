@@ -232,11 +232,12 @@ internal val LocalDrawerOpen = compositionLocalOf { false }
 internal fun Modifier.blockHorizontalPageSwipe(
     enabled: Boolean = true,
     allowVerticalScroll: Boolean = false,
+    allowChildScroll: Boolean = false,
 ): Modifier {
     if (!enabled) return this
     val drawerOpen by rememberUpdatedState(LocalDrawerOpen.current)
-    return pointerInput(allowVerticalScroll) {
-        val threshold = viewConfiguration.touchSlop * 0.4f
+    return pointerInput(allowVerticalScroll, allowChildScroll) {
+        val threshold = if (allowChildScroll) viewConfiguration.touchSlop else viewConfiguration.touchSlop * 0.4f
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
             if (drawerOpen) return@awaitEachGesture
@@ -245,12 +246,13 @@ internal fun Modifier.blockHorizontalPageSwipe(
                 val event = awaitPointerEvent(PointerEventPass.Main)
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 if (!change.pressed) break
+                if (allowChildScroll && change.isConsumed) break
                 val delta = change.position - down.position
                 val dx = abs(delta.x)
                 val dy = abs(delta.y)
                 if (!locked) {
-                    if (allowVerticalScroll && dy > threshold && dy > dx) break
-                    if (dx > threshold || (!allowVerticalScroll && dy > threshold)) locked = true
+                    if (allowVerticalScroll && dy >= threshold && dy > dx) break
+                    if (dx >= threshold || (!allowVerticalScroll && dy >= threshold)) locked = true
                 }
                 if (locked && !change.isConsumed) change.consume()
             }

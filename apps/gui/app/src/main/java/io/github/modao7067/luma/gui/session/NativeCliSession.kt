@@ -46,14 +46,32 @@ internal class NativeCliSession(
     private var agyFallbackKey = ""
     private val admitting = mutableSetOf<String>()
     private val answering = mutableSetOf<String>()
+    private var fastPollDeadlineNs = 0L
+    private var lastPendingIds = emptySet<String>()
     private val path get() = "/sessions/${record.id}"
     val historyReady: Boolean get() = snapshot.optBoolean("historyReady")
+    private fun armTurnStartBurst(nowNs: Long = System.nanoTime()) {
+        fastPollDeadlineNs = nowNs + TURN_START_BURST_NS
+    }
     private val awaitingApproval: Boolean
         get() = view.connected &&
             !view.loading &&
             view.requests.isNotEmpty() &&
             answering.isEmpty() &&
             view.subAgents.none { it.status !in setOf("succeeded", "completed", "failed", "cancelled", "closed", "aborted") }
+    private val awaitingTurnStart: Boolean
+        get() = NativeCliStatePolicy.shouldFastPollTurnStart(
+            connected = view.connected,
+            loading = view.loading,
+            activeTurnId = view.activeTurnId,
+            admitting = admitting.isNotEmpty(),
+            sending = view.sending,
+            awaitingHandshake = view.awaitingHandshake,
+            hasPending = record.submissions.any { !it.dismissed && it.state == "pending" },
+            hasUnsettledUnknown = record.submissions.any { !it.dismissed && it.state == "unknown" },
+            nowNs = System.nanoTime(),
+            burstDeadlineNs = fastPollDeadlineNs,
+        )
     private fun publish() = changed(view, models)
     private fun apply(s: JSONObject) = apply(s, null)
     private fun apply(s: JSONObject, preprojected: Pair<SessionView, SessionView>?) {
@@ -157,9 +175,16 @@ internal class NativeCliSession(
         s.optJSONObject("consumedSubmissions")?.let { consumed -> consumed.keys().forEach { id -> if (consumed.optBoolean(id)) SubmissionLedger.consumed(record, id) } }
         HostQueueTakeback.reconcile(record, s)?.let { view = view.copy(error = it) }
         if (titleChanged || messageTitleChanged || before != listOf(record.threadId, record.model, record.effort, record.title, record.submissions.map { listOf(it.id, it.state, it.nativeQueued, it.nativeConsumed, it.queuePresentation, it.takebackState) }, record.nativeProtocol)) persist()
+        val currentPendingIds = record.submissions.asSequence().filter { !it.dismissed && it.state == "pending" }.map { it.id }.toSet()
+        if (view.activeTurnId != null || currentPendingIds.isEmpty()) {
+            fastPollDeadlineNs = 0L
+        } else if (currentPendingIds.any { it !in lastPendingIds }) {
+            armTurnStartBurst()
+        }
+        lastPendingIds = currentPendingIds
         answering.retainAll(view.requests.map { it.id }.toSet())
         publish()
-        if (view.loading || (view.activeTurnId != null && !awaitingApproval)) watchSignals?.trySend(Unit)
+        if (view.loading || awaitingTurnStart || (view.activeTurnId != null && !awaitingApproval)) watchSignals?.trySend(Unit)
         if (view.requests.any { it.id !in oldRequests }) approval()
     }
     private fun run(block: suspend () -> Unit) {
@@ -179,6 +204,8 @@ internal class NativeCliSession(
         val signals = Channel<Unit>(Channel.CONFLATED)
         watchSignals = signals
         watchSseSupported = null
+        fastPollDeadlineNs = 0L
+        lastPendingIds = emptySet()
         view = view.copy(loading = true, connected = false, error = null); publish()
         withContext(scope.coroutineContext) {
             try {
@@ -218,7 +245,7 @@ internal class NativeCliSession(
                     try {
                         var idleBackoffMs = 1_000L
                         while (isActive) {
-                            if (view.loading || (view.activeTurnId != null && !awaitingApproval)) {
+                            if (view.loading || awaitingTurnStart || (view.activeTurnId != null && !awaitingApproval)) {
                                 idleBackoffMs = 1_000L
                                 delay(60)
                             } else if (watchSseSupported == true) {
@@ -226,7 +253,7 @@ internal class NativeCliSession(
                                 signals.receive()
                             } else {
                                 val woken = withTimeoutOrNull(idleBackoffMs) { signals.receive() } != null
-                                idleBackoffMs = if (woken) 1_000L else (idleBackoffMs * 2).coerceAtMost(10_000L)
+                                idleBackoffMs = if (woken) 1_000L else (idleBackoffMs * 2).coerceAtMost(4_000L)
                             }
                             val next = client.call("$path?after=$revision")
                             if (!next.optBoolean("unchanged") && next.optLong("revision", -1) >= revision) {
@@ -323,10 +350,15 @@ internal class NativeCliSession(
             setSending = { sending ->
                 if (sending) {
                     admitting.add(id)
+                    armTurnStartBurst()
                     view = view.copy(sending = true, awaitingHandshake = view.activeTurnId == null, error = null)
                     publish()
+                    watchSignals?.trySend(Unit)
                 } else {
                     admitting.remove(id)
+                    if (view.activeTurnId == null && record.submissions.any { !it.dismissed && it.state == "pending" }) {
+                        armTurnStartBurst()
+                    }
                     view = view.copy(sending = false, awaitingHandshake = false)
                 }
             },
@@ -452,7 +484,9 @@ internal class NativeCliSession(
         }
     }
     fun close() {
-        epoch++; job.cancel(); watchSignals?.close(); watchSignals = null; watchSseSupported = null; api?.close(); api = null; endpoint = null; answering.clear()
+        epoch++; job.cancel(); watchSignals?.close(); watchSignals = null; watchSseSupported = null; fastPollDeadlineNs = 0L; lastPendingIds = emptySet(); api?.close(); api = null; endpoint = null; answering.clear()
         view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"))
     }
 }
+
+private const val TURN_START_BURST_NS = 2_500_000_000L

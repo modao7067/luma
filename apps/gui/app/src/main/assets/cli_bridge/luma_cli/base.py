@@ -216,7 +216,7 @@ class Session:
                 return
             notify_watch = any(
                 k in fields and (k not in self.data or not _same_json(self.data[k], fields[k]))
-                for k in ("running", "requests", "connected")
+                for k in ("running", "requests", "connected", "connecting", "error")
             )
             self.data.update(fields)
             self.touch()

@@ -366,9 +366,9 @@ internal fun Modifier.morphAnchor(
 }
 
 @Composable
-internal fun MorphMenuLayer(host: MorphMenuHost, scene: GlassScene?, insets: WindowInsets) {
+internal fun MorphMenuLayer(host: MorphMenuHost, scene: GlassScene?, insets: WindowInsets, readyToReveal: Boolean = true) {
     for (entry in host.entries) {
-        key(entry.id) { MorphMenuSurface(host, entry, scene, insets) }
+        key(entry.id) { MorphMenuSurface(host, entry, scene, insets, readyToReveal) }
     }
 }
 
@@ -571,7 +571,7 @@ internal class OffsetSquircleShape(private val rect: Rect, private val radius: F
 }
 
 @Composable
-private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: GlassScene?, insets: WindowInsets) {
+private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: GlassScene?, insets: WindowInsets, readyToReveal: Boolean = true) {
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
     val haptic = LocalHapticFeedback.current
@@ -585,8 +585,14 @@ private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: 
     fun openTime() = if (inspecting && expanded) OPEN_SECONDS else open.value
     fun backTime() = if (inspecting) 0f else back.value
     fun anchorReady() = inspecting || (anchor.bounds.width > 0f && anchor.bounds.height > 0f)
+    val revealActive = !inspecting && (readyToReveal || open.value > 0f)
+    DisposableEffect(entry, inspecting, revealActive) {
+        if (revealActive) anchor.activeCount++
+        onDispose {
+            if (revealActive) anchor.activeCount = max(0, anchor.activeCount - 1)
+        }
+    }
     DisposableEffect(entry, inspecting) {
-        if (!inspecting) anchor.activeCount++
         var carrying = false
         val carried = object : MorphCarried {
             override fun move(position: Offset) {
@@ -621,19 +627,24 @@ private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: 
         anchor.carried = carried
         onDispose {
             if (anchor.carried === carried) anchor.carried = null
-            if (!inspecting) anchor.activeCount = max(0, anchor.activeCount - 1)
         }
     }
-    LaunchedEffect(expanded) {
+    LaunchedEffect(expanded, readyToReveal) {
         if (expanded) {
+            if (!readyToReveal) return@LaunchedEffect
             if (back.value > 0f) back.animateTo(0f, tween((back.value * 1000f).roundToInt(), easing = LinearEasing))
             open.animateTo(OPEN_SECONDS, tween(((OPEN_SECONDS - open.value) * 1000f).roundToInt(), easing = LinearEasing))
         } else {
             entry.rows.held = null
-            back.animateTo(DISMISS_SECONDS, tween(((DISMISS_SECONDS - back.value) * 1000f).roundToInt(), easing = LinearEasing))
-            if (!entry.expanded) {
+            if (open.value <= 0f) {
                 entry.removed = true
                 host.entries.remove(entry)
+            } else {
+                back.animateTo(DISMISS_SECONDS, tween(((DISMISS_SECONDS - back.value) * 1000f).roundToInt(), easing = LinearEasing))
+                if (!entry.expanded) {
+                    entry.removed = true
+                    host.entries.remove(entry)
+                }
             }
         }
     }
@@ -694,7 +705,7 @@ private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: 
                     .then(scrim)
                     .drawBehind {
                         val card = entry.card
-                        if (card.width <= 0f || card.height <= 0f || (!anchorReady() && openTime() < OPEN_SECONDS)) return@drawBehind
+                        if (card.width <= 0f || card.height <= 0f || (!readyToReveal && openTime() <= 0f) || (!anchorReady() && openTime() < OPEN_SECONDS)) return@drawBehind
                         val f = frame()
                         val elastic = elasticFrame(cardElastic, card, maxGrowthPx)
                         val platter = elastic.map(f.platter)
@@ -824,7 +835,7 @@ private fun MorphMenuSurface(host: MorphMenuHost, entry: MorphMenuEntry, scene: 
             background.place(0, 0)
             content?.placeWithLayer(placeX, placeY) {
                 val current = entry.card
-                if (current.width <= 0f || current.height <= 0f || (!anchorReady() && openTime() < OPEN_SECONDS)) {
+                if (current.width <= 0f || current.height <= 0f || (!readyToReveal && openTime() <= 0f) || (!anchorReady() && openTime() < OPEN_SECONDS)) {
                     alpha = 0f
                     return@placeWithLayer
                 }
@@ -952,7 +963,12 @@ private fun DrawScope.drawMorphGlass(
     if (scene == null) {
         val path = roundRectPath(platter, radius)
         if (droplet != null && droplet.width > 0f) path.op(path, roundRectPath(droplet, droplet.minDimension / 2f), PathOperation.Union)
-        drawPath(path, style.tint.compositeOver(opaque.copy(alpha = 1f)))
+        val fill = style.tint.compositeOver(opaque.copy(alpha = 1f))
+        drawPath(path, fill)
+        val borderColor = if (fill.luminance() > 0.5f) Color.Black.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.12f)
+        clipPath(path) {
+            drawPath(path, borderColor, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()))
+        }
         return
     }
     val pad = 2.dp.toPx()

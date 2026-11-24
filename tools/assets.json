@@ -48,8 +48,8 @@
     "sha256": "bbf645d5f5505d511e211c85d6d79f0bbf4faff138aabf9879d4c0edbdb70c9a"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/antigravity_agy_acp.py": {
-    "bytes": 113697,
-    "sha256": "9cf15b99360da4b1ed46a89937b2a7922a976d0e0a403dc8c4cba86abe4879a2"
+    "bytes": 116949,
+    "sha256": "9491b09f3f14932ac655f22189fa1262351e3a937f6b93836e2df9a57ab656cb"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/antigravity_cli.py": {
     "bytes": 82897,
@@ -60,8 +60,8 @@
     "sha256": "4cd26fa835d53644377aeec306ed323fe6ae261297e2e85ed9b22f75c2d90bf6"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/base.py": {
-    "bytes": 49292,
-    "sha256": "1f8c3f2623c0d815e5813c1cba4b6e1d2856110d2cdd8c59e360b350d07294fa"
+    "bytes": 49315,
+    "sha256": "52b9c1ea7466fd2647303d61a612a23e870494cf083f9cd290f35702b242b5f4"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/claude.py": {
     "bytes": 52583,
@@ -214,14 +214,6 @@
   "apps/gui/app/src/main/assets/sessions/luma-sessions": {
     "bytes": 4147,
     "sha256": "176d858ceaf8e04f94a8176ce4138e3182f183f529e658bf65291f76d14ffa6b"
-  },
-  "backend/root/daemon.py": {
-    "bytes": 20442,
-    "sha256": "94bcee64a6e22980f02fc9420682b222d4cc682384bdcc6a7866b0cce4ab795f"
-  },
-  "backend/root/mode_state.py": {
-    "bytes": 14480,
-    "sha256": "54b1340315d8e090599e0a83f65530cf7f53ba4ee797c3eb063b37ac90d606be"
   },
   "runtime/noroot/src/main/assets/JetBrainsMono-NerdFont-OFL.txt": {
     "bytes": 4399,
@@ -2326,5 +2318,13 @@
   "shared/terminal-ghostty/jniLibs/arm64-v8a/libluma_vt_jni.so": {
     "bytes": 11284464,
     "sha256": "a7c9b402788e3d26ed775230d1adbfa787d75f84a2fb2b8c81a69db91862e1f3"
+  },
+  "backend/root/daemon.py": {
+    "bytes": 20442,
+    "sha256": "94bcee64a6e22980f02fc9420682b222d4cc682384bdcc6a7866b0cce4ab795f"
+  },
+  "backend/root/mode_state.py": {
+    "bytes": 14480,
+    "sha256": "54b1340315d8e090599e0a83f65530cf7f53ba4ee797c3eb063b37ac90d606be"
   }
 }

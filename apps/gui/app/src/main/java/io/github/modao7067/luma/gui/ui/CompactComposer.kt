@@ -167,14 +167,14 @@ internal fun CompactComposer(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 14.dp, end = 14.dp, top = 10.dp)
-                    .horizontalScroll(rememberScrollState()),
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 14.dp, end = 14.dp, top = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 view.attachments.forEach { attachment ->
                     key(attachment.id) {
                         Box(Modifier.padding(top = 4.dp, end = 4.dp)) {
-                            ImageThumbnail(attachment.uri, attachment.name, busy = attachment.busy)
+                            ImageThumbnail(attachment.uri, attachment.name, busy = attachment.busy, blockHorizontalSwipe = false)
                             val removeHaptic = LocalHapticFeedback.current
                             Surface(
                                 onClick = {
@@ -191,7 +191,6 @@ internal fun CompactComposer(
                                     .offset(x = 4.dp, y = (-4).dp)
                                     .size(24.dp)
                                     .elasticPress(enabled = !inputBusy, stretch = false)
-                                    .blockHorizontalPageSwipe(enabled = !inputBusy)
                                     .semantics { contentDescription = tr("移除", "Remove") },
                             ) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -211,8 +210,8 @@ internal fun CompactComposer(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 14.dp, end = 14.dp, top = 6.dp)
-                    .horizontalScroll(rememberScrollState()),
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 14.dp, end = 14.dp, top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 view.skills.forEach { skill ->
@@ -227,8 +226,7 @@ internal fun CompactComposer(
                             },
                             enabled = skillEnabled,
                             modifier = Modifier
-                                .elasticPress(enabled = skillEnabled, stretch = false)
-                                .blockHorizontalPageSwipe(enabled = skillEnabled),
+                                .elasticPress(enabled = skillEnabled, stretch = false),
                             label = { Text(skill.name, style = MaterialTheme.typography.labelMedium) },
                             trailingIcon = { ComposerGlyph("close") },
                         )

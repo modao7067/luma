@@ -25,6 +25,23 @@ object NativeCliStatePolicy {
     fun recoverableAbsence(record: SessionRecord, submissionId: String): Boolean = submissionId !in record.receiptRecoveryRequired &&
         record.submissions.find { it.id == submissionId }?.let { it.takebackId == null && !it.dismissed } != false
 
+    fun shouldFastPollTurnStart(
+        connected: Boolean,
+        loading: Boolean,
+        activeTurnId: String?,
+        admitting: Boolean,
+        sending: Boolean,
+        awaitingHandshake: Boolean,
+        hasPending: Boolean,
+        hasUnsettledUnknown: Boolean,
+        nowNs: Long,
+        burstDeadlineNs: Long,
+    ): Boolean {
+        if (!connected || loading || activeTurnId != null) return false
+        if (admitting || sending || awaitingHandshake) return true
+        return hasPending && !hasUnsettledUnknown && nowNs < burstDeadlineNs
+    }
+
     fun serviceUpdateImpact(affectedClis: List<String>, runningClis: List<String>): String =
         tr(
             "共享 CLI 桥范围：${affectedClis.joinToString("、")}。\n本 App 当前已连接且执行中：${runningClis.size} 个会话" +

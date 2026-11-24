@@ -91,4 +91,31 @@ class NativeCliStatePolicyTest {
         assertNotEquals(scope, NativeCliCatalogIdentity.of(r.copy(nativeProtocol = "grok-private-leader-v1")))
         assertNotEquals(scope, NativeCliCatalogIdentity.of(r.copy(externalSocket = "/different.sock")))
     }
+
+    @Test fun turnStartFastPollStopsWhenBlockedByUnknownOrBurstExpires() {
+        assertTrue(NativeCliStatePolicy.shouldFastPollTurnStart(
+            connected = true, loading = false, activeTurnId = null,
+            admitting = false, sending = false, awaitingHandshake = false,
+            hasPending = true, hasUnsettledUnknown = false,
+            nowNs = 1_000L, burstDeadlineNs = 5_000L,
+        ))
+        assertFalse(NativeCliStatePolicy.shouldFastPollTurnStart(
+            connected = true, loading = false, activeTurnId = null,
+            admitting = false, sending = false, awaitingHandshake = false,
+            hasPending = true, hasUnsettledUnknown = true,
+            nowNs = 1_000L, burstDeadlineNs = 5_000L,
+        ))
+        assertFalse(NativeCliStatePolicy.shouldFastPollTurnStart(
+            connected = true, loading = false, activeTurnId = null,
+            admitting = false, sending = false, awaitingHandshake = false,
+            hasPending = true, hasUnsettledUnknown = false,
+            nowNs = 5_000L, burstDeadlineNs = 5_000L,
+        ))
+        assertTrue(NativeCliStatePolicy.shouldFastPollTurnStart(
+            connected = true, loading = false, activeTurnId = null,
+            admitting = true, sending = false, awaitingHandshake = false,
+            hasPending = true, hasUnsettledUnknown = true,
+            nowNs = 9_000L, burstDeadlineNs = 5_000L,
+        ))
+    }
 }
