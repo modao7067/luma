@@ -58,10 +58,12 @@ class Harness:
         self.saves += 1
         if self.fail_save: raise OSError('PRIVATE_DISK_SENTINEL')
         self.saved = copy.deepcopy(self.config)
-    def prompts(self): return [f for f in self.process.frames if f.get('method') == 'session/prompt']
+    def prompts(self):
+        with self.process.lock: return [f for f in self.process.frames if f.get('method') == 'session/prompt']
     def send(self, ident='a'):
+        before = len(self.prompts())
         self.session.submit({'submissionId':ident,'text':'synthetic input'})
-        wait_for(lambda:len(self.prompts()) >= 1)
+        wait_for(lambda:len(self.prompts()) > before)
         return self.prompts()[-1]
     def update(self, kind, **fields):
         self.process.stdout.put({'method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':kind, **fields}}})
