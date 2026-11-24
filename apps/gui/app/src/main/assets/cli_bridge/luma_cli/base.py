@@ -181,6 +181,7 @@ class Session:
         self._probe_lock = threading.Lock()
         self._probe_cache = {}
         self._snapshot_probe_tls = threading.local()
+        self._watch_notify = None
         for delivery in config.get("deliveries", {}).values():
             if delivery["state"] == "dispatching": delivery["state"] = "unknown"
         self.data = {"cli": config["cli"], "nativeId": config.get("nativeId", ""), "title": "",
@@ -193,8 +194,15 @@ class Session:
     def touch(self):
         self.last_activity = time.monotonic()
 
+    def _emit_watch(self):
+        cb = self._watch_notify
+        if cb:
+            try: cb()
+            except Exception: pass
+
     def update(self, **fields):
         if not fields: return
+        notify_watch = False
         with self.lock:
             if fields.get("running") or self.data.get("running"):
                 self.touch()
@@ -206,10 +214,16 @@ class Session:
                 self.save()
             if not changed:
                 return
+            notify_watch = any(
+                k in fields and (k not in self.data or not _same_json(self.data[k], fields[k]))
+                for k in ("running", "requests", "connected")
+            )
             self.data.update(fields)
             self.touch()
             self.seq += 1
             self.delivery_wake.set()
+        if notify_watch:
+            self._emit_watch()
 
     def media(self, content):
         resources = media_blocks(content)
@@ -262,6 +276,7 @@ class Session:
         return resources
 
     def row(self, value):
+        notify_watch = False
         with self.lock:
             if value.get("role") == "user" and not value.get("media"):
                 delivery = self.config.get("deliveries", {}).get(value["id"], {})
@@ -270,9 +285,13 @@ class Session:
             old = self.rows.get(value["id"])
             if old is not None and _same_json(old, value):
                 return
+            if not self.data.get("running") or self.data.get("requests"):
+                notify_watch = True
             self.rows[value["id"]] = value
             self.touch()
             self.seq += 1
+        if notify_watch:
+            self._emit_watch()
 
     def settle_incomplete_rows(self, status):
         with self.lock:
@@ -282,6 +301,7 @@ class Session:
 
     def subagent(self, ident, **fields):
         if not ident: return
+        notify_watch = False
         with self.lock:
             existing = self.subagents.get(ident)
             old = existing if existing is not None else {"id": ident}
@@ -290,9 +310,13 @@ class Session:
             nxt = {**old, **fields}
             if existing is not None and _same_json(existing, nxt):
                 return
+            if not self.data.get("running") and old.get("status") != nxt.get("status"):
+                notify_watch = True
             self.subagents[ident] = nxt
             self.touch()
             self.seq += 1
+        if notify_watch:
+            self._emit_watch()
 
     def _save_delivery_state(self, phase):
         try:

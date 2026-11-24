@@ -572,7 +572,7 @@ internal fun AttachedBrowserPane(
                                     icon = { BrowserChevronGlyph(forward = false) },
                                     onClick = {
                                         moreOpen = false
-                                        if (tab != null && tab.web.canGoBack()) tab.web.goBack()
+                                        if (browser != null && tab != null) browser.goBack(tab)
                                     },
                                 )
                                 BrowserVectorMenuItem(
@@ -581,7 +581,7 @@ internal fun AttachedBrowserPane(
                                     icon = { BrowserChevronGlyph(forward = true) },
                                     onClick = {
                                         moreOpen = false
-                                        if (tab != null && tab.web.canGoForward()) tab.web.goForward()
+                                        if (browser != null && tab != null) browser.goForward(tab)
                                     },
                                 )
                                 ActionMenuItem(
@@ -591,14 +591,8 @@ internal fun AttachedBrowserPane(
                                     enabled = tab != null && !tab.crashed.value,
                                     onClick = {
                                         moreOpen = false
-                                        if (tab != null && !tab.crashed.value) {
-                                            if (isLoading) {
-                                                tab.web.stopLoading()
-                                                tab.loading.value = false
-                                            } else {
-                                                tab.loading.value = true
-                                                tab.web.reload()
-                                            }
+                                        if (browser != null && tab != null && !tab.crashed.value) {
+                                            if (isLoading) browser.stopLoading(tab) else browser.reload(tab)
                                         }
                                     },
                                 )
@@ -793,7 +787,6 @@ internal fun AttachedBrowserPane(
                         if (hostHolder.attachedTab !== tab) {
                             hostHolder.attachedTab?.let { prev -> browser.detach(prev, frame) }
                             browser.attach(tab, frame)
-                            tab.web.setLayerType(View.LAYER_TYPE_NONE, null)
                             hostHolder.attachedTab = tab
                         }
                     },

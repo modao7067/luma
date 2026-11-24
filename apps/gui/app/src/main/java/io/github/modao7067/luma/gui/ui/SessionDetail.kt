@@ -714,20 +714,21 @@ private fun SessionDetailContent(
                                         } else {
                                             val entry = row.entries.first()
                                             val animateMessagePop = animateRowArrival && entry.role == "user"
-                                            val markdown = if (entry.role == "assistant") rememberMarkdownPresentation(
-                                                identity = "${view.summary.id}:$rowKey", source = entry.text,
-                                                complete = view.activeTurnId == null || view.messages.lastOrNull { it.role == "assistant" }?.id != entry.id,
-                                                animate = true, animateArrival = false,
-                                            ) else null
+                                            val isAssistantComplete = view.activeTurnId == null || view.messages.lastOrNull { it.role == "assistant" }?.id != entry.id
                                             SmoothTailGrowth(
                                                 rowId = rowKey,
-                                                contentKey = (((markdown?.visibleUnits ?: entry.text.length) xor System.identityHashCode(markdown?.document)) * 31 + entry.images.size) * 31 + entry.delivery.hashCode() * 7 + entry.status.hashCode(),
                                                 knownHeights = rowHeights,
                                                 animateArrival = animateRowArrival && entry.role != "user",
                                                 animatePop = animateMessagePop,
                                                 topSpacing = topSpacing,
                                             ) {
-                                                ConversationMessage(entry, actions, view.summary.cli, markdown)
+                                                StreamingConversationRowMessage(
+                                                    identity = "${view.summary.id}:$rowKey",
+                                                    entry = entry,
+                                                    complete = isAssistantComplete,
+                                                    actions = actions,
+                                                    cli = view.summary.cli,
+                                                )
                                             }
                                         }
                                     }
@@ -836,20 +837,21 @@ private fun SessionDetailContent(
                                                         } else {
                                                             val entry = row.entries.first()
                                                             val animateMessagePop = animateRowArrival && entry.role == "user"
-                                                            val markdown = if (entry.role == "assistant") rememberMarkdownPresentation(
-                                                                identity = "${view.summary.id}:$rowKey", source = entry.text,
-                                                                complete = view.activeTurnId == null || view.messages.lastOrNull { it.role == "assistant" }?.id != entry.id,
-                                                                animate = true, animateArrival = false,
-                                                            ) else null
+                                                            val isAssistantComplete = view.activeTurnId == null || view.messages.lastOrNull { it.role == "assistant" }?.id != entry.id
                                                             SmoothTailGrowth(
                                                                 rowId = rowKey,
-                                                                contentKey = (((markdown?.visibleUnits ?: entry.text.length) xor System.identityHashCode(markdown?.document)) * 31 + entry.images.size) * 31 + entry.delivery.hashCode() * 7 + entry.status.hashCode(),
                                                                 knownHeights = rowHeights,
                                                                 animateArrival = animateRowArrival && entry.role != "user",
                                                                 animatePop = animateMessagePop,
                                                                 topSpacing = topSpacing,
                                                             ) {
-                                                                ConversationMessage(entry, actions, view.summary.cli, markdown)
+                                                                StreamingConversationRowMessage(
+                                                                    identity = "${view.summary.id}:$rowKey",
+                                                                    entry = entry,
+                                                                    complete = isAssistantComplete,
+                                                                    actions = actions,
+                                                                    cli = view.summary.cli,
+                                                                )
                                                             }
                                                         }
                                                     }
@@ -917,6 +919,24 @@ private fun SessionDetailContent(
             )
         }
     }
+}
+
+@Composable
+internal fun StreamingConversationRowMessage(
+    identity: String,
+    entry: ConversationItem,
+    complete: Boolean,
+    actions: CockpitActions,
+    cli: String,
+) {
+    val markdown = if (entry.role == "assistant") rememberMarkdownPresentation(
+        identity = identity,
+        source = entry.text,
+        complete = complete,
+        animate = true,
+        animateArrival = false,
+    ) else null
+    ConversationMessage(entry, actions, cli, markdown)
 }
 
 @Composable
@@ -1144,36 +1164,4 @@ internal fun BoxScope.ConversationScrollOverlay(
             }
         }
     }
-}
-
-@Composable
-internal fun rememberStreamedMarkdownText(id: String, targetText: String, animateArrival: Boolean): String {
-    if (LocalInspectionMode.current) return targetText
-    var cursor by remember(id) {
-        mutableIntStateOf(if (animateArrival && targetText.length <= 240) 0 else targetText.length)
-    }
-    if (targetText.length < cursor) cursor = targetText.length
-    LaunchedEffect(id, targetText) {
-        var lastFrameNanos = 0L
-        var carry = 0f
-        while (cursor < targetText.length) {
-            val dtSeconds = withFrameNanos { frameNanos ->
-                val dt = if (lastFrameNanos == 0L) 16_000_000L else (frameNanos - lastFrameNanos).coerceIn(1_000_000L, 50_000_000L)
-                lastFrameNanos = frameNanos
-                dt / 1_000_000_000f
-            }
-            val remaining = targetText.length - cursor
-            carry += (45f + remaining / 0.28f) * dtSeconds
-            val step = carry.toInt()
-            if (step > 0) {
-                carry -= step
-                var next = (cursor + step).coerceAtMost(targetText.length)
-                if (next < targetText.length && Character.isHighSurrogate(targetText[next - 1])) {
-                    next = (next + 1).coerceAtMost(targetText.length)
-                }
-                cursor = next
-            }
-        }
-    }
-    return if (cursor >= targetText.length) targetText else targetText.substring(0, cursor)
 }

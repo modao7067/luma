@@ -63,15 +63,32 @@ internal class OpenCodeSync(
     private var full = true
     private var catalog = true
     private var closed = false
+    private var paused = false
+    private var retryDelayMs = 1_000L
     private var streamEpoch = 0
     private var worker: Job? = null
+    private var retryJob: Job? = null
     private var noticeTimer: Job? = null
     val recovering get() = !closed && outage.active && !outage.terminal
+
+    fun setPaused(value: Boolean) {
+        if (paused == value) return
+        paused = value
+        if (paused) {
+            retryJob?.cancel()
+            retryJob = null
+        } else if (!closed && !outage.terminal) {
+            retryDelayMs = 1_000L
+            if (outage.active || !streamConnected()) {
+                invalidate(all = true)
+            }
+        }
+    }
 
     fun invalidate(all: Boolean = false, ids: List<String> = emptyList(), models: Boolean = false) {
         if (closed || outage.terminal) return
         full = full || all; catalog = catalog || models; dirtyMessages.addAll(ids)
-        signals.trySend(Unit)
+        if (!paused) signals.trySend(Unit)
     }
 
     fun start() {
@@ -80,7 +97,9 @@ internal class OpenCodeSync(
         worker = scope.launch {
             while (isActive && !closed && !outage.terminal) {
                 signals.receive()
+                if (paused) continue
                 delay(100)
+                if (paused) continue
                 try {
                     if (!streamConnected()) {
                         full = true
@@ -89,7 +108,7 @@ internal class OpenCodeSync(
                             if (!closed && epoch == streamEpoch) {
                                 streamEpoch++
                                 failed(failure)
-                                invalidate(all = true)
+                                if (!paused) invalidate(all = true)
                             }
                         } }
                     }
@@ -102,6 +121,7 @@ internal class OpenCodeSync(
                     catch (failure: Exception) { catalog = catalog || models; throw failure }
                     if (!streamConnected() || epoch != streamEpoch) throw IOException(tr("OpenCode 事件连接已断开", "OpenCode event stream disconnected"))
                     if (all) {
+                        retryDelayMs = 1_000L
                         outage.recovered(); noticeTimer?.cancel(); noticeTimer = null
                         changed(State(connected = true, recovering = false, notice = null))
                     }
@@ -110,8 +130,15 @@ internal class OpenCodeSync(
                     failed(failure)
                     if (!outage.terminal) {
                         full = true
-                        delay(1_000)
-                        invalidate(all = true)
+                        if (!paused) {
+                            val waitMs = retryDelayMs
+                            retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000L)
+                            retryJob?.cancel()
+                            retryJob = scope.launch {
+                                delay(waitMs)
+                                if (!closed && !outage.terminal && !paused) invalidate(all = true)
+                            }
+                        }
                     }
                 }
             }
@@ -130,5 +157,5 @@ internal class OpenCodeSync(
 
     private fun publishFailure() = changed(State(connected = false, recovering = recovering, notice = outage.notice))
     fun dismissNotice() { outage.dismiss() }
-    fun close() { closed = true; streamEpoch++; worker?.cancel(); noticeTimer?.cancel(); signals.close() }
+    fun close() { closed = true; streamEpoch++; retryJob?.cancel(); retryJob = null; worker?.cancel(); noticeTimer?.cancel(); signals.close() }
 }

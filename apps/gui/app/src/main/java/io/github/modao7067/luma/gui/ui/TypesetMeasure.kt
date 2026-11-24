@@ -38,6 +38,7 @@ internal data class TypesetResolvedStyle(
     val lineThrough: Boolean,
     val fontFeatureSettings: String?,
     val isCode: Boolean,
+    val baselineShiftMultiplier: Float = 0f,
 )
 
 internal data class TypesetPreparedInput(
@@ -118,6 +119,7 @@ internal fun prepareTypesetInput(
     inlineFormulas: Map<String, TypesetInlineObjectSpec>,
     density: Density,
     fontFamilyResolver: FontFamily.Resolver,
+    styleCache: TypesetStyleMeasurementCache? = null,
 ): TypesetPreparedInput {
     val text = annotated.text
     val baseSizePx = with(density) {
@@ -140,6 +142,7 @@ internal fun prepareTypesetInput(
         letterSpacing = baseStyle.letterSpacing,
         background = baseStyle.background,
         textDecoration = baseStyle.textDecoration,
+        baselineShift = baseStyle.baselineShift,
     )
 
     val boundaries = HashSet<Int>(annotated.spanStyles.size * 2 + 8)
@@ -185,9 +188,10 @@ internal fun prepareTypesetInput(
         val weight = merged.fontWeight ?: baseStyle.fontWeight ?: FontWeight.Normal
         val fontStyle = merged.fontStyle ?: baseStyle.fontStyle ?: FontStyle.Normal
         val synthesis = merged.fontSynthesis ?: baseStyle.fontSynthesis ?: FontSynthesis.All
-        val typeface = runCatching {
-            fontFamilyResolver.resolve(family, weight, fontStyle, synthesis).value as? Typeface
-        }.getOrNull() ?: Typeface.DEFAULT
+        val typeface = styleCache?.resolveTypeface(fontFamilyResolver, family, weight, fontStyle, synthesis)
+            ?: runCatching {
+                fontFamilyResolver.resolve(family, weight, fontStyle, synthesis).value as? Typeface
+            }.getOrNull() ?: Typeface.DEFAULT
         val sizePx = resolveTypesetTextSizePx(baseSizePx, merged.fontSize, density)
         val letterSp = resolveTypesetLetterSpacingEm(merged.letterSpacing, sizePx, density)
         val fg = if (merged.color != Color.Unspecified) merged.color else baseColor
@@ -208,6 +212,7 @@ internal fun prepareTypesetInput(
             lineThrough = dec != null && TextDecoration.LineThrough in dec,
             fontFeatureSettings = merged.fontFeatureSettings,
             isCode = isCode,
+            baselineShiftMultiplier = merged.baselineShift?.multiplier ?: 0f,
         )
         return styleIndexMap.getOrPut(resolved) {
             val idx = styleList.size
@@ -255,8 +260,7 @@ internal fun prepareTypesetInput(
         runs.add(TypesetRunInput(segStart, segEnd, styleId, kind))
     }
 
-    val basePaint = buildTextPaint(styleList[baseStyleId])
-    val fm = basePaint.fontMetrics
+    val fm = styleCache?.get(styleList[baseStyleId])?.fontMetrics ?: buildTextPaint(styleList[baseStyleId]).fontMetrics
     val naturalAscent = -fm.ascent
     val naturalDescent = fm.descent
     val naturalHeight = (naturalAscent + naturalDescent).coerceAtLeast(baseSizePx)
@@ -298,14 +302,43 @@ internal fun buildTextPaint(style: TypesetResolvedStyle): TextPaint = TextPaint(
 }
 
 internal class TypesetStyleMeasurementCache {
+    private data class TypefaceKey(
+        val family: FontFamily?,
+        val weight: FontWeight,
+        val style: FontStyle,
+        val synthesis: FontSynthesis,
+    )
+
     internal class Entry(val paint: TextPaint) {
+        val fontMetrics: Paint.FontMetrics = paint.fontMetrics
         var spaceWidth: Float = -1f
         var hyphenWidth: Float = -1f
         var emWidth: Float = -1f
         val singleCharWidths = HashMap<Char, Float>(64)
+        val sliceWidths = HashMap<String, Float>(128)
     }
 
     private val entries = HashMap<TypesetResolvedStyle, Entry>(8)
+    private val typefaces = HashMap<TypefaceKey, Typeface>(8)
+
+    fun resolveTypeface(
+        resolver: FontFamily.Resolver,
+        family: FontFamily?,
+        weight: FontWeight,
+        style: FontStyle,
+        synthesis: FontSynthesis,
+    ): Typeface {
+        val key = TypefaceKey(family, weight, style, synthesis)
+        typefaces[key]?.let { return it }
+        if (typefaces.size >= MAX_STYLE_ENTRIES) {
+            typefaces.clear()
+        }
+        val resolved = runCatching {
+            resolver.resolve(family, weight, style, synthesis).value as? Typeface
+        }.getOrNull() ?: Typeface.DEFAULT
+        typefaces[key] = resolved
+        return resolved
+    }
 
     fun get(style: TypesetResolvedStyle): Entry {
         if (entries.size >= MAX_STYLE_ENTRIES && style !in entries) {
@@ -316,6 +349,35 @@ internal class TypesetStyleMeasurementCache {
 
     companion object {
         private const val MAX_STYLE_ENTRIES = 32
+        internal const val MAX_SLICE_ENTRIES = 512
+        internal const val MAX_CACHED_SLICE_LEN = 48
+    }
+}
+
+internal class TypesetDrawCache {
+    private var cachedStyles: List<TypesetResolvedStyle>? = null
+    private var cachedOverrideArgb: Int = 0
+    private var cachedPaints: Array<TextPaint> = emptyArray()
+    val decoPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    fun paintsFor(styles: List<TypesetResolvedStyle>, overrideColorArgb: Int): Array<TextPaint> {
+        if (cachedOverrideArgb == overrideColorArgb && cachedPaints.size == styles.size) {
+            if (cachedStyles === styles || cachedStyles == styles) {
+                cachedStyles = styles
+                return cachedPaints
+            }
+        }
+        val built = Array(styles.size) { idx ->
+            buildTextPaint(styles[idx]).apply {
+                if (overrideColorArgb != 0 && styles[idx].colorArgb == styles[0].colorArgb) {
+                    color = overrideColorArgb
+                }
+            }
+        }
+        cachedStyles = styles
+        cachedOverrideArgb = overrideColorArgb
+        cachedPaints = built
+        return built
     }
 }
 
@@ -323,9 +385,11 @@ internal class AndroidTypesetMeasurer(
     initialPrepared: TypesetPreparedInput? = null,
     private val styleCache: TypesetStyleMeasurementCache = TypesetStyleMeasurementCache(),
 ) : TypesetMeasurer {
+    internal val cache: TypesetStyleMeasurementCache get() = styleCache
     private var prepared: TypesetPreparedInput? = null
     private var boundStyles: List<TypesetResolvedStyle> = emptyList()
     private var boundEntries: Array<TypesetStyleMeasurementCache.Entry> = emptyArray()
+    private var scratchChars = CharArray(64)
 
     init {
         initialPrepared?.let(::bind)
@@ -344,9 +408,20 @@ internal class AndroidTypesetMeasurer(
         if (end <= start) return 0f
         val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
         val paint = entry.paint
-        if (end - start == 1) {
+        val len = end - start
+        if (len == 1) {
             val ch = text[start]
             return entry.singleCharWidths.getOrPut(ch) { measureSlice(paint, text, start, end) }
+        }
+        if (len <= TypesetStyleMeasurementCache.MAX_CACHED_SLICE_LEN) {
+            val key = text.substring(start, end)
+            entry.sliceWidths[key]?.let { return it }
+            val measured = measureSlice(paint, text, start, end)
+            if (entry.sliceWidths.size >= TypesetStyleMeasurementCache.MAX_SLICE_ENTRIES) {
+                entry.sliceWidths.clear()
+            }
+            entry.sliceWidths[key] = measured
+            return measured
         }
         return measureSlice(paint, text, start, end)
     }
@@ -357,10 +432,12 @@ internal class AndroidTypesetMeasurer(
         val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
         val paint = entry.paint
         if (Build.VERSION.SDK_INT >= 29) {
-            val chars = CharArray(len)
-            text.toCharArray(chars, 0, start, end)
+            if (scratchChars.size < len) {
+                scratchChars = CharArray(max(len, scratchChars.size * 2))
+            }
+            text.toCharArray(scratchChars, 0, start, end)
             val total = runCatching {
-                paint.getTextRunAdvances(chars, 0, len, 0, len, false, outAdvances, 0)
+                paint.getTextRunAdvances(scratchChars, 0, len, 0, len, false, outAdvances, 0)
             }.getOrDefault(0f)
             if (total > 0f && total.isFinite()) return
         }
@@ -482,19 +559,20 @@ internal fun drawTypesetLayout(
     layout: TypesetLayout,
     styles: List<TypesetResolvedStyle>,
     overrideColorArgb: Int = 0,
+    drawCache: TypesetDrawCache? = null,
 ) {
     val nativeCanvas = canvas.nativeCanvas
     val text = layout.text
     if (text.isEmpty() || styles.isEmpty()) return
 
-    val paints = Array(styles.size) { idx ->
+    val paints = drawCache?.paintsFor(styles, overrideColorArgb) ?: Array(styles.size) { idx ->
         buildTextPaint(styles[idx]).apply {
             if (overrideColorArgb != 0 && styles[idx].colorArgb == styles[0].colorArgb) {
                 color = overrideColorArgb
             }
         }
     }
-    val decoPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    val decoPaint = drawCache?.decoPaint ?: Paint(Paint.ANTI_ALIAS_FLAG)
     val useRunDraw = checkRunAdvanceSupport(paints[0])
 
     for (line in layout.lines) {
@@ -513,19 +591,19 @@ internal fun drawTypesetLayout(
             var runEndPiece = pIdx
             var runCharEnd = first.charEnd
             var runWidth = first.width
-            var prevRight = first.drawX + first.width
+            var expectedNextX = first.drawX + first.width
             while (runEndPiece + 1 < pieces.size) {
                 val next = pieces[runEndPiece + 1]
                 if (next.kind == first.kind &&
                     next.styleId == first.styleId &&
                     next.charStart == runCharEnd &&
                     abs(next.scaleX - first.scaleX) < 0.0005f &&
-                    abs(next.drawX - prevRight) < 0.35f
+                    abs(next.drawX - expectedNextX) < 0.05f
                 ) {
                     runEndPiece++
                     runCharEnd = next.charEnd
                     runWidth += next.width
-                    prevRight = next.drawX + next.width
+                    expectedNextX += next.width
                 } else {
                     break
                 }
@@ -537,7 +615,20 @@ internal fun drawTypesetLayout(
                 nativeCanvas.drawRect(first.x, line.top, first.x + runWidth, line.bottom, decoPaint)
             }
 
-            paint.textScaleX = first.scaleX
+            paint.textScaleX = 1f
+            val drawBaseline = if (style.baselineShiftMultiplier != 0f) {
+                line.baseline + paint.ascent() * style.baselineShiftMultiplier
+            } else {
+                line.baseline
+            }
+            val scaled = abs(first.scaleX - 1f) > 0.0005f
+            if (scaled) {
+                nativeCanvas.save()
+                nativeCanvas.translate(first.drawX, drawBaseline)
+                nativeCanvas.scale(first.scaleX, 1f)
+            }
+            val textX = if (scaled) 0f else first.drawX
+            val textY = if (scaled) 0f else drawBaseline
             if (useRunDraw) {
                 nativeCanvas.drawTextRun(
                     text,
@@ -545,20 +636,23 @@ internal fun drawTypesetLayout(
                     runCharEnd,
                     first.charStart,
                     runCharEnd,
-                    first.drawX,
-                    line.baseline,
+                    textX,
+                    textY,
                     false,
                     paint,
                 )
             } else {
-                nativeCanvas.drawText(text, first.charStart, runCharEnd, first.drawX, line.baseline, paint)
+                nativeCanvas.drawText(text, first.charStart, runCharEnd, textX, textY, paint)
+            }
+            if (scaled) {
+                nativeCanvas.restore()
             }
 
             if (style.underline) {
                 decoPaint.color = paint.color
                 decoPaint.style = Paint.Style.STROKE
                 decoPaint.strokeWidth = max(1f, style.textSizePx * 0.068f)
-                val underlineY = min(line.bottom - decoPaint.strokeWidth * 0.5f, line.baseline + style.textSizePx * 0.16f)
+                val underlineY = min(line.bottom - decoPaint.strokeWidth * 0.5f, drawBaseline + style.textSizePx * 0.16f)
                 nativeCanvas.drawLine(first.x, underlineY, first.x + runWidth, underlineY, decoPaint)
             }
 
@@ -566,7 +660,7 @@ internal fun drawTypesetLayout(
                 decoPaint.color = paint.color
                 decoPaint.style = Paint.Style.STROKE
                 decoPaint.strokeWidth = max(1f, style.textSizePx * 0.068f)
-                val strikeY = line.baseline - style.textSizePx * 0.30f
+                val strikeY = drawBaseline - style.textSizePx * 0.30f
                 nativeCanvas.drawLine(first.x, strikeY, first.x + runWidth, strikeY, decoPaint)
             }
 

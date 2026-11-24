@@ -47,8 +47,19 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 41)
         }
     }
-    override fun onStart() { super.onStart(); sessions.onActivityStarted(this) }
-    override fun onStop() { sessions.onActivityStopped(this); sessions.saveDrafts(); super.onStop() }
+    override fun onStart() {
+        super.onStart()
+        val app = application as LumaApplication
+        sessions.onActivityStarted(this)
+        app.browser.onActivityStarted(this)
+    }
+    override fun onStop() {
+        val app = application as LumaApplication
+        app.browser.onActivityStopped(this)
+        sessions.onActivityStopped(this)
+        sessions.saveDrafts()
+        super.onStop()
+    }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

@@ -815,6 +815,9 @@ internal class OpenCodeSession(
         }
         if (view.connected) synchronizer?.invalidate(all = true)
     }
+    fun setBackgroundIdlePaused(paused: Boolean) {
+        synchronizer?.setPaused(paused)
+    }
     fun close() {
         lifecycle++
         clearLiveDeltas()

@@ -444,10 +444,113 @@ with open(p, 'a', encoding='utf-8') as f:
         events2 = [ev for argv in wakes2 for ev in json.loads(argv[argv.index('events') + 1])]
         assert any(ev.get('sessionId') == 'bg-hold' and ev.get('kind') == 'completed' for ev in events2), f'Missing hold completed wake: {events2}'
 
+        sse_cond = threading.Condition()
+        sse_seq = [0]
+        sse_shutdown = [False]
+        sse_state = {'sse-1': {'running': True, 'releasable': False, 'capabilities': {'release': True}, 'requests': []}}
+        sse_polls = []
+
+        class MockSseHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == '/watch/events':
+                    self.close_connection = True
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    try:
+                        self.wfile.write(b': ok\n\n')
+                        self.wfile.flush()
+                        last = sse_seq[0]
+                        while not sse_shutdown[0]:
+                            with sse_cond:
+                                if sse_seq[0] == last and not sse_shutdown[0]:
+                                    sse_cond.wait(timeout=1.0)
+                                cur = sse_seq[0]
+                            if sse_shutdown[0]:
+                                break
+                            if cur != last:
+                                last = cur
+                                self.wfile.write(f'data: {cur}\n\n'.encode('ascii'))
+                                self.wfile.flush()
+                    except OSError:
+                        pass
+                    return
+                if self.path.startswith('/sessions/'):
+                    sid = self.path.split('/sessions/', 1)[1]
+                    with sse_cond:
+                        sse_polls.append(time.monotonic())
+                        payload = dict(sse_state.get(sid, {'running': False, 'requests': []}))
+                    body = json.dumps(payload).encode('utf-8')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+        sse_srv = ThreadedHTTPServer(('127.0.0.1', 0), MockSseHandler)
+        sse_port = sse_srv.server_address[1]
+        threading.Thread(target=sse_srv.serve_forever, daemon=True).start()
+
+        wakes_log.unlink(missing_ok=True)
+        (base / 'bg-watch-spec.json').write_text(json.dumps({
+            'active': True, 'watchGen': 7, 'packageName': 'io.github.modao7067.luma', 'updatedAt': int(time.time() * 1000),
+            'sessions': [{
+                'id': 'sse-1', 'epoch': 1, 'protocol': 'bridged', 'task': 'luma-native-cli-gui-v3',
+                'endpointUrl': f'http://127.0.0.1:{sse_port}', 'running': True, 'userStopped': False, 'requestIds': [],
+            }],
+        }), encoding='utf-8')
+        env_sse = {**env, 'LUMA_BG_TICK_SEC': '5.0', 'LUMA_BG_EVENT_WAIT_SEC': '15.0', 'LUMA_BG_IDLE_EXIT_SEC': '0.4'}
+        assert subprocess.run([sys.executable, '-I', '-B', str(script_path), str(base)], env=env_sse, check=False).returncode == 0
+        time.sleep(0.9)
+        with sse_cond:
+            initial_poll_count = len(sse_polls)
+        assert initial_poll_count == 1, f'Expected exactly 1 initial snapshot under SSE (zero polling), got {initial_poll_count}'
+
+        push_t0 = time.monotonic()
+        with sse_cond:
+            sse_state['sse-1'] = {'running': True, 'releasable': False, 'capabilities': {'release': True}, 'requests': [{'id': 'req-idle-1'}], 'subAgents': []}
+            sse_seq[0] += 1
+            sse_cond.notify_all()
+
+        wake_deadline = time.monotonic() + 1.0
+        while time.monotonic() < wake_deadline and not wakes_log.is_file():
+            time.sleep(0.02)
+        push_latency = time.monotonic() - push_t0
+        assert wakes_log.is_file(), 'SSE push did not trigger wake broadcast!'
+        assert push_latency < 0.8, f'SSE push took too long ({push_latency:.3f}s) with 5s fallback tick!'
+        wakes3 = [json.loads(line) for line in wakes_log.read_text(encoding='utf-8').splitlines() if line.strip()]
+        events3 = [ev for argv in wakes3 for ev in json.loads(argv[argv.index('events') + 1])]
+        assert any(ev.get('sessionId') == 'sse-1' and ev.get('kind') == 'approval' for ev in events3), f'Missing SSE approval wake: {events3}'
+        assert any('--es' in argv and 'watchGen' in argv and argv[argv.index('watchGen') + 1] == '7' for argv in wakes3), f'Missing watchGen=7: {wakes3}'
+
+        idle_deadline = time.monotonic() + 1.5
+        released3 = False
+        while time.monotonic() < idle_deadline:
+            fd3 = os.open(str(base / 'bg-watch.lock'), os.O_RDWR)
+            try:
+                fcntl.flock(fd3, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd3, fcntl.LOCK_UN)
+                released3 = True
+                os.close(fd3)
+                break
+            except BlockingIOError:
+                os.close(fd3)
+                time.sleep(0.03)
+        assert released3, 'Watcher stayed alive on running+approval-blocked session instead of exiting!'
+
+        with sse_cond:
+            sse_shutdown[0] = True
+            sse_cond.notify_all()
+        sse_srv.shutdown()
         ws_tcp.close()
         ws_unix.close()
         http_srv.shutdown()
-        print(f'PASS notifications stress: 8x flock spawn, 24 sessions / 4 protocols, {len(lines)} batched broadcast(s), 0 duplicates, instant disarm, X-Luma-Watch + releasable hold')
+        print(f'PASS notifications stress: 8x flock spawn, 24 sessions / 4 protocols, {len(lines)} batched broadcast(s), 0 duplicates, instant disarm, X-Luma-Watch + releasable hold + SSE push ({push_latency*1000:.0f}ms, 0 polls) + idle approval exit')
 
 if __name__ == '__main__':
     main()

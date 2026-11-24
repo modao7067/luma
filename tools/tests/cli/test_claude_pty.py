@@ -131,22 +131,19 @@ class PtyFoundationAndClaudeTests(unittest.TestCase):
             work = pathlib.Path(tmp) / "work"
             work.mkdir()
             state = pathlib.Path(tmp) / "state"
-            with patch("luma_cli.server.probe_claude_pty", return_value=(True, True, "", "/usr/bin/claude")), \
-                 patch.object(ClaudePtySession, "connect", lambda s: s.update(connected=True, canOpenTui=True, nativeProtocol=CLAUDE_PTY_PROTOCOL)):
+            self.assertEqual(default_new_protocol("Claude Code"), (CLAUDE_STREAM_PROTOCOL, ""))
+            with patch.object(ClaudeSession, "connect", lambda s: s.update(connected=True)):
                 with Manager(state) as m:
                     s = m.connect({"id": "new-claude", "cli": "Claude Code", "cwd": str(work)})
-                    self.assertIs(type(s), ClaudePtySession)
-                    self.assertEqual(s.config["nativeProtocol"], CLAUDE_PTY_PROTOCOL)
-            with patch("luma_cli.server.probe_claude_pty", return_value=(True, False, "old flags", "/usr/bin/claude")), \
-                 patch.object(ClaudeSession, "connect", lambda s: s.update(connected=True)):
-                with Manager(state) as m:
-                    s = m.connect({"id": "fallback-claude", "cli": "Claude Code", "cwd": str(work)})
                     self.assertIs(type(s), ClaudeSession)
                     self.assertEqual(s.config["nativeProtocol"], CLAUDE_STREAM_PROTOCOL)
-                    self.assertEqual(s.config["protocolFallbackNotice"], "old flags")
+            with patch.object(ClaudePtySession, "connect", lambda s: s.update(connected=True, canOpenTui=True, nativeProtocol=CLAUDE_PTY_PROTOCOL)):
+                with Manager(state) as m:
+                    explicit = m.connect({"id": "explicit-pty-ok", "cli": "Claude Code", "cwd": str(work), "nativeProtocol": CLAUDE_PTY_PROTOCOL})
+                    self.assertIs(type(explicit), ClaudePtySession)
+                    self.assertEqual(explicit.config["nativeProtocol"], CLAUDE_PTY_PROTOCOL)
             (state / "legacy-claude.json").write_text(json.dumps({"id": "legacy-claude", "cli": "Claude Code", "cwd": str(work)}))
-            with patch("luma_cli.server.probe_claude_pty", return_value=(True, True, "", "/usr/bin/claude")), \
-                 patch.object(ClaudeSession, "connect", lambda s: s.update(connected=True)):
+            with patch.object(ClaudeSession, "connect", lambda s: s.update(connected=True)):
                 with Manager(state) as m:
                     legacy = m.connect({"id": "legacy-claude", "cli": "Claude Code", "cwd": str(work)})
                     self.assertIs(type(legacy), ClaudeSession)
@@ -256,7 +253,7 @@ while True:
             with patch.dict(os.environ, {"PATH": env_path}), \
                  patch("luma_cli.claude.os.geteuid", return_value=1000):
                 with Manager(state) as m:
-                    s = m.connect({"id": "c1", "cli": "Claude Code", "cwd": str(work)})
+                    s = m.connect({"id": "c1", "cli": "Claude Code", "cwd": str(work), "nativeProtocol": CLAUDE_PTY_PROTOCOL})
                     try:
                         self.assertIs(type(s), ClaudePtySession)
                         self.assertTrue(s.data["connected"])
@@ -377,7 +374,7 @@ time.sleep(30)
                  patch("luma_cli.claude.os.geteuid", return_value=1000), \
                  patch.object(ClaudePtySession, "startup_wait_sec", 0.5):
                 with Manager(state) as m:
-                    s = m.connect({"id": "g1", "cli": "Claude Code", "cwd": str(work)})
+                    s = m.connect({"id": "g1", "cli": "Claude Code", "cwd": str(work), "nativeProtocol": CLAUDE_PTY_PROTOCOL})
                     try:
                         self.assertIs(type(s), ClaudePtySession)
                         self.assertFalse(s.data["connected"])
@@ -1057,6 +1054,65 @@ time.sleep(30)
             self.assertIn("sub42", s2.subagents)
             self.assertEqual(s2.subagents["sub42"]["itemId"], "tool-tu-ag1")
             self.assertTrue(any(m["role"] == "tool" and m["toolName"] == "Bash" for m in s2.subagents["sub42"]["messages"]))
+
+    def test_idle_tail_tick_does_not_repeat_capture_pane(self):
+        class FakeOwner:
+            def __init__(self):
+                self.captures = []
+
+            def alive(self):
+                return True
+
+            def capture_pane(self, lines=12):
+                self.captures.append(lines)
+                return "accept edits on (shift+tab to cycle)"
+
+        s = ClaudePtySession({"id": "s-idle-perm", "cli": "Claude Code", "cwd": "/tmp", "nativeId": NATIVE_UUID}, lambda: None)
+        s.owner = FakeOwner()
+        s._startup_waiting = False
+        s.data["connected"] = True
+        s.data["running"] = False
+
+        s.on_tail_tick()
+        self.assertEqual(s.owner.captures, [12])
+        s._last_pane_perm_sync = 0.0
+        s.on_tail_tick()
+        s.on_tail_tick()
+        self.assertEqual(s.owner.captures, [12])
+
+        s.data["running"] = True
+        s.on_tail_tick()
+        s.data["running"] = False
+        s._last_pane_perm_sync = 0.0
+        before_post_turn = len(s.owner.captures)
+        s.on_tail_tick()
+        self.assertEqual(len(s.owner.captures), before_post_turn + 1)
+        self.assertEqual(s.owner.captures[-1], 12)
+        s._last_pane_perm_sync = 0.0
+        s.on_tail_tick()
+        self.assertEqual(len(s.owner.captures), before_post_turn + 1)
+
+    def test_tmux_owner_alive_uses_proc_fast_path_without_spawning_tmux(self):
+        with tempfile.TemporaryDirectory(prefix="luma-owner-alive-") as tmp:
+            sock = pathlib.Path(tmp) / "tmux.sock"
+            sock.write_text("", encoding="utf-8")
+            config = {"id": "s-alive", "cli": "Claude Code", "cwd": tmp, "ownerDirectory": tmp + "/owner", "nativeId": NATIVE_UUID}
+            s = ClaudePtySession(config, lambda: None)
+            owner = NativeOwner(s)
+            owner.tmux_socket = str(sock)
+            my_pid = os.getpid()
+            from luma_cli.native_owner import process_start
+            my_start = process_start(my_pid)
+            self.assertTrue(my_start)
+            owner.handle.update(kind="tmux", pid=my_pid, processStart=my_start, terminalSocket=str(sock))
+            with patch.object(owner, "tmux", side_effect=AssertionError("must not spawn tmux when pid/start match")):
+                self.assertTrue(owner.alive())
+
+            owner.handle["processStart"] = "stale-start"
+            dead_result = subprocess.CompletedProcess(["tmux"], 0, stdout=b"1\n")
+            with patch.object(owner, "tmux", return_value=dead_result) as mock_tmux:
+                self.assertFalse(owner.alive())
+                mock_tmux.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,6 +15,8 @@ class SessionWakeReceiver : BroadcastReceiver() {
         ) return
         val token = intent.getStringExtra("token").orEmpty()
         if (!RootBackgroundNotifications.verifyToken(context, token)) return
+        val watchGen = intent.getStringExtra("watchGen")?.toLongOrNull() ?: 0L
+        if (!RootBackgroundNotifications.verifyWakeGeneration(context, watchGen)) return
 
         val parsed = parseWakeEvents(intent)
         if (parsed.isEmpty()) return

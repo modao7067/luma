@@ -129,4 +129,88 @@ class MarkdownCacheTest {
         assertEquals("ab😀", safeUtf16Prefix(text, 4))
         assertEquals(4, safeUtf16SliceStart(text, 3))
     }
+
+    @Test fun chineseNoSpaceFootnotesParseBodyAndRefsWithoutBecomingLinks() {
+        val source = buildString {
+            appendLine("正文引用了第一条脚注[^1]，以及带名称的第二条[^note]。")
+            appendLine()
+            appendLine("普通引用链接[官方站点][site]继续正常生效。")
+            appendLine()
+            appendLine("[site]: https://example.com")
+            appendLine("[^note]: 这是第二条无空格中文脚注正文。")
+            append("[^1]: 这是第一条无空格中文脚注正文。")
+        }
+        val doc = MarkdownDocumentParser().parse(source, complete = true)
+        fun collect(node: MarkdownAst, kind: MarkdownKind): List<MarkdownAst> =
+            (if (node.kind == kind) listOf(node) else emptyList()) + node.children.flatMap { collect(it, kind) }
+
+        val firstPara = doc.blocks[0].node
+        assertEquals(MarkdownKind.PARAGRAPH, firstPara.kind)
+        val refs = collect(firstPara, MarkdownKind.FOOTNOTE_REF)
+        assertEquals(listOf("[1]", "[2]"), refs.map { it.literal })
+        assertEquals(listOf(1, 2), refs.map { it.number })
+        assertTrue(collect(firstPara, MarkdownKind.LINK).isEmpty())
+
+        val secondPara = doc.blocks[1].node
+        val links = collect(secondPara, MarkdownKind.LINK)
+        assertEquals(1, links.size)
+        assertEquals("https://example.com", links.single().destination)
+
+        val footnotes = doc.blocks.last().node
+        assertEquals(MarkdownKind.FOOTNOTES, footnotes.kind)
+        assertEquals(2, footnotes.children.size)
+        assertEquals(1, footnotes.children[0].number)
+        assertEquals(2, footnotes.children[1].number)
+        assertEquals("这是第一条无空格中文脚注正文。", collect(footnotes.children[0], MarkdownKind.TEXT).joinToString("") { it.literal })
+        assertEquals("这是第二条无空格中文脚注正文。", collect(footnotes.children[1], MarkdownKind.TEXT).joinToString("") { it.literal })
+    }
+
+    @Test fun multiParagraphNestedAndProtectedFootnotesPreserveStructureAndEscapes() {
+        val source = buildString {
+            appendLine("转义\\[^a]、行内代码`[^a]`与真实引用[^b]。")
+            appendLine()
+            appendLine("```markdown")
+            appendLine("[^inside]: 代码块里的脚注定义不应被提取。")
+            appendLine("```")
+            appendLine()
+            appendLine("[^a]: 嵌套脚注最终内容。")
+            appendLine("[^b]: 首段见嵌套[^a]。")
+            appendLine()
+            appendLine("    第二段续行含 `inline`。")
+            appendLine()
+            appendLine("    ```kotlin")
+            appendLine("    val n = 42")
+            appendLine("    ```")
+            append("[^extra]: 未在正文直接引用但仍保留展示的脚注。")
+        }
+        val docParser = MarkdownDocumentParser()
+        val doc = docParser.parse(source, complete = true)
+        fun collect(node: MarkdownAst, kind: MarkdownKind): List<MarkdownAst> =
+            (if (node.kind == kind) listOf(node) else emptyList()) + node.children.flatMap { collect(it, kind) }
+
+        val firstPara = doc.blocks[0].node
+        val topRefs = collect(firstPara, MarkdownKind.FOOTNOTE_REF)
+        assertEquals(listOf("[1]"), topRefs.map { it.literal })
+        assertTrue(collect(firstPara, MarkdownKind.TEXT).joinToString("") { it.literal }.contains("转义[^a]"))
+        assertEquals(listOf("[^a]"), collect(firstPara, MarkdownKind.CODE).map { it.literal })
+
+        val codeBlock = doc.blocks[1].node
+        assertEquals(MarkdownKind.CODE_BLOCK, codeBlock.kind)
+        assertTrue(codeBlock.literal.contains("[^inside]: 代码块里的脚注定义不应被提取。"))
+
+        val footnotes = doc.blocks.last().node
+        assertEquals(MarkdownKind.FOOTNOTES, footnotes.kind)
+        assertEquals(listOf("b", "a", "extra"), footnotes.children.map { it.destination })
+        assertEquals(listOf(1, 2, 3), footnotes.children.map { it.number })
+        val itemB = footnotes.children[0]
+        assertEquals(listOf(MarkdownKind.PARAGRAPH, MarkdownKind.PARAGRAPH, MarkdownKind.CODE_BLOCK), itemB.children.map { it.kind })
+        assertEquals(listOf("[2]"), collect(itemB.children[0], MarkdownKind.FOOTNOTE_REF).map { it.literal })
+        assertEquals("val n = 42", itemB.children[2].literal)
+
+        val midStream = docParser.parse("流式正文引用[^1]。\n\n[^1]:", complete = false)
+        assertTrue(collect(midStream.blocks[0].node, MarkdownKind.FOOTNOTE_REF).isEmpty())
+        val resolvedStream = docParser.parse("流式正文引用[^1]。\n\n[^1]: 脚注已到达。", complete = false, previous = midStream)
+        assertEquals(listOf("[1]"), collect(resolvedStream.blocks[0].node, MarkdownKind.FOOTNOTE_REF).map { it.literal })
+        assertEquals(MarkdownKind.FOOTNOTES, resolvedStream.blocks.last().node.kind)
+    }
 }

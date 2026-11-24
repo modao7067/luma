@@ -36,6 +36,8 @@ internal class SessionActivityState(record: SessionRecord) {
     private var wasTurnActive = false
     private var knownRequestIds = emptySet<String>()
     private var knownAssistantIds = emptySet<String>()
+    private var knownAssistantCount = 0
+    private var lastKnownAssistantText: String? = null
     private var priorAssistantIds = emptySet<String>()
     private var lastRequestsRef: List<UserRequest>? = null
     private var lastMessagesRef: List<ConversationItem>? = null
@@ -50,6 +52,8 @@ internal class SessionActivityState(record: SessionRecord) {
         wasTurnActive = false
         knownRequestIds = emptySet()
         knownAssistantIds = emptySet()
+        knownAssistantCount = 0
+        lastKnownAssistantText = null
         lastRequestsRef = null
         lastMessagesRef = null
         pendingSubmissionIds.clear()
@@ -101,10 +105,27 @@ internal class SessionActivityState(record: SessionRecord) {
         } else {
             requests.mapTo(HashSet()) { it.id }
         }
-        val currentAssistantIds = if (everSettled && messages === lastMessagesRef) {
-            knownAssistantIds
+        val currentAssistantIds: Set<String>
+        val currentAssistantCount: Int
+        val currentLastAssistantText: String?
+        if (everSettled && messages === lastMessagesRef) {
+            currentAssistantIds = knownAssistantIds
+            currentAssistantCount = knownAssistantCount
+            currentLastAssistantText = lastKnownAssistantText
         } else {
-            messages.asSequence().filter { it.role == "assistant" }.mapTo(HashSet()) { it.id }
+            val ids = HashSet<String>()
+            var count = 0
+            var lastText: String? = null
+            for (m in messages) {
+                if (m.role == "assistant") {
+                    ids.add(m.id)
+                    count++
+                    lastText = m.text
+                }
+            }
+            currentAssistantIds = ids
+            currentAssistantCount = count
+            currentLastAssistantText = lastText
         }
         val turnActive = activeTurnId != null
 
@@ -113,6 +134,8 @@ internal class SessionActivityState(record: SessionRecord) {
             wasTurnActive = turnActive
             knownRequestIds = currentRequestIds
             knownAssistantIds = currentAssistantIds
+            knownAssistantCount = currentAssistantCount
+            lastKnownAssistantText = currentLastAssistantText
             lastRequestsRef = requests
             lastMessagesRef = messages
             if (turnActive) {
@@ -146,7 +169,12 @@ internal class SessionActivityState(record: SessionRecord) {
         if (turnActive) pendingSubmissionIds.clear()
 
         val hasNewRequest = currentRequestIds !== knownRequestIds && currentRequestIds.any { it !in knownRequestIds }
-        val fastSyncCompleted = !wasTurnActive && !turnActive && currentAssistantIds !== knownAssistantIds && currentAssistantIds.any { it !in knownAssistantIds }
+        val hasNewAssistantId = currentAssistantIds !== knownAssistantIds && currentAssistantIds.any { it !in knownAssistantIds }
+        val isGenuinelyNewAssistant = hasNewAssistantId && (
+            currentAssistantCount > knownAssistantCount ||
+                (currentLastAssistantText != null && currentLastAssistantText != lastKnownAssistantText)
+            )
+        val fastSyncCompleted = !wasTurnActive && !turnActive && isGenuinelyNewAssistant
         val turnCompleted = (wasTurnActive && !turnActive) || fastSyncCompleted
 
         if (hasNewRequest || turnCompleted) {
@@ -165,6 +193,8 @@ internal class SessionActivityState(record: SessionRecord) {
         wasTurnActive = turnActive
         knownRequestIds = currentRequestIds
         knownAssistantIds = currentAssistantIds
+        knownAssistantCount = currentAssistantCount
+        lastKnownAssistantText = currentLastAssistantText
         lastRequestsRef = requests
         lastMessagesRef = messages
         return changed

@@ -416,21 +416,22 @@ internal fun SubAgentDetailScreen(
                     } else {
                         val entry = row.entries.first()
                         val animateMessagePop = animateRowArrival && entry.role == "user"
-                        val markdown = if (entry.role == "assistant") rememberMarkdownPresentation(
-                            identity = "$identity:$rowKey", source = entry.text,
-                            complete = detail.agent.status != "running" || detail.messages.lastOrNull { it.role == "assistant" }?.id != entry.id,
-                            animate = true, animateArrival = false,
-                        ) else null
+                        val isAssistantComplete = detail.agent.status != "running" || detail.messages.lastOrNull { it.role == "assistant" }?.id != entry.id
                         val displayedEntry = entry.copy(delivery = "")
                         SmoothTailGrowth(
                             rowId = "$identity:$rowKey",
-                            contentKey = (((markdown?.visibleUnits ?: displayedEntry.text.length) xor System.identityHashCode(markdown?.document)) * 31 + displayedEntry.images.size) * 31 + displayedEntry.status.hashCode(),
                             knownHeights = rowHeights,
                             animateArrival = animateRowArrival,
                             animatePop = animateMessagePop,
                             topSpacing = topSpacing,
                         ) {
-                            ConversationMessage(displayedEntry, actions, cli, markdown)
+                            StreamingConversationRowMessage(
+                                identity = "$identity:$rowKey",
+                                entry = displayedEntry,
+                                complete = isAssistantComplete,
+                                actions = actions,
+                                cli = cli,
+                            )
                         }
                     }
                 }

@@ -334,4 +334,58 @@ class SessionActivityPolicyTest {
         assertEquals("10月28日", formatSessionActivityTime(ts(2026, 10, 28, 8, 0), now, zone))
         assertEquals("2025年10月28日", formatSessionActivityTime(ts(2025, 10, 28, 8, 0), now, zone))
     }
+
+    @Test fun assistantRowIdSwapWithIdenticalTextAfterReadDoesNotRetriggerCompletionOrUnread() {
+        var now = 40_000L
+        val clock = SessionActivityClock(nowMs = { now })
+        val record = SessionRecord("s-claude", "Claude", "root", "/workspace", threadId = "t-c", cli = "Claude Code", lastActiveAt = 1_000L)
+        val activity = SessionActivityState(record)
+
+        activity.reconcile(
+            record, connected = true, loading = false, hydrating = false,
+            activeTurnId = "turn-1",
+            messages = listOf(ConversationItem("msg_stream:0", "assistant", "这是已经看完的完整回复。")),
+            requests = emptyList(), viewingInForeground = true, clock = clock,
+        )
+        now = 41_000L
+        assertTrue(
+            activity.reconcile(
+                record, connected = true, loading = false, hydrating = false,
+                activeTurnId = null,
+                messages = listOf(ConversationItem("msg_stream:0", "assistant", "这是已经看完的完整回复。")),
+                requests = emptyList(), viewingInForeground = true, clock = clock,
+            ),
+        )
+        assertTrue(activity.lastTurnCompleted)
+        assertFalse(record.unread)
+
+        now = 42_000L
+        assertFalse(
+            activity.reconcile(
+                record, connected = true, loading = false, hydrating = false,
+                activeTurnId = null,
+                messages = listOf(ConversationItem("uuid-final:0", "assistant", "这是已经看完的完整回复。")),
+                requests = emptyList(), viewingInForeground = false, clock = clock,
+            ),
+        )
+        assertFalse(activity.lastTurnCompleted)
+        assertFalse(record.unread)
+        assertEquals(41_000L, record.lastActiveAt)
+
+        now = 43_000L
+        assertTrue(
+            activity.reconcile(
+                record, connected = true, loading = false, hydrating = false,
+                activeTurnId = null,
+                messages = listOf(
+                    ConversationItem("uuid-final:0", "assistant", "这是已经看完的完整回复。"),
+                    ConversationItem("uuid-next:0", "assistant", "真正的新一轮回复。"),
+                ),
+                requests = emptyList(), viewingInForeground = false, clock = clock,
+            ),
+        )
+        assertTrue(activity.lastTurnCompleted)
+        assertTrue(record.unread)
+        assertEquals(43_000L, record.lastActiveAt)
+    }
 }

@@ -923,8 +923,20 @@ class NativeOwner:
 
     def alive(self):
         if self.handle.get("kind") == "tmux":
+            pid, start = self.handle.get("pid"), self.handle.get("processStart")
+            if pid and start and process_start(pid) == start and os.path.exists(self.tmux_socket):
+                return True
             state = self.tmux("display-message", "-p", "-t", "owner", "#{pane_dead}", check=False)
-            return state.returncode == 0 and state.stdout.strip() == b"0"
+            alive = state.returncode == 0 and state.stdout.strip() == b"0"
+            if alive and not (pid and start):
+                try:
+                    pane_pid, pane_start = _query_tmux_pane_pid(self.tmux_command(), self.tmux_socket)
+                except (OSError, subprocess.TimeoutExpired, ValueError):
+                    pane_pid, pane_start = None, None
+                if pane_pid and pane_start:
+                    self.handle.update(pid=pane_pid, processStart=pane_start)
+                    self.session.save()
+            return alive
         pid, start = self.handle.get("pid"), self.handle.get("processStart")
         if pid and start and process_start(pid) == start:
             return True

@@ -476,6 +476,46 @@ def _validate_http_url(url: Any) -> str | None:
     return cleaned
 
 
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, host, port)
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        src_origin = _url_origin(req.full_url)
+        dst_origin = _url_origin(newurl)
+        if src_origin is None or dst_origin is None or src_origin != dst_origin:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                f"Blocked cross-origin redirect ({code})",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen_auth(req: urllib.request.Request, timeout: float):
+    opener = urllib.request.build_opener(_SameOriginRedirectHandler())
+    return opener.open(req, timeout=timeout)
+
+
 def _read_response_bytes(resp: Any, max_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> bytes:
     try:
         raw = resp.read(max_bytes + 1)
@@ -4887,8 +4927,8 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                     if not isinstance(rl, dict):
                         continue
                     windows = []
-                    lbl_5h = _tr("5h 窗口", "5h window")
-                    lbl_7d = _tr("7d 窗口", "7d window")
+                    lbl_5h = _tr("短期", "Session")
+                    lbl_7d = _tr("每周", "Weekly")
                     for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
                         slot = rl.get(key)
                         if isinstance(slot, dict) and _safe_float(slot.get("used_percent")) is not None:
@@ -4975,8 +5015,8 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
                 res = read_result(2)
                 rl = res.get("rateLimits") if isinstance(res.get("rateLimits"), dict) else res
                 windows = []
-                lbl_5h = _tr("5h 窗口", "5h window")
-                lbl_7d = _tr("7d 窗口", "7d window")
+                lbl_5h = _tr("短期", "Session")
+                lbl_7d = _tr("每周", "Weekly")
                 for key, default_label, default_mins in (("primary", lbl_5h, 300), ("secondary", lbl_7d, 10080)):
                     slot = rl.get(key)
                     if isinstance(slot, dict) and _safe_float(slot.get("usedPercent") if "usedPercent" in slot else slot.get("used_percent")) is not None:
@@ -5098,14 +5138,14 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
                 "User-Agent": "claude-code/2.0",
             },
         )
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
+        with _urlopen_auth(req, timeout=3.5) as resp:
             body = json.loads(_read_response_bytes(resp).decode("utf-8"))
         windows = []
         mapping = [
-            ("five_hour", _tr("5h 窗口", "5h window"), 5 * 3_600_000),
-            ("seven_day", _tr("7d 总窗口", "7d overall"), 7 * 86_400_000),
-            ("seven_day_sonnet", "7d Sonnet", 7 * 86_400_000),
-            ("seven_day_opus", "7d Opus", 7 * 86_400_000),
+            ("five_hour", _tr("短期", "Session"), 5 * 3_600_000),
+            ("seven_day", _tr("每周", "Weekly"), 7 * 86_400_000),
+            ("seven_day_sonnet", _tr("每周 · Sonnet", "Weekly · Sonnet"), 7 * 86_400_000),
+            ("seven_day_opus", _tr("每周 · Opus", "Weekly · Opus"), 7 * 86_400_000),
         ]
         for key, label, dur_ms in mapping:
             slot = body.get(key)
@@ -5230,13 +5270,18 @@ def _parse_antigravity_summary_windows(
                 if win_type == "weekly"
                 else ((5 * 3_600_000) if win_type == "5h" else None)
             )
+            raw_display = re.sub(
+                r"(?i)\b(?:limits?|quotas?|windows?)\b|限额|配额|窗口",
+                "",
+                str(b.get("displayName") or ""),
+            ).strip()
             win_lbl = (
-                _tr("7d 窗口", "7d window")
+                _tr("每周", "Weekly")
                 if win_type == "weekly"
                 else (
-                    _tr("5h 窗口", "5h window")
+                    _tr("短期", "Session")
                     if win_type == "5h"
-                    else (str(b.get("displayName") or "").strip() or _tr("配额", "Quota"))
+                    else (raw_display or _tr("短期", "Session"))
                 )
             )
             used_pct = max(0.0, min(100.0, (1.0 - rem_frac) * 100.0))
@@ -5278,8 +5323,8 @@ def _parse_antigravity_model_windows(payload: dict[str, Any]) -> list[dict[str, 
             _safe_float(m_info["weeklyQuotaInfo"].get("remainingFraction")) is not None
         )
         for suffix, q_key, dur_ms, s_lbl in (
-            ("primary", "quotaInfo", None, f"{grp} · {_tr('主窗口', 'Primary')}" if has_weekly else grp),
-            ("weekly", "weeklyQuotaInfo", 7 * 86_400_000, f"{grp} · {_tr('7d 窗口', '7d window')}"),
+            ("primary", "quotaInfo", None, f"{grp} · {_tr('短期', 'Session')}" if has_weekly else grp),
+            ("weekly", "weeklyQuotaInfo", 7 * 86_400_000, f"{grp} · {_tr('每周', 'Weekly')}"),
         ):
             q_info = m_info.get(q_key)
             if not isinstance(q_info, dict):
@@ -5352,7 +5397,7 @@ def _refresh_antigravity_access_token(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen_auth(req, timeout=timeout) as resp:
             payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         at = payload.get("access_token")
         return at.strip() if isinstance(at, str) and at.strip() else None
@@ -5491,7 +5536,7 @@ def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+            with _urlopen_auth(req, timeout=req_timeout) as resp:
                 data = json.loads(_read_response_bytes(resp).decode("utf-8"))
             if isinstance(data, dict):
                 return parse_fn(data, req_ms)
@@ -5618,13 +5663,13 @@ def _decode_grok_grpc_web_billing(raw_bytes: bytes) -> dict[str, Any]:
         span_days = ((end_ms - start_ms) / 86_400_000.0) if (start_ms and end_ms and end_ms > start_ms) else None
         if period_enum == 2 or (span_days is not None and 4.0 <= span_days <= 12.0):
             dur_ms: int | None = 7 * 86_400_000
-            lbl = _tr("7d 订阅额度", "7d subscription")
+            lbl = _tr("每周", "Weekly")
         elif period_enum == 3 or (span_days is not None and 20.0 <= span_days <= 45.0):
             dur_ms = 30 * 86_400_000
-            lbl = _tr("月度订阅额度", "Monthly subscription")
+            lbl = _tr("每月", "Monthly")
         else:
             dur_ms = int(end_ms - start_ms) if (start_ms and end_ms and end_ms > start_ms) else None
-            lbl = _tr("订阅额度", "Subscription")
+            lbl = _tr("当前", "Current")
         end_iso = _iso_from_epoch_sec(end_ms / 1000.0) if end_ms else None
         windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
 
@@ -6028,7 +6073,7 @@ def _refresh_grok_access_token(auth: dict[str, Any]) -> str | None:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=4.5) as resp:
+            with _urlopen_auth(req, timeout=4.5) as resp:
                 payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         except Exception:
             return None
@@ -6108,7 +6153,7 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
                 "User-Agent": "grok-cli/1.0",
             },
         )
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+        with _urlopen_auth(req, timeout=3.0) as resp:
             return json.loads(_read_response_bytes(resp).decode("utf-8"))
 
     def _fetch_grpc_web(bearer: str) -> dict[str, Any]:
@@ -6128,7 +6173,7 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
                 "x-user-agent": "connect-es/2.1.1",
             },
         )
-        with urllib.request.urlopen(req, timeout=4.5) as resp:
+        with _urlopen_auth(req, timeout=4.5) as resp:
             return _decode_grok_grpc_web_billing(_read_response_bytes(resp))
 
     privacy_blocked = False
@@ -6175,9 +6220,9 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
         if used_pct is not None:
             dur_ms = (7 * 86_400_000) if p_type == "WEEKLY" else ((30 * 86_400_000) if p_type == "MONTHLY" else None)
             lbl = (
-                _tr("7d 订阅额度", "7d subscription")
+                _tr("每周", "Weekly")
                 if p_type == "WEEKLY"
-                else (_tr("月度订阅额度", "Monthly subscription") if p_type == "MONTHLY" else _tr("订阅额度", "Subscription"))
+                else (_tr("每月", "Monthly") if p_type == "MONTHLY" else _tr("当前", "Current"))
             )
             end_iso = period.get("end") if isinstance(period.get("end"), str) else None
             windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
@@ -6196,7 +6241,7 @@ def _probe_grok_limits(home: Path) -> dict[str, Any]:
                 "unit": "USD",
             }
             if not windows and tot_usd and tot_usd > 0:
-                windows.append(_make_window("credits", _tr("月度额度", "Monthly credits"), (used_usd / tot_usd) * 100.0, None, 30 * 86_400_000))
+                windows.append(_make_window("credits", _tr("每月", "Monthly"), (used_usd / tot_usd) * 100.0, None, 30 * 86_400_000))
         if windows or credits is not None:
             return {
                 "cli": "Grok Build",
@@ -6358,7 +6403,7 @@ def _probe_deepseek_limits(home: Path) -> dict[str, Any]:
                     "User-Agent": "luma-cli/1.0",
                 },
             )
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
+            with _urlopen_auth(req, timeout=4.0) as resp:
                 payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
             infos = [x for x in (payload.get("balance_infos") or []) if isinstance(x, dict)]
             chosen = (
@@ -6401,7 +6446,7 @@ def _probe_deepseek_limits(home: Path) -> dict[str, Any]:
                     "User-Agent": "luma-cli/1.0",
                 },
             )
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
+            with _urlopen_auth(req, timeout=4.0) as resp:
                 payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
             biz = ((payload.get("data") or {}).get("biz_data")) if isinstance(payload.get("data"), dict) else None
             wallets = [w for w in ((biz or {}).get("normal_wallets") or []) if isinstance(w, dict)]
@@ -6610,7 +6655,7 @@ def _refresh_kimi_access_token(auth: dict[str, Any]) -> str | None:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
+            with _urlopen_auth(req, timeout=4.0) as resp:
                 payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
         except Exception:
             return None
@@ -6726,7 +6771,7 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
                     "User-Agent": "kimi-cli/1.0",
                 },
             )
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
+            with _urlopen_auth(req, timeout=4.0) as resp:
                 return json.loads(_read_response_bytes(resp).decode("utf-8"))
 
         try:
@@ -6763,11 +6808,10 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
                 if rem_v is not None:
                     used_v = max(0.0, lim_v - rem_v)
             if lim_v is not None and lim_v > 0 and used_v is not None:
-                lbl = str(usage_map.get("name") or usage_map.get("title") or _tr("7d 订阅限额", "Weekly limit"))
                 windows.append(
                     _make_window(
                         "weekly",
-                        lbl,
+                        _tr("每周", "Weekly"),
                         (used_v / lim_v) * 100.0,
                         _kimi_reset_iso(usage_map, now_sec),
                         7 * 86_400_000,
@@ -6792,26 +6836,50 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
                 dur = _safe_int(win_meta.get("duration") or item.get("duration") or detail.get("duration"))
                 t_unit = str(win_meta.get("timeUnit") or item.get("timeUnit") or detail.get("timeUnit") or "").upper()
                 dur_ms: int | None = None
-                auto_lbl = _tr(f"限额 #{idx + 1}", f"Limit #{idx + 1}")
+                auto_lbl: str | None = None
                 if dur > 0:
                     if "MIN" in t_unit:
                         dur_ms = dur * 60_000
-                        auto_lbl = _tr(f"{dur // 60}h 限额", f"{dur // 60}h limit") if (dur >= 60 and dur % 60 == 0) else _tr(f"{dur}m 限额", f"{dur}m limit")
+                        if dur == 300:
+                            auto_lbl = _tr("短期", "Session")
+                        else:
+                            auto_lbl = f"{dur // 60}h" if (dur >= 60 and dur % 60 == 0) else f"{dur}m"
                     elif "HOUR" in t_unit:
                         dur_ms = dur * 3_600_000
-                        auto_lbl = _tr(f"{dur}h 限额", f"{dur}h limit")
+                        auto_lbl = _tr("短期", "Session") if dur == 5 else f"{dur}h"
                     elif "DAY" in t_unit:
                         dur_ms = dur * 86_400_000
-                        auto_lbl = _tr(f"{dur}d 限额", f"{dur}d limit")
+                        auto_lbl = _tr("每周", "Weekly") if dur == 7 else (_tr("每月", "Monthly") if dur == 30 else f"{dur}d")
                     elif "WEEK" in t_unit:
                         dur_ms = dur * 7 * 86_400_000
-                        auto_lbl = _tr("7d 订阅限额", "Weekly limit") if dur == 1 else _tr(f"{dur}w 限额", f"{dur}w limit")
+                        auto_lbl = _tr("每周", "Weekly") if dur == 1 else f"{dur}w"
                     elif "MONTH" in t_unit:
                         dur_ms = dur * 30 * 86_400_000
-                        auto_lbl = _tr("月度限额", "Monthly limit") if dur == 1 else _tr(f"{dur}mo 限额", f"{dur}mo limit")
+                        auto_lbl = _tr("每月", "Monthly") if dur == 1 else f"{dur}mo"
                     else:
                         dur_ms = dur * 1000
-                lbl = str(item.get("name") or item.get("title") or detail.get("name") or detail.get("title") or auto_lbl)
+                raw_name = str(item.get("name") or item.get("title") or detail.get("name") or detail.get("title") or "").strip()
+                clean_name = re.sub(
+                    r"(?i)\b(?:subscription|limits?|quotas?|windows?)\b|订阅额度|订阅限额|限额|配额|窗口",
+                    "",
+                    raw_name,
+                )
+                clean_name = re.sub(r"\s+", " ", clean_name).strip(" -_·:/()[]")
+                period_probe = re.sub(r"[_-]+", " ", clean_name).strip()
+                is_period_only = bool(
+                    period_probe
+                    and re.fullmatch(
+                        r"(?i)(?:(?:limit|quota|window)\s+)?(?:\d+\s*(?:s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|mo|mon|mons|months?|秒|分钟|小时|天|周|月)|short(?:\s*term)?|session|rolling|hourly|daily|weekly|monthly|短期|每小时|每日|每天|每周|每月)",
+                        period_probe,
+                    )
+                )
+                if auto_lbl:
+                    if clean_name and not is_period_only:
+                        lbl = clean_name if auto_lbl.lower() in clean_name.lower() else f"{auto_lbl} · {clean_name}"
+                    else:
+                        lbl = auto_lbl
+                else:
+                    lbl = clean_name or f"#{idx + 1}"
                 windows.append(
                     _make_window(
                         f"limit_{idx}",
@@ -6832,7 +6900,7 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
                     windows.append(
                         _make_window(
                             "limit_5h",
-                            _tr("5h 限额", "5h limit"),
+                            _tr("短期", "Session"),
                             max(0.0, min(100.0, ratio_5h * 100.0)),
                             _kimi_reset_iso(pool_5h, now_sec),
                             5 * 3_600_000,
@@ -6846,7 +6914,7 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
                     windows.append(
                         _make_window(
                             "monthly",
-                            _tr("月度限额", "Monthly limit"),
+                            _tr("每月", "Monthly"),
                             max(0.0, min(100.0, ratio_mo * 100.0)),
                             _kimi_reset_iso(pool_mo, now_sec),
                             30 * 86_400_000,
@@ -6876,6 +6944,238 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
         }
 
 
+OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+OPENCODE_CONSOLE_SERVER_URL = "https://opencode.ai/console"
+
+
+def _opencode_console_server_ok(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return True
+    server = metadata.get("server")
+    if not isinstance(server, str):
+        return True
+    try:
+        parsed = urllib.parse.urlparse(server.strip())
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    return normalized == OPENCODE_CONSOLE_SERVER_URL
+
+
+def _parse_opencode_db_credential(raw_value: Any) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        stored = json.loads(raw_value)
+    except Exception:
+        return None
+    if not isinstance(stored, dict) or stored.get("type") != "key":
+        return None
+    if not _opencode_console_server_ok(stored.get("metadata")):
+        return None
+    raw_key = stored.get("key")
+    if isinstance(raw_key, str) and raw_key.strip():
+        return raw_key.strip()
+    return None
+
+
+def _read_opencode_db_api_keys(
+    db_path: Path,
+    integration_ids: tuple[str, ...] = ("opencode", "opencode-go"),
+) -> list[str | None]:
+    if not integration_ids or not db_path.is_file():
+        return [None for _ in integration_ids]
+    raw_rows: list[Any] = [None for _ in integration_ids]
+    try:
+        with _open_readonly_sqlite(db_path, timeout=1.5) as con:
+            has_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'"
+            ).fetchone()
+            if not has_table:
+                return [None for _ in integration_ids]
+            for idx, integration_id in enumerate(integration_ids):
+                row = con.execute(
+                    "SELECT value FROM credential "
+                    "WHERE integration_id = ? AND active IS NOT 0 "
+                    "ORDER BY active DESC, time_created DESC, id DESC LIMIT 1",
+                    (integration_id,),
+                ).fetchone()
+                if row:
+                    raw_rows[idx] = row[0]
+    except Exception:
+        return [None for _ in integration_ids]
+    return [_parse_opencode_db_credential(raw_val) for raw_val in raw_rows]
+
+
+def _read_opencode_db_api_key(db_path: Path, integration_id: str) -> str | None:
+    return _read_opencode_db_api_keys(db_path, (integration_id,))[0]
+
+
+def _extract_opencode_go_keys(home: Path) -> list[str]:
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
+    opencode_dir = data_home / "opencode"
+    inline_auth = os.environ.get("OPENCODE_AUTH_CONTENT")
+    raw_auth = ""
+    if inline_auth:
+        raw_auth = inline_auth
+    else:
+        auth_path = opencode_dir / "auth.json"
+        if auth_path.is_file():
+            try:
+                raw_auth = auth_path.read_text("utf-8")
+            except (OSError, UnicodeError):
+                raw_auth = ""
+
+    auth_go_key: str | None = None
+    if raw_auth:
+        try:
+            auth_obj = json.loads(raw_auth)
+            if isinstance(auth_obj, dict):
+                entry = auth_obj.get("opencode-go")
+                if isinstance(entry, dict) and entry.get("type") == "api":
+                    candidate = entry.get("key")
+                    if isinstance(candidate, str) and candidate.strip():
+                        auth_go_key = candidate.strip()
+        except Exception:
+            pass
+
+    if not auth_go_key:
+        env_key = (os.environ.get("OPENCODE_API_KEY") or "").strip()
+        if env_key:
+            auth_go_key = env_key
+
+    db_file = os.environ.get("OPENCODE_DB") or "opencode.db"
+    stored_keys: list[str | None] = []
+    if not inline_auth and db_file != ":memory:":
+        db_path = (opencode_dir / db_file).resolve()
+        stored_keys = _read_opencode_db_api_keys(db_path, ("opencode", "opencode-go"))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in [*stored_keys, auth_go_key]:
+        if isinstance(item, str) and item and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def _probe_opencode_limits(home: Path, keys: list[str] | None = None) -> dict[str, Any]:
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    resolved_keys = keys if keys is not None else _extract_opencode_go_keys(home)
+    if not resolved_keys:
+        return {
+            "cli": "OpenCode",
+            "planType": None,
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "unconfigured",
+            "message": None,
+            "windows": [],
+            "credits": None,
+        }
+
+    try:
+        body: Any = None
+        last_status: int | None = None
+        for idx, api_key in enumerate(resolved_keys):
+            req = urllib.request.Request(
+                OPENCODE_GO_USAGE_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "luma-usage/1",
+                },
+            )
+            try:
+                with _urlopen_auth(req, timeout=4.0) as resp:
+                    last_status = getattr(resp, "status", 200)
+                    body = json.loads(_read_response_bytes(resp).decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                last_status = exc.code
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                if last_status in (401, 403) and idx + 1 < len(resolved_keys):
+                    continue
+                if last_status == 403:
+                    return {
+                        "cli": "OpenCode",
+                        "planType": None,
+                        "updatedAt": now_iso,
+                        "source": "unavailable",
+                        "status": "unconfigured",
+                        "message": None,
+                        "windows": [],
+                        "credits": None,
+                    }
+                return {
+                    "cli": "OpenCode",
+                    "planType": "Go",
+                    "updatedAt": now_iso,
+                    "source": "unavailable",
+                    "status": "error",
+                    "message": _tr(
+                        f"读取 OpenCode Go 限额失败：HTTP {last_status}",
+                        f"Failed to read OpenCode Go limits: HTTP {last_status}",
+                    ),
+                    "windows": [],
+                    "credits": None,
+                }
+
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage, dict):
+            raise ValueError("Invalid OpenCode Go usage payload")
+
+        windows: list[dict[str, Any]] = []
+        mapping = [
+            ("rolling", "go_rolling", _tr("短期", "Session"), 5 * 3_600_000),
+            ("weekly", "go_weekly", _tr("每周", "Weekly"), 7 * 86_400_000),
+            ("monthly", "go_monthly", _tr("每月", "Monthly"), None),
+        ]
+        for field_key, wid, label, dur_ms in mapping:
+            slot = usage.get(field_key)
+            if not isinstance(slot, dict):
+                continue
+            pct = _safe_float(slot.get("percent"))
+            if pct is None:
+                continue
+            raw_reset = slot.get("resetsAt")
+            resets_at = raw_reset.strip() if isinstance(raw_reset, str) and raw_reset.strip() else None
+            windows.append(_make_window(wid, label, pct, resets_at, dur_ms))
+
+        if not windows:
+            raise ValueError("No OpenCode Go usage windows")
+
+        return {
+            "cli": "OpenCode",
+            "planType": "Go",
+            "updatedAt": now_iso,
+            "source": "live",
+            "status": "ok",
+            "message": None,
+            "windows": windows,
+            "credits": None,
+        }
+    except Exception as exc:
+        return {
+            "cli": "OpenCode",
+            "planType": "Go",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _tr(
+                f"读取 OpenCode Go 限额失败：{type(exc).__name__}",
+                f"Failed to read OpenCode Go limits: {type(exc).__name__}",
+            ),
+            "windows": [],
+            "credits": None,
+        }
+
+
 def _has_claude_oauth(home: Path) -> bool:
     return _extract_claude_oauth(home) is not None
 
@@ -6890,6 +7190,13 @@ def _has_deepseek_auth(home: Path) -> bool:
 
 def _has_kimi_oauth(home: Path) -> bool:
     return _extract_kimi_oauth(home) is not None
+
+def _has_opencode_go_auth(home: Path) -> bool:
+    return bool(_extract_opencode_go_keys(home))
+
+
+_DEFAULT_HAS_OPENCODE_GO_AUTH = _has_opencode_go_auth
+_DEFAULT_PROBE_OPENCODE_LIMITS = _probe_opencode_limits
 
 
 def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str, Any]:
@@ -6918,11 +7225,31 @@ def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str,
         ("Codex", _has_codex_oauth, _probe_codex_limits),
         ("Claude Code", _has_claude_oauth, _probe_claude_limits),
         ("Antigravity", _has_antigravity_oauth, _probe_antigravity_limits),
+        ("OpenCode", _has_opencode_go_auth, _probe_opencode_limits),
         ("Grok Build", _has_grok_oauth, _probe_grok_limits),
         ("DeepSeek Harness", _has_deepseek_auth, _probe_deepseek_limits),
         ("Kimi Code", _has_kimi_oauth, _probe_kimi_limits),
     ]
-    active_probes = [(name, fn) for name, has_oauth, fn in candidate_probes if has_oauth(home)]
+    active_probes: list[tuple[str, Any]] = []
+    for name, has_oauth, fn in candidate_probes:
+        if (
+            name == "OpenCode"
+            and has_oauth is _DEFAULT_HAS_OPENCODE_GO_AUTH
+            and fn is _DEFAULT_PROBE_OPENCODE_LIMITS
+        ):
+            try:
+                pre_keys = _extract_opencode_go_keys(home)
+            except Exception:
+                pre_keys = []
+            if pre_keys:
+                active_probes.append((name, lambda h, k=pre_keys: _probe_opencode_limits(h, keys=k)))
+            continue
+        try:
+            configured = bool(has_oauth(home))
+        except Exception:
+            configured = False
+        if configured:
+            active_probes.append((name, fn))
 
     results_map: dict[str, dict[str, Any]] = {}
     timed_out = False

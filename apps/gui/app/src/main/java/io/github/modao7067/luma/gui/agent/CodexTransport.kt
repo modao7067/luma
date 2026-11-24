@@ -49,7 +49,7 @@ internal class CodexWebSocketTransport(
     override fun close() { socket?.close(1000, "Client detached") }
     companion object {
         val defaultClient: OkHttpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
+            .readTimeout(0, TimeUnit.SECONDS).build()
     }
 }
 

@@ -92,4 +92,58 @@ class NativeCliClientTest {
             server.close()
         }
     }
+
+    @Test fun watchEventsStreamsSseAndFallsBackOnJsonResponse() = runBlocking {
+        val fallbackServer = Fixture { _, _, _ -> 422 to """{"message":"unsupported","rejected":true}""" }
+        val fallbackApi = NativeCliClient(fallbackServer.url, "fixture")
+        try {
+            var connected = false
+            val supported = fallbackApi.watchEvents(onConnected = { connected = true }, onEvent = {})
+            assertFalse(supported)
+            assertFalse(connected)
+        } finally {
+            fallbackApi.close()
+            fallbackServer.close()
+        }
+
+        val sseSocket = ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))
+        val worker = thread(isDaemon = true) {
+            try {
+                sseSocket.accept().use { peer ->
+                    val input = peer.getInputStream().buffered()
+                    fun readLine(): String {
+                        val b = StringBuilder()
+                        while (true) {
+                            val c = input.read()
+                            if (c < 0 || c == 10) return b.toString().trimEnd('\r')
+                            b.append(c.toChar())
+                        }
+                    }
+                    while (true) {
+                        if (readLine().isEmpty()) break
+                    }
+                    val out = peer.getOutputStream()
+                    out.write(
+                        ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" +
+                            ": ok\n\ndata: 1\n\ndata: 2\n\n").toByteArray(),
+                    )
+                    out.flush()
+                }
+            } catch (_: java.io.IOException) {
+            }
+        }
+        val sseApi = NativeCliClient("http://127.0.0.1:${sseSocket.localPort}", "fixture")
+        try {
+            var connected = 0
+            var events = 0
+            val supported = sseApi.watchEvents(onConnected = { connected++ }, onEvent = { events++ })
+            assertTrue(supported)
+            assertEquals(1, connected)
+            assertEquals(2, events)
+        } finally {
+            sseApi.close()
+            sseSocket.close()
+            worker.join(2000)
+        }
+    }
 }

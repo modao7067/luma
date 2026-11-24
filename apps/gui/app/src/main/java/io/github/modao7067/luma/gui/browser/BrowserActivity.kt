@@ -52,10 +52,14 @@ class BrowserActivity : ComponentActivity() {
     }
     override fun onStart() {
         super.onStart()
-        ownerSessionId?.let { (application as LumaApplication).sessions.onActivityStarted(this, it) }
+        val app = application as LumaApplication
+        app.browser.onActivityStarted(this)
+        ownerSessionId?.let { app.sessions.onActivityStarted(this, it) }
     }
     override fun onStop() {
-        (application as LumaApplication).sessions.onActivityStopped(this)
+        val app = application as LumaApplication
+        app.browser.onActivityStopped(this)
+        app.sessions.onActivityStopped(this)
         super.onStop()
     }
 }

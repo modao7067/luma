@@ -12,7 +12,10 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -22,6 +25,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.pullToRefresh
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -29,31 +35,41 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.modao7067.luma.gui.runtime.AgentRuntime
+import io.github.modao7067.luma.gui.ui.shapes.addSquircleRect
+import io.github.modao7067.luma.gui.ui.thirdparty.miuix.overScrollVertical
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import io.github.modao7067.luma.gui.runtime.AgentRuntime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -638,12 +654,30 @@ internal fun formatCompactTokens(tokens: Long): String = when {
     else -> tokens.toString()
 }
 
-internal fun formatUsageLimitLabel(label: String): String = label
-    .replace("主窗口", "常规")
-    .replace("总窗口", "总计")
-    .replace("窗口", "")
-    .replace(Regex("\\s+windows?\\b", RegexOption.IGNORE_CASE), "")
-    .trim()
+internal fun formatUsageLimitLabel(label: String): String {
+    val raw = label.trim()
+    if (raw.isEmpty()) return ""
+    val session = tr("短期", "Session")
+    val weekly = tr("每周", "Weekly")
+    val monthly = tr("每月", "Monthly")
+    val current = tr("当前", "Current")
+    return raw
+        .replace(Regex("(?i)(?:5-?hour|5\\s*小时|\\b5h)(?:\\s*(?:窗口|限额|订阅额度|订阅限额|配额)|\\s+(?:windows?|limits?|quotas?|subscription))?"), session)
+        .replace(Regex("(?i)\\bSession\\b|短期|主窗口"), session)
+        .replace(Regex("(?i)(?:\\b7d|每周)(?:\\s*(?:总窗口|窗口|订阅额度|订阅限额|限额|配额)|\\s+(?:overall|windows?|subscription|limits?|quotas?))"), weekly)
+        .replace(Regex("(?i)\\b7d\\s+(Sonnet|Opus)\\b"), "$weekly · $1")
+        .replace(Regex("(?i)\\b7d\\b"), weekly)
+        .replace(Regex("(?i)\\bWeekly(?:\\s+(?:limit|quota|window|subscription))?\\b|每周|总窗口"), weekly)
+        .replace(Regex("(?i)(?:月度|每月)(?:订阅额度|订阅限额|额度|限额|配额|窗口)?|\\bMonthly(?:\\s+(?:subscription|credits|limit|quota|window))?\\b"), monthly)
+        .replace(Regex("(?i)\\bCurrent\\b|当前"), current)
+        .replace(Regex("订阅额度|订阅限额|限额|窗口|配额"), "")
+        .replace(Regex("(?i)\\b(?:subscription|windows?|limits?|quotas?)\\b"), "")
+        .replace(Regex("\\s*·\\s*·\\s*"), " · ")
+        .replace(Regex("^[\\s·]+|[\\s·]+$"), "")
+        .replace(Regex("\\s{2,}"), " ")
+        .trim()
+        .ifEmpty { current }
+}
 
 internal fun formatUsdCost(usd: Double, approximate: Boolean = false): String {
     if (!usd.isFinite() || usd <= 0.0) return "$0.00"
@@ -704,19 +738,40 @@ internal fun formatResetCountdown(resetsAtIso: String?, nowMs: Long = System.cur
     }
 }
 
-internal fun providerUsageColor(cli: String): Color = when (cli) {
-    "Codex" -> Color(0xFF3B82F6)
-    "Claude Code" -> Color(0xFFD97757)
-    "Antigravity" -> Color(0xFF8B5CF6)
-    "OpenCode" -> Color(0xFF10B981)
-    "pi" -> Color(0xFFF59E0B)
-    "DeepSeek Harness" -> Color(0xFF4D6BFE)
-    "Kimi Code" -> Color(0xFFEC4899)
-    "Grok Build" -> Color(0xFF06B6D4)
-    "Qoder CLI" -> Color(0xFF14B8A6)
-    "CodeBuddy Code" -> Color(0xFF6366F1)
-    else -> Color(0xFF64748B)
+internal fun providerUsageColor(cli: String, darkTheme: Boolean = false): Color = when (cli) {
+    "Codex" -> if (darkTheme) Color(0xFFD0D5DD) else Color(0xFF475569)
+    "Claude Code" -> Color(0xFFD47B5A)
+    "Antigravity" -> Color(0xFF8B7EC8)
+    "OpenCode" -> Color(0xFF5698B4)
+    "pi" -> Color(0xFF529E88)
+    "DeepSeek Harness" -> Color(0xFF647CC4)
+    "Kimi Code" -> Color(0xFFC47A96)
+    "Grok Build" -> if (darkTheme) Color(0xFF9CA3AF) else Color(0xFF6B7280)
+    "Qoder CLI" -> Color(0xFF5A9A96)
+    "CodeBuddy Code" -> Color(0xFF7B80BD)
+    else -> Color(0xFF788292)
 }
+
+private fun isDarkScheme(colors: ColorScheme): Boolean = colors.background.luminance() < 0.5f
+
+private fun usageAccentTone(colors: ColorScheme, fraction: Float): Color =
+    lerp(colors.surfaceContainerHighest, colors.primary, fraction.coerceIn(0f, 1f))
+
+private fun usageTrackColor(colors: ColorScheme): Color =
+    colors.surfaceContainerHighest
+
+private fun usageHairlineColor(colors: ColorScheme): Color {
+    val isDark = isDarkScheme(colors)
+    return colors.outlineVariant.copy(alpha = if (isDark) 0.24f else 0.30f)
+}
+
+private fun resolvedProviderColor(cli: String, colors: ColorScheme): Color = when (cli) {
+    "Codex" -> colors.primary
+    "Grok Build" -> usageAccentTone(colors, 0.54f)
+    else -> providerUsageColor(cli, darkTheme = isDarkScheme(colors))
+}
+
+private fun TextStyle.tabular(): TextStyle = copy(fontFeatureSettings = TABULAR_NUMS_FEATURE)
 
 @Composable
 internal fun GlobalUsageDialog(
@@ -735,6 +790,7 @@ internal fun GlobalUsageDialog(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun GlobalUsageScreen(
     environment: String = io.github.modao7067.luma.gui.GuiProduct.environment,
@@ -872,7 +928,7 @@ internal fun GlobalUsageScreen(
             } finally {
                 if (summaryRequestSeq == reqId && environment == requestEnv) {
                     loadingSummary = false
-                    if (!loadingLimits && currentSelectedPeriodId() == periodArg) {
+                    if (!loadingLimits) {
                         manualRefreshing = false
                     }
                 }
@@ -903,7 +959,7 @@ internal fun GlobalUsageScreen(
                 } finally {
                     if (limitsRequestSeq == limitsReqId && environment == requestEnv && LumaI18n.langCode() == requestLang) {
                         loadingLimits = false
-                        if (!loadingSummary && currentSelectedPeriodId() == periodArg) {
+                        if (!loadingSummary) {
                             manualRefreshing = false
                         }
                     }
@@ -919,6 +975,8 @@ internal fun GlobalUsageScreen(
     }
 
     val colors = MaterialTheme.colorScheme
+    val isDark = isDarkScheme(colors)
+    val pullToRefreshState = rememberPullToRefreshState()
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = colors.background,
@@ -926,6 +984,21 @@ internal fun GlobalUsageScreen(
         LiquidScaffold(
             wrapTop = false,
             wrapBottom = false,
+            overlay = { overlayPadding ->
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(top = (overlayPadding.calculateTopPadding() - 28.dp).coerceAtLeast(0.dp)),
+                ) {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullToRefreshState,
+                        isRefreshing = manualRefreshing,
+                        containerColor = if (isDark) colors.surfaceContainerHigh else colors.surfaceBright,
+                        color = colors.onSurface,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
+            },
             topBar = {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -992,53 +1065,38 @@ internal fun GlobalUsageScreen(
             },
             bottomBar = {},
         ) { padding ->
-            Column(
+            val statsScroll = rememberScrollState()
+            val limitsScroll = rememberScrollState()
+            val layoutDirection = LocalLayoutDirection.current
+            val tabBarHeight = 38.dp
+            val topBasePadding = padding.calculateTopPadding() + 6.dp
+            val statsTopPadding = topBasePadding + tabBarHeight + 10.dp
+            val limitsTopPadding = topBasePadding + tabBarHeight + 16.dp
+            val bottomContentPadding = padding.calculateBottomPadding() + 28.dp
+
+            val interpolatedScrollPx by remember(pagerState, statsScroll, limitsScroll) {
+                derivedStateOf {
+                    val progress = (pagerState.currentPage + pagerState.currentPageOffsetFraction)
+                        .coerceIn(0f, 1f)
+                    (statsScroll.value * (1f - progress) + limitsScroll.value * progress).roundToInt()
+                }
+            }
+
+            Box(
                 Modifier
                     .fillMaxSize()
-                    .padding(top = padding.calculateTopPadding() + 6.dp),
-            ) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    UsageMetricTabBar(
-                        pagerState = pagerState,
-                        metricView = metricView,
-                        onSelectMetric = { tab ->
-                            scope.launch {
-                                pagerState.animateScrollToPage(tab.ordinal)
-                            }
+                    .pullToRefresh(
+                        isRefreshing = manualRefreshing,
+                        state = pullToRefreshState,
+                        onRefresh = {
+                            if (!manualRefreshing) refreshData(forceRefresh = true)
                         },
                     )
-
-                    if (manualRefreshing) {
-                        LinearProgressIndicator(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 4.dp)
-                                .clip(CircleShape),
-                        )
-                    }
-
-                    errorState?.let { err ->
-                        val msg = when (err) {
-                            is UsageErrorState.Message -> err.text
-                            UsageErrorState.SummaryLoadFailed -> tr("用量读取失败", "Failed to load usage")
-                            UsageErrorState.LimitsLoadFailed -> tr("限额读取失败", "Failed to load quotas")
-                        }
-                        ErrorNotice(msg) { errorState = null }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-
+                    .overScrollVertical(),
+            ) {
                 HorizontalPager(
                     state = pagerState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
+                    modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.Top,
                 ) { page ->
                     val pageView = UsageMetricView.entries.getOrElse(page) { UsageMetricView.STATS }
@@ -1046,30 +1104,44 @@ internal fun GlobalUsageScreen(
                         Column(
                             Modifier
                                 .fillMaxSize()
-                                .verticalScroll(rememberScrollState())
+                                .verticalScroll(limitsScroll)
                                 .padding(
                                     start = 16.dp,
                                     end = 16.dp,
-                                    bottom = padding.calculateBottomPadding() + 28.dp,
+                                    top = limitsTopPadding,
+                                    bottom = bottomContentPadding,
                                 ),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
                         ) {
+                            UsageErrorBanner(errorState) { errorState = null }
                             if (!manualRefreshing && limits == null && loadingLimits) {
-                                LinearProgressIndicator(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 4.dp)
-                                        .clip(CircleShape),
-                                )
+                                UsageLoadingPlaceholder(tr("正在读取限额…", "Loading quotas…"))
+                            } else {
+                                Column(
+                                    Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                                ) {
+                                    UsageLimitsContent(
+                                        limits = limits,
+                                        rolling30dCostByCli = lastKnownRolling30dCost,
+                                        loading = loadingLimits,
+                                    )
+                                }
                             }
-                            UsageLimitsContent(
-                                limits = limits,
-                                rolling30dCostByCli = lastKnownRolling30dCost,
-                                loading = loadingLimits,
-                            )
                         }
                     } else {
-                        Column(Modifier.fillMaxSize()) {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .verticalScroll(statsScroll)
+                                .padding(
+                                    start = 16.dp,
+                                    end = 16.dp,
+                                    top = statsTopPadding,
+                                    bottom = bottomContentPadding,
+                                ),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
                             UsagePeriodSelector(
                                 selectedPeriod = selectedPeriod,
                                 onSelectPeriod = { nextPeriod ->
@@ -1082,42 +1154,153 @@ internal fun GlobalUsageScreen(
                                     }
                                     selectedPeriodName = nextPeriod.name
                                 },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
+                                modifier = Modifier.fillMaxWidth(),
                             )
-                            Column(
-                                Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth()
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(
-                                        start = 16.dp,
-                                        end = 16.dp,
-                                        bottom = padding.calculateBottomPadding() + 28.dp,
-                                    ),
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                if (!manualRefreshing && statsSummary == null && loadingSummary) {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 4.dp)
-                                            .clip(CircleShape),
+                            UsageErrorBanner(errorState) { errorState = null }
+                            if (!manualRefreshing && statsSummary == null && loadingSummary) {
+                                UsageLoadingPlaceholder(tr("正在读取用量…", "Loading usage…"))
+                            } else {
+                                Column(
+                                    Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                                ) {
+                                    UsageStatsContent(
+                                        summary = statsSummary,
+                                        selectedPeriod = selectedPeriod,
+                                        loading = loadingSummary,
                                     )
                                 }
-                                UsageStatsContent(
-                                    summary = statsSummary,
-                                    selectedPeriod = selectedPeriod,
-                                    loading = loadingSummary,
-                                )
                             }
                         }
+                    }
+                }
+
+                val activeScrollState = if (pagerState.currentPage == 0) statsScroll else limitsScroll
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .offset { IntOffset(0, -interpolatedScrollPx) }
+                        .padding(start = 16.dp, end = 16.dp, top = topBasePadding),
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .scrollable(
+                                state = activeScrollState,
+                                orientation = Orientation.Vertical,
+                                reverseDirection = ScrollableDefaults.reverseDirection(
+                                    layoutDirection,
+                                    Orientation.Vertical,
+                                    reverseScrolling = false,
+                                ),
+                            ),
+                    ) {
+                        UsageMetricTabBar(
+                            pagerState = pagerState,
+                            metricView = metricView,
+                            onSelectMetric = { tab ->
+                                scope.launch {
+                                    pagerState.animateScrollToPage(tab.ordinal)
+                                }
+                            },
+                        )
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun UsageErrorBanner(
+    errorState: UsageErrorState?,
+    onDismiss: () -> Unit,
+) {
+    errorState?.let { err ->
+        val msg = when (err) {
+            is UsageErrorState.Message -> err.text
+            UsageErrorState.SummaryLoadFailed -> tr("用量读取失败", "Failed to load usage")
+            UsageErrorState.LimitsLoadFailed -> tr("限额读取失败", "Failed to load quotas")
+        }
+        ErrorNotice(msg, onDismiss)
+    }
+}
+
+@Composable
+private fun UsageLoadingPlaceholder(label: String) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 48.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(16.dp),
+            strokeWidth = 2.dp,
+            color = colors.primary,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun UsageSection(
+    title: String,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.2.sp,
+                ),
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            trailing?.invoke()
+        }
+        Surface(
+            shape = LumaCardShape(22.dp),
+            color = colors.surfaceContainerLow,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                Modifier.fillMaxWidth(),
+                content = content,
+            )
+        }
+    }
+}
+
+@Composable
+private fun UsageHairlineDivider(modifier: Modifier = Modifier) {
+    HorizontalDivider(
+        modifier = modifier,
+        thickness = 0.5.dp,
+        color = usageHairlineColor(MaterialTheme.colorScheme),
+    )
 }
 
 @Composable
@@ -1128,6 +1311,8 @@ private fun UsageMetricTabBar(
 ) {
     val colors = MaterialTheme.colorScheme
     val tabShape = LumaCardShape(11.dp)
+    val indicatorColor = colors.secondaryContainer
+
     Surface(
         shape = LumaCardShape(14.dp),
         color = colors.surfaceContainerLow,
@@ -1139,7 +1324,6 @@ private fun UsageMetricTabBar(
                 .padding(3.dp)
                 .height(32.dp),
         ) {
-            val indicatorColor = colors.secondaryContainer
             Canvas(Modifier.matchParentSize()) {
                 val count = UsageMetricView.entries.size
                 if (count <= 0) return@Canvas
@@ -1172,7 +1356,7 @@ private fun UsageMetricTabBar(
                         Text(
                             tab.label,
                             style = MaterialTheme.typography.labelMedium.copy(
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                             ),
                             color = if (selected) colors.onSecondaryContainer else colors.onSurfaceVariant,
                         )
@@ -1190,31 +1374,41 @@ private fun UsagePeriodSelector(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    Row(
+    val itemShape = LumaCardShape(9.dp)
+
+    Surface(
+        shape = LumaCardShape(12.dp),
+        color = colors.surfaceContainerLow,
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        UsagePeriodOption.entries.forEach { option ->
-            val active = selectedPeriod == option
-            Box(
-                Modifier
-                    .weight(1f)
-                    .height(32.dp)
-                    .clip(CircleShape)
-                    .background(if (active) colors.primaryContainer else colors.surfaceContainerLow)
-                    .clickable(role = Role.Tab) { onSelectPeriod(option) }
-                    .semantics { selected = active }
-                    .testTag("usage-window-${option.periodId}"),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    option.label,
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                    ),
-                    color = if (active) colors.onPrimaryContainer else colors.onSurfaceVariant,
-                )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            UsagePeriodOption.entries.forEach { option ->
+                val active = selectedPeriod == option
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                        .clip(itemShape)
+                        .background(if (active) colors.secondaryContainer else Color.Transparent)
+                        .clickable(role = Role.Tab) { onSelectPeriod(option) }
+                        .semantics { selected = active }
+                        .testTag("usage-window-${option.periodId}"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        option.label,
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        ),
+                        color = if (active) colors.onSecondaryContainer else colors.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -1234,7 +1428,7 @@ private fun UsageLimitsContent(
     }
     if (providers.isEmpty() && !loading) {
         Surface(
-            shape = LumaCardShape(20.dp),
+            shape = LumaCardShape(22.dp),
             color = colors.surfaceContainerLow,
             modifier = Modifier.fillMaxWidth(),
         ) {
@@ -1242,7 +1436,10 @@ private fun UsageLimitsContent(
                 Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(tr("暂无限额数据", "No quota data"), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                Text(
+                    tr("暂无限额数据", "No quota data"),
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                )
                 Text(
                     tr("登录订阅账号后刷新", "Sign in to a subscription, then refresh"),
                     style = MaterialTheme.typography.bodySmall,
@@ -1280,19 +1477,18 @@ private fun ProviderLimitCard(
 ) {
     val colors = MaterialTheme.colorScheme
     val hasWindows = provider.windows.isNotEmpty() || provider.credits != null
-    val accent = providerUsageColor(provider.cli)
+    val accent = resolvedProviderColor(provider.cli, colors)
 
     Surface(
         shape = LumaCardShape(22.dp),
         color = colors.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+        Column(Modifier.fillMaxWidth()) {
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
@@ -1301,16 +1497,26 @@ private fun ProviderLimitCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    ProviderIcon(provider.cli, selected = hasWindows, size = 32.dp)
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    ProviderIcon(provider.cli, selected = hasWindows, size = 24.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f, fill = false),
+                    ) {
                         Text(
                             cliDisplayLabel(provider.cli),
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                            color = colors.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                         if (!provider.planType.isNullOrBlank()) {
                             Text(
-                                provider.planType,
-                                style = MaterialTheme.typography.labelSmall,
+                                "· ${provider.planType}",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = colors.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1318,34 +1524,76 @@ private fun ProviderLimitCard(
                         }
                     }
                 }
-                val badgeText = when (provider.source) {
-                    "live" -> tr("实时", "Live")
-                    "session_fallback" -> tr("历史", "History")
-                    else -> if (provider.status == "error") tr("读取失败", "Unavailable") else tr("未配置", "Not configured")
+                val statusHint = when {
+                    provider.source == "session_fallback" -> tr("历史", "History") to colors.onSurfaceVariant
+                    provider.status == "error" -> tr("读取失败", "Unavailable") to colors.error
+                    !hasWindows -> tr("未配置", "Not configured") to colors.onSurfaceVariant
+                    else -> null
                 }
-                Surface(
-                    shape = LumaCardShape(10.dp),
-                    color = if (hasWindows) colors.secondaryContainer.copy(alpha = 0.7f) else colors.surfaceContainerHighest,
-                ) {
+                if (statusHint != null) {
                     Text(
-                        badgeText,
-                        Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        statusHint.first,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (hasWindows) colors.onSecondaryContainer else colors.onSurfaceVariant,
+                        color = statusHint.second,
+                        modifier = Modifier.padding(start = 8.dp),
                     )
                 }
             }
 
-            if (hasWindows) {
-                Surface(
-                    shape = LumaCardShape(12.dp),
-                    color = colors.surfaceContainerHighest.copy(alpha = 0.55f),
-                    modifier = Modifier.fillMaxWidth(),
+            if (provider.windows.isNotEmpty()) {
+                UsageHairlineDivider(Modifier.padding(horizontal = 16.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
+                    provider.windows.forEach { window ->
+                        LimitWindowRow(
+                            window = window,
+                            accentColor = accent,
+                            nowMs = nowMs,
+                        )
+                    }
+                }
+            }
+
+            if (hasWindows) {
+                UsageHairlineDivider(Modifier.padding(horizontal = 16.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    provider.credits?.let { cred ->
+                        val credLabel = when (cred.label.trim()) {
+                            "", "额度", "Quota" -> tr("额度", "Quota")
+                            else -> cred.label
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                credLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            Text(
+                                formatUsageCreditsValue(cred),
+                                style = (if (provider.windows.isEmpty()) {
+                                    MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                                } else {
+                                    MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                                }).tabular(),
+                                color = colors.onSurface,
+                            )
+                        }
+                    }
                     Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1356,52 +1604,18 @@ private fun ProviderLimitCard(
                         )
                         Text(
                             formatRolling30dCost(rolling30dCostByCli, provider.cli),
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                            ),
-                            color = colors.onSurface,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold).tabular(),
+                            color = colors.onSurface.copy(alpha = 0.85f),
                         )
                     }
                 }
             }
 
-            if (provider.windows.isNotEmpty()) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    provider.windows.forEach { window ->
-                        LimitWindowRow(window = window, accentColor = accent, nowMs = nowMs)
-                    }
-                }
-            }
-
-            provider.credits?.let { cred ->
-                HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.35f))
-                val credLabel = when (cred.label.trim()) {
-                    "", "额度", "Quota" -> tr("额度", "Quota")
-                    else -> cred.label
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(credLabel, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    val valueStr = formatUsageCreditsValue(cred)
-                    Text(
-                        valueStr,
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                    )
-                }
-            }
-
             if (!hasWindows && !provider.message.isNullOrBlank()) {
+                UsageHairlineDivider(Modifier.padding(horizontal = 16.dp))
                 Text(
                     provider.message,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (provider.status == "error") colors.error else colors.onSurfaceVariant,
                 )
@@ -1417,117 +1631,112 @@ private fun LimitWindowRow(
     nowMs: Long,
 ) {
     val colors = MaterialTheme.colorScheme
+    val isDark = isDarkScheme(colors)
     val langCode = LumaI18n.langCode()
-    val used = (window.usedPercent.takeIf { it.isFinite() } ?: 0.0).coerceIn(0.0, 100.0)
     val remaining = (window.remainingPercent.takeIf { it.isFinite() } ?: 100.0).coerceIn(0.0, 100.0)
     val elapsedShare = remember(window.resetsAt, window.windowDurationMs, nowMs) {
         computeElapsedShare(window.resetsAt, window.windowDurationMs, nowMs)
     }
     val paceRemaining = remember(elapsedShare) { computePaceRemainingPercent(elapsedShare) }
-    val pace = remember(used, elapsedShare) { computeUsagePace(used, elapsedShare) }
     val countdown = remember(window.resetsAt, nowMs, langCode) { formatResetCountdown(window.resetsAt, nowMs) }
+    val displayLabel = remember(window.label, langCode) { formatUsageLimitLabel(window.label) }
 
-    val barColor = when {
-        remaining <= 10.0 -> Color(0xFFE5484D)
-        remaining <= 30.0 -> Color(0xFFF5A623)
-        else -> accentColor
+    val lowAlertColor = if (isDark) Color(0xFFE07476) else Color(0xFFC95154)
+    val warnColor = if (isDark) Color(0xFFD9A354) else Color(0xFFC78B36)
+    val barFillColor = when {
+        remaining <= 10.0 -> lowAlertColor.copy(alpha = if (isDark) 0.82f else 0.78f)
+        remaining <= 25.0 -> warnColor.copy(alpha = if (isDark) 0.74f else 0.68f)
+        else -> accentColor.copy(alpha = if (isDark) 0.72f else 0.62f)
     }
+    val trackColor = usageTrackColor(colors)
+    val surfaceColor = colors.surfaceContainerLow
+    val tickColor = colors.onSurface.copy(alpha = 0.78f)
+    val percentStyle = MaterialTheme.typography.titleLarge.copy(
+        fontSize = 22.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.4).sp,
+        fontWeight = FontWeight.Bold,
+    ).tabular()
 
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    displayLabel,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 14.sp,
+                        lineHeight = 18.sp,
+                        fontWeight = FontWeight.Medium,
+                    ),
+                    color = colors.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (countdown != null) {
+                    Text(
+                        countdown,
+                        style = MaterialTheme.typography.labelSmall.tabular(),
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Text(
-                formatUsageLimitLabel(window.label),
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                tr("剩余 ${remaining.roundToInt()}%", "${remaining.roundToInt()}% left"),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                ),
-                color = if (remaining <= 10.0) Color(0xFFE5484D) else colors.onSurface,
+                "${remaining.roundToInt()}%",
+                style = percentStyle,
+                color = if (remaining <= 10.0) lowAlertColor else colors.onSurface,
             )
         }
 
-        val trackColor = colors.surfaceContainerHighest
-        val surfaceColor = colors.surfaceContainerLow
-        val tickColor = colors.onSurface.copy(alpha = 0.72f)
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(9.dp),
+                .height(12.dp),
         ) {
             val w = size.width
             val h = size.height
-            val r = CornerRadius(h / 2f, h / 2f)
-            drawRoundRect(color = trackColor, cornerRadius = r, size = size)
+            val clip = Path().apply {
+                addSquircleRect(w, h, 5.dp.toPx())
+            }
 
-            val fillWidth = (w * (remaining.toFloat() / 100f)).coerceIn(0f, w)
-            if (fillWidth > 0.5f) {
-                drawRoundRect(
-                    color = barColor,
-                    cornerRadius = r,
-                    size = Size(fillWidth, h),
-                )
+            clipPath(clip) {
+                drawRect(color = trackColor, size = size)
+                val rawFill = (w * (remaining.toFloat() / 100f)).coerceIn(0f, w)
+                val fillWidth = if (remaining > 0.0) max(rawFill, 4.dp.toPx()).coerceAtMost(w) else 0f
+                if (fillWidth > 0.5f) {
+                    drawRect(color = barFillColor, size = Size(fillWidth, h))
+                }
             }
 
             if (paceRemaining != null && paceRemaining in 2..98) {
-                val tickX = w * (paceRemaining / 100f)
-                val gapHalf = 2.5.dp.toPx()
-                val tickWidth = 2.dp.toPx()
+                val inset = 4.dp.toPx()
+                val tickX = (w * (paceRemaining / 100f)).coerceIn(inset, max(inset, w - inset))
+                val gapHalf = 2.dp.toPx()
+                val tickW = 1.6.dp.toPx()
+                val tickVPad = 1.5.dp.toPx()
                 drawRect(
                     color = surfaceColor,
                     topLeft = Offset(max(0f, tickX - gapHalf), 0f),
                     size = Size(min(w, gapHalf * 2f), h),
                 )
-                drawRect(
+                drawRoundRect(
                     color = tickColor,
-                    topLeft = Offset(max(0f, tickX - tickWidth / 2f), 0f),
-                    size = Size(tickWidth, h),
-                )
-            }
-        }
-
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text(
-                    tr("已用 ${String.format(Locale.US, "%.1f", used)}%", "${String.format(Locale.US, "%.1f", used)}% used"),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                )
-                if (pace != null) {
-                    val paceColor = when (pace) {
-                        UsagePace.AHEAD -> Color(0xFFE5484D)
-                        UsagePace.ON_TRACK -> colors.onSurfaceVariant
-                        UsagePace.UNDER -> Color(0xFF10B981)
-                    }
-                    Text(
-                        "· ${pace.label}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = paceColor,
-                    )
-                }
-            }
-            if (countdown != null) {
-                Text(
-                    countdown,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
+                    topLeft = Offset(max(0f, tickX - tickW / 2f), tickVPad),
+                    size = Size(tickW, (h - tickVPad * 2f).coerceAtLeast(2f)),
+                    cornerRadius = CornerRadius(tickW / 2f, tickW / 2f),
                 )
             }
         }
@@ -1544,7 +1753,7 @@ private fun UsageStatsContent(
     if (summary == null) {
         if (!loading) {
             Surface(
-                shape = LumaCardShape(20.dp),
+                shape = LumaCardShape(22.dp),
                 color = colors.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -1561,7 +1770,6 @@ private fun UsageStatsContent(
 
     val totals = summary.totals
     val hasApproximate = totals.modelPricedCostUsd > 0.0
-    var chartByCost by rememberSaveable { mutableStateOf(false) }
     var selectedBucketIdx by remember(summary.period, summary.buckets.size) { mutableStateOf<Int?>(null) }
     val activeBucket = selectedBucketIdx?.let { summary.buckets.getOrNull(it) }
     var expandedClis by remember { mutableStateOf(setOf<String>()) }
@@ -1572,8 +1780,8 @@ private fun UsageStatsContent(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            Modifier.padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -1581,44 +1789,21 @@ private fun UsageStatsContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    if (activeBucket != null) tr("${activeBucket.date} 明细", "${activeBucket.date} details") else tr("${selectedPeriod.label}总览", "${selectedPeriod.label} overview"),
+                    if (activeBucket != null) tr("${activeBucket.date} 明细", "${activeBucket.date} details")
+                    else tr("${selectedPeriod.label}总览", "${selectedPeriod.label} overview"),
                     style = MaterialTheme.typography.labelMedium,
-                    color = colors.onSurfaceVariant,
+                    color = if (activeBucket != null) colors.onSurface else colors.onSurfaceVariant,
                 )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (activeBucket != null) {
-                        Box(
-                            Modifier
-                                .clip(CircleShape)
-                                .background(colors.secondaryContainer)
-                                .clickable(role = Role.Button) { selectedBucketIdx = null }
-                                .padding(horizontal = 9.dp, vertical = 4.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                tr("总览", "Overview"),
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = colors.onSecondaryContainer,
-                            )
-                        }
-                    }
-                    Box(
-                        Modifier
-                            .clip(CircleShape)
-                            .background(colors.surfaceContainerHighest)
-                            .clickable(role = Role.Button) { chartByCost = !chartByCost }
-                            .padding(horizontal = 9.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            if (chartByCost) tr("按费用 ⇅", "By cost ⇅") else tr("按 Token ⇅", "By tokens ⇅"),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                    }
+                if (activeBucket != null) {
+                    Text(
+                        tr("返回总览", "Overview"),
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = colors.primary,
+                        modifier = Modifier
+                            .clip(LumaCardShape(6.dp))
+                            .clickable(role = Role.Button) { selectedBucketIdx = null }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
                 }
             }
 
@@ -1632,10 +1817,13 @@ private fun UsageStatsContent(
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
                         formatCompactTokens(heroTokens),
-                        style = MaterialTheme.typography.headlineMedium.copy(
+                        style = MaterialTheme.typography.displaySmall.copy(
+                            fontSize = 34.sp,
+                            lineHeight = 38.sp,
+                            letterSpacing = (-0.8).sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                        ),
+                        ).tabular(),
+                        color = colors.onSurface,
                     )
                     Text(
                         "Token",
@@ -1650,10 +1838,12 @@ private fun UsageStatsContent(
                     Text(
                         formatUsdCost(heroCost, approximate = hasApproximate && heroCost > 0.0),
                         style = MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                        color = colors.primary,
+                            fontSize = 20.sp,
+                            lineHeight = 26.sp,
+                            letterSpacing = (-0.3).sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ).tabular(),
+                        color = colors.onSurface.copy(alpha = 0.78f),
                     )
                     Text(
                         tr("API 估算", "API estimate"),
@@ -1666,19 +1856,38 @@ private fun UsageStatsContent(
             if (activeBucket != null) {
                 val cliItems = activeBucket.byCli.entries
                     .filter { it.value.totalTokens > 0L || it.value.costUsd > 0.0 }
-                    .sortedByDescending { if (chartByCost) it.value.costUsd else it.value.totalTokens.toDouble() }
-                val breakdownText = if (cliItems.isEmpty()) {
-                    tr("暂无记录", "No activity")
+                    .sortedByDescending { it.value.totalTokens }
+                if (cliItems.isEmpty()) {
+                    Text(
+                        tr("暂无记录", "No activity"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
                 } else {
-                    cliItems.joinToString(" · ") { (cli, v) ->
-                        "${cliDisplayLabel(cli)} ${formatCompactTokens(v.totalTokens)} (${formatUsdCost(v.costUsd, approximate = true)})"
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        cliItems.forEach { (cli, v) ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .background(resolvedProviderColor(cli, colors), CircleShape),
+                                )
+                                Text(
+                                    "${cliDisplayLabel(cli)} ${formatCompactTokens(v.totalTokens)} (${formatUsdCost(v.costUsd, approximate = true)})",
+                                    style = MaterialTheme.typography.labelSmall.tabular(),
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
-                Text(
-                    breakdownText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                )
             } else {
                 val subParts = buildList {
                     add(tr("${totals.events} 次请求", "${totals.events} requests"))
@@ -1691,7 +1900,7 @@ private fun UsageStatsContent(
                 }
                 Text(
                     subParts.joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodySmall.tabular(),
                     color = colors.onSurfaceVariant,
                 )
             }
@@ -1700,7 +1909,6 @@ private fun UsageStatsContent(
                 UsageStackedBarChart(
                     buckets = summary.buckets,
                     providers = summary.byProvider.map { it.cli },
-                    costMode = chartByCost,
                     selectedIndex = selectedBucketIdx,
                     onSelectBucket = { idx -> selectedBucketIdx = idx },
                 )
@@ -1708,208 +1916,219 @@ private fun UsageStatsContent(
         }
     }
 
-    if (summary.activity.days.isNotEmpty()) {
-        UsageActivityHeatmapCard(activity = summary.activity)
-    }
-
     if (summary.byProvider.isNotEmpty()) {
-        Surface(
-            shape = LumaCardShape(22.dp),
-            color = colors.surfaceContainerLow,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(
-                Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        tr("CLI 用量", "By CLI"),
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        tr("展开明细", "Expand details"),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.End,
-                    )
+        UsageSection(title = tr("CLI 用量", "By CLI")) {
+            val totalProviderTokens = summary.byProvider.sumOf { it.totalTokens }.toDouble().takeIf { it > 0.0 } ?: 1.0
+            val trackColor = usageTrackColor(colors)
+            summary.byProvider.forEachIndexed { idx, p ->
+                if (idx > 0) {
+                    UsageHairlineDivider(Modifier.padding(start = 16.dp))
                 }
-                val maxDenominator = if (chartByCost) {
-                    summary.byProvider.sumOf { it.costUsd }.takeIf { it > 0.0 } ?: 1.0
-                } else {
-                    summary.byProvider.sumOf { it.totalTokens }.toDouble().takeIf { it > 0.0 } ?: 1.0
+                val share = (p.totalTokens.toDouble() / totalProviderTokens).coerceIn(0.0, 1.0)
+                val pColor = resolvedProviderColor(p.cli, colors)
+                val isExpanded = p.cli in expandedClis
+                val cliModels = remember(summary.byModel, p.cli) {
+                    summary.byModel
+                        .filter { it.cli == p.cli }
+                        .sortedWith(compareByDescending<ModelUsageTotal> { it.totalTokens }.thenByDescending { it.costUsd })
                 }
-                summary.byProvider.forEach { p ->
-                    val metricVal = if (chartByCost) p.costUsd else p.totalTokens.toDouble()
-                    val share = (metricVal / maxDenominator).coerceIn(0.0, 1.0)
-                    val pColor = providerUsageColor(p.cli)
-                    val isExpanded = p.cli in expandedClis
-                    val cliModels = remember(summary.byModel, p.cli, chartByCost) {
-                        summary.byModel
-                            .filter { it.cli == p.cli }
-                            .sortedWith(
-                                if (chartByCost) {
-                                    compareByDescending<ModelUsageTotal> { it.costUsd }.thenByDescending { it.totalTokens }
-                                } else {
-                                    compareByDescending<ModelUsageTotal> { it.totalTokens }.thenByDescending { it.costUsd }
-                                },
-                            )
-                    }
 
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(LumaCardShape(14.dp))
-                            .clickable {
-                                expandedClis = if (isExpanded) expandedClis - p.cli else expandedClis + p.cli
-                            }
-                            .padding(vertical = 3.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            expandedClis = if (isExpanded) expandedClis - p.cli else expandedClis + p.cli
+                        }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Row(
-                            Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            ProviderIcon(p.cli, selected = isExpanded, size = 28.dp)
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    cliDisplayLabel(p.cli),
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                                )
-                                Text(
-                                    tr("${p.events} 次 · ${(share * 100.0).roundToInt()}% · 缓存命中 ${p.cacheHitPercent}%", "${p.events} req · ${(share * 100.0).roundToInt()}% · Cache ${p.cacheHitPercent}%"),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                val primaryStr = if (chartByCost) {
-                                    formatUsdCost(p.costUsd, approximate = p.modelPricedCostUsd > 0.0)
-                                } else {
-                                    formatCompactTokens(p.totalTokens)
-                                }
-                                val secondaryStr = if (chartByCost) {
-                                    "${formatCompactTokens(p.totalTokens)} · ${if (isExpanded) "▴" else "▾"}"
-                                } else {
-                                    "${formatUsdCost(p.costUsd, approximate = p.modelPricedCostUsd > 0.0)} · ${if (isExpanded) "▴" else "▾"}"
-                                }
-                                Text(
-                                    primaryStr,
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
-                                    ),
-                                )
-                                Text(
-                                    secondaryStr,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(CircleShape)
-                                .background(colors.surfaceContainerHighest),
+                            horizontalArrangement = Arrangement.spacedBy(9.dp),
+                            modifier = Modifier.weight(1f),
                         ) {
                             Box(
                                 Modifier
-                                    .fillMaxWidth(share.toFloat().coerceIn(0.02f, 1f))
-                                    .fillMaxHeight()
-                                    .clip(CircleShape)
-                                    .background(pColor),
+                                    .size(8.dp)
+                                    .background(pColor, CircleShape),
+                            )
+                            Text(
+                                cliDisplayLabel(p.cli),
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                                color = colors.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "${(share * 100.0).roundToInt()}%",
+                                style = MaterialTheme.typography.labelSmall.tabular(),
+                                color = colors.onSurfaceVariant,
                             )
                         }
-
-                        AnimatedVisibility(
-                            visible = isExpanded,
-                            enter = expandVertically() + fadeIn(),
-                            exit = shrinkVertically() + fadeOut(),
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Column(
+                            Text(
+                                formatCompactTokens(p.totalTokens),
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                ).tabular(),
+                                color = colors.onSurface,
+                            )
+                            Text(
+                                if (isExpanded) "▴" else "▾",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant.copy(alpha = 0.65f),
+                            )
+                        }
+                    }
+
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(trackColor),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(share.toFloat().coerceIn(0.015f, 1f))
+                                .fillMaxHeight()
+                                .clip(CircleShape)
+                                .background(pColor),
+                        )
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            tr("${p.events} 次 · 缓存命中 ${p.cacheHitPercent}%", "${p.events} req · Cache ${p.cacheHitPercent}%"),
+                            style = MaterialTheme.typography.labelSmall.tabular(),
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            formatUsdCost(p.costUsd, approximate = p.modelPricedCostUsd > 0.0),
+                            style = MaterialTheme.typography.labelSmall.tabular(),
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = isExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut(),
+                    ) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            UsageHairlineDivider()
+                            Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .padding(top = 4.dp)
-                                    .clip(LumaCardShape(12.dp))
-                                    .background(colors.surfaceContainerHighest.copy(alpha = 0.42f))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(7.dp),
+                                    .height(IntrinsicSize.Min),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                val detailMeta = buildList {
-                                    add(tr("输入缓存命中 ${p.cacheHitPercent}%", "Input cache ${p.cacheHitPercent}%"))
-                                    if (p.cacheSavingsUsd > 0.0) {
-                                        add(tr("省 ${formatUsdCost(p.cacheSavingsUsd, approximate = true)}", "Saved ${formatUsdCost(p.cacheSavingsUsd, approximate = true)}"))
-                                    }
-                                    if (p.reasoningTokens > 0L) {
-                                        add(tr("思考 ${formatCompactTokens(p.reasoningTokens)}", "Reasoning ${formatCompactTokens(p.reasoningTokens)}"))
-                                    }
-                                }.joinToString(" · ")
-                                Text(
-                                    detailMeta,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant,
+                                Box(
+                                    Modifier
+                                        .width(1.5.dp)
+                                        .fillMaxHeight()
+                                        .clip(CircleShape)
+                                        .background(pColor.copy(alpha = 0.45f)),
                                 )
+                                Column(
+                                    Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    val detailMeta = buildList {
+                                        add(tr("输入缓存命中 ${p.cacheHitPercent}%", "Input cache ${p.cacheHitPercent}%"))
+                                        if (p.cacheSavingsUsd > 0.0) {
+                                            add(tr("省 ${formatUsdCost(p.cacheSavingsUsd, approximate = true)}", "Saved ${formatUsdCost(p.cacheSavingsUsd, approximate = true)}"))
+                                        }
+                                        if (p.reasoningTokens > 0L) {
+                                            add(tr("思考 ${formatCompactTokens(p.reasoningTokens)}", "Reasoning ${formatCompactTokens(p.reasoningTokens)}"))
+                                        }
+                                    }.joinToString(" · ")
+                                    Text(
+                                        detailMeta,
+                                        style = MaterialTheme.typography.labelSmall.tabular(),
+                                        color = colors.onSurfaceVariant,
+                                    )
 
-                                cliModels.forEachIndexed { mIdx, m ->
-                                    if (mIdx > 0) {
-                                        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.25f))
-                                    }
-                                    Row(
-                                        Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        Column(Modifier.weight(1f)) {
-                                            Text(
-                                                m.model,
-                                                style = MaterialTheme.typography.bodySmall.copy(
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    fontFamily = FontFamily.Monospace,
-                                                ),
-                                            )
-                                            val uiHint = if (m.uiLabels.isNotEmpty()) {
-                                                tr("面板: ${m.uiLabels.joinToString(" / ")} · ", "UI: ${m.uiLabels.joinToString(" / ")} · ")
-                                            } else {
-                                                ""
+                                    cliModels.forEachIndexed { mIdx, m ->
+                                        if (mIdx > 0) {
+                                            UsageHairlineDivider()
+                                        }
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        ) {
+                                            Column(
+                                                Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                            ) {
+                                                Text(
+                                                    m.model,
+                                                    style = MaterialTheme.typography.bodySmall.copy(
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                    ),
+                                                    color = colors.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                val uiHint = if (m.uiLabels.isNotEmpty()) {
+                                                    "${m.uiLabels.joinToString(" / ")} · "
+                                                } else {
+                                                    ""
+                                                }
+                                                Text(
+                                                    tr(
+                                                        "${uiHint}输入 ${formatCompactTokens(m.inputTokens)} · 输出 ${formatCompactTokens(m.outputTokens)}",
+                                                        "${uiHint}In ${formatCompactTokens(m.inputTokens)} · Out ${formatCompactTokens(m.outputTokens)}",
+                                                    ),
+                                                    style = MaterialTheme.typography.labelSmall.tabular(),
+                                                    color = colors.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
                                             }
-                                            Text(
-                                                tr("${uiHint}输入 ${formatCompactTokens(m.inputTokens)} · 输出 ${formatCompactTokens(m.outputTokens)}", "${uiHint}In ${formatCompactTokens(m.inputTokens)} · Out ${formatCompactTokens(m.outputTokens)}"),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = colors.onSurfaceVariant,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                        val mCostTag = when (m.costSource) {
-                                            "unpriced" -> tr("未定价", "Unpriced")
-                                            "modelPriced", "mixed" -> formatUsdCost(m.costUsd) + "*"
-                                            else -> formatUsdCost(m.costUsd)
-                                        }
-                                        Column(horizontalAlignment = Alignment.End) {
-                                            Text(
-                                                formatCompactTokens(m.totalTokens),
-                                                style = MaterialTheme.typography.labelMedium.copy(
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontFamily = FontFamily.Monospace,
-                                                ),
-                                            )
-                                            Text(
-                                                mCostTag,
-                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                                color = colors.onSurfaceVariant,
-                                            )
+                                            val mCostTag = when (m.costSource) {
+                                                "unpriced" -> tr("未定价", "Unpriced")
+                                                "modelPriced", "mixed" -> formatUsdCost(m.costUsd) + "*"
+                                                else -> formatUsdCost(m.costUsd)
+                                            }
+                                            Column(
+                                                horizontalAlignment = Alignment.End,
+                                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                            ) {
+                                                Text(
+                                                    formatCompactTokens(m.totalTokens),
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold).tabular(),
+                                                    color = colors.onSurface,
+                                                )
+                                                Text(
+                                                    mCostTag,
+                                                    style = MaterialTheme.typography.labelSmall.tabular(),
+                                                    color = colors.onSurfaceVariant,
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1921,105 +2140,91 @@ private fun UsageStatsContent(
         }
     }
 
+    TotalsMetricGrid(summary = summary)
+
     if (totals.categoryCostUsd.total > 0.0) {
         CostCategoryBreakdownCard(totals.categoryCostUsd)
     }
 
-    TotalsMetricGrid(totals = totals)
+    if (summary.activity.days.isNotEmpty()) {
+        UsageActivityHeatmapCard(activity = summary.activity)
+    }
 
     if (summary.byModel.isNotEmpty()) {
-        Surface(
-            shape = LumaCardShape(22.dp),
-            color = colors.surfaceContainerLow,
-            modifier = Modifier.fillMaxWidth(),
+        UsageSection(
+            title = tr("模型排行", "Top models"),
+            trailing = {
+                Text(
+                    tr("* API 费率估算", "* API estimate"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant.copy(alpha = 0.8f),
+                )
+            },
         ) {
-            Column(
-                Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+            val displayedModels = remember(summary.byModel) {
+                summary.byModel
+                    .sortedWith(compareByDescending<ModelUsageTotal> { it.totalTokens }.thenByDescending { it.costUsd })
+                    .take(24)
+            }
+            displayedModels.forEachIndexed { index, m ->
+                if (index > 0) {
+                    UsageHairlineDivider(Modifier.padding(start = 16.dp))
+                }
+                val mColor = resolvedProviderColor(m.cli, colors)
                 Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(
-                        tr("模型排行", "Top models"),
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        tr("* API 费率估算", "* API estimate"),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.End,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                val displayedModels = remember(summary.byModel, chartByCost) {
-                    if (chartByCost) {
-                        summary.byModel.sortedWith(compareByDescending<ModelUsageTotal> { it.costUsd }.thenByDescending { it.totalTokens })
-                    } else {
-                        summary.byModel.sortedWith(compareByDescending<ModelUsageTotal> { it.totalTokens }.thenByDescending { it.costUsd })
-                    }.take(24)
-                }
-                displayedModels.forEachIndexed { index, m ->
-                    if (index > 0) {
-                        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.28f))
-                    }
-                    Row(
+                    Box(
                         Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            .size(8.dp)
+                            .background(mColor, CircleShape),
+                    )
+                    Column(
+                        Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        ProviderIcon(m.cli, selected = false, size = 26.dp)
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                m.model,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontFamily = FontFamily.Monospace,
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            val uiSuffix = if (m.uiLabels.isNotEmpty()) {
-                                " · ${m.uiLabels.first()}"
-                            } else {
-                                ""
-                            }
-                            Text(
-                                tr("${cliDisplayLabel(m.cli)}$uiSuffix · 输入 ${formatCompactTokens(m.inputTokens)} · 输出 ${formatCompactTokens(m.outputTokens)}", "${cliDisplayLabel(m.cli)}$uiSuffix · In ${formatCompactTokens(m.inputTokens)} · Out ${formatCompactTokens(m.outputTokens)}"),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        Text(
+                            m.model,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                            color = colors.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        val uiSuffix = if (m.uiLabels.isNotEmpty()) " · ${m.uiLabels.first()}" else ""
+                        Text(
+                            tr(
+                                "${cliDisplayLabel(m.cli)}$uiSuffix · 输入 ${formatCompactTokens(m.inputTokens)} · 输出 ${formatCompactTokens(m.outputTokens)}",
+                                "${cliDisplayLabel(m.cli)}$uiSuffix · In ${formatCompactTokens(m.inputTokens)} · Out ${formatCompactTokens(m.outputTokens)}",
+                            ),
+                            style = MaterialTheme.typography.labelSmall.tabular(),
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        val costTag = when (m.costSource) {
+                            "unpriced" -> tr("未定价", "Unpriced")
+                            "modelPriced", "mixed" -> formatUsdCost(m.costUsd) + "*"
+                            else -> formatUsdCost(m.costUsd)
                         }
-                        Column(horizontalAlignment = Alignment.End) {
-                            val costTag = when (m.costSource) {
-                                "unpriced" -> tr("未定价", "Unpriced")
-                                "modelPriced", "mixed" -> formatUsdCost(m.costUsd) + "*"
-                                else -> formatUsdCost(m.costUsd)
-                            }
-                            Text(
-                                if (chartByCost) costTag else formatCompactTokens(m.totalTokens),
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace,
-                                ),
-                            )
-                            Text(
-                                if (chartByCost) "${formatCompactTokens(m.totalTokens)} tok" else costTag,
-                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
+                        Text(
+                            formatCompactTokens(m.totalTokens),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold).tabular(),
+                            color = colors.onSurface,
+                        )
+                        Text(
+                            costTag,
+                            style = MaterialTheme.typography.labelSmall.tabular(),
+                            color = colors.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -2050,8 +2255,8 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
         Modifier
             .fillMaxWidth()
             .testTag("usage-pricing-source-footer")
-            .padding(top = 4.dp, start = 4.dp, end = 4.dp, bottom = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(top = 2.dp, start = 4.dp, end = 4.dp, bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         val headerText = if (isRemoteActive) {
             val detailParts = buildList {
@@ -2074,7 +2279,7 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
         }
         Text(
             headerText,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.labelSmall.tabular(),
             color = colors.onSurfaceVariant,
         )
 
@@ -2109,13 +2314,13 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
                             Modifier
                                 .size(6.dp)
                                 .background(
-                                    if (src.active) Color(0xFF10B981) else colors.outline.copy(alpha = 0.6f),
+                                    if (src.active) colors.primary else colors.outline.copy(alpha = 0.55f),
                                     CircleShape,
                                 ),
                         )
                         Text(
                             label,
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
                             maxLines = 1,
                         )
@@ -2130,7 +2335,7 @@ private fun PricingSourceFooter(pricingSource: UsagePricingSource) {
                 "Estimated at public API rates",
             ),
             style = MaterialTheme.typography.labelSmall,
-            color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+            color = colors.onSurfaceVariant.copy(alpha = 0.72f),
         )
     }
 }
@@ -2149,46 +2354,18 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
         ln(peak.toDouble() + 1.0).coerceAtLeast(1.0)
     }
 
-    Surface(
-        shape = LumaCardShape(22.dp),
-        color = colors.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    val emptyCell = colors.surfaceContainerHighest.copy(alpha = 0.72f)
+    val highlightBorder = colors.primary
+
+    UsageSection(title = tr("活跃记录", "Activity")) {
         Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    tr("活跃记录", "Activity"),
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(0.85f),
-                )
-                Text(
-                    tr("活跃 ${activity.activeDays} 天 · 连续 ${activity.currentStreak} 天 · 最长 ${activity.longestStreak} 天", "${activity.activeDays} active days · ${activity.currentStreak}d streak · best ${activity.longestStreak}d"),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier.weight(1.15f),
-                )
-            }
-
-            val baseEmpty = colors.surfaceContainerHighest.copy(alpha = 0.65f)
-            val accent = colors.primary
-            val highlightBorder = colors.onSurface
-
             Canvas(
                 Modifier
                     .fillMaxWidth()
-                    .height(86.dp)
+                    .height(88.dp)
                     .pointerInput(days.size, cols) {
                         detectTapGestures { pos ->
                             if (cols <= 0) return@detectTapGestures
@@ -2213,10 +2390,10 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
                     val x = col * (cellW + gap)
                     val y = row * (cellH + gap)
                     val fillColor = if (d.totalTokens <= 0L) {
-                        baseEmpty
+                        emptyCell
                     } else {
-                        val ratio = (ln(d.totalTokens.toDouble() + 1.0) / maxLog).toFloat().coerceIn(0.18f, 1f)
-                        accent.copy(alpha = ratio)
+                        val ratio = (ln(d.totalTokens.toDouble() + 1.0) / maxLog).toFloat().coerceIn(0.24f, 1f)
+                        usageAccentTone(colors, ratio)
                     }
                     drawRoundRect(
                         color = fillColor,
@@ -2230,7 +2407,7 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
                             topLeft = Offset(x, y),
                             size = Size(cellW, cellH),
                             cornerRadius = radius,
-                            style = Stroke(width = 1.3.dp.toPx()),
+                            style = Stroke(width = 1.4.dp.toPx()),
                         )
                     }
                 }
@@ -2245,7 +2422,7 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
             }
             Text(
                 footerText,
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                style = MaterialTheme.typography.labelSmall.tabular(),
                 color = colors.onSurfaceVariant,
             )
         }
@@ -2256,25 +2433,22 @@ private fun UsageActivityHeatmapCard(activity: UsageActivitySummary) {
 private fun UsageStackedBarChart(
     buckets: List<UsagePeriodBucket>,
     providers: List<String>,
-    costMode: Boolean,
     selectedIndex: Int? = null,
     onSelectBucket: (Int?) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
-    val maxBucketVal = remember(buckets, costMode) {
-        buckets.maxOfOrNull { if (costMode) it.costUsd else it.totalTokens.toDouble() }?.takeIf { it > 0.0 } ?: 1.0
+    val maxBucketVal = remember(buckets) {
+        buckets.maxOfOrNull { it.totalTokens.toDouble() }?.takeIf { it > 0.0 } ?: 1.0
     }
-    val providerColors = remember(providers) {
-        providers.associateWith { providerUsageColor(it) }
-    }
-    val emptyBarColor = colors.surfaceContainerHighest.copy(alpha = 0.55f)
-    val selectedSlotTint = colors.onSurface.copy(alpha = 0.07f)
+    val providerColors = providers.associateWith { resolvedProviderColor(it, colors) }
+    val baselineColor = usageHairlineColor(colors)
+    val selectedSlotTint = colors.primary.copy(alpha = 0.09f)
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(132.dp)
+                .height(172.dp)
                 .pointerInput(buckets.size, selectedIndex) {
                     detectTapGestures { offset ->
                         if (buckets.isEmpty() || size.width <= 0) return@detectTapGestures
@@ -2288,49 +2462,63 @@ private fun UsageStackedBarChart(
             val totalW = size.width
             val totalH = size.height
             val slotW = totalW / count.toFloat()
-            val gap = (slotW * 0.22f).coerceIn(1.5f, 6f)
+            val gap = (slotW * 0.18f).coerceIn(1.5f, 4.dp.toPx())
             val barW = max(2f, slotW - gap)
+            val topRadius = CornerRadius(3.dp.toPx().coerceAtMost(barW / 2f), 3.dp.toPx().coerceAtMost(barW / 2f))
 
             buckets.forEachIndexed { idx, bucket ->
                 val x = idx * slotW + gap / 2f
                 val isSelected = selectedIndex == idx
-                val alphaFactor = if (selectedIndex == null || isSelected) 1f else 0.35f
+                val alphaFactor = if (selectedIndex == null || isSelected) 1f else 0.30f
                 if (isSelected) {
                     drawRoundRect(
                         color = selectedSlotTint,
                         topLeft = Offset(idx * slotW, 0f),
                         size = Size(slotW, totalH),
-                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                        cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx()),
                     )
                 }
-                val bucketTotal = if (costMode) bucket.costUsd else bucket.totalTokens.toDouble()
-                if (bucketTotal <= 0.0) {
-                    val minH = 3.dp.toPx()
-                    drawRoundRect(
-                        color = emptyBarColor.copy(alpha = emptyBarColor.alpha * alphaFactor),
-                        topLeft = Offset(x, totalH - minH),
-                        size = Size(barW, minH),
-                        cornerRadius = CornerRadius(2f, 2f),
-                    )
-                } else {
-                    val barTotalH = ((bucketTotal / maxBucketVal).toFloat().coerceIn(0.03f, 1f)) * totalH
-                    var currentBottom = totalH
-                    providers.forEach { cli ->
-                        val cliSlot = bucket.byCli[cli] ?: return@forEach
-                        val cliVal = if (costMode) cliSlot.costUsd else cliSlot.totalTokens.toDouble()
-                        if (cliVal <= 0.0) return@forEach
-                        val segH = ((cliVal / bucketTotal).toFloat() * barTotalH).coerceAtLeast(1.5f)
-                        val top = max(0f, currentBottom - segH)
-                        val baseC = providerColors[cli] ?: Color(0xFF64748B)
-                        drawRect(
-                            color = baseC.copy(alpha = alphaFactor),
-                            topLeft = Offset(x, top),
-                            size = Size(barW, currentBottom - top),
+                val bucketTotal = bucket.totalTokens.toDouble()
+                if (bucketTotal > 0.0) {
+                    val barTotalH = ((bucketTotal / maxBucketVal).toFloat().coerceIn(0.03f, 1f)) * (totalH - 2.dp.toPx())
+                    val barTop = (totalH - barTotalH).coerceAtLeast(0f)
+                    val barPath = Path().apply {
+                        addRoundRect(
+                            RoundRect(
+                                rect = Rect(x, barTop, x + barW, totalH),
+                                topLeft = topRadius,
+                                topRight = topRadius,
+                                bottomLeft = CornerRadius.Zero,
+                                bottomRight = CornerRadius.Zero,
+                            ),
                         )
-                        currentBottom = top
+                    }
+                    clipPath(barPath) {
+                        var currentBottom = totalH
+                        providers.forEach { cli ->
+                            val cliSlot = bucket.byCli[cli] ?: return@forEach
+                            val cliVal = cliSlot.totalTokens.toDouble()
+                            if (cliVal <= 0.0) return@forEach
+                            val segH = ((cliVal / bucketTotal).toFloat() * barTotalH).coerceAtLeast(1.5f)
+                            val top = max(barTop, currentBottom - segH)
+                            val baseC = providerColors[cli] ?: usageAccentTone(colors, 0.5f)
+                            drawRect(
+                                color = baseC.copy(alpha = alphaFactor),
+                                topLeft = Offset(x, top),
+                                size = Size(barW, (currentBottom - top).coerceAtLeast(0f)),
+                            )
+                            currentBottom = top
+                        }
                     }
                 }
             }
+
+            drawLine(
+                color = baselineColor,
+                start = Offset(0f, totalH - 0.5.dp.toPx()),
+                end = Offset(totalW, totalH - 0.5.dp.toPx()),
+                strokeWidth = 0.5.dp.toPx(),
+            )
         }
 
         if (buckets.size >= 2) {
@@ -2338,29 +2526,39 @@ private fun UsageStackedBarChart(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(buckets.first().label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                Text(buckets[buckets.size / 2].label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                Text(buckets.last().label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text(
+                    buckets.first().label,
+                    style = MaterialTheme.typography.labelSmall.tabular(),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+                )
+                Text(
+                    buckets[buckets.size / 2].label,
+                    style = MaterialTheme.typography.labelSmall.tabular(),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+                )
+                Text(
+                    buckets.last().label,
+                    style = MaterialTheme.typography.labelSmall.tabular(),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+                )
             }
         }
 
         if (providers.isNotEmpty()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                providers.take(5).forEach { cli ->
+                providers.forEach { cli ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
                         Box(
                             Modifier
-                                .size(8.dp)
-                                .background(providerUsageColor(cli), CircleShape),
+                                .size(7.dp)
+                                .background(providerColors[cli] ?: usageAccentTone(colors, 0.5f), CircleShape),
                         )
                         Text(
                             cliDisplayLabel(cli),
@@ -2381,68 +2579,63 @@ private fun CostCategoryBreakdownCard(breakdown: CategoryCostBreakdown) {
     val colors = MaterialTheme.colorScheme
     val total = breakdown.total.takeIf { it > 0.0 } ?: return
     val items = listOf(
-        Triple(tr("未缓存输入", "Uncached input"), breakdown.input, Color(0xFF3B82F6)),
-        Triple(tr("缓存读取", "Cache read"), breakdown.cacheRead, Color(0xFF10B981)),
-        Triple(tr("缓存写入", "Cache write"), breakdown.cacheWrite, Color(0xFFF59E0B)),
-        Triple(tr("输出与思考", "Output & reasoning"), breakdown.output, Color(0xFF8B5CF6)),
+        Triple(tr("输出与思考", "Output & reasoning"), breakdown.output, usageAccentTone(colors, 0.94f)),
+        Triple(tr("缓存写入", "Cache write"), breakdown.cacheWrite, usageAccentTone(colors, 0.68f)),
+        Triple(tr("未缓存输入", "Uncached input"), breakdown.input, usageAccentTone(colors, 0.44f)),
+        Triple(tr("缓存读取", "Cache read"), breakdown.cacheRead, usageAccentTone(colors, 0.22f)),
     )
+    val visible = items.filter { it.second > 0.0 }
+    if (visible.isEmpty()) return
 
-    Surface(
-        shape = LumaCardShape(22.dp),
-        color = colors.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    UsageSection(title = tr("费用构成", "Cost breakdown")) {
         Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                tr("费用构成", "Cost breakdown"),
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-            )
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(10.dp)
-                    .clip(CircleShape)
-                    .background(colors.surfaceContainerHighest),
+                    .height(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                items.forEach { (_, value, color) ->
-                    val frac = (value / total).toFloat()
-                    if (frac > 0.005f) {
-                        Box(
-                            Modifier
-                                .weight(frac)
-                                .fillMaxHeight()
-                                .background(color),
-                        )
-                    }
+                visible.forEach { (_, value, color) ->
+                    val frac = (value / total).toFloat().coerceAtLeast(0.015f)
+                    Box(
+                        Modifier
+                            .weight(frac)
+                            .fillMaxHeight()
+                            .clip(LumaCardShape(3.dp))
+                            .background(color),
+                    )
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items.forEach { (label, value, color) ->
-                    if (value > 0.0) {
-                        val pct = ((value / total) * 100.0).roundToInt()
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Box(Modifier.size(8.dp).background(color, CircleShape))
-                                Text(label, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                            }
-                            Text(
-                                "${formatUsdCost(value, approximate = true)} ($pct%)",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontFamily = FontFamily.Monospace,
-                                ),
-                            )
-                        }
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                visible.forEach { (label, value, color) ->
+                    val pct = ((value / total) * 100.0).roundToInt()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(LumaCardShape(2.5.dp))
+                                .background(color),
+                        )
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            "${formatUsdCost(value, approximate = true)} ($pct%)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold).tabular(),
+                            color = colors.onSurface,
+                        )
                     }
                 }
             }
@@ -2451,35 +2644,82 @@ private fun CostCategoryBreakdownCard(breakdown: CategoryCostBreakdown) {
 }
 
 @Composable
-private fun TotalsMetricGrid(totals: UsageTotals) {
+private fun TotalsMetricGrid(summary: GlobalUsageSummary) {
+    val colors = MaterialTheme.colorScheme
+    val totals = summary.totals
     val totalInput = totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens
     val cacheHitPct = if (totalInput > 0L) ((totals.cachedInputTokens.toDouble() / totalInput.toDouble()) * 100.0).roundToInt() else 0
     val unpricedPct = if (totals.totalTokens > 0L) ((totals.unpricedTokens.toDouble() / totals.totalTokens.toDouble()) * 100.0).roundToInt() else 0
 
+    val activeBuckets = summary.buckets.count { it.totalTokens > 0L }
+    val avgPerActive = if (activeBuckets > 0) totals.totalTokens / activeBuckets else 0L
+    val avgTitle = when (summary.granularity) {
+        "hour" -> tr("时均 Token", "Per active hour")
+        "month" -> tr("月均 Token", "Per active month")
+        else -> tr("日均 Token", "Per active day")
+    }
+    val avgSub = if (activeBuckets > 0) {
+        when (summary.granularity) {
+            "hour" -> tr("$activeBuckets 个活跃小时", "$activeBuckets active hours")
+            "month" -> tr("$activeBuckets 个活跃月", "$activeBuckets active months")
+            else -> tr("$activeBuckets 个活跃天", "$activeBuckets active days")
+        }
+    } else {
+        tr("${totals.events} 次请求", "${totals.events} requests")
+    }
+    val cacheSavingsSub = if (totals.costUsd > 0.0 && totals.cacheSavingsUsd > 0.0) {
+        tr(
+            "约为费用 ${String.format(Locale.US, "%.1f", totals.cacheSavingsUsd / totals.costUsd)}x",
+            "${String.format(Locale.US, "%.1f", totals.cacheSavingsUsd / totals.costUsd)}x raw cost",
+        )
+    } else {
+        tr("相对未缓存输入费率", "vs. uncached input rate")
+    }
+
     val cells = listOf(
-        Triple(tr("总 Token", "Total tokens"), formatCompactTokens(totals.totalTokens), tr("${totals.events} 次请求", "${totals.events} requests")),
-        Triple(tr("缓存节省", "Cache savings"), formatUsdCost(totals.cacheSavingsUsd, approximate = totals.cacheSavingsUsd > 0.0), tr("相对未缓存输入费率", "vs. uncached input rate")),
+        Triple(avgTitle, formatCompactTokens(avgPerActive), avgSub),
+        Triple(tr("缓存节省", "Cache savings"), formatUsdCost(totals.cacheSavingsUsd, approximate = totals.cacheSavingsUsd > 0.0), cacheSavingsSub),
         Triple(tr("缓存输入", "Cached input"), formatCompactTokens(totals.cachedInputTokens), tr("命中率 $cacheHitPct%", "$cacheHitPct% hit rate")),
-        Triple(tr("未缓存输入", "Uncached input"), formatCompactTokens(totals.uncachedInputTokens), if (totals.cacheCreationTokens > 0) tr("含写入 ${formatCompactTokens(totals.cacheCreationTokens)}", "incl. ${formatCompactTokens(totals.cacheCreationTokens)} write") else tr("直接输入", "direct input")),
-        Triple(tr("输出与思考", "Output & reasoning"), formatCompactTokens(totals.outputTokens + totals.reasoningTokens), if (totals.reasoningTokens > 0) tr("思考 ${formatCompactTokens(totals.reasoningTokens)}", "${formatCompactTokens(totals.reasoningTokens)} reasoning") else tr("模型输出", "model output")),
+        Triple(tr("未缓存输入", "Uncached input"), formatCompactTokens(totals.uncachedInputTokens), if (totals.cacheCreationTokens > 0) tr("含写入 ${formatCompactTokens(totals.cacheCreationTokens)}", "incl. ${formatCompactTokens(totals.cacheCreationTokens)} write") else tr("直接输入", "Direct input")),
+        Triple(tr("输出与思考", "Output & reasoning"), formatCompactTokens(totals.outputTokens + totals.reasoningTokens), if (totals.reasoningTokens > 0) tr("思考 ${formatCompactTokens(totals.reasoningTokens)}", "${formatCompactTokens(totals.reasoningTokens)} reasoning") else tr("模型输出", "Model output")),
         Triple(tr("未定价占比", "Unpriced share"), "$unpricedPct%", "${formatCompactTokens(totals.unpricedTokens)} tok"),
     )
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val hairline = usageHairlineColor(colors)
+    UsageSection(title = tr("汇总指标", "Totals")) {
         for (rowIdx in 0 until 3) {
+            if (rowIdx > 0) {
+                UsageHairlineDivider()
+            }
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
             ) {
-                for (colIdx in 0 until 2) {
-                    val (title, value, sub) = cells[rowIdx * 2 + colIdx]
-                    MetricGridCell(
-                        title = title,
-                        value = value,
-                        subtitle = sub,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                val left = cells[rowIdx * 2]
+                val right = cells[rowIdx * 2 + 1]
+                MetricGridCell(
+                    title = left.first,
+                    value = left.second,
+                    subtitle = left.third,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .width(0.5.dp)
+                        .background(hairline),
+                )
+                MetricGridCell(
+                    title = right.first,
+                    value = right.second,
+                    subtitle = right.third,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
             }
         }
     }
@@ -2493,39 +2733,35 @@ private fun MetricGridCell(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    Surface(
-        shape = LumaCardShape(18.dp),
-        color = colors.surfaceContainerLow,
-        modifier = modifier,
+    Column(
+        modifier = modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Column(
-            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            Text(
-                title,
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                value,
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 17.sp,
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Text(
+            title,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontSize = 19.sp,
+                lineHeight = 24.sp,
+                letterSpacing = (-0.3).sp,
+                fontWeight = FontWeight.SemiBold,
+            ).tabular(),
+            color = colors.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.labelSmall.tabular(),
+            color = colors.onSurfaceVariant.copy(alpha = 0.80f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }

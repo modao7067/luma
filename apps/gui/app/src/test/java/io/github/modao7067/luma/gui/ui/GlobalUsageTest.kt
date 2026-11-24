@@ -32,19 +32,47 @@ class GlobalUsageTest {
     }
 
     @Test fun quotaLabelsKeepOnlyPeriodAndModelNames() {
-        val labels = mapOf(
-            "5h 窗口" to "5h",
-            "7d 窗口" to "7d",
-            "7d 总窗口" to "7d 总计",
-            "Gemini · 5h 窗口" to "Gemini · 5h",
-            "Gemini · 主窗口" to "Gemini · 常规",
-            "5h window" to "5h",
-            "Gemini · 7d Window" to "Gemini · 7d",
-            "7d overall" to "7d overall",
-            "Monthly credits" to "Monthly credits",
+        val zhLabels = mapOf(
+            "5h 窗口" to "短期",
+            "7d 窗口" to "每周",
+            "7d 总窗口" to "每周",
+            "7d 订阅额度" to "每周",
+            "7d 订阅限额" to "每周",
+            "5h 限额" to "短期",
+            "Gemini · 5h 窗口" to "Gemini · 短期",
+            "Gemini · 主窗口" to "Gemini · 短期",
+            "5h window" to "短期",
+            "Gemini · 7d Window" to "Gemini · 每周",
+            "7d overall" to "每周",
+            "7d Sonnet" to "每周 · Sonnet",
+            "Monthly credits" to "每月",
+            "月度" to "每月",
+            "月度订阅额度" to "每月",
+            "月度限额" to "每月",
+            "订阅额度" to "当前",
+            "3h 限额" to "3h",
             "每周 · Claude Sonnet" to "每周 · Claude Sonnet",
+            "Session" to "短期",
+            "Weekly" to "每周",
+            "Monthly" to "每月",
         )
-        labels.forEach { (source, expected) ->
+        zhLabels.forEach { (source, expected) ->
+            assertEquals(expected, formatUsageLimitLabel(source))
+        }
+
+        LumaI18n.overrideLanguage = "en"
+        val enLabels = mapOf(
+            "短期" to "Session",
+            "每周" to "Weekly",
+            "每月" to "Monthly",
+            "当前" to "Current",
+            "Gemini · 每周" to "Gemini · Weekly",
+            "每周 · Sonnet" to "Weekly · Sonnet",
+            "5h 窗口" to "Session",
+            "7d 窗口" to "Weekly",
+            "月度订阅额度" to "Monthly",
+        )
+        enLabels.forEach { (source, expected) ->
             assertEquals(expected, formatUsageLimitLabel(source))
         }
     }

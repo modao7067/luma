@@ -26,7 +26,7 @@ from .kimi_web_transport import (
     reap_idle_kimi_gateway,
 )
 from .claude import ClaudeSession
-from .claude_pty import CLAUDE_PTY_PROTOCOL, CLAUDE_STREAM_PROTOCOL, ClaudePtySession, probe_claude_pty
+from .claude_pty import CLAUDE_PTY_PROTOCOL, CLAUDE_STREAM_PROTOCOL, ClaudePtySession
 from .antigravity import AntigravitySession
 from .antigravity_agy_acp import AntigravityAgyAcpSession, AGY_ACP_PROTOCOL
 from .antigravity_cli import AntigravityCliSession, PROTOCOL as AGY_PROTOCOL
@@ -52,10 +52,7 @@ def default_new_protocol(cli):
     if cli == "Grok Build":
         return "grok-private-leader-v1", ""
     if cli == "Claude Code":
-        found, compatible, reason, _ = probe_claude_pty()
-        if found and not compatible:
-            return CLAUDE_STREAM_PROTOCOL, reason
-        return CLAUDE_PTY_PROTOCOL, ""
+        return CLAUDE_STREAM_PROTOCOL, ""
     if cli == "pi":
         found, compatible, _, _ = probe_pi_native()
         if found and not compatible:
@@ -105,6 +102,13 @@ class Manager:
         self.hook_base_url = None
         self._hook_routes = {}
         self._fallback_hook_server = None
+        self._watch_cond = threading.Condition(threading.Lock())
+        self._watch_seq = 0
+
+    def notify_watch(self):
+        with self._watch_cond:
+            self._watch_seq += 1
+            self._watch_cond.notify_all()
 
     def __enter__(self):
         return self
@@ -140,6 +144,7 @@ class Manager:
             self._hook_routes.clear()
             fallback_server = self._fallback_hook_server
             self._fallback_hook_server = None
+        self.notify_watch()
         for _, sess in sessions:
             try:
                 sess.retire_observer()
@@ -414,6 +419,7 @@ class Manager:
             try:
                 save()
                 session = adapter(config, save)
+                session._watch_notify = self.notify_watch
                 if hasattr(session, "attach_hook_manager"):
                     session.attach_hook_manager(self)
                 session.touch()
@@ -441,6 +447,7 @@ class Manager:
                     config["protocolFallbackNotice"] = notice
                     save()
                     fallback = KimiSession(config, save)
+                    fallback._watch_notify = self.notify_watch
                     fallback.touch()
                     fallback.update(connecting=True, nativeProtocol="kimi-acp", permissionNotice=notice)
                     with self.lock:
@@ -635,7 +642,8 @@ class Manager:
                 del self.sessions[key]
                 self._release_observer_lock(key)
             self.touch()
-            return result
+        self.notify_watch()
+        return result
 
     def destroy(self, key, payload=None):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", key): raise Rejected(tr("无效本地会话标识", "Invalid local session ID"))
@@ -767,6 +775,32 @@ def serve(port, password_file, directory):
                 if self.command == "GET" and path == "/health":
                     self.reply(200, {"protocol": 1, "deliveryProtocol": 2, "queueTakebackProtocol": 1, "clis": list(ADAPTERS),
                         "nativeProtocols": NATIVE_PROTOCOLS, "carrierRevision": carrier_revision()}); return
+                if self.command == "GET" and path == "/watch/events":
+                    self.close_connection = True
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(b": ok\n\n")
+                        self.wfile.flush()
+                        last_seq = manager._watch_seq
+                        deadline = time.monotonic() + 300.0
+                        while not manager.shutting_down and time.monotonic() < deadline:
+                            with manager._watch_cond:
+                                if manager._watch_seq == last_seq and not manager.shutting_down:
+                                    manager._watch_cond.wait(timeout=30.0)
+                                cur_seq = manager._watch_seq
+                            if manager.shutting_down:
+                                break
+                            if cur_seq != last_seq:
+                                last_seq = cur_seq
+                                self.wfile.write(f"data: {cur_seq}\n\n".encode("ascii"))
+                                self.wfile.flush()
+                    except OSError:
+                        pass
+                    return
                 payload = {}
                 if self.command == "POST":
                     length = int(self.headers.get("Content-Length", "0"))
@@ -862,12 +896,16 @@ def serve(port, password_file, directory):
                     if time.monotonic() - manager.last_activity < idle_exit_sec:
                         continue
                     manager.shutting_down = True
+                manager.notify_watch()
                 server.shutdown()
                 return
         threading.Thread(target=idle_reaper, daemon=True, name="LumaBridgeIdleReaper").start()
     term_event = threading.Event()
     def term_shutdown():
         term_event.wait()
+        with manager.lock:
+            manager.shutting_down = True
+        manager.notify_watch()
         server.shutdown()
     threading.Thread(target=term_shutdown, daemon=True, name="LumaTermShutdown").start()
     def on_term(signum, frame):

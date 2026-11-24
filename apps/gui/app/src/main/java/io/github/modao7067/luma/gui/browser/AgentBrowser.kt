@@ -104,9 +104,17 @@ class AgentBrowser(private val context: Context) {
         val navSeq: Long = 0L,
     )
 
-    class Tab(val id: String, val owner: String, val web: WebView, val mobileUserAgent: String) {
-        val title = mutableStateOf(tr("新标签页", "New tab"))
-        val url = mutableStateOf("")
+    class Tab(
+        val id: String,
+        val owner: String,
+        initialUrl: String = "",
+        initialTitle: String = tr("新标签页", "New tab"),
+    ) {
+        internal var webView: WebView? = null
+        internal var mobileUserAgent: String = ""
+        val hasWebView = mutableStateOf(false)
+        val title = mutableStateOf(initialTitle)
+        val url = mutableStateOf(initialUrl)
         val loading = mutableStateOf(false)
         val progress = mutableIntStateOf(0)
         val canGoBack = mutableStateOf(false)
@@ -129,9 +137,10 @@ class AgentBrowser(private val context: Context) {
         var lastAutoDialog: JSONObject? = null
         var dialogTimeoutJob: Job? = null
         var closed = false
-        var resumed = true
+        var resumed = false
         var lastPreviewAtMs = 0L
         var lastDialogNotice: String? = null
+        var lastAccessedAtMs = SystemClock.elapsedRealtime()
     }
 
     val tabs = mutableStateListOf<Tab>()
@@ -140,29 +149,98 @@ class AgentBrowser(private val context: Context) {
     val agentOperatingSessions = mutableStateMapOf<String, Boolean>()
     val agentOperationSeq = mutableStateMapOf<String, Int>()
     val agentInFlightCount = mutableStateMapOf<String, Int>()
+    private val startedActivities = java.util.IdentityHashMap<Any, Unit>()
+    val appForeground: Boolean get() = startedActivities.isNotEmpty()
+    internal var timersPaused = false
+        private set
+
+    fun onActivityStarted(token: Any) {
+        startedActivities[token] = Unit
+        syncTabLifecycle()
+    }
+
+    fun onActivityStopped(token: Any) {
+        startedActivities.remove(token)
+        evictInactiveWebViewsIfNeeded()
+        syncTabLifecycle()
+    }
 
     fun isAgentOperating(owner: String): Boolean = agentOperatingSessions[owner] == true
     fun agentSeqFor(owner: String): Int = agentOperationSeq[owner] ?: 0
     fun isAgentCommandInFlight(owner: String): Boolean = (agentInFlightCount[owner] ?: 0) > 0
     fun stopAgentOperating(owner: String) {
         agentOperatingSessions[owner] = false
+        evictInactiveWebViewsIfNeeded()
         syncTabLifecycle()
     }
 
+    private fun isTabProtected(tab: Tab, keepTab: Tab? = null): Boolean {
+        if (tab === keepTab) return true
+        val web = tab.webView
+        if (web != null && web.parent != null) return true
+        val fgOwner = if (appForeground) foregroundSession.value else null
+        if (fgOwner != null && tab.owner == fgOwner) return true
+        if (isAgentOperating(tab.owner) || isAgentCommandInFlight(tab.owner) || tab.inFlightCount > 0) return true
+        if (tab.jsDialog.value != null || tab.fileChooser.value != null) return true
+        return false
+    }
+
+    private fun discardWebView(tab: Tab) {
+        val web = tab.webView ?: return
+        tab.webView = null
+        tab.hasWebView.value = false
+        tab.resumed = false
+        tab.loading.value = false
+        tab.canGoBack.value = false
+        tab.canGoForward.value = false
+        tab.previewBitmap.value = null
+        (web.parent as? android.view.ViewGroup)?.removeView(web)
+        if (!tab.crashed.value) runCatching { web.destroy() }
+        (web.context as? MutableContextWrapper)?.baseContext = context.applicationContext
+    }
+
+    private fun evictInactiveWebViewsIfNeeded(keepTab: Tab? = null) {
+        while (true) {
+            val live = tabs.filter { !it.closed && it.webView != null }
+            if (live.size <= MAX_LIVE_WEBVIEWS) return
+            val victim = live.filterNot { isTabProtected(it, keepTab) }
+                .minByOrNull { it.lastAccessedAtMs } ?: return
+            discardWebView(victim)
+        }
+    }
+
     private fun syncTabLifecycle() {
-        val fgOwner = foregroundSession.value
+        val fgOwner = if (appForeground) foregroundSession.value else null
         val fgTabId = if (fgOwner != null) (foregroundTabByOwner[fgOwner] ?: activeTabByOwner[fgOwner]) else null
+        var anyResumed = false
+        var anyLiveWeb: WebView? = null
+        val desired = ArrayList<Pair<Tab, Boolean>>()
         tabs.forEach { t ->
+            val web = t.webView ?: return@forEach
             if (t.closed || t.crashed.value) return@forEach
+            if (anyLiveWeb == null) anyLiveWeb = web
             val activeForFg = fgOwner != null && t.owner == fgOwner && (t.id == fgTabId || fgTabId == null)
             val activeForAgent = (isAgentOperating(t.owner) && activeTabByOwner[t.owner] == t.id) || t.inFlightCount > 0
             val shouldResume = activeForFg || activeForAgent
+            if (shouldResume) anyResumed = true
+            desired.add(t to shouldResume)
+        }
+        if ((appForeground || anyResumed) && timersPaused) {
+            anyLiveWeb?.let { runCatching { it.resumeTimers() } }
+            timersPaused = false
+        }
+        desired.forEach { (t, shouldResume) ->
+            val web = t.webView ?: return@forEach
             if (shouldResume != t.resumed) {
                 t.resumed = shouldResume
                 runCatching {
-                    if (shouldResume) t.web.onResume() else t.web.onPause()
+                    if (shouldResume) web.onResume() else web.onPause()
                 }
             }
+        }
+        if (!appForeground && !anyResumed && !timersPaused && anyLiveWeb != null) {
+            runCatching { anyLiveWeb.pauseTimers() }
+            timersPaused = true
         }
     }
 
@@ -212,7 +290,16 @@ class AgentBrowser(private val context: Context) {
         if (manifestFile.exists() || File("${manifestFile.path}.bak").exists()) runCatching {
             JSONObject(String(manifest.readFully())).optJSONArray("tabs")?.objects()?.forEach {
                 val url = it.optString("url")
-                if (BrowserPolicy.allowedUrl(url)) newTab(it.getString("owner"), url, it.getString("id"))
+                if (BrowserPolicy.allowedUrl(url)) {
+                    val owner = it.getString("owner")
+                    val id = it.getString("id")
+                    val savedTitle = it.optString("title").ifBlank {
+                        url.removePrefix("https://").removePrefix("http://").take(32).ifBlank { tr("新标签页", "New tab") }
+                    }
+                    val tab = Tab(id = id, owner = owner, initialUrl = url, initialTitle = savedTitle)
+                    tabs.add(tab)
+                    if (!activeTabByOwner.containsKey(owner)) activeTabByOwner[owner] = tab.id
+                }
             }
         }
         scope.launch(Dispatchers.IO) {
@@ -245,8 +332,9 @@ class AgentBrowser(private val context: Context) {
         contentViewportWidthPx = widthPx
         contentViewportHeightPx = contentHeightPx
         tabs.forEach { tab ->
-            if (!tab.closed && !tab.crashed.value && tab.web.parent == null) {
-                layoutOffscreen(tab.web)
+            val web = tab.webView
+            if (!tab.closed && !tab.crashed.value && web != null && web.parent == null) {
+                layoutOffscreen(web)
             }
         }
     }
@@ -288,6 +376,7 @@ class AgentBrowser(private val context: Context) {
                 tab.fileChooser.value = null
             }
         }
+        evictInactiveWebViewsIfNeeded()
         syncTabLifecycle()
     }
 
@@ -408,14 +497,16 @@ class AgentBrowser(private val context: Context) {
 
     private fun syncNavigationFlags(tab: Tab) {
         if (tab.closed || tab.crashed.value) return
-        tab.canGoBack.value = tab.web.canGoBack()
-        tab.canGoForward.value = tab.web.canGoForward()
+        val web = tab.webView
+        tab.canGoBack.value = web?.canGoBack() == true
+        tab.canGoForward.value = web?.canGoForward() == true
     }
 
     fun setDesktopMode(tab: Tab, enabled: Boolean) {
         if (tab.closed || tab.crashed.value) return
         tab.desktopMode.value = enabled
-        tab.web.settings.apply {
+        val web = tab.webView ?: return
+        web.settings.apply {
             userAgentString = if (enabled) DESKTOP_USER_AGENT else tab.mobileUserAgent
             useWideViewPort = true
             loadWithOverviewMode = true
@@ -423,8 +514,52 @@ class AgentBrowser(private val context: Context) {
         if (tab.url.value.isNotBlank()) {
             tab.generation++
             tab.loading.value = true
-            tab.web.reload()
+            web.reload()
         }
+    }
+
+    fun goBack(tab: Tab) {
+        if (tab.closed || tab.crashed.value) return
+        val web = tab.webView ?: return
+        if (web.canGoBack()) {
+            web.goBack()
+            syncNavigationFlags(tab)
+        }
+    }
+
+    fun goForward(tab: Tab) {
+        if (tab.closed || tab.crashed.value) return
+        val web = tab.webView ?: return
+        if (web.canGoForward()) {
+            web.goForward()
+            syncNavigationFlags(tab)
+        }
+    }
+
+    fun stopLoading(tab: Tab) {
+        if (tab.closed || tab.crashed.value) return
+        tab.webView?.stopLoading()
+        tab.loading.value = false
+    }
+
+    fun reload(tab: Tab) {
+        if (tab.closed || tab.crashed.value) return
+        val web = ensureWebView(tab, loadSavedUrl = false)
+        tab.generation++
+        tab.loading.value = true
+        tab.error.value = null
+        if (web.url.isNullOrBlank() && tab.url.value.isNotBlank()) {
+            web.loadUrl(tab.url.value)
+        } else {
+            web.reload()
+        }
+    }
+
+    fun otherSessionsTabs(keepOwner: String): List<Tab> =
+        tabs.filter { it.owner != keepOwner && !it.closed }
+
+    fun closeOtherSessionsTabs(keepOwner: String) {
+        otherSessionsTabs(keepOwner).forEach(::close)
     }
 
     private fun recordConsole(tab: Tab, entry: ConsoleEntry) {
@@ -460,10 +595,27 @@ class AgentBrowser(private val context: Context) {
     @SuppressLint("SetJavaScriptEnabled")
     fun newTab(owner: String, url: String = "", id: String = UUID.randomUUID().toString(), selectActive: Boolean = true): Tab {
         require(url.isEmpty() || BrowserPolicy.allowedUrl(url)) { tr("仅支持 HTTPS 或本机 HTTP 页面", "Only HTTPS or localhost HTTP pages are supported") }
+        val tab = Tab(id = id, owner = owner, initialUrl = url)
+        tabs.add(tab)
+        if (selectActive || !activeTabByOwner.containsKey(owner)) {
+            activeTabByOwner[owner] = tab.id
+        }
+        ensureWebView(tab, loadSavedUrl = true)
+        return tab
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    internal fun ensureWebView(tab: Tab, loadSavedUrl: Boolean = true): WebView {
+        tab.lastAccessedAtMs = SystemClock.elapsedRealtime()
+        tab.webView?.let { return it }
+        val owner = tab.owner
         val web = WebView(MutableContextWrapper(context.applicationContext))
         web.setLayerType(View.LAYER_TYPE_NONE, null)
         val defaultUa = web.settings.userAgentString.orEmpty()
-        val tab = Tab(id, owner, web, defaultUa)
+        tab.mobileUserAgent = defaultUa
+        tab.webView = web
+        tab.hasWebView.value = true
+        tab.resumed = true
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -475,6 +627,7 @@ class AgentBrowser(private val context: Context) {
             mediaPlaybackRequiresUserGesture = true
             setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
+            if (tab.desktopMode.value) userAgentString = DESKTOP_USER_AGENT
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
@@ -573,9 +726,13 @@ class AgentBrowser(private val context: Context) {
                 tab.crashed.value = true
                 tab.error.value = tr("网页进程已退出，请关闭并重新打开标签页", "WebView renderer exited; close and reopen the tab")
                 tab.loading.value = false
+                tab.webView = null
+                tab.hasWebView.value = false
+                tab.resumed = false
                 (view.parent as? android.view.ViewGroup)?.removeView(view)
                 view.destroy()
                 (view.context as MutableContextWrapper).baseContext = context.applicationContext
+                syncTabLifecycle()
                 return true
             }
         }
@@ -590,7 +747,7 @@ class AgentBrowser(private val context: Context) {
                 if (!userGesture) return false
                 val child = newTab(owner)
                 activeTabByOwner[owner] = child.id
-                (resultMsg.obj as WebView.WebViewTransport).webView = child.web
+                (resultMsg.obj as WebView.WebViewTransport).webView = ensureWebView(child, loadSavedUrl = false)
                 resultMsg.sendToTarget()
                 return true
             }
@@ -711,37 +868,37 @@ class AgentBrowser(private val context: Context) {
         }
 
         layoutOffscreen(web)
-        tabs.add(tab)
-        if (selectActive || !activeTabByOwner.containsKey(owner)) {
-            activeTabByOwner[owner] = tab.id
-        }
+        evictInactiveWebViewsIfNeeded(keepTab = tab)
         syncTabLifecycle()
-        if (url.isNotEmpty()) {
+        val initialUrl = tab.url.value
+        if (loadSavedUrl && initialUrl.isNotEmpty()) {
             tab.loading.value = true
             tab.previewRevision.intValue++
-            web.loadUrl(url)
+            web.loadUrl(initialUrl)
         }
-        return tab
+        return web
     }
 
     fun attach(tab: Tab, host: android.widget.FrameLayout) {
         check(!tab.closed && !tab.crashed.value) { tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited") }
-        tab.web.setLayerType(View.LAYER_TYPE_NONE, null)
-        if (tab.web.parent === host) {
-            (tab.web.context as MutableContextWrapper).baseContext = host.context
+        val web = ensureWebView(tab, loadSavedUrl = true)
+        web.setLayerType(View.LAYER_TYPE_NONE, null)
+        if (web.parent === host) {
+            (web.context as MutableContextWrapper).baseContext = host.context
             return
         }
-        (tab.web.parent as? android.view.ViewGroup)?.removeView(tab.web)
-        (tab.web.context as MutableContextWrapper).baseContext = host.context
-        host.addView(tab.web, android.widget.FrameLayout.LayoutParams(-1, -1))
+        (web.parent as? android.view.ViewGroup)?.removeView(web)
+        (web.context as MutableContextWrapper).baseContext = host.context
+        host.addView(web, android.widget.FrameLayout.LayoutParams(-1, -1))
     }
 
     fun detach(tab: Tab, host: android.widget.FrameLayout) {
-        if (tab.web.parent === host) {
-            host.removeView(tab.web)
-            (tab.web.context as MutableContextWrapper).baseContext = context.applicationContext
+        val web = tab.webView ?: return
+        if (web.parent === host) {
+            host.removeView(web)
+            (web.context as MutableContextWrapper).baseContext = context.applicationContext
             if (!tab.closed && !tab.crashed.value) {
-                layoutOffscreen(tab.web)
+                layoutOffscreen(web)
             }
         }
     }
@@ -766,10 +923,16 @@ class AgentBrowser(private val context: Context) {
             val fallback = tabs.lastOrNull { it.owner == tab.owner && !it.closed }?.id
             if (fallback != null) foregroundTabByOwner[tab.owner] = fallback else foregroundTabByOwner.remove(tab.owner)
         }
+        val web = tab.webView
+        tab.webView = null
+        tab.hasWebView.value = false
+        tab.resumed = false
         syncTabLifecycle()
-        (tab.web.parent as? android.view.ViewGroup)?.removeView(tab.web)
-        if (!tab.crashed.value) tab.web.destroy()
-        (tab.web.context as MutableContextWrapper).baseContext = context.applicationContext
+        if (web != null) {
+            (web.parent as? android.view.ViewGroup)?.removeView(web)
+            if (!tab.crashed.value) web.destroy()
+            (web.context as MutableContextWrapper).baseContext = context.applicationContext
+        }
         persist()
     }
 
@@ -804,14 +967,16 @@ class AgentBrowser(private val context: Context) {
         if (selectActive) {
             activeTabByOwner[tab.owner] = tab.id
         }
+        tab.url.value = url
+        val web = ensureWebView(tab, loadSavedUrl = false)
         tab.generation++
         tab.loading.value = true
         tab.error.value = null
-        tab.web.loadUrl(url)
+        web.loadUrl(url)
     }
 
     suspend fun extractSelectionQuote(tab: Tab): String? {
-        if (tab.closed || tab.crashed.value || tab.loading.value) return null
+        if (tab.closed || tab.crashed.value || tab.loading.value || tab.webView == null) return null
         val res = evaluatePage(tab, obj("action" to "selection"))
         val text = res.optString("selection").trim()
         if (!res.optBoolean("ok") || text.isEmpty()) return null
@@ -824,7 +989,7 @@ class AgentBrowser(private val context: Context) {
         val out = manifest.startWrite()
         try {
             val savedTabs = tabs.filter { BrowserPolicy.allowedUrl(it.url.value) }
-                .map { obj("id" to it.id, "owner" to it.owner, "url" to it.url.value) }
+                .map { obj("id" to it.id, "owner" to it.owner, "url" to it.url.value, "title" to it.title.value) }
             out.write(obj("tabs" to JSONArray(savedTabs)).toString().toByteArray())
             manifest.finishWrite(out)
         } catch (_: Exception) {
@@ -854,7 +1019,7 @@ class AgentBrowser(private val context: Context) {
 
     private suspend fun captureViewportBitmap(tab: Tab, targetWidthPx: Int): Bitmap? {
         if (tab.closed || tab.crashed.value) return null
-        val web = tab.web
+        val web = tab.webView ?: return null
         if (!web.isAttachedToWindow && web.parent == null) {
             layoutOffscreen(web)
         }
@@ -935,7 +1100,7 @@ class AgentBrowser(private val context: Context) {
         toY: Float,
         durationMs: Long,
     ) {
-        val web = tab.web
+        val web = ensureWebView(tab)
         if (!web.isAttachedToWindow && web.parent == null) layoutOffscreen(web)
         val steps = (durationMs / 18L).toInt().coerceIn(6, 40)
         val stepDelay = (durationMs / steps).coerceAtLeast(8L)
@@ -965,7 +1130,7 @@ class AgentBrowser(private val context: Context) {
     }
 
     private suspend fun dispatchCoordinateTap(tab: Tab, normX: Float, normY: Float) {
-        val web = tab.web
+        val web = ensureWebView(tab)
         if (!web.isAttachedToWindow && web.parent == null) layoutOffscreen(web)
         val viewW = (web.width.takeIf { it > 0 } ?: contentViewportWidthPx).toFloat()
         val viewH = (web.height.takeIf { it > 0 } ?: contentViewportHeightPx).toFloat()
@@ -1006,7 +1171,8 @@ class AgentBrowser(private val context: Context) {
             .put("token", token)
             .put("fallback", fallback)
         val deferred = CompletableDeferred<String?>()
-        tab.web.evaluateJavascript("($pageScript)($payload)") { value ->
+        val web = tab.webView ?: return null
+        web.evaluateJavascript("($pageScript)($payload)") { value ->
             deferred.complete(value)
         }
         val dialogWatcher = scope.launch {
@@ -1321,39 +1487,42 @@ class AgentBrowser(private val context: Context) {
         if (tab.closed || tab.crashed.value) {
             return obj("ok" to false, "code" to "TAB_UNAVAILABLE", "error" to tr("标签页已关闭或网页进程已退出", "Tab is closed or renderer exited"), "dispatched" to false)
         }
-        return when (val action = request.getString("action")) {
+        val action = request.getString("action")
+        if (action != "close" && action != "navigate") {
+            ensureWebView(tab)
+        }
+        return when (action) {
             "navigate" -> {
                 val keepFg = foregroundSession.value == tab.owner && !allowLiveAgent.value && foregroundTabByOwner[tab.owner] != tab.id
                 navigate(tab, request.getString("url"), selectActive = !keepFg)
                 obj("ok" to true, "dispatched" to true, "tab" to info(tab))
             }
             "back" -> {
-                if (!tab.web.canGoBack()) {
+                val web = ensureWebView(tab)
+                if (!web.canGoBack()) {
                     obj("ok" to false, "code" to "NO_HISTORY_BACK", "error" to tr("当前标签页没有可后退的历史记录", "No back history in current tab"), "dispatched" to false)
                 } else {
                     tab.generation++
                     tab.error.value = null
-                    tab.web.goBack()
+                    web.goBack()
                     syncNavigationFlags(tab)
                     obj("ok" to true, "dispatched" to true, "tab" to info(tab))
                 }
             }
             "forward" -> {
-                if (!tab.web.canGoForward()) {
+                val web = ensureWebView(tab)
+                if (!web.canGoForward()) {
                     obj("ok" to false, "code" to "NO_HISTORY_FORWARD", "error" to tr("当前标签页没有可前进的历史记录", "No forward history in current tab"), "dispatched" to false)
                 } else {
                     tab.generation++
                     tab.error.value = null
-                    tab.web.goForward()
+                    web.goForward()
                     syncNavigationFlags(tab)
                     obj("ok" to true, "dispatched" to true, "tab" to info(tab))
                 }
             }
             "reload" -> {
-                tab.generation++
-                tab.loading.value = true
-                tab.error.value = null
-                tab.web.reload()
+                reload(tab)
                 obj("ok" to true, "dispatched" to true, "tab" to info(tab))
             }
             "close" -> {
@@ -1372,11 +1541,12 @@ class AgentBrowser(private val context: Context) {
                         toY = request.getDouble("toY").toFloat(),
                         durationMs = request.optLong("durationMs", 280L).coerceIn(50L, 3000L),
                     )
+                    val web = ensureWebView(tab)
                     obj(
                         "ok" to true,
                         "dispatched" to true,
-                        "scrollX" to tab.web.scrollX,
-                        "scrollY" to tab.web.scrollY,
+                        "scrollX" to web.scrollX,
+                        "scrollY" to web.scrollY,
                         "tab" to info(tab),
                     )
                 }
@@ -1492,7 +1662,7 @@ class AgentBrowser(private val context: Context) {
                 val annotate = request.optBoolean("annotate", false)
                 val meta = if (annotate) evaluatePage(tab, obj("action" to "read", "interactiveOnly" to true)) else null
                 if (meta != null && !meta.optBoolean("ok")) return meta
-                val fullW = tab.web.width.takeIf { it > 0 } ?: contentViewportWidthPx
+                val fullW = ensureWebView(tab).width.takeIf { it > 0 } ?: contentViewportWidthPx
                 val rawBitmap = captureViewportBitmap(tab, targetWidthPx = fullW.coerceIn(360, 720))
                     ?: error(tr("页面尚未完成绘制", "Page has not finished rendering yet"))
                 tab.previewBitmap.value = rawBitmap
@@ -1520,11 +1690,12 @@ class AgentBrowser(private val context: Context) {
             }
             "wait" -> {
                 val state = BrowserProtocol.waitState(request)
+                val web = ensureWebView(tab)
                 if (tab.error.value != null) obj("ok" to false, "code" to "PAGE_UNAVAILABLE", "error" to tab.error.value, "dispatched" to false)
                 else if (tab.loading.value) obj("ok" to true, "matched" to false, "reason" to "LOADING")
                 else when (state) {
                     "ready" -> obj("ok" to true, "matched" to true, "state" to state)
-                    "url" -> obj("ok" to true, "matched" to (tab.web.url == request.getString("url")), "state" to state, "reason" to "URL_MISMATCH")
+                    "url" -> obj("ok" to true, "matched" to (web.url == request.getString("url")), "state" to state, "reason" to "URL_MISMATCH")
                     else -> evaluatePage(tab, request)
                 }
             }
@@ -1532,8 +1703,9 @@ class AgentBrowser(private val context: Context) {
                 if (tab.loading.value || tab.error.value != null) {
                     obj("ok" to false, "code" to "PAGE_NOT_READY", "error" to tr("页面尚未就绪；先 wait 或检查 tabs", "Page is not ready yet; wait or check tabs"), "dispatched" to false)
                 } else {
-                    if (!tab.web.isAttachedToWindow && tab.web.parent == null) {
-                        layoutOffscreen(tab.web)
+                    val web = ensureWebView(tab)
+                    if (!web.isAttachedToWindow && web.parent == null) {
+                        layoutOffscreen(web)
                     }
                     val prepared = if (action in setOf("click", "fill", "type", "select", "check", "uncheck", "hover", "press") && !request.has("snapshot")) {
                         JSONObject(request.toString()).put("snapshot", "__live__").put("reuseSnapshot", true)
@@ -1581,7 +1753,7 @@ class AgentBrowser(private val context: Context) {
         val mutating = action in setOf("click", "fill", "type", "select", "check", "uncheck", "hover", "press")
         val generation = tab.generation
         val deferred = CompletableDeferred<String?>()
-        tab.web.evaluateJavascript("($pageScript)($data)") { value ->
+        ensureWebView(tab).evaluateJavascript("($pageScript)($data)") { value ->
             deferred.complete(value)
         }
         val dialogWatcher = scope.launch {
@@ -1632,6 +1804,7 @@ class AgentBrowser(private val context: Context) {
     }
 
     companion object {
+        internal const val MAX_LIVE_WEBVIEWS = 8
         private val SESSION_ID_PATTERN = Regex("[a-zA-Z0-9_-]{1,128}")
         private val THREAD_ID_PATTERN = Regex("[a-zA-Z0-9_-]{1,131}")
         private const val DESKTOP_USER_AGENT =

@@ -376,6 +376,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         self._catalog_refresh_inflight = False
         self._catalog_refresh_pending_force = False
         self._last_pane_perm_sync = 0.0
+        self._pane_perm_dirty = True
         self._last_tui_prompt_scan = 0.0
         self._tui_prompt_requests = {}
 
@@ -470,10 +471,13 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         owner = self.owner
         if owner is None or self._startup_waiting or self._identity_mismatched:
             return None
+        if not force and not self._pane_perm_dirty:
+            return None
         now = time.monotonic()
         if not force and now - self._last_pane_perm_sync < 1.2:
             return None
         self._last_pane_perm_sync = now
+        self._pane_perm_dirty = False
         if not owner.alive():
             return None
         mode = _parse_pane_permission_mode(owner.capture_pane(12))
@@ -485,6 +489,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         if not self.data.get("connected") or self._startup_waiting:
             return
         if self.data.get("running") or self._tui_prompt_requests:
+            self._pane_perm_dirty = True
             self._sync_tui_confirm_prompts(force=False)
         if not self.data.get("running"):
             self._sync_pane_permission(force=False)
@@ -788,6 +793,7 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
         self._interrupt_turn_seq = None
         self._interrupt_pane_baseline = ""
         self._last_pane_perm_sync = 0.0
+        self._pane_perm_dirty = True
         self._last_tui_prompt_scan = 0.0
         self._tui_prompt_requests = {}
         self._session_started.clear()
@@ -1017,8 +1023,12 @@ class ClaudePtySession(ClaudeProjectionMixin, PtyTuiSession):
             disk_start = self._read_start_file()
             if disk_start:
                 self._apply_session_start_payload(disk_start)
+        seq_before = self.seq
         self.load_history()
+        if self.seq != seq_before:
+            self._pane_perm_dirty = True
         if self.data.get("running"):
+            self._pane_perm_dirty = True
             self._try_settle_interrupted_turn()
         else:
             self._scan_transcript_turn_end(record_only=True)

@@ -243,5 +243,121 @@ class TypesetEngineTest {
         assertFalse(isTypesetCacheable(TypesetMode.JUSTIFY, TYPESET_CACHE_MAX_ENTRY_CHARS + 1))
         assertTrue(isTypesetCacheable(TypesetMode.JUSTIFY, 512))
         assertTrue(isTypesetCacheable(TypesetMode.BALANCED_LEFT, TYPESET_CACHE_MAX_ENTRY_CHARS))
+
+        val emojiAndCjk = "中文与 English 123 🦋 \uD840\uDC00 结尾"
+        assertFalse(TypesetEngine.requiresPlatformBidi(emojiAndCjk, 0))
+        assertFalse(TypesetEngine.requiresPlatformBidi(emojiAndCjk, emojiAndCjk.indexOf("🦋")))
+        val appendedRtl = "$emojiAndCjk مرحبا"
+        assertTrue(TypesetEngine.requiresPlatformBidi(appendedRtl, emojiAndCjk.length))
+    }
+
+    @Test fun incrementalStreamingLayoutMatchesFreshLayoutAcrossMixedTextAndReducesWork() {
+        val sample = "第一段是中文与 English words 混排（带标点「挤压」），还有 inline-code 和 🦋 表情。\n第二段继续流式追加更多文字，验证多行增量复用不会偏离全量贪心排版，即使遇到长单词 configuration 或标点。最后一段收尾。"
+        val width = 180f
+        var incrementalMeasures = 0
+        var freshMeasures = 0
+        val countingInc = object : TypesetMeasurer by measurer {
+            override fun measureWidth(text: String, start: Int, end: Int, styleId: Int): Float {
+                incrementalMeasures++
+                return measurer.measureWidth(text, start, end, styleId)
+            }
+        }
+        val countingFresh = object : TypesetMeasurer by measurer {
+            override fun measureWidth(text: String, start: Int, end: Int, styleId: Int): Float {
+                freshMeasures++
+                return measurer.measureWidth(text, start, end, styleId)
+            }
+        }
+
+        var prevLayout: TypesetLayout? = null
+        var prevRuns: List<TypesetRunInput>? = null
+        var len = 12
+        while (len <= sample.length) {
+            val safeLen = markdownVisibleEnd(sample, len)
+            val prefix = sample.substring(0, safeLen)
+            val runs = listOf(TypesetRunInput(0, prefix.length, 0, TypesetSpanKind.NORMAL))
+            val inc = TypesetEngine.layout(
+                text = prefix,
+                runs = runs,
+                maxWidthPx = width,
+                mode = TypesetMode.STREAMING,
+                measurer = countingInc,
+                previousLayout = prevLayout,
+                previousRuns = prevRuns,
+            )
+            val fresh = TypesetEngine.layout(
+                text = prefix,
+                runs = runs,
+                maxWidthPx = width,
+                mode = TypesetMode.STREAMING,
+                measurer = countingFresh,
+            )
+            assertEquals("Line count mismatch at len=$safeLen", fresh.lines.size, inc.lines.size)
+            assertEquals("Width mismatch at len=$safeLen", fresh.width, inc.width, 0.01f)
+            assertEquals("Height mismatch at len=$safeLen", fresh.height, inc.height, 0.01f)
+            assertEquals("minIntrinsicWidth mismatch at len=$safeLen", fresh.minIntrinsicWidth, inc.minIntrinsicWidth, 0.01f)
+            assertEquals("maxIntrinsicWidth mismatch at len=$safeLen", fresh.maxIntrinsicWidth, inc.maxIntrinsicWidth, 0.01f)
+            for (lineIdx in fresh.lines.indices) {
+                assertEquals("Line $lineIdx mismatch at len=$safeLen", fresh.lines[lineIdx], inc.lines[lineIdx])
+            }
+            assertArrayEquals("charLine mismatch at len=$safeLen", fresh.charLine, inc.charLine)
+            assertArrayEquals("charLeft mismatch at len=$safeLen", fresh.charLeft, inc.charLeft, 0.01f)
+            assertArrayEquals("charRight mismatch at len=$safeLen", fresh.charRight, inc.charRight, 0.01f)
+            prevLayout = inc
+            prevRuns = runs
+            len = if (len == sample.length) sample.length + 1 else minOf(sample.length, len + 7)
+        }
+        assertTrue(
+            "Incremental streaming must measure far fewer segments than fresh: inc=$incrementalMeasures fresh=$freshMeasures",
+            incrementalMeasures * 2 < freshMeasures,
+        )
+    }
+
+    @Test fun incrementalStreamingSoftWrapPreservesExactMaxIntrinsicWidth() {
+        val base = "这是一段连续追加的中文文本".repeat(6)
+        val full = base + "追加"
+        val prevRuns = listOf(TypesetRunInput(0, base.length, 0, TypesetSpanKind.NORMAL))
+        val fullRuns = listOf(TypesetRunInput(0, full.length, 0, TypesetSpanKind.NORMAL))
+        val prev = TypesetEngine.layout(base, prevRuns, 160f, TypesetMode.STREAMING, measurer)
+        val inc = TypesetEngine.layout(full, fullRuns, 160f, TypesetMode.STREAMING, measurer, prev, prevRuns)
+        val fresh = TypesetEngine.layout(full, fullRuns, 160f, TypesetMode.STREAMING, measurer)
+        assertEquals(fresh.minIntrinsicWidth, inc.minIntrinsicWidth, 0.01f)
+        assertEquals(fresh.maxIntrinsicWidth, inc.maxIntrinsicWidth, 0.01f)
+
+        val mixedBase = "前缀中文内容非常长足够折行很多次，接着继续输入中英混排 English words 直到出现软换行"
+        val mixedFull = mixedBase + "尾句再追加更多中文和 English。"
+        val mPrevRuns = listOf(TypesetRunInput(0, mixedBase.length, 0, TypesetSpanKind.NORMAL))
+        val mFullRuns = listOf(TypesetRunInput(0, mixedFull.length, 0, TypesetSpanKind.NORMAL))
+        val mPrev = TypesetEngine.layout(mixedBase, mPrevRuns, 140f, TypesetMode.STREAMING, measurer)
+        val mInc = TypesetEngine.layout(mixedFull, mFullRuns, 140f, TypesetMode.STREAMING, measurer, mPrev, mPrevRuns)
+        val mFresh = TypesetEngine.layout(mixedFull, mFullRuns, 140f, TypesetMode.STREAMING, measurer)
+        assertEquals(mFresh.minIntrinsicWidth, mInc.minIntrinsicWidth, 0.01f)
+        assertEquals(mFresh.maxIntrinsicWidth, mInc.maxIntrinsicWidth, 0.01f)
+    }
+
+    @Test fun streamingRetroactiveStyleNarrowingMatchesFreshLineBreaksAndCoordinates() {
+        val base = "甲乙丙丁".repeat(15)
+        val full = base + "末"
+        val prevRuns = listOf(TypesetRunInput(0, base.length, 0, TypesetSpanKind.NORMAL))
+        val nextRuns = listOf(
+            TypesetRunInput(0, 49, 0, TypesetSpanKind.NORMAL),
+            TypesetRunInput(49, full.length, 1, TypesetSpanKind.NORMAL),
+        )
+        val prev = TypesetEngine.layout(base, prevRuns, 121f, TypesetMode.STREAMING, measurer)
+        val inc = TypesetEngine.layout(full, nextRuns, 121f, TypesetMode.STREAMING, measurer, prev, prevRuns)
+        val fresh = TypesetEngine.layout(full, nextRuns, 121f, TypesetMode.STREAMING, measurer)
+        assertEquals(50, fresh.lines[6].charEnd)
+        assertEquals(50, fresh.lines[7].charStart)
+        assertEquals(fresh.lines.size, inc.lines.size)
+        assertEquals(fresh.width, inc.width, 0.01f)
+        assertEquals(fresh.height, inc.height, 0.01f)
+        assertEquals(fresh.minIntrinsicWidth, inc.minIntrinsicWidth, 0.01f)
+        assertEquals(fresh.maxIntrinsicWidth, inc.maxIntrinsicWidth, 0.01f)
+        for (i in fresh.lines.indices) {
+            assertEquals("Line $i mismatch", fresh.lines[i], inc.lines[i])
+        }
+        assertArrayEquals(fresh.charLine, inc.charLine)
+        assertArrayEquals(fresh.charLeft, inc.charLeft, 0.01f)
+        assertArrayEquals(fresh.charRight, inc.charRight, 0.01f)
     }
 }

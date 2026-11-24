@@ -34,6 +34,14 @@ Source: https://github.com/anthropics/claude-agent-sdk-python/tree/d38e51e
 
 Copyright Anthropic. The MIT license is retained in `app/src/main/assets/cli_bridge/CLAUDE-SDK-LICENSE.txt`. Claude Code and Kimi Code executables are not bundled; Luma uses the user's installed CLIs and configuration.
 
+## Global usage and quota probes
+
+`cli_bridge/luma_cli/global_usage.py` adapts usage aggregation, rate-limit window semantics, and provider quota probing (including OpenCode Go `packages/provider-opencode/src/server/usageLimits.ts`, Codex, Claude, Antigravity, and Grok) from T3 Code (`pingdotgg/t3code`), revision `6577c6b6185167c0e502fa01f9e8e8f2dee6ff25`, along with usage-scanning references from `junhoyeo/tokscale` (CLI/core, MIT) and `MoonshotAI/kimi-cli` (Apache-2.0).
+
+Source: https://github.com/pingdotgg/t3code/tree/6577c6b6185167c0e502fa01f9e8e8f2dee6ff25
+
+Copyright (c) 2026 T3 Tools Inc. The MIT license is retained in `app/src/main/assets/cli_bridge/T3CODE-LICENSE.txt`.
+
 ## Termux and terminal provenance
 
 Terminal emulator and view sources originate from Termux through jeffusion/Termix commit `4bcbac08fcd15c91c65d50df90159b45544433c3`. Original copyrights and license exceptions are retained in `COPYING`, `GPL-3.0.txt`, `UPSTREAM-LICENSE` and the shared source files. Parts derived from jackpal's Android-Terminal-Emulator retain their Apache-2.0 terms.

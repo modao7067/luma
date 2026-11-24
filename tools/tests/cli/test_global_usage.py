@@ -238,10 +238,10 @@ class GlobalUsageTest(unittest.TestCase):
             ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", "3p-5h", "3p-weekly"],
         )
         self.assertAlmostEqual(by_id["gemini-5h"]["usedPercent"], 9.04, places=1)
-        self.assertEqual(by_id["gemini-5h"]["label"], f"Gemini · {gu._tr('5h 窗口', '5h window')}")
+        self.assertEqual(by_id["gemini-5h"]["label"], f"Gemini · {gu._tr('短期', 'Session')}")
         self.assertAlmostEqual(by_id["gemini-weekly"]["usedPercent"], 2.51, places=1)
-        self.assertEqual(by_id["gemini-weekly"]["label"], f"Gemini · {gu._tr('7d 窗口', '7d window')}")
-        self.assertEqual(by_id["gemini-argon-wtu-weekly"]["label"], f"Gemini 4 Argon · {gu._tr('7d 窗口', '7d window')}")
+        self.assertEqual(by_id["gemini-weekly"]["label"], f"Gemini · {gu._tr('每周', 'Weekly')}")
+        self.assertEqual(by_id["gemini-argon-wtu-weekly"]["label"], f"Gemini 4 Argon · {gu._tr('每周', 'Weekly')}")
         self.assertAlmostEqual(by_id["gemini-argon-wtu-weekly"]["usedPercent"], 35.0, places=1)
         self.assertEqual(by_id["3p-5h"]["usedPercent"], 0.0)
         self.assertIsNone(by_id["3p-5h"]["resetsAt"])
@@ -1514,7 +1514,7 @@ sys.stdin.read()
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
                 patch.dict(os.environ, {"KIMI_SHARE_DIR": str(home / ".kimi")}, clear=False),
-                patch.object(gu.urllib.request, "urlopen", return_value=FakeResp(usages_payload)),
+                patch.object(gu, "_urlopen_auth", return_value=FakeResp(usages_payload)),
             ):
                 lim = gu._probe_kimi_limits(home)
                 self.assertEqual(lim["cli"], "Kimi Code")
@@ -1642,7 +1642,7 @@ sys.stdin.read()
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
                 patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False),
-                patch.object(gu.urllib.request, "urlopen", side_effect=fake_urlopen),
+                patch.object(gu, "_urlopen_auth", side_effect=fake_urlopen),
             ):
                 s = gu.collect_summary(period="today", tz_name="UTC", refresh=True, sync_pricing=False)
                 by_cli = {row["cli"]: row for row in s["byProvider"]}
@@ -1766,7 +1766,7 @@ sys.stdin.read()
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
                 patch.dict(os.environ, env, clear=False),
-                patch.object(gu.urllib.request, "urlopen", side_effect=fake_urlopen),
+                patch.object(gu, "_urlopen_auth", side_effect=fake_urlopen),
             ):
                 s = gu.collect_summary(period="today", tz_name="UTC", refresh=True, sync_pricing=False)
                 by_cli = {row["cli"]: row for row in s["byProvider"]}
@@ -1880,13 +1880,13 @@ sys.stdin.read()
 
             grok_auth["oidcIssuer"] = "https://auth.x.ai"
             missing_scope = {**grok_auth, "scopeKey": "missing-scope"}
-            with patch.object(gu.urllib.request, "urlopen") as m_open:
+            with patch.object(gu, "_urlopen_auth") as m_open:
                 self.assertIsNone(gu._refresh_grok_access_token(missing_scope))
                 m_open.assert_not_called()
 
             with patch.object(
-                gu.urllib.request,
-                "urlopen",
+                gu,
+                "_urlopen_auth",
                 return_value=_JsonResp({"access_token": "new_g_acc", "refresh_token": "new_g_ref", "expires_in": 1800}),
             ):
                 tok = gu._refresh_grok_access_token(grok_auth)
@@ -1898,14 +1898,14 @@ sys.stdin.read()
             self.assertEqual(saved_grok["https://accounts.x.ai/sign-in"]["refresh_token"], "new_g_ref")
 
             stale_grok_auth = {**grok_auth, "token": "old_g_acc", "refreshToken": "old_g_ref", "expiresAt": 1000}
-            with patch.object(gu.urllib.request, "urlopen") as m_open:
+            with patch.object(gu, "_urlopen_auth") as m_open:
                 reused = gu._refresh_grok_access_token(stale_grok_auth)
                 m_open.assert_not_called()
             self.assertEqual(reused, "new_g_acc")
             self.assertEqual(stale_grok_auth["refreshToken"], "new_g_ref")
 
             with (
-                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "rot_g", "refresh_token": "rot_g_ref"})),
+                patch.object(gu, "_urlopen_auth", return_value=_JsonResp({"access_token": "rot_g", "refresh_token": "rot_g_ref"})),
                 patch.object(gu, "_atomic_write_text", side_effect=OSError("disk full")),
             ):
                 self.assertEqual(gu._refresh_grok_access_token(grok_auth), "rot_g")
@@ -1931,8 +1931,8 @@ sys.stdin.read()
 
             kimi_auth["oauthHost"] = "https://auth.kimi.com"
             with patch.object(
-                gu.urllib.request,
-                "urlopen",
+                gu,
+                "_urlopen_auth",
                 return_value=_JsonResp({"access_token": "new_k", "refresh_token": "new_k_ref", "expires_in": 3600}),
             ):
                 ktok = gu._refresh_kimi_access_token(kimi_auth)
@@ -1944,14 +1944,14 @@ sys.stdin.read()
             self.assertEqual(saved_kimi["refresh_token"], "new_k_ref")
 
             stale_kimi_auth = {**kimi_auth, "accessToken": "old_k", "refreshToken": "old_k_ref", "expiresAt": 1000}
-            with patch.object(gu.urllib.request, "urlopen") as m_open:
+            with patch.object(gu, "_urlopen_auth") as m_open:
                 reused_k = gu._refresh_kimi_access_token(stale_kimi_auth)
                 m_open.assert_not_called()
             self.assertEqual(reused_k, "new_k")
             self.assertEqual(stale_kimi_auth["refreshToken"], "new_k_ref")
 
             with (
-                patch.object(gu.urllib.request, "urlopen", return_value=_JsonResp({"access_token": "rot_k", "refresh_token": "rot_k_ref"})),
+                patch.object(gu, "_urlopen_auth", return_value=_JsonResp({"access_token": "rot_k", "refresh_token": "rot_k_ref"})),
                 patch.object(gu, "_atomic_write_text", side_effect=OSError("ro")),
             ):
                 self.assertEqual(gu._refresh_kimi_access_token(kimi_auth), "rot_k")
@@ -2008,7 +2008,7 @@ sys.stdin.read()
                 "authFile": grok_home_file,
                 "scopeKey": "https://accounts.x.ai/sign-in",
             }
-            with patch.object(gu.urllib.request, "urlopen", side_effect=_capture_grok_refresh):
+            with patch.object(gu, "_urlopen_auth", side_effect=_capture_grok_refresh):
                 self.assertEqual(gu._refresh_grok_access_token(stale_next_proc_grok), "next_g_tok")
             self.assertEqual(len(sent_bodies), 1)
             self.assertIn("refresh_token=exp_g_ref", sent_bodies[0])
@@ -2675,6 +2675,359 @@ sys.stdin.read()
             session_payload = gu.collect_codex_session_pricing(str(rollout))
             self.assertIn("catalog", session_payload)
             self.assertTrue(session_payload["rollout"]["hasUsage"])
+
+    def test_opencode_go_limits_probe_keys_fallback_and_windows(self):
+        resets_at = "2026-11-24T12:00:00.000Z"
+
+        class _FakeResp:
+            def __init__(self, payload: dict):
+                self.status = 200
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, n: int = -1) -> bytes:
+                return self._raw if n < 0 else self._raw[:n]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            oc_dir = home / ".local" / "share" / "opencode"
+            oc_dir.mkdir(parents=True)
+            (oc_dir / "auth.json").write_text(
+                json.dumps({"opencode-go": {"type": "api", "key": "auth-go-key"}}),
+                "utf-8",
+            )
+            db_path = oc_dir / "opencode.db"
+            con = sqlite3.connect(str(db_path))
+            con.execute(
+                "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, value TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)"
+            )
+            con.execute(
+                "INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)",
+                ("c1", "opencode", json.dumps({"type": "key", "key": "console-key", "metadata": {"server": "https://opencode.ai/console"}}), 1, 2, 2),
+            )
+            con.execute(
+                "INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)",
+                ("c2", "opencode-go", json.dumps({"type": "key", "key": "db-go-key"}), 1, 3, 3),
+            )
+            con.execute(
+                "INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)",
+                ("c3", "opencode", json.dumps({"type": "key", "key": "custom-host-key", "metadata": {"server": "https://selfhosted.example"}}), 1, 9, 9),
+            )
+            con.commit()
+            con.close()
+
+            clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
+            with patch.dict(os.environ, clean_env, clear=True):
+                keys = gu._extract_opencode_go_keys(home)
+                self.assertEqual(keys, ["db-go-key", "auth-go-key"])
+
+                seen_tokens: list[str] = []
+
+                def fake_urlopen(req, timeout=None):
+                    auth_header = req.get_header("Authorization") or ""
+                    token = auth_header.replace("Bearer ", "")
+                    seen_tokens.append(token)
+                    if token == "db-go-key":
+                        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+                    return _FakeResp({
+                        "usage": {
+                            "rolling": {"percent": 12.5, "resetsAt": resets_at},
+                            "weekly": {"percent": 40, "resetsAt": resets_at},
+                            "monthly": {"percent": 125, "resetsAt": resets_at},
+                        }
+                    })
+
+                with patch.object(gu, "_urlopen_auth", side_effect=fake_urlopen):
+                    res = gu._probe_opencode_limits(home)
+                self.assertEqual(seen_tokens, ["db-go-key", "auth-go-key"])
+                self.assertEqual(res["cli"], "OpenCode")
+                self.assertEqual(res["planType"], "Go")
+                self.assertEqual(res["status"], "ok")
+                self.assertEqual(res["source"], "live")
+                self.assertEqual([w["id"] for w in res["windows"]], ["go_rolling", "go_weekly", "go_monthly"])
+                self.assertEqual([w["label"] for w in res["windows"]], [gu._tr("短期", "Session"), gu._tr("每周", "Weekly"), gu._tr("每月", "Monthly")])
+                self.assertEqual([w["usedPercent"] for w in res["windows"]], [12.5, 40.0, 100.0])
+                self.assertEqual([w["remainingPercent"] for w in res["windows"]], [87.5, 60.0, 0.0])
+                self.assertEqual([w["windowDurationMs"] for w in res["windows"]], [5 * 3_600_000, 7 * 86_400_000, None])
+
+                def fake_403(req, timeout=None):
+                    raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+                with patch.object(gu, "_urlopen_auth", side_effect=fake_403):
+                    non_go = gu._probe_opencode_limits(home)
+                self.assertEqual(non_go["status"], "unconfigured")
+
+                cache_dir = home / ".cache"
+                cache_dir.mkdir()
+                with (
+                    patch.object(gu.Path, "home", return_value=home),
+                    patch.object(gu, "_cache_dir", return_value=cache_dir),
+                    patch.object(gu, "_has_codex_oauth", return_value=False),
+                    patch.object(gu, "_has_claude_oauth", return_value=False),
+                    patch.object(gu, "_has_antigravity_oauth", return_value=False),
+                    patch.object(gu, "_has_grok_oauth", return_value=False),
+                    patch.object(gu, "_has_deepseek_auth", return_value=False),
+                    patch.object(gu, "_has_kimi_oauth", return_value=False),
+                    patch.object(gu, "_urlopen_auth", side_effect=lambda req, timeout=None: _FakeResp({
+                        "usage": {
+                            "rolling": {"percent": 5, "resetsAt": resets_at},
+                            "weekly": {"percent": 20, "resetsAt": resets_at},
+                            "monthly": {"percent": 80, "resetsAt": resets_at},
+                        }
+                    })),
+                ):
+                    limits = gu.collect_limits(fresh=True)
+                self.assertEqual([p["cli"] for p in limits["providers"]], ["OpenCode"])
+
+            with patch.dict(
+                os.environ,
+                {**clean_env, "OPENCODE_AUTH_CONTENT": json.dumps({"opencode-go": {"type": "api", "key": "inline-key"}})},
+                clear=True,
+            ):
+                self.assertEqual(gu._extract_opencode_go_keys(home), ["inline-key"])
+
+    def test_auth_redirect_blocks_cross_origin_and_https_downgrade(self):
+        import http.server
+        import threading
+
+        handler = gu._SameOriginRedirectHandler()
+        base_req = gu.urllib.request.Request(
+            "https://opencode.ai/zen/go/v1/usage",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        for bad_url in (
+            "https://evil.example/steal",
+            "http://opencode.ai/zen/go/v1/usage",
+            "https://opencode.ai:8443/zen/go/v1/usage",
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                handler.redirect_request(base_req, None, 302, "Found", {}, bad_url)
+            ctx.exception.close()
+        same_req = handler.redirect_request(base_req, None, 302, "Found", {}, "https://opencode.ai/zen/go/v2/usage")
+        self.assertEqual(same_req.full_url, "https://opencode.ai/zen/go/v2/usage")
+
+        leaked_headers: list[str] = []
+
+        class _SinkHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                leaked_headers.append(self.headers.get("Authorization") or "")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"usage":{"rolling":{"percent":1}}}')
+
+            def log_message(self, format, *args):
+                return
+
+        sink_srv = http.server.HTTPServer(("127.0.0.1", 0), _SinkHandler)
+        sink_port = sink_srv.server_address[1]
+
+        class _RedirectorHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{sink_port}/steal")
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                return
+
+        redir_srv = http.server.HTTPServer(("127.0.0.1", 0), _RedirectorHandler)
+        redir_port = redir_srv.server_address[1]
+        t_sink = threading.Thread(target=sink_srv.serve_forever, daemon=True)
+        t_redir = threading.Thread(target=redir_srv.serve_forever, daemon=True)
+        t_sink.start()
+        t_redir.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
+                with (
+                    patch.dict(os.environ, {**clean_env, "OPENCODE_API_KEY": "top-secret-key"}, clear=True),
+                    patch.object(gu, "OPENCODE_GO_USAGE_URL", f"http://127.0.0.1:{redir_port}/zen/go/v1/usage"),
+                ):
+                    res = gu._probe_opencode_limits(home)
+                self.assertEqual(res["status"], "error")
+                self.assertIn("302", res["message"] or "")
+                self.assertEqual(leaked_headers, [])
+        finally:
+            redir_srv.shutdown()
+            sink_srv.shutdown()
+            redir_srv.server_close()
+            sink_srv.server_close()
+
+    def test_opencode_corrupt_auth_unicode_error_and_limits_fault_isolation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            oc_dir = home / ".local" / "share" / "opencode"
+            oc_dir.mkdir(parents=True)
+            (oc_dir / "auth.json").write_bytes(b"\xff\xfe\xfd")
+            cache_dir = home / ".cache"
+            cache_dir.mkdir()
+            clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
+            with patch.dict(os.environ, clean_env, clear=True):
+                self.assertEqual(gu._extract_opencode_go_keys(home), [])
+                fake_claude = {
+                    "cli": "Claude Code",
+                    "planType": "Max",
+                    "updatedAt": "2026-11-23T00:00:00Z",
+                    "source": "live",
+                    "status": "ok",
+                    "message": None,
+                    "windows": [gu._make_window("five_hour", "Session", 10.0, None, 5 * 3_600_000)],
+                    "credits": None,
+                }
+                with (
+                    patch.object(gu.Path, "home", return_value=home),
+                    patch.object(gu, "_cache_dir", return_value=cache_dir),
+                    patch.object(gu, "_has_codex_oauth", side_effect=RuntimeError("corrupt codex")),
+                    patch.object(gu, "_has_claude_oauth", return_value=True),
+                    patch.object(gu, "_probe_claude_limits", return_value=fake_claude),
+                    patch.object(gu, "_has_antigravity_oauth", return_value=False),
+                    patch.object(gu, "_has_grok_oauth", return_value=False),
+                    patch.object(gu, "_has_deepseek_auth", return_value=False),
+                    patch.object(gu, "_has_kimi_oauth", return_value=False),
+                ):
+                    limits = gu.collect_limits(fresh=True)
+                self.assertEqual([p["cli"] for p in limits["providers"]], ["Claude Code"])
+
+    def test_opencode_wal_db_opens_only_once_per_collect_limits_and_preserves_priority(self):
+        class _FakeResp:
+            status = 200
+
+            def __init__(self, payload: dict):
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, n: int = -1) -> bytes:
+                return self._raw if n < 0 else self._raw[:n]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            oc_dir = home / ".local" / "share" / "opencode"
+            oc_dir.mkdir(parents=True)
+            (oc_dir / "auth.json").write_text(
+                json.dumps({"opencode-go": {"type": "api", "key": "auth-go-key"}}),
+                "utf-8",
+            )
+            db_path = oc_dir / "opencode.db"
+            con = sqlite3.connect(str(db_path))
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute(
+                "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, value TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)"
+            )
+            con.execute(
+                "INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)",
+                ("c1", "opencode", json.dumps({"type": "key", "key": "console-key", "metadata": {"server": "https://opencode.ai/console"}}), 1, 2, 2),
+            )
+            con.execute(
+                "INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)",
+                ("c2", "opencode-go", json.dumps({"type": "key", "key": "db-go-key"}), 1, 3, 3),
+            )
+            con.commit()
+            con.execute("INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)", ("c3", "other", "{}", 1, 4, 4))
+            con.commit()
+
+            cache_dir = home / ".cache"
+            cache_dir.mkdir()
+            clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
+            seen_tokens: list[str] = []
+
+            def fake_urlopen(req, timeout=None):
+                seen_tokens.append((req.get_header("Authorization") or "").replace("Bearer ", ""))
+                if len(seen_tokens) < 3:
+                    raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+                return _FakeResp({"usage": {"rolling": {"percent": 15, "resetsAt": "2026-11-24T12:00:00Z"}}})
+
+            try:
+                with (
+                    patch.dict(os.environ, clean_env, clear=True),
+                    patch.object(gu.Path, "home", return_value=home),
+                    patch.object(gu, "_cache_dir", return_value=cache_dir),
+                    patch.object(gu, "_has_codex_oauth", return_value=False),
+                    patch.object(gu, "_has_claude_oauth", return_value=False),
+                    patch.object(gu, "_has_antigravity_oauth", return_value=False),
+                    patch.object(gu, "_has_grok_oauth", return_value=False),
+                    patch.object(gu, "_has_deepseek_auth", return_value=False),
+                    patch.object(gu, "_has_kimi_oauth", return_value=False),
+                    patch.object(gu, "_open_readonly_sqlite", wraps=gu._open_readonly_sqlite) as open_spy,
+                    patch.object(gu, "_urlopen_auth", side_effect=fake_urlopen),
+                ):
+                    limits = gu.collect_limits(fresh=True)
+                self.assertEqual(open_spy.call_count, 1)
+                self.assertEqual(seen_tokens, ["console-key", "db-go-key", "auth-go-key"])
+                self.assertEqual([p["cli"] for p in limits["providers"]], ["OpenCode"])
+            finally:
+                con.close()
+
+    def test_kimi_multi_pool_same_duration_preserves_distinct_pool_names(self):
+        class _FakeResp:
+            status = 200
+
+            def __init__(self, payload: dict):
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, n: int = -1) -> bytes:
+                return self._raw if n < 0 else self._raw[:n]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            kimi_dir = home / ".kimi" / "credentials"
+            kimi_dir.mkdir(parents=True)
+            (kimi_dir / "kimi-code.json").write_text(
+                json.dumps({"access_token": "tok", "expires_at": time.time() + 3600}),
+                "utf-8",
+            )
+            payload = {
+                "user": {"membership": {"level": "LEVEL_PRO"}},
+                "limits": [
+                    {
+                        "name": "Model A",
+                        "window": {"duration": 5, "timeUnit": "TIME_UNIT_HOUR"},
+                        "detail": {"limit": "100", "used": "10"},
+                    },
+                    {
+                        "name": "Model B",
+                        "window": {"duration": 5, "timeUnit": "TIME_UNIT_HOUR"},
+                        "detail": {"limit": "100", "used": "40"},
+                    },
+                    {
+                        "name": "5h Limit",
+                        "window": {"duration": 5, "timeUnit": "TIME_UNIT_HOUR"},
+                        "detail": {"limit": "100", "used": "5"},
+                    },
+                    {
+                        "name": "limit_5h",
+                        "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                        "detail": {"limit": "100", "used": "15"},
+                    },
+                ],
+            }
+            with (
+                patch.dict(os.environ, {"KIMI_SHARE_DIR": str(home / ".kimi")}, clear=False),
+                patch.object(gu, "_urlopen_auth", return_value=_FakeResp(payload)),
+            ):
+                lim = gu._probe_kimi_limits(home)
+            labels = [w["label"] for w in lim["windows"]]
+            short_lbl = gu._tr("短期", "Session")
+            self.assertEqual(
+                labels,
+                [f"{short_lbl} · Model A", f"{short_lbl} · Model B", short_lbl, short_lbl],
+            )
 
 
 if __name__ == "__main__":

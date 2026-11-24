@@ -58,6 +58,7 @@ import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.LineHeightStyle
@@ -91,6 +92,7 @@ private val LocalListNestingDepth = compositionLocalOf { 0 }
 private val LocalQuoteNestingDepth = compositionLocalOf { 0 }
 private val LocalMarkdownIndentDp = compositionLocalOf { 0.dp }
 private val LocalMarkdownStreamingTail = compositionLocalOf { false }
+private val LocalMarkdownFootnote = compositionLocalOf { false }
 
 internal const val MAX_CARD_MARKDOWN_CHARS = 128 * 1024
 internal const val MAX_INLINE_MATH_CHARS = 512
@@ -364,6 +366,7 @@ internal fun NativeMarkdown(
         LocalQuoteNestingDepth provides 0,
         LocalMarkdownIndentDp provides 0.dp,
         LocalMarkdownStreamingTail provides !shown.document.complete,
+        LocalMarkdownFootnote provides false,
     ) {
         LumaSelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(11.dp), modifier = Modifier.fillMaxWidth()) {
@@ -473,13 +476,16 @@ private fun MarkdownBlock(
     val indent = LocalMarkdownIndentDp.current
     val indentModifier = if (indent > 0.dp) Modifier.padding(start = indent) else Modifier
     val useEditorial = LocalEditorialMarkdown.current
+    val inFootnote = LocalMarkdownFootnote.current
+    val paragraphBodyStyle = when {
+        inFootnote && useEditorial -> editorialBodyStyle().copy(fontSize = 13.5.sp, lineHeight = 20.sp)
+        inFootnote -> MaterialTheme.typography.bodyMedium.copy(lineBreak = LineBreak.Simple)
+        useEditorial -> editorialBodyStyle()
+        else -> MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
+    }
     when (node.kind) {
         MarkdownKind.PARAGRAPH -> {
-            val bodyStyle = if (useEditorial) {
-                editorialBodyStyle()
-            } else {
-                MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
-            }
+            val bodyStyle = paragraphBodyStyle
             val inlineCatalogIds = remember(node) { extractInlinePluginCatalogIds(node) }
             val media = remember(node) { markdownImages(node, resourceLinks = true) }
             val mediaBudget = if (budget == Int.MAX_VALUE) media.size else (budget - node.inlineUnits).coerceIn(0, media.size)
@@ -613,20 +619,124 @@ private fun MarkdownBlock(
             }
         }
         MarkdownKind.TABLE -> MarkdownTable(node, onFileLink, budget)
+        MarkdownKind.FOOTNOTES -> MarkdownFootnotes(node, onFileLink, budget)
         MarkdownKind.RULE -> HorizontalDivider(
             Modifier.padding(vertical = 4.dp),
             thickness = 0.5.dp,
             color = colors.outlineVariant.copy(alpha = 0.45f),
         )
         MarkdownKind.HTML_BLOCK -> {
-            val bodyStyle = if (useEditorial) {
-                editorialBodyStyle()
-            } else {
-                MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
-            }
-            Text(node.literal.substring(0, markdownVisibleEnd(node.literal, budget)), modifier = indentModifier, style = bodyStyle)
+            Text(node.literal.substring(0, markdownVisibleEnd(node.literal, budget)), modifier = indentModifier, style = paragraphBodyStyle)
         }
         else -> MarkdownChildren(node.children, budget, onFileLink)
+    }
+}
+
+@Composable
+private fun MarkdownFootnotes(
+    node: MarkdownAst,
+    onFileLink: ((String) -> Unit)?,
+    budget: Int,
+) {
+    if (budget <= 0 || node.children.isEmpty()) return
+    val colors = MaterialTheme.colorScheme
+    val isDark = codePaletteDark(colors)
+    val markerColor = (if (isDark) Color(0xFF6DA7EC) else Color(0xFF184F95)).copy(alpha = 0.90f)
+    val useEditorial = LocalEditorialMarkdown.current
+    val footnoteBodyStyle = if (useEditorial) {
+        editorialBodyStyle().copy(fontSize = 13.5.sp, lineHeight = 20.sp)
+    } else {
+        MaterialTheme.typography.bodyMedium.copy(lineBreak = LineBreak.Simple)
+    }
+    val markerStyle = footnoteBodyStyle.copy(
+        fontSize = 12.5.sp,
+        fontWeight = FontWeight.Medium,
+        fontFeatureSettings = TABULAR_NUMS_FEATURE,
+    )
+    val maxNum = node.children.maxOfOrNull { it.number } ?: 1
+    val slotWidth = when {
+        maxNum >= 100 -> 28.dp
+        maxNum >= 10 -> 22.dp
+        else -> 16.dp
+    }
+    val footnotesStreamingTail = LocalMarkdownStreamingTail.current
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        HorizontalDivider(
+            Modifier.padding(bottom = 2.dp),
+            thickness = 0.5.dp,
+            color = colors.outlineVariant.copy(alpha = 0.45f),
+        )
+        CompositionLocalProvider(
+            LocalMarkdownFootnote provides true,
+            LocalMarkdownTextColor provides colors.onSurface.copy(alpha = 0.80f),
+            LocalMarkdownIndentDp provides 0.dp,
+        ) {
+            var remaining = if (budget == Int.MAX_VALUE) Int.MAX_VALUE else (budget - 1).coerceAtLeast(0)
+            node.children.forEachIndexed { index, item ->
+                if (remaining > 0) {
+                    val marker = "${item.number}."
+                    val itemFull = remaining >= item.revealUnits
+                    val shownMarker = if (itemFull) marker else marker.substring(0, markdownVisibleEnd(marker, remaining))
+                    val bodyBudget = if (itemFull) Int.MAX_VALUE else (remaining - marker.length).coerceAtLeast(0)
+                    val itemStreamingTail = footnotesStreamingTail && index == node.children.lastIndex
+                    key(item.destination.ifEmpty { index.toString() }) {
+                        CompositionLocalProvider(LocalMarkdownStreamingTail provides itemStreamingTail) {
+                            val children = item.children
+                            if (children.isEmpty()) {
+                                Row(Modifier.fillMaxWidth()) {
+                                    Text(shownMarker, Modifier.widthIn(min = slotWidth), color = markerColor, style = markerStyle)
+                                }
+                            } else {
+                                val first = children.first()
+                                val firstFull = bodyBudget >= first.revealUnits
+                                val firstBudget = if (firstFull) Int.MAX_VALUE else bodyBudget
+                                val restBudget = if (bodyBudget == Int.MAX_VALUE) Int.MAX_VALUE else (bodyBudget - first.revealUnits).coerceAtLeast(0)
+                                val rest = if (children.size > 1) children.subList(1, children.size) else emptyList()
+                                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    if (first.kind == MarkdownKind.PARAGRAPH && extractStandalonePluginCatalogId(first) == null) {
+                                        val firstStreamingTail = itemStreamingTail && rest.isEmpty()
+                                        Row(Modifier.fillMaxWidth()) {
+                                            Text(
+                                                shownMarker,
+                                                Modifier.widthIn(min = slotWidth).alignByBaseline(),
+                                                color = markerColor,
+                                                style = markerStyle,
+                                            )
+                                            Box(Modifier.weight(1f).alignByBaseline()) {
+                                                CompositionLocalProvider(LocalMarkdownStreamingTail provides firstStreamingTail) {
+                                                    RichText(first, footnoteBodyStyle, onFileLink, firstBudget)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Row(Modifier.fillMaxWidth()) {
+                                            Text(
+                                                shownMarker,
+                                                Modifier.widthIn(min = slotWidth),
+                                                color = markerColor,
+                                                style = markerStyle,
+                                            )
+                                            Box(Modifier.weight(1f)) {
+                                                MarkdownBlock(first, onFileLink, firstBudget, isFirstBlock = true)
+                                            }
+                                        }
+                                    }
+                                    if (rest.isNotEmpty() && restBudget > 0) {
+                                        CompositionLocalProvider(LocalMarkdownIndentDp provides slotWidth) {
+                                            MarkdownChildren(rest, restBudget, onFileLink)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    remaining = if (remaining == Int.MAX_VALUE) Int.MAX_VALUE else (remaining - item.revealUnits).coerceAtLeast(0)
+                }
+            }
+        }
     }
 }
 
@@ -641,10 +751,12 @@ private fun MarkdownListItem(
 ) {
     val colors = MaterialTheme.colorScheme
     val useEditorial = LocalEditorialMarkdown.current
-    val bodyStyle = if (useEditorial) {
-        editorialBodyStyle()
-    } else {
-        MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
+    val inFootnote = LocalMarkdownFootnote.current
+    val bodyStyle = when {
+        inFootnote && useEditorial -> editorialBodyStyle().copy(fontSize = 13.5.sp, lineHeight = 20.sp)
+        inFootnote -> MaterialTheme.typography.bodyMedium.copy(lineBreak = LineBreak.Simple)
+        useEditorial -> editorialBodyStyle()
+        else -> MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Simple)
     }
     val markerStyle = bodyStyle.copy(
         fontWeight = FontWeight.Medium,
@@ -926,6 +1038,13 @@ private fun buildRichText(
         fontWeight = FontWeight.Medium,
         color = accent,
     )
+    val footnoteRefStyle = SpanStyle(
+        color = linkColor,
+        fontSize = 0.72.em,
+        fontWeight = FontWeight.SemiBold,
+        fontFeatureSettings = TABULAR_NUMS_FEATURE,
+        baselineShift = BaselineShift(0.36f),
+    )
     val result = buildAnnotatedString {
         fun renderText(rawText: String) {
             val text = if ("plugin-card" in rawText) pluginCardStripInlineRegex.replace(rawText, "") else rawText
@@ -958,6 +1077,7 @@ private fun buildRichText(
         fun visit(current: MarkdownAst) {
             when (current.kind) {
                 MarkdownKind.TEXT -> renderText(current.literal)
+                MarkdownKind.FOOTNOTE_REF -> withStyle(footnoteRefStyle) { append(current.literal) }
                 MarkdownKind.SOFT_BREAK -> append(" ")
                 MarkdownKind.HARD_BREAK -> append("\n")
                 MarkdownKind.CODE -> withStyle(codeStyle) { append(current.literal) }

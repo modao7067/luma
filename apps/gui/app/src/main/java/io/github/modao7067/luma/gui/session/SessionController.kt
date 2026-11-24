@@ -34,6 +34,7 @@ class SessionController(private val context: Context) : CockpitActions {
     private val blank get() = store.navigation.blank
     private val blankImports = mutableListOf<Attachment>()
     private val browser get() = (context.applicationContext as io.github.modao7067.luma.gui.LumaApplication).browser
+    private val optionalBrowser get() = (context.applicationContext as? io.github.modao7067.luma.gui.LumaApplication)?.browser
     private var inventoryGeneration = 0
     private val sessions = linkedMapOf<String, Live>()
     private val mutableState = MutableStateFlow(CockpitState())
@@ -156,6 +157,8 @@ class SessionController(private val context: Context) : CockpitActions {
         val durationTracker = io.github.modao7067.luma.gui.ui.SessionProcessDurationTracker()
         val notificationTracker = SessionNotificationTracker()
         var userStoppedTurn = false
+        var wasViewingInForeground = false
+        var foregroundViewedEpoch = 0
         var view = SessionView(
             summary(record),
             draft = record.draft,
@@ -458,7 +461,11 @@ class SessionController(private val context: Context) : CockpitActions {
                         }
                     }
                 }
+            } else if (backgrounded && !hasPendingWork(s)) {
+                s.reconnectJob?.cancel(); s.reconnectJob = null
+                s.openCode?.setBackgroundIdlePaused(true)
             } else if (!s.releasing && s.observing && !s.view.loading && s.record.threadId != null && s.nativeCli?.retryable != false && s.reconnectJob?.isActive != true && s.connectJob?.isActive != true && s.openCode?.recovering != true) {
+                s.openCode?.setBackgroundIdlePaused(false)
                 s.reconnectJob = scope.launch {
                     val intent = s.generation
                     delay(s.reconnectDelay)
@@ -472,13 +479,30 @@ class SessionController(private val context: Context) : CockpitActions {
                         publish()
                     }
                 }
+            } else {
+                s.openCode?.setBackgroundIdlePaused(false)
             }
             scheduleDismissals(s)
             settleCommands(s)
+            optionalBrowser?.let { ab ->
+                if (ab.isAgentOperating(s.record.id) &&
+                    !ab.isAgentCommandInFlight(s.record.id) &&
+                    s.view.activeTurnId == null &&
+                    !s.view.loading &&
+                    s.view.requests.isEmpty() &&
+                    !s.firstSendPending &&
+                    !s.dispatchingLocal
+                ) {
+                    ab.stopAgentOperating(s.record.id)
+                }
+            }
             val codexRequests = if (s.record.cli == "Codex") codexRequests(s) else emptyList()
             val effectiveRequests = if (s.record.cli != "Codex") s.view.requests else codexRequests
             val effectiveMessages = if (s.record.cli != "Codex") s.view.messages else s.items.snapshot()
             val viewingInForeground = foreground && selected == s.record.id && childObservation?.parentId != s.record.id
+            val enteredForegroundView = viewingInForeground && !s.wasViewingInForeground
+            if (viewingInForeground) s.foregroundViewedEpoch++
+            s.wasViewingInForeground = viewingInForeground
             if (s.activity.reconcile(
                     s.record, s.view.connected, s.view.loading, s.hydrating,
                     s.view.activeTurnId, effectiveMessages, effectiveRequests, viewingInForeground, activityClock,
@@ -496,7 +520,7 @@ class SessionController(private val context: Context) : CockpitActions {
             )) {
                 is SessionNotificationDecision.Post -> notificationSink.post(s.record.id, s.record.title, s.record.cli, decision.kind)
                 SessionNotificationDecision.Cancel -> notificationSink.cancel(s.record.id)
-                SessionNotificationDecision.None -> {}
+                SessionNotificationDecision.None -> if (enteredForegroundView) notificationSink.cancel(s.record.id)
             }
             diagnostics.observe(s.record.id, s.view.error, s.record.submissions, s.record.queueDismissals)
             if (s.dormant) {
@@ -630,6 +654,15 @@ class SessionController(private val context: Context) : CockpitActions {
     private fun isDisplayedInForegroundTerminal(s: Live): Boolean =
         foregroundTerminalSnapshot?.matches(s) == true
 
+    private fun hasPendingWork(s: Live): Boolean =
+        s.view.activeTurnId != null ||
+            s.view.loading ||
+            s.firstSendPending ||
+            s.dispatchingLocal ||
+            SubmissionLedger.pending(s.record) ||
+            s.view.subAgents.any { it.status !in setOf("succeeded", "completed", "failed", "cancelled", "closed", "aborted") } ||
+            s.view.messages.any { it.kind == "tool" && it.status in setOf("running", "in_progress", "pending") }
+
     private fun canReleaseIdle(
         s: Live,
         backgroundOnly: Boolean = true,
@@ -639,7 +672,7 @@ class SessionController(private val context: Context) : CockpitActions {
             (!backgroundOnly || backgrounded || (selected != s.record.id && !foregroundTracker.isPinned(s.record.id))) &&
             s.observing && !s.dormant &&
             s.connectJob?.isActive != true && !s.firstSendPending && !s.dispatchingLocal && !s.dismissing &&
-            childObservation?.parentId != s.record.id && SessionIdlePolicy.canAutoRelease(s.record, s.view) &&
+            (backgrounded || childObservation?.parentId != s.record.id) && SessionIdlePolicy.canAutoRelease(s.record, s.view) &&
             when {
                 s.record.cli in CliCatalog.bridged -> s.nativeCli?.releasable == true
                 s.record.cli == "Codex" -> s.record.externalSocket == null && s.idleConfirmed && s.historyResumable
@@ -1067,6 +1100,7 @@ class SessionController(private val context: Context) : CockpitActions {
             return false
         }
         disposeSession(previous, destroyBackend = true)
+        optionalBrowser?.closeOwned(previous.record.id, previous.record.threadId)
         return true
     }
 
@@ -1219,11 +1253,16 @@ class SessionController(private val context: Context) : CockpitActions {
             backgrounded = !visible
             refreshForegroundTerminalSnapshot(force = true)
             if (visible) {
+                wakeEpoch++
                 runtime.onAppForegrounded()
                 if (RootBackgroundNotifications.isEnabled(context)) {
                     rootWatcherArmed = false
                     lastArmedRootSessions = emptyList()
                     RootBackgroundNotifications.disarmLocal(context)
+                }
+                sessions.values.forEach { s ->
+                    s.openCode?.setBackgroundIdlePaused(false)
+                    if (s.observing && !s.view.connected && !s.view.loading) s.reconnectDelay = 1000L
                 }
                 current()?.let { if ((it.dormant && !it.observing) || (it.releasing && !inCliMaintenance(it))) startObservation(it) }
             } else {
@@ -1249,15 +1288,23 @@ class SessionController(private val context: Context) : CockpitActions {
             val activeTool = s.view.messages.any {
                 it.kind == "tool" && it.status in setOf("running", "in_progress", "pending")
             }
-            val needsWatch = s.view.activeTurnId != null ||
-                s.view.requests.isNotEmpty() ||
-                s.view.loading ||
-                s.connectJob?.isActive == true ||
-                s.firstSendPending ||
-                s.dispatchingLocal ||
-                SubmissionLedger.pending(s.record) ||
-                activeSubAgent ||
-                activeTool
+            val awaitingOnlyApproval = s.view.requests.isNotEmpty() &&
+                !activeSubAgent &&
+                !s.view.loading &&
+                s.connectJob?.isActive != true &&
+                !s.firstSendPending &&
+                !s.dispatchingLocal &&
+                !SubmissionLedger.pending(s.record)
+            val needsWatch = !awaitingOnlyApproval && (
+                s.view.activeTurnId != null ||
+                    s.view.loading ||
+                    s.connectJob?.isActive == true ||
+                    s.firstSendPending ||
+                    s.dispatchingLocal ||
+                    SubmissionLedger.pending(s.record) ||
+                    activeSubAgent ||
+                    activeTool
+                )
             if (!needsWatch) return@mapNotNull null
             val proto = when {
                 s.record.cli in CliCatalog.bridged -> "bridged"
@@ -1307,10 +1354,14 @@ class SessionController(private val context: Context) : CockpitActions {
         events: List<Pair<String, SessionNotificationKind>>,
         onComplete: () -> Unit,
     ) {
+        if (!foreground && !backgrounded) {
+            backgrounded = true
+            publish()
+        }
         val epoch = wakeEpoch
         scope.launch {
             try {
-                val targets = ArrayList<Pair<Live, SessionNotificationKind>>(events.size)
+                val targets = ArrayList<Triple<Live, SessionNotificationKind, Int>>(events.size)
                 for ((sessionId, kind) in events) {
                     if (wakeEpoch != epoch) break
                     val s = sessions[sessionId]?.takeIf { it.record.environment == environment } ?: continue
@@ -1318,24 +1369,47 @@ class SessionController(private val context: Context) : CockpitActions {
                         s.userStoppedTurn = false
                         continue
                     }
+                    val viewedBefore = s.foregroundViewedEpoch
                     when {
                         !s.view.connected && !s.view.loading && s.openCode?.recovering != true -> startObservation(s)
                         s.record.cli in CliCatalog.bridged -> s.nativeCli?.pullLatest()
                         s.record.cli == "OpenCode" -> s.openCode?.refreshDashboard()
                     }
-                    targets += s to kind
+                    targets += Triple(s, kind, viewedBefore)
                 }
                 if (targets.isEmpty() || wakeEpoch != epoch) return@launch
                 withTimeoutOrNull(1000L) {
-                    while (wakeEpoch == epoch && targets.any { (s, kind) -> s.observing && s.notificationTracker.activePostedKind != kind }) {
+                    while (wakeEpoch == epoch && targets.any { (s, kind, viewedBefore) ->
+                            s.observing &&
+                                s.foregroundViewedEpoch == viewedBefore &&
+                                s.notificationTracker.activePostedKind != kind
+                        }
+                    ) {
                         delay(80L)
                     }
                 }
                 if (wakeEpoch != epoch) return@launch
-                for ((s, kind) in targets) {
+                for ((s, kind, viewedBefore) in targets) {
                     if (sessions[s.record.id] !== s || !s.observing) continue
                     val viewingNow = foreground && selected == s.record.id && childObservation?.parentId != s.record.id
-                    when (val decision = s.notificationTracker.onExternalWake(kind, viewingNow)) {
+                    if (viewingNow || s.foregroundViewedEpoch != viewedBefore) {
+                        s.notificationTracker.clear()
+                        notificationSink.cancel(s.record.id)
+                        continue
+                    }
+                    val settled = s.view.connected && !s.view.loading && !s.hydrating
+                    if (settled) {
+                        val effectiveRequests = if (s.record.cli != "Codex") s.view.requests else codexRequests(s)
+                        val alreadyReadCompletion = kind == SessionNotificationKind.COMPLETED &&
+                            s.view.activeTurnId == null &&
+                            !s.record.unread
+                        val alreadyResolvedRequest = (kind == SessionNotificationKind.APPROVAL || kind == SessionNotificationKind.QUESTION) &&
+                            effectiveRequests.isEmpty()
+                        if (alreadyReadCompletion || alreadyResolvedRequest) {
+                            continue
+                        }
+                    }
+                    when (val decision = s.notificationTracker.onExternalWake(kind, false)) {
                         is SessionNotificationDecision.Post -> notificationSink.post(s.record.id, s.record.title, s.record.cli, decision.kind)
                         SessionNotificationDecision.Cancel -> notificationSink.cancel(s.record.id)
                         SessionNotificationDecision.None -> {}
@@ -2779,7 +2853,7 @@ class SessionController(private val context: Context) : CockpitActions {
             publish(); return
         }
         disposeSession(s, destroyBackend = true)
-        browser.closeOwned(id, s.record.threadId)
+        optionalBrowser?.closeOwned(id, s.record.threadId)
         if (wasSelected) preferences.edit().remove("session").apply()
         publish()
     }

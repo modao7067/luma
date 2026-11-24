@@ -230,6 +230,31 @@ class OpenCodeSyncTest {
         assertNull(first.notice); assertNotNull(second.notice)
     }
 
+    @Test fun pausedSyncSuppressesBackgroundRetriesAndResumesImmediately() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        var live = false
+        var reads = 0
+        var failReads = true
+        val failed = ChannelSignal()
+        val recovered = ChannelSignal()
+        val sync = OpenCodeSync(scope, { live }, { live = true }, { _, _, _ ->
+            reads++
+            if (failReads) throw EOFException("offline")
+        }, { state -> if (state.connected) recovered.send() else failed.send() })
+        try {
+            sync.start()
+            failed.await()
+            assertEquals(1, reads)
+            sync.setPaused(true)
+            delay(1_300)
+            assertEquals("Paused sync must not retry in background", 1, reads)
+            failReads = false
+            sync.setPaused(false)
+            recovered.await()
+            assertEquals(2, reads)
+        } finally { sync.close(); scope.cancel() }
+    }
+
     private class ChannelSignal {
         private val signals = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         fun send() { signals.trySend(Unit) }

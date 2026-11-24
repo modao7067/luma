@@ -254,7 +254,7 @@ internal fun MenuSectionReveal(
 @Composable
 internal fun SmoothTailGrowth(
     rowId: String,
-    contentKey: Any,
+    contentKey: Any = Unit,
     knownHeights: MutableMap<String, Int>,
     animateArrival: Boolean,
     animatePop: Boolean = animateArrival,
@@ -265,11 +265,10 @@ internal fun SmoothTailGrowth(
         Box(Modifier.padding(top = topSpacing)) { content() }
         return
     }
-    var initialized by remember(rowId) { mutableStateOf(false) }
-    var lastContentKey by remember(rowId) { mutableStateOf(contentKey) }
+    val initializedFlag = remember(rowId) { BooleanArray(1) }
     val isLivePop = remember(rowId) { animatePop && knownHeights[rowId] == null }
-    val popScale = remember(rowId) { Animatable(if (isLivePop) 0.96f else 1f, Float.VectorConverter, 0.001f) }
-    val popAlpha = remember(rowId) { Animatable(if (isLivePop) 0f else 1f, Float.VectorConverter, 0.001f) }
+    val popScale = if (isLivePop) remember(rowId) { Animatable(0.96f, Float.VectorConverter, 0.001f) } else null
+    val popAlpha = if (isLivePop) remember(rowId) { Animatable(0f, Float.VectorConverter, 0.001f) } else null
     var targetPx by remember(rowId) { mutableIntStateOf(knownHeights[rowId] ?: if (animateArrival) 0 else -1) }
     var currentPx by remember(rowId) { mutableFloatStateOf((knownHeights[rowId] ?: 0).toFloat()) }
     val anim = remember(rowId) { Animatable(currentPx, Float.VectorConverter, 0.5f) }
@@ -290,8 +289,8 @@ internal fun SmoothTailGrowth(
             onDispose { turnReaders.remove(reader) }
         }
     }
-    LaunchedEffect(rowId, isLivePop) {
-        if (isLivePop) {
+    if (isLivePop && popScale != null && popAlpha != null) {
+        LaunchedEffect(rowId) {
             launch { popAlpha.animateTo(1f, spatialSpring()) }
             launch { popScale.animateTo(1f, spatialSpring()) }
         }
@@ -318,16 +317,22 @@ internal fun SmoothTailGrowth(
     Layout(
         content = {
             CompositionLocalProvider(LocalTurnAnimatingReaders provides localAnimReaders) {
-                Box(
-                    Modifier.graphicsLayer {
-                        val s = popScale.value
-                        scaleX = s
-                        scaleY = s
-                        alpha = popAlpha.value
-                        transformOrigin = TransformOrigin(1f, 1f)
-                    },
-                ) {
-                    content()
+                if (popScale != null && popAlpha != null) {
+                    Box(
+                        Modifier.graphicsLayer {
+                            val s = popScale.value
+                            scaleX = s
+                            scaleY = s
+                            alpha = popAlpha.value
+                            transformOrigin = TransformOrigin(1f, 1f)
+                        },
+                    ) {
+                        content()
+                    }
+                } else {
+                    Box {
+                        content()
+                    }
                 }
             }
         },
@@ -336,9 +341,8 @@ internal fun SmoothTailGrowth(
         val placeable = measurables.first().measure(constraints.copy(minHeight = 0))
         val spacingPx = topSpacing.roundToPx()
         val fullHeight = placeable.height + spacingPx
-        if (!initialized) {
-            initialized = true
-            lastContentKey = contentKey
+        if (!initializedFlag[0]) {
+            initializedFlag[0] = true
             val known = knownHeights[rowId]
             if (known == null && !animateArrival) {
                 targetPx = fullHeight
@@ -351,7 +355,6 @@ internal fun SmoothTailGrowth(
                 knownHeights[rowId] = startPx
             }
         } else {
-            lastContentKey = contentKey
             if (localAnimReaders.any { it.invoke() }) {
                 targetPx = fullHeight
                 currentPx = fullHeight.toFloat()

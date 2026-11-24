@@ -117,6 +117,9 @@ internal data class TypesetLayout(
     val minIntrinsicWidth: Float,
     val maxIntrinsicWidth: Float,
     val justifiedParagraph: Boolean,
+    val lineParagraphNaturalWidthEnd: FloatArray = FloatArray(0),
+    val linePrefixMinIntrinsic: FloatArray = FloatArray(0),
+    val lineCompletedParagraphMaxIntrinsic: FloatArray = FloatArray(0),
 )
 
 internal object TypesetEngine {
@@ -207,6 +210,8 @@ internal object TypesetEngine {
         maxWidthPx: Float,
         mode: TypesetMode,
         measurer: TypesetMeasurer,
+        previousLayout: TypesetLayout? = null,
+        previousRuns: List<TypesetRunInput>? = null,
     ): TypesetLayout {
         val lineMetrics = measurer.baseLineMetrics()
         val safeMaxWidth = if (maxWidthPx.isFinite() && maxWidthPx > 0f) maxWidthPx else Float.POSITIVE_INFINITY
@@ -236,12 +241,24 @@ internal object TypesetEngine {
                 minIntrinsicWidth = 0f,
                 maxIntrinsicWidth = 0f,
                 justifiedParagraph = false,
+                lineParagraphNaturalWidthEnd = floatArrayOf(0f),
+                linePrefixMinIntrinsic = floatArrayOf(0f),
+                lineCompletedParagraphMaxIntrinsic = floatArrayOf(0f),
             )
         }
 
         val normalizedRuns = normalizeRuns(text.length, runs)
-        val segments = splitHardParagraphs(text)
-        val allLines = ArrayList<TypesetLine>(segments.size * 2)
+        val keepLineCount = if (mode == TypesetMode.STREAMING && safeMaxWidth.isFinite() && previousLayout != null && previousRuns != null) {
+            findStreamingPrefixKeepCount(text, normalizedRuns, safeMaxWidth, previousLayout, previousRuns)
+        } else {
+            0
+        }
+        val splitChar = if (keepLineCount > 0) previousLayout!!.lines[keepLineCount].charStart else 0
+        val segments = splitHardParagraphs(text, splitChar)
+        val allLines = ArrayList<TypesetLine>(keepLineCount + segments.size * 2)
+        val lineParaNatEnd = ArrayList<Float>(keepLineCount + segments.size * 2)
+        val lineMinIntr = ArrayList<Float>(keepLineCount + segments.size * 2)
+        val lineCompletedMaxIntr = ArrayList<Float>(keepLineCount + segments.size * 2)
         val placeholders = ArrayList<TypesetPlaceholderPlacement>()
         val charLine = IntArray(text.length) { -1 }
         val charLeft = FloatArray(text.length)
@@ -250,9 +267,41 @@ internal object TypesetEngine {
         var maxLineRight = 0f
         var minIntrinsic = 0f
         var maxIntrinsic = 0f
+        var completedMaxIntrinsic = 0f
+        var continuedParagraphPrefixWidth = 0f
         var anyJustified = false
 
+        if (keepLineCount > 0 && previousLayout != null) {
+            val kept = previousLayout.lines
+            for (k in 0 until keepLineCount) {
+                val ln = kept[k]
+                allLines.add(ln)
+                lineParaNatEnd.add(previousLayout.lineParagraphNaturalWidthEnd[k])
+                lineMinIntr.add(previousLayout.linePrefixMinIntrinsic[k])
+                lineCompletedMaxIntr.add(previousLayout.lineCompletedParagraphMaxIntrinsic[k])
+                maxLineRight = max(maxLineRight, ln.right)
+            }
+            currentTop = kept[keepLineCount - 1].bottom
+            System.arraycopy(previousLayout.charLine, 0, charLine, 0, splitChar)
+            System.arraycopy(previousLayout.charLeft, 0, charLeft, 0, splitChar)
+            System.arraycopy(previousLayout.charRight, 0, charRight, 0, splitChar)
+            for (p in previousLayout.placeholders) {
+                if (p.charIndex < splitChar) placeholders.add(p)
+            }
+            minIntrinsic = previousLayout.linePrefixMinIntrinsic[keepLineCount - 1]
+            completedMaxIntrinsic = previousLayout.lineCompletedParagraphMaxIntrinsic[keepLineCount - 1]
+            maxIntrinsic = completedMaxIntrinsic
+            if (text[splitChar - 1] != '\n') {
+                continuedParagraphPrefixWidth = previousLayout.lineParagraphNaturalWidthEnd[keepLineCount - 1]
+            }
+        }
+
         val emWidth = measurer.measureEmWidth(normalizedRuns.firstOrNull()?.styleId ?: 0).coerceAtLeast(1f)
+        val activeRuns = if (splitChar > 0 && normalizedRuns.size > 8) {
+            normalizedRuns.filter { it.end > splitChar }
+        } else {
+            normalizedRuns
+        }
 
         for (segIdx in segments.indices) {
             val seg = segments[segIdx]
@@ -260,6 +309,7 @@ internal object TypesetEngine {
             val segEnd = seg.second
             val hasTrailingNewline = segEnd < text.length && text[segEnd] == '\n'
             val lineEndWithNewline = if (hasTrailingNewline) segEnd + 1 else segEnd
+            val segPrefixNatWidth = if (segIdx == 0) continuedParagraphPrefixWidth else 0f
 
             if (segStart == segEnd) {
                 val lineIdx = allLines.size
@@ -276,6 +326,11 @@ internal object TypesetEngine {
                     pieces = emptyList(),
                 )
                 allLines.add(line)
+                completedMaxIntrinsic = max(completedMaxIntrinsic, segPrefixNatWidth)
+                maxIntrinsic = max(maxIntrinsic, completedMaxIntrinsic)
+                lineParaNatEnd.add(segPrefixNatWidth)
+                lineMinIntr.add(minIntrinsic)
+                lineCompletedMaxIntr.add(completedMaxIntrinsic)
                 if (hasTrailingNewline) {
                     charLine[segEnd] = lineIdx
                     charLeft[segEnd] = 0f
@@ -289,15 +344,17 @@ internal object TypesetEngine {
                 text = text,
                 segStart = segStart,
                 segEnd = segEnd,
-                runs = normalizedRuns,
+                runs = activeRuns,
                 measurer = measurer,
                 maxWidthPx = safeMaxWidth,
                 emWidth = emWidth,
                 allowHyphenation = mode != TypesetMode.STREAMING,
             )
             val items = built.items
+            val segBaseMinIntrinsic = minIntrinsic
+            val fullParaNaturalWidth = segPrefixNatWidth + built.totalNaturalWidth
             minIntrinsic = max(minIntrinsic, built.minWordWidth)
-            maxIntrinsic = max(maxIntrinsic, built.totalNaturalWidth)
+            maxIntrinsic = max(maxIntrinsic, fullParaNaturalWidth)
 
             val unbounded = !safeMaxWidth.isFinite()
             val codeDense = built.visibleChars > 0 && (built.codeChars.toFloat() / built.visibleChars.toFloat()) >= 0.52f
@@ -331,6 +388,9 @@ internal object TypesetEngine {
 
             val breaks = finalBreakChain.indices
             var prevBreak = 0
+            var itemCursor = 0
+            var runningParaNatWidth = 0f
+            var runningMinWord = segBaseMinIntrinsic
             for (bPos in 1 until breaks.size) {
                 val endBreak = breaks[bPos]
                 val isLastLineOfSeg = bPos == breaks.lastIndex
@@ -357,6 +417,29 @@ internal object TypesetEngine {
                     placeholders = placeholders,
                 )
                 allLines.add(builtLine)
+                var nextContentStart = if (isLastLineOfSeg) items.size else endBreak + 1
+                if (!isLastLineOfSeg) {
+                    while (nextContentStart < items.size && items[nextContentStart] !is KpBox) {
+                        nextContentStart++
+                    }
+                }
+                while (itemCursor < nextContentStart) {
+                    when (val it = items[itemCursor]) {
+                        is KpBox -> {
+                            runningParaNatWidth += it.width
+                            runningMinWord = max(runningMinWord, it.width)
+                        }
+                        is KpGlue -> runningParaNatWidth += it.width
+                        is KpPenalty -> Unit
+                    }
+                    itemCursor++
+                }
+                lineParaNatEnd.add(segPrefixNatWidth + runningParaNatWidth)
+                lineMinIntr.add(runningMinWord)
+                if (isLastLineOfSeg) {
+                    completedMaxIntrinsic = max(completedMaxIntrinsic, fullParaNaturalWidth)
+                }
+                lineCompletedMaxIntr.add(completedMaxIntrinsic)
                 maxLineRight = max(maxLineRight, builtLine.right)
                 currentTop = builtLine.bottom
                 prevBreak = endBreak
@@ -378,10 +461,13 @@ internal object TypesetEngine {
                     pieces = emptyList(),
                 ),
             )
+            lineParaNatEnd.add(0f)
+            lineMinIntr.add(0f)
+            lineCompletedMaxIntr.add(0f)
             currentTop = lineMetrics.lineHeight
         }
 
-        fillUnassignedCharMetrics(text.length, allLines, charLine, charLeft, charRight)
+        fillUnassignedCharMetrics(text.length, allLines, charLine, charLeft, charRight, splitChar)
 
         val resolvedWidth = when {
             safeMaxWidth.isFinite() -> max(
@@ -404,6 +490,9 @@ internal object TypesetEngine {
             minIntrinsicWidth = minIntrinsic,
             maxIntrinsicWidth = maxIntrinsic,
             justifiedParagraph = anyJustified,
+            lineParagraphNaturalWidthEnd = lineParaNatEnd.toFloatArray(),
+            linePrefixMinIntrinsic = lineMinIntr.toFloatArray(),
+            lineCompletedParagraphMaxIntrinsic = lineCompletedMaxIntr.toFloatArray(),
         )
     }
 
@@ -424,10 +513,130 @@ internal object TypesetEngine {
         return out
     }
 
-    private fun splitHardParagraphs(text: String): List<Pair<Int, Int>> {
+    private fun findStreamingPrefixKeepCount(
+        text: String,
+        normalizedRuns: List<TypesetRunInput>,
+        maxWidthPx: Float,
+        previousLayout: TypesetLayout,
+        previousRuns: List<TypesetRunInput>,
+    ): Int {
+        if (previousLayout.justifiedParagraph) return 0
+        if (previousLayout.maxWidth != maxWidthPx) return 0
+        val prevText = previousLayout.text
+        if (text.length <= prevText.length || !text.startsWith(prevText)) return 0
+        val prevLines = previousLayout.lines
+        if (prevLines.size < 3) return 0
+        if (previousLayout.lineParagraphNaturalWidthEnd.size != prevLines.size ||
+            previousLayout.linePrefixMinIntrinsic.size != prevLines.size ||
+            previousLayout.lineCompletedParagraphMaxIntrinsic.size != prevLines.size
+        ) {
+            return 0
+        }
+        val prevNorm = normalizeRuns(prevText.length, previousRuns)
+        if (!runsMatchPrefix(prevNorm, normalizedRuns, prevText.length)) return 0
+        var keep = prevLines.size - 2
+        while (keep >= 1) {
+            val prevLastKept = prevLines[keep - 1]
+            val firstRebuilt = prevLines[keep]
+            val splitChar = firstRebuilt.charStart
+            if (splitChar in 1 until prevText.length &&
+                prevLastKept.charEnd == splitChar &&
+                prevLastKept.visibleEnd <= splitChar &&
+                prevLastKept.trailingHyphenStyleId < 0 &&
+                isCleanStreamingBoundary(text, normalizedRuns, splitChar)
+            ) {
+                return keep
+            }
+            keep--
+        }
+        return 0
+    }
+
+    private fun isCleanStreamingBoundary(
+        text: String,
+        runs: List<TypesetRunInput>,
+        splitChar: Int,
+    ): Boolean {
+        val prevCh = text[splitChar - 1]
+        val nextCh = text[splitChar]
+        if (prevCh == '\n') return true
+        if (nextCh == ' ' || nextCh == '\t' || nextCh == '\n') return false
+        if (Character.isHighSurrogate(prevCh) || Character.isLowSurrogate(nextCh)) return false
+        if ((prevCh == '—' && nextCh == '—') || (prevCh == '…' && nextCh == '…')) return false
+        val nextType = Character.getType(nextCh)
+        if (nextCh == '\u200D' ||
+            prevCh == '\u200D' ||
+            nextType == Character.NON_SPACING_MARK.toInt() ||
+            nextType == Character.ENCLOSING_MARK.toInt() ||
+            nextCh in '\uFE00'..'\uFE0F'
+        ) {
+            return false
+        }
+        if (prevCh == ' ' || prevCh == '\t') return true
+        val prevRun = runAtIndex(runs, splitChar - 1)
+        val nextRun = runAtIndex(runs, splitChar)
+        if (prevRun?.kind == TypesetSpanKind.CODE || nextRun?.kind == TypesetSpanKind.CODE) {
+            return prevRun !== nextRun
+        }
+        if (isLatinWordContinuation(text, splitChar - 1, text.length) &&
+            isLatinWordContinuation(text, splitChar, text.length)
+        ) {
+            return false
+        }
+        return true
+    }
+
+    private fun runAtIndex(runs: List<TypesetRunInput>, index: Int): TypesetRunInput? {
+        var lo = 0
+        var hi = runs.lastIndex
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            val run = runs[mid]
+            when {
+                index < run.start -> hi = mid - 1
+                index >= run.end -> lo = mid + 1
+                else -> return run
+            }
+        }
+        return null
+    }
+
+    private fun runsMatchPrefix(
+        prevRuns: List<TypesetRunInput>,
+        nextRuns: List<TypesetRunInput>,
+        splitChar: Int,
+    ): Boolean {
+        var idx = 0
+        while (idx < prevRuns.size) {
+            val p = prevRuns[idx]
+            if (p.start >= splitChar) break
+            if (idx >= nextRuns.size) return false
+            val n = nextRuns[idx]
+            if (n.start != p.start ||
+                n.styleId != p.styleId ||
+                n.kind != p.kind ||
+                n.objectId != p.objectId ||
+                n.objectWidthPx != p.objectWidthPx ||
+                n.objectHeightPx != p.objectHeightPx ||
+                n.objectBaselineFraction != p.objectBaselineFraction
+            ) {
+                return false
+            }
+            if (p.end < splitChar) {
+                if (n.end != p.end) return false
+            } else {
+                if (n.end < splitChar) return false
+                return true
+            }
+            idx++
+        }
+        return true
+    }
+
+    private fun splitHardParagraphs(text: String, startIndex: Int = 0): List<Pair<Int, Int>> {
         val result = ArrayList<Pair<Int, Int>>(2)
-        var start = 0
-        var i = 0
+        var start = startIndex
+        var i = startIndex
         while (i < text.length) {
             if (text[i] == '\n') {
                 result.add(start to i)
@@ -1417,7 +1626,7 @@ internal object TypesetEngine {
             when (it) {
                 is KpBox -> {
                     naturalWidth += it.width
-                    if (it.kind != TypesetSpanKind.INLINE_OBJECT) printableTextWidth += it.width
+                    if (it.kind == TypesetSpanKind.NORMAL) printableTextWidth += it.width
                 }
                 is KpGlue -> {
                     naturalWidth += it.width
@@ -1500,7 +1709,7 @@ internal object TypesetEngine {
             when (it) {
                 is KpBox -> {
                     val isTrimmedStart = i == contentStart && startTrim > 0f
-                    val boxScale = if (it.kind == TypesetSpanKind.INLINE_OBJECT) 1f else lineScaleX
+                    val boxScale = if (it.kind == TypesetSpanKind.NORMAL) lineScaleX else 1f
                     val scaledW = it.width * boxScale
                     val drawX = if (isTrimmedStart) x - startTrim * boxScale else x
                     val advanceW = if (isTrimmedStart) scaledW - startTrim * boxScale else scaledW
@@ -1695,10 +1904,11 @@ internal object TypesetEngine {
         charLine: IntArray,
         charLeft: FloatArray,
         charRight: FloatArray,
+        startIndex: Int = 0,
     ) {
-        var lastLine = 0
-        var lastX = 0f
-        for (i in 0 until length) {
+        var lastLine = if (startIndex > 0) charLine[startIndex - 1].coerceIn(0, lines.lastIndex) else 0
+        var lastX = if (startIndex > 0) charRight[startIndex - 1] else 0f
+        for (i in startIndex until length) {
             if (charLine[i] >= 0) {
                 lastLine = charLine[i]
                 lastX = charRight[i]
@@ -1785,10 +1995,15 @@ internal object TypesetEngine {
             cp in 0x2F800..0x2FA1F ||
             cp in 0x30000..0x323AF
 
-    internal fun requiresPlatformBidi(text: String): Boolean {
-        var hasPotentialBidi = false
-        var i = 0
+    internal fun requiresPlatformBidi(text: String, startIndex: Int = 0): Boolean {
         val n = text.length
+        if (startIndex >= n) return false
+        var safeStart = startIndex.coerceAtLeast(0)
+        if (safeStart > 0 && Character.isHighSurrogate(text[safeStart - 1])) {
+            safeStart--
+        }
+        var hasPotentialBidi = false
+        var i = safeStart
         while (i < n) {
             val ch = text[i]
             val c = ch.code
@@ -1797,17 +2012,33 @@ internal object TypesetEngine {
                 c in 0x202A..0x202E ||
                 c in 0x2066..0x2069 ||
                 c in 0xFB1D..0xFDFF ||
-                c in 0xFE70..0xFEFF ||
-                Character.isHighSurrogate(ch)
+                c in 0xFE70..0xFEFF
             ) {
                 hasPotentialBidi = true
                 break
             }
+            if (Character.isHighSurrogate(ch) && i + 1 < n && Character.isLowSurrogate(text[i + 1])) {
+                val cp = Character.toCodePoint(ch, text[i + 1])
+                val dir = Character.getDirectionality(cp)
+                if (dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT ||
+                    dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC ||
+                    dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT_EMBEDDING ||
+                    dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT_OVERRIDE ||
+                    dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT_ISOLATE
+                ) {
+                    hasPotentialBidi = true
+                    break
+                }
+                i += 2
+                continue
+            }
             i++
         }
         if (!hasPotentialBidi) return false
-        val chars = text.toCharArray()
-        return java.text.Bidi.requiresBidi(chars, 0, chars.size)
+        val len = n - safeStart
+        val chars = CharArray(len)
+        text.toCharArray(chars, 0, safeStart, n)
+        return java.text.Bidi.requiresBidi(chars, 0, len)
     }
 
     internal fun isCjkOpenPunct(ch: Char): Boolean =

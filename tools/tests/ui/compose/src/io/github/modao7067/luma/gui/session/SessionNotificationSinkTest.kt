@@ -197,7 +197,7 @@ class SessionNotificationSinkTest {
     @Test fun stressRootArmDisarmFlappingNeverRacesOrLeavesActiveSpecAfterDisarm() {
         RootBackgroundNotifications.forceEnableForTesting = true
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val dir = File(app.filesDir, "runtime/agent/root")
+        val dir = File(app.filesDir, GuiProduct.agentRuntimePath())
         try {
             repeat(100) { iter ->
                 val watched = listOf(
@@ -312,6 +312,164 @@ class SessionNotificationSinkTest {
             }
             assertTrue("goAsync completion callback must still fire on disconnectAll abort", raceCompleted)
             assertEquals("Stale wake batch must not post after disconnectAll()", 0, nm.activeNotifications.size)
+        } finally {
+            controller.disconnectAll()
+        }
+    }
+
+    @Test fun openingSessionInFreshProcessCancelsPersistedOsNotificationAndOrphanedSummary() {
+        val store = SessionStore(app)
+        store.save(
+            listOf(
+                SessionRecord("p-1", "已看会话1", GuiProduct.environment, "/workspace", threadId = "tp-1", cli = "Claude Code"),
+                SessionRecord("p-2", "已看会话2", GuiProduct.environment, "/workspace", threadId = "tp-2", cli = "Codex"),
+                SessionRecord("p-idle", "其他会话", GuiProduct.environment, "/workspace", threadId = "tp-3", cli = "Codex"),
+            ),
+        )
+        val nm = app.getSystemService(NotificationManager::class.java)
+        val shadowNm = shadowOf(nm)
+
+        val priorSink = AndroidSessionNotificationSink(app)
+        priorSink.post("p-1", "已看会话1", "Claude Code", SessionNotificationKind.COMPLETED)
+        priorSink.post("p-2", "已看会话2", "Codex", SessionNotificationKind.COMPLETED)
+        assertNotNull(shadowNm.getNotification("p-1", SessionNotifications.SESSION_NOTIFICATION_ID))
+        assertNotNull(shadowNm.getNotification("p-2", SessionNotifications.SESSION_NOTIFICATION_ID))
+        assertNotNull(shadowNm.getNotification(SessionNotifications.SUMMARY_NOTIFICATION_ID))
+
+        val restartedSink = AndroidSessionNotificationSink(app)
+        val restartedController = SessionController(app)
+        restartedController.notificationSink = restartedSink
+        try {
+            restartedController.setForeground(true)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNotNull(shadowNm.getNotification("p-1", SessionNotifications.SESSION_NOTIFICATION_ID))
+            assertNotNull(shadowNm.getNotification("p-2", SessionNotifications.SESSION_NOTIFICATION_ID))
+
+            restartedController.openSession("p-1")
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNull("Opening p-1 after restart must cancel lingering OS notification", shadowNm.getNotification("p-1", SessionNotifications.SESSION_NOTIFICATION_ID))
+            assertNotNull(shadowNm.getNotification("p-2", SessionNotifications.SESSION_NOTIFICATION_ID))
+            assertNull("Summary must clear once only one child remains even after restart", shadowNm.getNotification(SessionNotifications.SUMMARY_NOTIFICATION_ID))
+
+            restartedController.openSession("p-2")
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNull("Opening p-2 after restart must cancel lingering OS notification", shadowNm.getNotification("p-2", SessionNotifications.SESSION_NOTIFICATION_ID))
+            assertEquals(0, nm.activeNotifications.size)
+        } finally {
+            restartedController.disconnectAll()
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
+    @Test fun staleWatchGenerationAndForegroundedSessionSuppressLateWakeNotification() {
+        RootBackgroundNotifications.forceEnableForTesting = true
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val dir = File(app.filesDir, GuiProduct.agentRuntimePath())
+        try {
+            RootBackgroundNotifications.armInBackground(
+                app,
+                scope,
+                listOf(WatchedRootSession("s-gen", 1, "bridged", task = "luma-native-cli-gui-v3", running = true, userStopped = false, requestIds = emptyList())),
+                spawnLauncher = false,
+            )
+            Thread.sleep(150L)
+            val armedSpec = JSONObject(File(dir, "bg-watch-spec.json").readText())
+            val armedGen = armedSpec.getLong("watchGen")
+            assertTrue(armedGen > 0L)
+            assertTrue(RootBackgroundNotifications.verifyWakeGeneration(app, armedGen))
+
+            RootBackgroundNotifications.disarmLocal(app)
+            assertFalse("Disarmed spec must reject stale watchGen broadcast", RootBackgroundNotifications.verifyWakeGeneration(app, armedGen))
+        } finally {
+            scope.cancel()
+        }
+
+        val store = SessionStore(app)
+        store.save(
+            listOf(
+                SessionRecord("late-1", "刚看过", GuiProduct.environment, "/workspace", threadId = "tl-1", cli = "Claude Code"),
+                SessionRecord("late-2", "切去别的", GuiProduct.environment, "/workspace", threadId = "tl-2", cli = "Codex"),
+            ),
+        )
+        val nm = app.getSystemService(NotificationManager::class.java)
+        val shadowNm = shadowOf(nm)
+        val sink = AndroidSessionNotificationSink(app)
+        val controller = SessionController(app)
+        controller.notificationSink = sink
+        try {
+            controller.setForeground(false)
+            var done = false
+            controller.onBackgroundWakeBatch(listOf("late-1" to SessionNotificationKind.COMPLETED)) { done = true }
+            shadowOf(Looper.getMainLooper()).idleFor(100L, TimeUnit.MILLISECONDS)
+
+            controller.openSession("late-1")
+            controller.setForeground(true)
+            shadowOf(Looper.getMainLooper()).idle()
+            controller.openSession("late-2")
+            controller.setForeground(false)
+
+            repeat(15) {
+                shadowOf(Looper.getMainLooper()).idleFor(100L, TimeUnit.MILLISECONDS)
+            }
+            assertTrue(done)
+            assertNull("Session viewed during in-flight wake must never re-post notification", shadowNm.getNotification("late-1", SessionNotifications.SESSION_NOTIFICATION_ID))
+        } finally {
+            controller.disconnectAll()
+        }
+    }
+
+    @Test fun coldStartWakeMarksControllerBackgroundedAndApprovalWaitSkipsRootWatch() {
+        RootBackgroundNotifications.forceEnableForTesting = true
+        val store = SessionStore(app)
+        store.save(
+            listOf(
+                SessionRecord("cold-1", "冷启动会话", GuiProduct.environment, "/workspace", threadId = "tc-1", cli = "Claude Code"),
+            ),
+        )
+        val controller = SessionController(app)
+        try {
+            val bgField = SessionController::class.java.getDeclaredField("backgrounded").apply { isAccessible = true }
+            assertFalse(bgField.getBoolean(controller))
+
+            var done = false
+            controller.onBackgroundWakeBatch(listOf("cold-1" to SessionNotificationKind.COMPLETED)) { done = true }
+            assertTrue("Cold-start wake batch must mark controller backgrounded", bgField.getBoolean(controller))
+            repeat(15) {
+                shadowOf(Looper.getMainLooper()).idleFor(100L, TimeUnit.MILLISECONDS)
+            }
+            assertTrue(done)
+
+            val sessionsMap = SessionController::class.java.getDeclaredField("sessions").apply { isAccessible = true }.get(controller) as Map<*, *>
+            val live = sessionsMap["cold-1"]!!
+            live.javaClass.getDeclaredField("connectJob").apply { isAccessible = true }.let { f ->
+                (f.get(live) as? kotlinx.coroutines.Job)?.cancel()
+                f.set(live, null)
+            }
+            val viewField = live.javaClass.getDeclaredField("view").apply { isAccessible = true }
+            val currentView = viewField.get(live) as SessionView
+            val buildWatched = SessionController::class.java.getDeclaredMethod("buildWatchedRootSessions").apply { isAccessible = true }
+            viewField.set(
+                live,
+                currentView.copy(
+                    connected = true,
+                    loading = false,
+                    activeTurnId = "tc-1",
+                    requests = emptyList(),
+                ),
+            )
+            val watchedRunning = buildWatched.invoke(controller) as List<*>
+            assertEquals("Running session without pending approval must arm root watcher", 1, watchedRunning.size)
+            viewField.set(
+                live,
+                currentView.copy(
+                    connected = true,
+                    loading = false,
+                    activeTurnId = "tc-1",
+                    requests = listOf(UserRequest("req-1", "Bash", "echo hi", listOf(RequestChoice("allow", "Allow")))),
+                ),
+            )
+            val watched = buildWatched.invoke(controller) as List<*>
+            assertTrue("Approval-blocked session with no active subagents must not arm root watcher", watched.isEmpty())
         } finally {
             controller.disconnectAll()
         }

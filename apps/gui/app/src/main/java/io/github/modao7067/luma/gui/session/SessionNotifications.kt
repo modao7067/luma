@@ -252,11 +252,9 @@ internal class AndroidSessionNotificationSink(
     override fun cancel(sessionId: String) {
         pendingPosts.remove(sessionId)
         val nm = manager ?: return
-        val removed = activeSlots.remove(sessionId)
+        activeSlots.remove(sessionId)
         nm.cancel(sessionId, SessionNotifications.SESSION_NOTIFICATION_ID)
-        if (removed != null || summaryPosted) {
-            reconcileGroupSummary(nm)
-        }
+        reconcileGroupSummary(nm)
     }
 
     override fun cancelAll() {
@@ -325,6 +323,11 @@ internal class AndroidSessionNotificationSink(
         runCatching {
             nm.activeNotifications.any { it.id == SessionNotifications.SESSION_NOTIFICATION_ID && it.tag == sessionId }
         }.getOrDefault(true)
+
+    private fun isSummaryPresentInOs(nm: NotificationManager): Boolean =
+        runCatching {
+            nm.activeNotifications.any { it.id == SessionNotifications.SUMMARY_NOTIFICATION_ID && it.tag == null }
+        }.getOrDefault(false)
 
     private fun deliverNow(nm: NotificationManager, item: PendingPost): Boolean {
         evictIfNeeded(nm, item.sessionId)
@@ -411,7 +414,7 @@ internal class AndroidSessionNotificationSink(
                 summaryPosted = true
             } catch (_: SecurityException) {
             }
-        } else if (summaryPosted) {
+        } else if (summaryPosted || isSummaryPresentInOs(nm)) {
             summaryPosted = false
             nm.cancel(SessionNotifications.SUMMARY_NOTIFICATION_ID)
         }

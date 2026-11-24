@@ -4,7 +4,7 @@ import io.github.modao7067.luma.gui.i18n.tr
 import org.json.JSONObject
 
 internal object NativeCliRuntimePolicy {
-    const val revision = "cli-bridge-v88"
+    const val revision = "cli-bridge-v90"
     private const val minimumGrokCarrier = 18
     val restartWarning: String
         get() = tr(

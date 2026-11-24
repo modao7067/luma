@@ -4,12 +4,14 @@ import io.github.modao7067.luma.gui.i18n.LumaI18n
 import io.github.modao7067.luma.gui.i18n.tr
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import io.github.modao7067.luma.gui.agent.*
 import io.github.modao7067.luma.gui.runtime.AgentRuntime
 import io.github.modao7067.luma.gui.runtime.NativeCliRuntimePolicy
 import io.github.modao7067.luma.gui.runtime.RuntimeEndpoint
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.UUID
 
 internal class NativeCliSession(
@@ -31,6 +33,8 @@ internal class NativeCliSession(
     private var epoch = 0
     private var revision = -1L
     private var snapshot = JSONObject()
+    private var watchSignals: Channel<Unit>? = null
+    @Volatile private var watchSseSupported: Boolean? = null
     private var view = SessionView(SessionSummary(record.id, record.title, record.environment, record.cwd, cli = record.cli))
     private var models = initialModels
     internal var catalogIdentity = NativeCliCatalogIdentity.of(record)
@@ -44,6 +48,12 @@ internal class NativeCliSession(
     private val answering = mutableSetOf<String>()
     private val path get() = "/sessions/${record.id}"
     val historyReady: Boolean get() = snapshot.optBoolean("historyReady")
+    private val awaitingApproval: Boolean
+        get() = view.connected &&
+            !view.loading &&
+            view.requests.isNotEmpty() &&
+            answering.isEmpty() &&
+            view.subAgents.none { it.status !in setOf("succeeded", "completed", "failed", "cancelled", "closed", "aborted") }
     private fun publish() = changed(view, models)
     private fun apply(s: JSONObject) = apply(s, null)
     private fun apply(s: JSONObject, preprojected: Pair<SessionView, SessionView>?) {
@@ -149,6 +159,7 @@ internal class NativeCliSession(
         if (titleChanged || messageTitleChanged || before != listOf(record.threadId, record.model, record.effort, record.title, record.submissions.map { listOf(it.id, it.state, it.nativeQueued, it.nativeConsumed, it.queuePresentation, it.takebackState) }, record.nativeProtocol)) persist()
         answering.retainAll(view.requests.map { it.id }.toSet())
         publish()
+        if (view.loading || (view.activeTurnId != null && !awaitingApproval)) watchSignals?.trySend(Unit)
         if (view.requests.any { it.id !in oldRequests }) approval()
     }
     private fun run(block: suspend () -> Unit) {
@@ -165,6 +176,9 @@ internal class NativeCliSession(
         previous.join()
         if (generation != epoch) throw CancellationException(tr("界面连接已取消", "UI connection cancelled"))
         job = SupervisorJob(); scope = CoroutineScope(job + Dispatchers.Main.immediate); revision = -1
+        val signals = Channel<Unit>(Channel.CONFLATED)
+        watchSignals = signals
+        watchSseSupported = null
         view = view.copy(loading = true, connected = false, error = null); publish()
         withContext(scope.coroutineContext) {
             try {
@@ -174,10 +188,49 @@ internal class NativeCliSession(
                 connectClient(client)
                 scope.launch {
                     try {
+                        while (isActive && (view.connected || view.loading)) {
+                            val supported = try {
+                                client.watchEvents(
+                                    onConnected = {
+                                        watchSseSupported = true
+                                        signals.trySend(Unit)
+                                    },
+                                    onEvent = { signals.trySend(Unit) },
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: IOException) {
+                                watchSseSupported = null
+                                signals.trySend(Unit)
+                                delay(2_000)
+                                continue
+                            }
+                            if (!supported) {
+                                watchSseSupported = false
+                                signals.trySend(Unit)
+                                break
+                            }
+                            signals.trySend(Unit)
+                        }
+                    } catch (e: CancellationException) { throw e }
+                }
+                scope.launch {
+                    try {
+                        var idleBackoffMs = 1_000L
                         while (isActive) {
-                            delay(if (view.activeTurnId != null || view.loading) 60 else 1000)
+                            if (view.loading || (view.activeTurnId != null && !awaitingApproval)) {
+                                idleBackoffMs = 1_000L
+                                delay(60)
+                            } else if (watchSseSupported == true) {
+                                idleBackoffMs = 1_000L
+                                signals.receive()
+                            } else {
+                                val woken = withTimeoutOrNull(idleBackoffMs) { signals.receive() } != null
+                                idleBackoffMs = if (woken) 1_000L else (idleBackoffMs * 2).coerceAtMost(10_000L)
+                            }
                             val next = client.call("$path?after=$revision")
                             if (!next.optBoolean("unchanged") && next.optLong("revision", -1) >= revision) {
+                                idleBackoffMs = 1_000L
                                 val base = view
                                 val projected = withContext(Dispatchers.Default) { NativeCliProjection.view(next, base) }
                                 apply(next, base to projected)
@@ -341,7 +394,7 @@ internal class NativeCliSession(
     fun answer(id: String, choice: String, answers: Map<String, List<String>>) {
         if (id in answering || view.requests.none { it.id == id }) return
         run {
-            answering.add(id); view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) }); publish()
+            answering.add(id); view = view.copy(requests = view.requests.map { it.copy(answering = it.id in answering) }); publish(); watchSignals?.trySend(Unit)
             try {
                 action("answer", obj("id" to id, "choice" to choice, "answers" to JSONObject(answers)))
             } catch (e: CancellationException) {
@@ -399,7 +452,7 @@ internal class NativeCliSession(
         }
     }
     fun close() {
-        epoch++; job.cancel(); api?.close(); api = null; endpoint = null; answering.clear()
+        epoch++; job.cancel(); watchSignals?.close(); watchSignals = null; watchSseSupported = null; api?.close(); api = null; endpoint = null; answering.clear()
         view = view.copy(connected = false, canOpenTui = false, loading = false, sending = false, configuring = false, queueBusy = false, requests = emptyList(), connection = tr("界面已断开 · 后端任务不受影响", "UI detached · Backend tasks unaffected"))
     }
 }
