@@ -171,18 +171,21 @@ class GlobalUsageTest {
         assertEquals("modelPriced", summary.byModel.single().costSource)
     }
 
-    @Test fun computesPaceGapAndRemainingTickMatchesT3CodeSemantics() {
+    @Test fun computesResetTimeFractionWithinWindow() {
         val nowMs = 1_700_000_000_000L
         val fiveHoursMs = 5L * 3_600_000L
-        val resetIso = java.time.Instant.ofEpochMilli(nowMs + 2L * 3_600_000L).toString()
-        val elapsed = computeElapsedShare(resetIso, fiveHoursMs, nowMs)
-        assertNotNull(elapsed)
-        assertEquals(0.60, elapsed!!, 1e-6)
-        assertEquals(40, computePaceRemainingPercent(elapsed))
+        val twoHoursLeftIso = java.time.Instant.ofEpochMilli(nowMs + 2L * 3_600_000L).toString()
+        val fraction = computeResetTimeFraction(twoHoursLeftIso, fiveHoursMs, nowMs)
+        assertNotNull(fraction)
+        assertEquals(0.4f, fraction!!, 1e-5f)
 
-        assertEquals(UsagePace.AHEAD, computeUsagePace(75.0, elapsed))
-        assertEquals(UsagePace.ON_TRACK, computeUsagePace(62.0, elapsed))
-        assertEquals(UsagePace.UNDER, computeUsagePace(30.0, elapsed))
+        val pastIso = java.time.Instant.ofEpochMilli(nowMs - 60_000L).toString()
+        val beyondWindowIso = java.time.Instant.ofEpochMilli(nowMs + fiveHoursMs + 60_000L).toString()
+        assertNull(computeResetTimeFraction(pastIso, fiveHoursMs, nowMs))
+        assertNull(computeResetTimeFraction(beyondWindowIso, fiveHoursMs, nowMs))
+        assertNull(computeResetTimeFraction("not-a-timestamp", fiveHoursMs, nowMs))
+        assertNull(computeResetTimeFraction(twoHoursLeftIso, 0L, nowMs))
+        assertNull(computeResetTimeFraction(twoHoursLeftIso, null, nowMs))
     }
 
     @Test fun formatsTokensCostAndResetCountdownCleanly() {
@@ -474,13 +477,8 @@ class GlobalUsageTest {
     }
 
     @Test fun guardsNonFiniteNumbersAndJsonNullsInLimitsAndFormatters() {
-        assertNull(computeUsagePace(Double.NaN, 0.5))
-        assertNull(computeUsagePace(Double.POSITIVE_INFINITY, 0.5))
-        assertNull(computeUsagePace(Double.NEGATIVE_INFINITY, 0.5))
-        assertNull(computeUsagePace(20.0, Double.NaN))
-        assertNull(computeUsagePace(20.0, Double.POSITIVE_INFINITY))
-        assertNull(computePaceRemainingPercent(Double.NaN))
-        assertNull(computePaceRemainingPercent(Double.NEGATIVE_INFINITY))
+        assertNull(computeResetTimeFraction(null, 5L * 3_600_000L, 1_700_000_000_000L))
+        assertNull(computeResetTimeFraction("1970-01-01T00:00:00Z", 5L * 3_600_000L, 1_700_000_000_000L))
 
         assertEquals("$0.00", formatUsdCost(Double.NaN))
         assertEquals("$0.00", formatUsdCost(Double.POSITIVE_INFINITY))

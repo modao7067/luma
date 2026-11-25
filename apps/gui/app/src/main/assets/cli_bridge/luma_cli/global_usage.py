@@ -1,10 +1,11 @@
-# Adapted from t3code UsageService/UsageLimitSources, junhoyeo/tokscale, and MoonshotAI/kimi-cli.
+# Adapted from usage formats documented by junhoyeo/tokscale (MIT, see TOKSCALE-LICENSE.txt) and MoonshotAI/kimi-cli (Apache-2.0).
 from __future__ import annotations
 
+import bisect
 import calendar
 import contextlib
 import datetime as dt
-import fcntl
+import email.utils
 import glob
 import gzip
 import hashlib
@@ -17,7 +18,6 @@ import select
 import shutil
 import signal
 import sqlite3
-import struct
 import subprocess
 import sys
 import tempfile
@@ -42,12 +42,14 @@ def _tr(zh: str, en: str) -> str:
     return zh if _is_zh() else en
 
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 ARCHIVE_VERSION = 2
-SCANNER_REV = 5
-PRICING_CACHE_VERSION = 1
-GUARD_BYTES = 64
+SCANNER_REV = 8
+PRICING_CACHE_VERSION = 2
 MAX_RECORDS_PER_SOURCE = 25000
+HEAD_FINGERPRINT_BYTES = 4096
+TAIL_FINGERPRINT_BYTES = 256
+CACHE_WRITE_1H_INPUT_MULTIPLIER = 2.0
 LIMITS_CACHE_TTL_SECONDS = 60
 PRICING_CACHE_TTL_SECONDS = 86400
 PRICING_OFFLINE_BACKOFF_SECONDS = 300
@@ -79,6 +81,32 @@ TRUSTED_MODELS_DEV_PROVIDERS = (
     "alibaba-cn",
     "google-vertex",
 )
+TRUSTED_MODELS_DEV_PROVIDER_PREFIXES: dict[str, tuple[str, ...]] = {
+    "anthropic": ("claude-",),
+    "openai": ("gpt-", "o1", "o3", "o4", "codex", "chatgpt"),
+    "google": ("gemini-", "gemma-"),
+    "google-vertex": ("gemini-", "gemma-"),
+    "deepseek": ("deepseek-",),
+    "moonshotai": ("kimi-", "moonshot-"),
+    "moonshotai-cn": ("kimi-", "moonshot-"),
+    "zhipuai": ("glm-",),
+    "xai": ("grok-",),
+    "minimax": ("minimax-",),
+    "minimax-cn": ("minimax-",),
+    "alibaba": ("qwen", "qwq"),
+    "alibaba-cn": ("qwen", "qwq"),
+    "mistral": ("mistral", "ministral", "codestral", "devstral", "pixtral", "magistral"),
+    "cohere": ("command",),
+}
+PREFERRED_MODELS_DEV_SECONDARY = (
+    "openrouter",
+    "vercel",
+    "azure",
+    "amazon-bedrock",
+    "helicone",
+    "github-models",
+    "github-copilot",
+)
 PRICING_SOURCE_CATALOG = (
     {
         "id": "models.dev",
@@ -95,145 +123,18 @@ PRICING_SOURCE_CATALOG = (
         "siteUrl": "https://models.litellm.ai",
     },
 )
-MODEL_PRICING_ALIASES: dict[str, str] = {
-    "gemini-pro-orchestrator-neon": "gemini-4-neon",
-    "gemini-pro-orchestrator-carbon": "gemini-4-carbon",
-    "gemini-pro-orchestrator-argon": "gemini-4-argon",
-    "gemini-pro-orchestrator": "gemini-4-carbon",
-    "gemini-flash-worker-agy": "gemini-4-hydrogen",
-    "gemini-4": "gemini-4-carbon",
-    "deepseek-v4": "deepseek-v4-pro",
-    "kimi-for-coding": "kimi-k2.7-code",
-    "kimi-for-coding-highspeed": "kimi-k2.7-code-highspeed",
-    "k2p5": "kimi-k2-thinking",
-    "k2-p5": "kimi-k2-thinking",
-    "k2p6": "kimi-k2.6",
-    "k2-p6": "kimi-k2.6",
-    "kimi-k2p6": "kimi-k2.6",
-    "kimi-k2.5-thinking": "kimi-k2-thinking",
-    "k2d6-agent": "kimi-k2.6",
-    "k3": "kimi-k3",
-    "k3-256k": "kimi-k3",
-    "k3-agent": "kimi-k3",
-    "k3-agent-swarm": "kimi-k3",
-    "k3.1-pro": "kimi-k3.1-pro",
-    "k3.1-pro-highspeed": "kimi-k3.1-pro-highspeed",
-    "kimi-k2.5-nvfp4": "kimi-k2.5",
-    "kimi-k2-instruct-0905": "kimi-k2.5",
-}
-
-MODEL_RATES_PER_M: dict[str, RateTuple] = {
-    "gpt-6.1": (2.50, 15.00, 0.25, 2.50, None),
-    "gpt-6.1-sol": (2.00, 10.00, 0.10, 2.50, (272_000, 4.00, 15.00, 0.20, 5.00)),
-    "gpt-6.1-terra": (1.00, 5.00, 0.05, 1.25, (272_000, 2.00, 7.50, 0.10, 2.50)),
-    "gpt-6-astra": (10.00, 50.00, 1.00, 12.50, (272_000, 20.00, 75.00, 2.00, 25.00)),
-    "gpt-6-sol": (2.00, 10.00, 0.20, 2.50, (272_000, 4.00, 15.00, 0.40, 5.00)),
-    "gpt-6-luna": (0.10, 0.50, 0.01, 0.125, (272_000, 0.20, 0.75, 0.02, 0.25)),
-    "gpt-6": (2.50, 15.00, 0.25, 2.50, None),
-    "codex-auto-review": (0.40, 1.60, 0.04, 0.40, None),
-    "gpt-5.6-sol": (4.00, 20.00, 0.40, 5.00, (272_000, 8.00, 30.00, 0.80, 10.00)),
-    "gpt-5.6-terra": (2.00, 12.00, 0.20, 2.50, (272_000, 4.00, 18.00, 0.40, 5.00)),
-    "gpt-5.6-luna": (0.20, 1.20, 0.02, 0.25, (272_000, 0.40, 1.80, 0.04, 0.50)),
-    "gpt-5.6": (4.00, 20.00, 0.40, 5.00, (272_000, 8.00, 30.00, 0.80, 10.00)),
-    "gpt-5.5": (5.00, 30.00, 0.50, 5.00, (272_000, 10.00, 45.00, 1.00, 10.00)),
-    "gpt-5.4": (2.50, 15.00, 0.25, 2.50, (272_000, 5.00, 22.50, 0.50, 5.00)),
-    "gpt-5.4-mini": (0.40, 1.60, 0.04, 0.40, None),
-    "gpt-5.3-codex": (1.75, 14.00, 0.175, 1.75, None),
-    "gpt-5.3-codex-spark": (0.40, 1.60, 0.04, 0.40, None),
-    "gpt-5.2-codex": (1.75, 14.00, 0.175, 1.75, None),
-    "gpt-5.2": (1.75, 14.00, 0.175, 1.75, None),
-    "gpt-5.1-codex-max": (2.50, 15.00, 0.25, 2.50, None),
-    "gpt-5.1-codex": (1.50, 12.00, 0.15, 1.50, None),
-    "gpt-5.1-codex-mini": (0.30, 1.20, 0.03, 0.30, None),
-    "gpt-5-codex": (1.25, 10.00, 0.125, 1.25, None),
-    "gpt-5": (1.25, 10.00, 0.125, 1.25, None),
-    "gpt-5-mini": (0.25, 2.00, 0.025, 0.25, None),
-    "gpt-5-nano": (0.05, 0.40, 0.005, 0.05, None),
-    "gpt-4.1": (2.00, 8.00, 0.50, 2.00, None),
-    "gpt-4.1-mini": (0.40, 1.60, 0.10, 0.40, None),
-    "gpt-4o": (2.50, 10.00, 1.25, 2.50, None),
-    "gpt-4o-mini": (0.15, 0.60, 0.075, 0.15, None),
-    "o3": (2.00, 8.00, 0.50, 2.00, None),
-    "o4-mini": (1.10, 4.40, 0.275, 1.10, None),
-    "codex-mini-latest": (1.50, 6.00, 0.375, 1.50, None),
-    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00, None),
-    "claude-sonnet-5-5": (2.00, 10.00, 0.10, 2.50, None),
-    "claude-opus-4-7": (5.00, 25.00, 0.50, 6.25, None),
-    "claude-opus-4-6": (5.00, 25.00, 0.50, 6.25, None),
-    "claude-opus-4-5": (5.00, 25.00, 0.50, 6.25, None),
-    "claude-opus-4-1": (15.00, 75.00, 1.50, 18.75, None),
-    "claude-opus-4": (15.00, 75.00, 1.50, 18.75, None),
-    "claude-sonnet-4-6": (3.00, 15.00, 0.30, 3.75, (200_000, 6.00, 22.50, 0.60, 7.50)),
-    "claude-sonnet-4-5": (3.00, 15.00, 0.30, 3.75, (200_000, 6.00, 22.50, 0.60, 7.50)),
-    "claude-sonnet-4": (3.00, 15.00, 0.30, 3.75, (200_000, 6.00, 22.50, 0.60, 7.50)),
-    "claude-3-7-sonnet": (3.00, 15.00, 0.30, 3.75, None),
-    "claude-3-5-sonnet": (3.00, 15.00, 0.30, 3.75, None),
-    "claude-haiku-4-5": (1.00, 5.00, 0.10, 1.25, None),
-    "claude-3-5-haiku": (0.80, 4.00, 0.08, 1.00, None),
-    "gemini-4-hydrogen": (1.50, 7.50, 0.075, 1.50, None),
-    "gemini-4-carbon": (2.00, 10.00, 0.10, 2.00, None),
-    "gemini-4-argon": (2.00, 10.00, 0.10, 2.00, None),
-    "gemini-4-neon": (3.00, 15.00, 0.15, 3.00, None),
-    "gemini-4": (2.00, 10.00, 0.10, 2.00, None),
-    "gemini-pro-orchestrator-neon": (3.00, 15.00, 0.15, 3.00, None),
-    "gemini-pro-orchestrator-argon": (2.00, 10.00, 0.10, 2.00, None),
-    "gemini-pro-orchestrator": (2.00, 10.00, 0.10, 2.00, None),
-    "gemini-flash-worker-agy": (1.50, 7.50, 0.075, 1.50, None),
-    "gemini-3.8-flash": (0.75, 3.75, 0.075, 0.75, None),
-    "gemini-3.7-flash": (0.75, 3.75, 0.075, 0.75, None),
-    "gemini-3.6-flash": (0.75, 3.75, 0.075, 0.75, None),
-    "gemini-3.5-flash-lite": (0.10, 0.40, 0.025, 0.10, None),
-    "gemini-3.5-flash": (0.15, 0.60, 0.0375, 0.15, None),
-    "gemini-3.1-flash-lite": (0.25, 1.50, 0.025, 0.25, None),
-    "gemini-3.1-pro": (2.00, 12.00, 0.20, 2.00, (200_000, 4.00, 18.00, 0.40, 4.00)),
-    "gemini-3-pro": (1.25, 10.00, 0.3125, 1.25, (200_000, 2.50, 15.00, 0.625, 2.50)),
-    "gemini-3-flash": (0.15, 0.60, 0.0375, 0.15, None),
-    "gemini-2.5-pro": (1.25, 10.00, 0.3125, 1.25, (200_000, 2.50, 15.00, 0.625, 2.50)),
-    "gemini-2.5-flash": (0.15, 0.60, 0.0375, 0.15, None),
-    "gpt-oss-120b": (0.09, 0.36, 0.045, 0.09, None),
-    "grok-4.7-build-fast": (4.00, 12.00, 1.00, 4.00, None),
-    "grok-4.7-build": (2.00, 6.00, 0.50, 2.00, None),
-    "grok-4.6-build": (2.00, 6.00, 0.50, 2.00, None),
-    "grok-4.20": (3.00, 15.00, 0.75, 3.00, None),
-    "grok-4": (3.00, 15.00, 0.75, 3.00, None),
-    "grok-code-fast-1": (0.20, 1.50, 0.02, 0.20, None),
-    "grok-3": (3.00, 15.00, 0.75, 3.00, None),
-    "grok-3-mini": (0.30, 0.50, 0.075, 0.30, None),
-    "deepseek-v4-pro": (0.66, 1.98, 0.022, 0.66, None),
-    "deepseek-v4-flash": (0.15, 0.60, 0.003, 0.15, None),
-    "deepseek-v4.1-flash": (0.10, 0.40, 0.025, 0.10, None),
-    "deepseek-flash": (0.15, 0.60, 0.003, 0.15, None),
-    "deepseek-v4": (0.27, 1.10, 0.07, 0.27, None),
-    "deepseek-chat": (0.28, 0.42, 0.028, 0.28, None),
-    "deepseek-reasoner": (0.28, 0.42, 0.028, 0.28, None),
-    "deepseek-v3": (0.27, 1.10, 0.07, 0.27, None),
-    "deepseek-r1": (0.55, 2.19, 0.14, 0.55, None),
-    "kimi-k3.1-pro-highspeed": (4.00, 20.00, 0.20, 4.00, None),
-    "kimi-k3.1-pro": (2.00, 10.00, 0.20, 2.00, None),
-    "kimi-k3": (3.00, 15.00, 0.30, 3.00, None),
-    "kimi-k2.7-code-highspeed": (1.90, 8.00, 0.38, 1.90, None),
-    "kimi-k2.7-code": (0.95, 4.00, 0.19, 0.95, None),
-    "kimi-k2.6": (0.95, 4.00, 0.16, 0.95, None),
-    "kimi-k2-thinking": (0.574, 2.294, 0.574, 0.574, None),
-    "kimi-k2.5": (0.60, 2.50, 0.15, 0.60, None),
-    "kimi-k2": (0.60, 2.50, 0.15, 0.60, None),
-    "qwen3-coder-plus": (0.35, 1.40, 0.08, 0.35, None),
-    "qwen3-max": (1.20, 4.80, 0.30, 1.20, None),
-    "glm-5": (0.50, 2.00, 0.125, 0.50, None),
-    "glm-4.7": (0.40, 1.60, 0.10, 0.40, None),
-    "minimax-m2.5": (0.30, 1.20, 0.03, 0.30, None),
-}
+BUILTIN_PRICING_FILENAME = "model_pricing.json"
 
 AGY_MODEL_ENUM: dict[int, str] = {
     246: "gemini-2.5-pro",
-    312: "gemini-2.5-flash",
-    313: "gemini-2.5-flash-thinking",
-    329: "gemini-2.5-flash-thinking",
-    330: "gemini-2.5-flash-lite",
     281: "claude-sonnet-4",
     282: "claude-sonnet-4",
     290: "claude-opus-4",
     291: "claude-opus-4",
+    312: "gemini-2.5-flash",
+    313: "gemini-2.5-flash-thinking",
+    329: "gemini-2.5-flash-thinking",
+    330: "gemini-2.5-flash-lite",
     333: "claude-sonnet-4-5",
     334: "claude-sonnet-4-5",
     340: "claude-haiku-4-5",
@@ -281,6 +182,7 @@ AGY_MODEL_ENUM: dict[int, str] = {
     1525: "gemini-4-hydrogen",
     1526: "gemini-4-hydrogen",
     1528: "gemini-4-hydrogen",
+    1532: "gemini-4-neon",
     1535: "gemini-4-neon",
     1537: "gemini-4-neon",
     1667: "gemini-4-carbon",
@@ -293,6 +195,8 @@ AGY_MODEL_ENUM: dict[int, str] = {
 }
 
 AGY_ORCHESTRATOR_ENUMS: frozenset[int] = frozenset({1537, 1667})
+AGY_WORKER_ENUMS: frozenset[int] = frozenset({1669})
+AGY_ROLE_WRAPPER_ENUMS: frozenset[int] = AGY_ORCHESTRATOR_ENUMS | AGY_WORKER_ENUMS
 AGY_CANONICAL_MODELS: dict[str, str] = {
     "gemini-pro-orchestrator": "gemini-4-carbon",
     "gemini-pro-orchestrator-carbon": "gemini-4-carbon",
@@ -455,6 +359,38 @@ def _serialize_rate_tuple(rate: RateTuple) -> list[Any]:
         if tiered is not None
         else None,
     ]
+
+
+def _load_builtin_pricing_table() -> tuple[dict[str, str], dict[str, RateTuple]]:
+    path = Path(__file__).resolve().with_name(BUILTIN_PRICING_FILENAME)
+    try:
+        obj = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return {}, {}
+    if not isinstance(obj, dict):
+        return {}, {}
+    aliases: dict[str, str] = {}
+    raw_aliases = obj.get("aliases")
+    if isinstance(raw_aliases, dict):
+        for k, v in raw_aliases.items():
+            if isinstance(k, str) and isinstance(v, str):
+                lk = k.strip().lower()
+                lv = v.strip().lower()
+                if lk and lv:
+                    aliases[lk] = lv
+    rates: dict[str, RateTuple] = {}
+    raw_rates = obj.get("rates")
+    if isinstance(raw_rates, dict):
+        for k, v in raw_rates.items():
+            if isinstance(k, str):
+                lk = k.strip().lower()
+                rt = _coerce_rate_tuple(v)
+                if lk and rt is not None:
+                    rates[lk] = rt
+    return aliases, rates
+
+
+MODEL_PRICING_ALIASES, MODEL_RATES_PER_M = _load_builtin_pricing_table()
 
 
 def _pricing_backoff_path() -> Path:
@@ -747,7 +683,12 @@ def _parse_models_dev_rates(payload: Any) -> tuple[dict[str, RateTuple], dict[st
     if not isinstance(payload, dict):
         return primary, secondary
 
-    def _collect_provider(models_obj: Any, dest: dict[str, RateTuple], check_modality: bool) -> None:
+    def _collect_provider(
+        models_obj: Any,
+        dest: dict[str, RateTuple],
+        check_modality: bool,
+        allowed_prefixes: tuple[str, ...] | None = None,
+    ) -> None:
         if not isinstance(models_obj, dict):
             return
         local_map: dict[str, RateTuple] = {}
@@ -766,19 +707,44 @@ def _parse_models_dev_rates(payload: Any) -> tuple[dict[str, RateTuple], dict[st
             norm = _normalize_model_id(raw_mid)
             if not norm or norm == "unknown":
                 continue
+            if allowed_prefixes is not None and not norm.startswith(allowed_prefixes):
+                continue
             if norm not in local_map or raw_mid.strip().lower() == norm:
                 local_map[norm] = rate
         for norm, rate in local_map.items():
-            dest.setdefault(norm, rate)
+            prev = dest.get(norm)
+            if prev is None:
+                dest[norm] = rate
+            elif abs(rate[0] - prev[0]) < 1e-6 and abs(rate[1] - prev[1]) < 1e-6:
+                read_m = rate[2] if (abs(prev[2] - prev[0]) < 1e-6 and rate[2] < rate[0] - 1e-6) else prev[2]
+                tiered = rate[4] if (prev[4] is None and rate[4] is not None) else prev[4]
+                dest[norm] = (prev[0], prev[1], read_m, prev[3], tiered)
 
     trusted_set = set(TRUSTED_MODELS_DEV_PROVIDERS)
     for prov in TRUSTED_MODELS_DEV_PROVIDERS:
         p_info = payload.get(prov)
         if isinstance(p_info, dict):
-            _collect_provider(p_info.get("models"), primary, check_modality=False)
+            _collect_provider(
+                p_info.get("models"),
+                primary,
+                check_modality=False,
+                allowed_prefixes=TRUSTED_MODELS_DEV_PROVIDER_PREFIXES.get(prov),
+            )
+
+    seen_sec: set[str] = set()
+    for prov in PREFERRED_MODELS_DEV_SECONDARY:
+        p_info = payload.get(prov)
+        if isinstance(p_info, dict):
+            seen_sec.add(prov)
+            _collect_provider(p_info.get("models"), secondary, check_modality=True)
+
+    for prov in TRUSTED_MODELS_DEV_PROVIDERS:
+        p_info = payload.get(prov)
+        if isinstance(p_info, dict):
+            _collect_provider(p_info.get("models"), secondary, check_modality=True)
 
     for prov, p_info in payload.items():
-        if not isinstance(prov, str) or prov in trusted_set or not isinstance(p_info, dict):
+        if not isinstance(prov, str) or prov in trusted_set or prov in seen_sec or not isinstance(p_info, dict):
             continue
         low_prov = prov.lower()
         if "plan" in low_prov or "free" in low_prov:
@@ -788,8 +754,12 @@ def _parse_models_dev_rates(payload: Any) -> tuple[dict[str, RateTuple], dict[st
     return primary, secondary
 
 
+_LITELLM_REGIONAL_PREFIX_RE = re.compile(
+    r"^(?:(?:us|eu|ap|au|ca|jp|us-gov)\.|azure/(?:us|eu|ap|au|ca|jp)/|bedrock_mantle/)",
+    re.IGNORECASE,
+)
 _LITELLM_BEDROCK_PREFIX_RE = re.compile(
-    r"^(?:(?:us|eu|ap|au|ca|global)\.)?(?:anthropic|amazon|meta|mistral|cohere|deepseek)\.",
+    r"^(?:global\.)?(?:anthropic|amazon|meta|mistral|cohere|deepseek|xai)\.",
     re.IGNORECASE,
 )
 _LITELLM_CANONICAL_PREFIXES = (
@@ -803,6 +773,15 @@ _LITELLM_CANONICAL_PREFIXES = (
     "dashscope/",
     "qwen/",
     "minimax/",
+    "mistral/",
+    "cohere/",
+)
+_LITELLM_PREFERRED_SECONDARY_PREFIXES = (
+    "openrouter/",
+    "vercel_ai_gateway/",
+    "azure/",
+    "azure_ai/",
+    "vertex_ai/",
 )
 _LITELLM_SKIP_MODES = {
     "embedding",
@@ -815,10 +794,11 @@ _LITELLM_SKIP_MODES = {
 }
 
 
-def _parse_litellm_rates(payload: Any) -> dict[str, RateTuple]:
-    ranked: dict[str, tuple[int, RateTuple]] = {}
+def _parse_litellm_rates(payload: Any) -> tuple[dict[str, RateTuple], dict[str, RateTuple]]:
+    pri_ranked: dict[str, tuple[tuple[int, int, int], RateTuple]] = {}
+    sec_ranked: dict[str, tuple[tuple[int, int, int], RateTuple]] = {}
     if not isinstance(payload, dict):
-        return {}
+        return {}, {}
     for raw_key, info in payload.items():
         if not isinstance(raw_key, str) or raw_key == "sample_spec" or not isinstance(info, dict):
             continue
@@ -850,41 +830,59 @@ def _parse_litellm_rates(payload: Any) -> dict[str, RateTuple]:
             t_write = round(t_cw_tok * 1_000_000.0, 6) if (t_cw_tok is not None and t_cw_tok > 0.0) else t_in
             tiered = (200_000, t_in, t_out, t_read, t_write)
 
+        low_raw = raw_key.strip().lower()
+        if _LITELLM_REGIONAL_PREFIX_RE.match(low_raw):
+            continue
         stripped_key = _LITELLM_BEDROCK_PREFIX_RE.sub("", raw_key.strip())
         norm = _normalize_model_id(stripped_key)
         if not norm or norm == "unknown":
             continue
-        low_raw = raw_key.strip().lower()
-        if low_raw == norm:
-            prio = 0
-        elif low_raw.startswith(_LITELLM_CANONICAL_PREFIXES):
-            prio = 1
-        elif "/" not in low_raw and stripped_key.lower() == norm:
-            prio = 2
-        else:
-            prio = 3
         rate: RateTuple = (in_m, out_m, read_m, write_m, tiered)
-        prev = ranked.get(norm)
-        if prev is None or prio < prev[0]:
-            ranked[norm] = (prio, rate)
-    return {k: v[1] for k, v in ranked.items()}
+        has_cr = 0 if (cr_tok is not None and read_m < in_m) else 1
+        has_tier = 0 if tiered is not None else 1
+        if low_raw == norm:
+            rank = (0, has_cr, has_tier)
+            dest = pri_ranked
+        elif low_raw.startswith(_LITELLM_CANONICAL_PREFIXES):
+            rank = (1, has_cr, has_tier)
+            dest = pri_ranked
+        elif "/" not in low_raw and stripped_key.lower() == norm:
+            rank = (2, has_cr, has_tier)
+            dest = pri_ranked
+        elif low_raw.startswith("vertex_ai/") and norm.startswith(("gemini-", "gemma-")):
+            rank = (2, has_cr, has_tier)
+            dest = pri_ranked
+        else:
+            sec_idx = len(_LITELLM_PREFERRED_SECONDARY_PREFIXES)
+            for idx, pref in enumerate(_LITELLM_PREFERRED_SECONDARY_PREFIXES):
+                if low_raw.startswith(pref):
+                    sec_idx = idx
+                    break
+            rank = (sec_idx, has_cr, has_tier)
+            dest = sec_ranked
+        prev = dest.get(norm)
+        if prev is None or rank < prev[0]:
+            dest[norm] = (rank, rate)
+    return {k: v[1] for k, v in pri_ranked.items()}, {k: v[1] for k, v in sec_ranked.items()}
 
 
 def _merge_rate_maps(
     base_map: dict[str, RateTuple],
     override_map: dict[str, RateTuple],
+    inherit_tiered: bool = True,
+    inherit_cache_read: bool = True,
 ) -> dict[str, RateTuple]:
     merged = dict(base_map)
     for key, rate in override_map.items():
         prev = merged.get(key)
-        if (
-            rate[4] is None
-            and prev is not None
-            and prev[4] is not None
-            and abs(rate[0] - prev[0]) < 1e-6
-            and abs(rate[1] - prev[1]) < 1e-6
-        ):
-            merged[key] = (rate[0], rate[1], rate[2], rate[3], prev[4])
+        if prev is not None and abs(rate[0] - prev[0]) < 1e-6 and abs(rate[1] - prev[1]) < 1e-6:
+            read_m = (
+                prev[2]
+                if (inherit_cache_read and abs(rate[2] - rate[0]) < 1e-6 and prev[2] < prev[0] - 1e-6)
+                else rate[2]
+            )
+            tiered = prev[4] if (inherit_tiered and rate[4] is None and prev[4] is not None) else rate[4]
+            merged[key] = (rate[0], rate[1], read_m, rate[3], tiered)
         else:
             merged[key] = rate
     return merged
@@ -898,6 +896,7 @@ def _build_runtime_catalog(
 ) -> dict[str, Any]:
     merged = _merge_rate_maps(MODEL_RATES_PER_M, online_rates)
     sorted_keys = sorted(merged.keys(), key=len, reverse=True)
+    sorted_aliases = sorted(MODEL_PRICING_ALIASES.keys(), key=len, reverse=True)
     digest_payload = json.dumps(
         [[k, _serialize_rate_tuple(merged[k])] for k in sorted(merged.keys())],
         separators=(",", ":"),
@@ -909,6 +908,7 @@ def _build_runtime_catalog(
         "modelCount": len(merged),
         "rates": merged,
         "sortedKeys": sorted_keys,
+        "sortedAliases": sorted_aliases,
         "digest": _fnv1a64(digest_payload),
         "memo": {},
     }
@@ -1031,16 +1031,32 @@ def _sync_pricing_catalog(force: bool = False) -> dict[str, Any]:
     ll_raw = task_res["ll"][1] if "ll" in task_res and task_res["ll"][0] else None
 
     md_primary, md_secondary = _parse_models_dev_rates(md_raw) if md_raw is not None else ({}, {})
-    ll_rates = _parse_litellm_rates(ll_raw) if ll_raw is not None else {}
+    ll_primary, ll_secondary = _parse_litellm_rates(ll_raw) if ll_raw is not None else ({}, {})
 
     active_sources: list[str] = []
     if md_primary or md_secondary:
         active_sources.append("models.dev")
-    if ll_rates:
+    if ll_primary or ll_secondary:
         active_sources.append("litellm")
 
-    merged_online = _merge_rate_maps(md_secondary, ll_rates)
-    merged_online = _merge_rate_maps(merged_online, md_primary)
+    merged_online = _merge_rate_maps(ll_secondary, md_secondary)
+    merged_online = _merge_rate_maps(merged_online, ll_primary)
+    merged_online = _merge_rate_maps(merged_online, md_primary, inherit_tiered=False)
+
+    official_primary = _merge_rate_maps(ll_primary, md_primary, inherit_tiered=False)
+    for key, rate in official_primary.items():
+        if key.endswith("-preview"):
+            base_key = key[:-8]
+            if base_key and base_key not in official_primary:
+                existing = merged_online.get(base_key)
+                if existing is not None:
+                    merged_online[base_key] = _merge_rate_maps(
+                        {base_key: existing},
+                        {base_key: rate},
+                        inherit_tiered=False,
+                    )[base_key]
+                else:
+                    merged_online[base_key] = rate
 
     if merged_online:
         updated_iso = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1103,6 +1119,38 @@ def _pricing_source_metadata(catalog: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _scale_rate_tuple(rate: RateTuple, factor: float) -> RateTuple:
+    in_m, out_m, read_m, write_m, tiered = rate
+    scaled_tier = (
+        (
+            tiered[0],
+            round(tiered[1] * factor, 6),
+            round(tiered[2] * factor, 6),
+            round(tiered[3] * factor, 6),
+            round(tiered[4] * factor, 6),
+        )
+        if tiered is not None
+        else None
+    )
+    return (
+        round(in_m * factor, 6),
+        round(out_m * factor, 6),
+        round(read_m * factor, 6),
+        round(write_m * factor, 6),
+        scaled_tier,
+    )
+
+
+def _resolve_alias_rate(alias_key: str, rates: dict[str, RateTuple]) -> RateTuple | None:
+    target = MODEL_PRICING_ALIASES.get(alias_key)
+    if not target:
+        return None
+    if target.endswith(":fast"):
+        base = rates.get(target[:-5])
+        return _scale_rate_tuple(base, 2.0) if base is not None else None
+    return rates.get(target)
+
+
 def _lookup_model_rate_in_catalog(model_id: str, catalog: dict[str, Any]) -> RateTuple | None:
     m = _normalize_model_id(model_id)
     if m.endswith(":fast"):
@@ -1115,9 +1163,9 @@ def _lookup_model_rate_in_catalog(model_id: str, catalog: dict[str, Any]) -> Rat
     rates: dict[str, RateTuple] = catalog["rates"]
 
     def _resolve() -> RateTuple | None:
-        alias_direct = MODEL_PRICING_ALIASES.get(m)
-        if alias_direct and alias_direct in rates:
-            return rates[alias_direct]
+        alias_rate = _resolve_alias_rate(m, rates)
+        if alias_rate is not None:
+            return alias_rate
         if m in rates:
             return rates[m]
         cleaned = m
@@ -1138,16 +1186,16 @@ def _lookup_model_rate_in_catalog(model_id: str, catalog: dict[str, Any]) -> Rat
         ):
             if cleaned.endswith(suffix):
                 cleaned = cleaned[: -len(suffix)]
-                alias_clean = MODEL_PRICING_ALIASES.get(cleaned)
-                if alias_clean and alias_clean in rates:
-                    return rates[alias_clean]
+                alias_rate = _resolve_alias_rate(cleaned, rates)
+                if alias_rate is not None:
+                    return alias_rate
                 if cleaned in rates:
                     return rates[cleaned]
                 if f"{cleaned}-preview" in rates:
                     return rates[f"{cleaned}-preview"]
-        alias_clean = MODEL_PRICING_ALIASES.get(cleaned)
-        if alias_clean and alias_clean in rates:
-            return rates[alias_clean]
+        alias_rate = _resolve_alias_rate(cleaned, rates)
+        if alias_rate is not None:
+            return alias_rate
         if cleaned in rates:
             return rates[cleaned]
         if f"{cleaned}-preview" in rates:
@@ -1162,6 +1210,20 @@ def _lookup_model_rate_in_catalog(model_id: str, catalog: dict[str, Any]) -> Rat
                 return rates[key]
             if alt_hyphen == key or alt_hyphen.startswith(key + "-"):
                 return rates[key]
+        sorted_aliases = catalog.get("sortedAliases")
+        if sorted_aliases is None:
+            sorted_aliases = sorted(MODEL_PRICING_ALIASES.keys(), key=len, reverse=True)
+        for alias in sorted_aliases:
+            if (
+                cleaned == alias
+                or cleaned.startswith(alias + "-")
+                or cleaned.startswith(alias + ".")
+                or alt_hyphen == alias
+                or alt_hyphen.startswith(alias + "-")
+            ):
+                alias_rate = _resolve_alias_rate(alias, rates)
+                if alias_rate is not None:
+                    return alias_rate
         return None
 
     ans = _resolve()
@@ -1184,6 +1246,7 @@ def _price_record(
     uncached = _safe_int(rec.get("uncachedInputTokens"))
     cached = _safe_int(rec.get("cachedInputTokens"))
     cache_write = _safe_int(rec.get("cacheCreationTokens"))
+    write_1h = min(cache_write, _safe_int(rec.get("cacheWrite1hTokens")))
     output = _safe_int(rec.get("outputTokens"))
     reasoning = _safe_int(rec.get("reasoningTokens"))
     total = uncached + cached + cache_write + output + reasoning
@@ -1211,7 +1274,8 @@ def _price_record(
 
         cat_in = (uncached * in_m / 1_000_000.0) * multiplier
         cat_read = (cached * read_m / 1_000_000.0) * multiplier
-        cat_write = (cache_write * write_m / 1_000_000.0) * multiplier
+        write_1h_m = in_m * CACHE_WRITE_1H_INPUT_MULTIPLIER
+        cat_write = (((cache_write - write_1h) * write_m + write_1h * write_1h_m) / 1_000_000.0) * multiplier
         cat_out = ((output + reasoning) * out_m / 1_000_000.0) * multiplier
         full_cached_as_input = (cached * in_m / 1_000_000.0) * multiplier
         cache_savings = max(0.0, full_cached_as_input - cat_read)
@@ -1333,6 +1397,9 @@ def _build_cache_entry(
         entry["min_ts_ms"] = min_ts
     return entry
 
+def _head_digest(data: bytes) -> str:
+    return hashlib.blake2b(data, digest_size=8).hexdigest()
+
 def _read_jsonl_incremental(
     file_path: str,
     cache_files: dict[str, Any],
@@ -1358,43 +1425,56 @@ def _read_jsonl_incremental(
     ):
         return prev["records"]
 
-    resume_offset = 0
-    guard_hash = ""
+    offset = 0
     records: list[dict[str, Any]] = []
     state = initial_state_fn() if initial_state_fn else {}
     resumed_truncated = False
     resumed_min_ts_ms: int | float | None = None
 
+    prev_offset = prev.get("offset") if isinstance(prev, dict) else None
     if (
-        isinstance(prev, dict)
-        and isinstance(prev.get("resume_offset"), int)
-        and 0 < prev["resume_offset"] <= size
+        isinstance(prev_offset, int)
+        and 0 < prev_offset <= size
+        and prev.get("dev") == st.st_dev
+        and prev.get("ino") == st.st_ino
+        and isinstance(prev.get("size"), int)
+        and prev["size"] < size
+        and isinstance(prev.get("head_len"), int)
+        and 0 < prev["head_len"] <= prev_offset
         and _cache_entry_covers(prev, cutoff_ms)
     ):
-        cand_offset = prev["resume_offset"]
-        cand_guard = prev.get("guard_hash") or ""
         try:
             with open(file_path, "rb") as f:
-                g_start = max(0, cand_offset - GUARD_BYTES)
-                f.seek(g_start)
-                g_bytes = f.read(cand_offset - g_start)
-                if _fnv1a64(g_bytes) == cand_guard:
-                    resume_offset = cand_offset
+                head_ok = _head_digest(f.read(prev["head_len"])) == prev.get("head")
+                tail_ok = True
+                prev_tail_len = prev.get("tail_len")
+                if isinstance(prev_tail_len, int) and 0 < prev_tail_len <= prev_offset:
+                    f.seek(prev_offset - prev_tail_len)
+                    tail_ok = _head_digest(f.read(prev_tail_len)) == prev.get("tail")
+                f.seek(prev_offset - 1)
+                if head_ok and tail_ok and f.read(1) == b"\n":
+                    offset = prev_offset
                     records = list(prev["records"])
                     if prev.get("truncated"):
                         resumed_truncated = True
                         resumed_min_ts_ms = prev.get("min_ts_ms")
                     if isinstance(prev.get("state"), dict):
                         state = dict(prev["state"])
-        except Exception:
-            resume_offset = 0
+        except OSError:
+            offset = 0
+            records = []
+            state = initial_state_fn() if initial_state_fn else {}
             resumed_truncated = False
             resumed_min_ts_ms = None
 
+    head_len = 0
+    head = ""
+    tail_len = 0
+    tail = ""
     try:
         with open(file_path, "rb") as f:
-            f.seek(resume_offset)
-            new_resume = resume_offset
+            f.seek(offset)
+            new_resume = offset
             while True:
                 line_offset = f.tell()
                 raw_line_with_end = f.readline()
@@ -1420,14 +1500,14 @@ def _read_jsonl_incremental(
                     else:
                         records.append(parsed)
             state.pop("_line_offset", None)
-
-            if new_resume > 0:
-                g_start = max(0, new_resume - GUARD_BYTES)
-                f.seek(g_start)
-                guard_hash = _fnv1a64(f.read(new_resume - g_start))
-            else:
-                guard_hash = ""
-            resume_offset = new_resume
+            offset = new_resume
+            if offset > 0:
+                head_len = min(HEAD_FINGERPRINT_BYTES, offset)
+                f.seek(0)
+                head = _head_digest(f.read(head_len))
+                tail_len = min(TAIL_FINGERPRINT_BYTES, offset)
+                f.seek(offset - tail_len)
+                tail = _head_digest(f.read(tail_len))
     except Exception:
         return records
 
@@ -1437,8 +1517,13 @@ def _read_jsonl_incremental(
         prior_min_ts_ms=resumed_min_ts_ms,
         size=size,
         mtime_ns=mtime_ns,
-        resume_offset=resume_offset,
-        guard_hash=guard_hash,
+        dev=st.st_dev,
+        ino=st.st_ino,
+        offset=offset,
+        head_len=head_len,
+        head=head,
+        tail_len=tail_len,
+        tail=tail,
         state=state,
     )
     return records
@@ -1478,7 +1563,11 @@ def _scan_claude(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> lis
             return None
         uncached = _safe_int(usage.get("input_tokens"))
         cache_read = _safe_int(usage.get("cache_read_input_tokens"))
-        cache_write = _safe_int(usage.get("cache_creation_input_tokens"))
+        split = usage.get("cache_creation")
+        raw_1h = _safe_int(split.get("ephemeral_1h_input_tokens")) if isinstance(split, dict) else 0
+        raw_5m = _safe_int(split.get("ephemeral_5m_input_tokens")) if isinstance(split, dict) else 0
+        cache_write = max(_safe_int(usage.get("cache_creation_input_tokens")), raw_1h + raw_5m)
+        write_1h = min(cache_write, raw_1h)
         output = _safe_int(usage.get("output_tokens"))
         if uncached + cache_read + cache_write + output <= 0:
             return None
@@ -1492,6 +1581,7 @@ def _scan_claude(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> lis
             "uncachedInputTokens": uncached,
             "cachedInputTokens": cache_read,
             "cacheCreationTokens": cache_write,
+            "cacheWrite1hTokens": write_1h,
             "outputTokens": output,
             "reasoningTokens": 0,
             "reportedCostUsd": _safe_float(obj.get("costUSD") or obj.get("total_cost_usd")),
@@ -1516,8 +1606,52 @@ def _codex_rollout_init_state() -> dict[str, Any]:
         "model": "gpt-5-codex",
         "fast": False,
         "prev_totals": None,
-        "fork_suppress_until_ms": 0,
-        "session_meta_count": 0,
+        "fork_child_id": None,
+        "fork_replay": False,
+        "fork_user": False,
+    }
+
+
+def _uuid7_ms(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    hexed = value.replace("-", "")
+    if len(hexed) != 32 or hexed[12] != "7":
+        return None
+    try:
+        return int(hexed[:12], 16)
+    except ValueError:
+        return None
+
+
+def _codex_fork_parent(payload: dict[str, Any]) -> str:
+    parent = payload.get("forked_from_id")
+    if isinstance(parent, str) and parent:
+        return parent
+    source = payload.get("source")
+    spawn = source.get("subagent") if isinstance(source, dict) else None
+    spawn = spawn.get("thread_spawn") if isinstance(spawn, dict) else None
+    parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+    return parent if isinstance(parent, str) else ""
+
+
+def _codex_turn_is_child_own(state: dict[str, Any], turn_id: Any, task_started: bool) -> bool:
+    child_ms = _uuid7_ms(state.get("fork_child_id"))
+    turn_ms = _uuid7_ms(turn_id)
+    if child_ms is not None and turn_ms is not None:
+        return turn_ms >= child_ms
+    return task_started or bool(state.get("fork_user"))
+
+
+def _codex_totals(usage: Any) -> dict[str, int] | None:
+    if not isinstance(usage, dict):
+        return None
+    return {
+        "in": _safe_int(usage.get("input_tokens")),
+        "cached": _safe_int(usage.get("cached_input_tokens")),
+        "write": _safe_int(usage.get("cache_write_input_tokens")),
+        "out": _safe_int(usage.get("output_tokens")),
+        "reason": _safe_int(usage.get("reasoning_output_tokens")),
     }
 
 
@@ -1533,9 +1667,10 @@ def _codex_rollout_parse_line(
         payload = {}
 
     if t == "session_meta":
-        state["session_meta_count"] = _safe_int(state.get("session_meta_count")) + 1
-        if state["session_meta_count"] > 1 and ts is not None:
-            state["fork_suppress_until_ms"] = ts + 1000
+        if not state.get("fork_child_id") and _codex_fork_parent(payload):
+            state["fork_child_id"] = payload.get("id") or "fork"
+            state["fork_replay"] = True
+            state["fork_user"] = payload.get("thread_source") == "user"
         m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
         m = payload.get("model") or payload.get("model_id") or m_info.get("slug") or m_info.get("model")
         if isinstance(m, str) and m.strip():
@@ -1544,6 +1679,11 @@ def _codex_rollout_parse_line(
             tier = str(payload.get("service_tier") or "").lower()
             state["fast"] = tier in ("fast", "priority")
         return None
+
+    if t in ("turn_context", "event_msg") and state.get("fork_replay"):
+        started = t == "event_msg" and payload.get("type") == "task_started"
+        if (t == "turn_context" or started) and _codex_turn_is_child_own(state, payload.get("turn_id"), started):
+            state["fork_replay"] = False
 
     if t == "turn_context":
         m_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
@@ -1561,12 +1701,13 @@ def _codex_rollout_parse_line(
             state["model"] = _normalize_model_id(m)
         return None
 
-    if t == "thread_settings_applied":
-        settings = payload.get("settings")
+    if t == "thread_settings_applied" or (t == "event_msg" and payload.get("type") == "thread_settings_applied"):
+        settings = payload.get("thread_settings")
+        if not isinstance(settings, dict):
+            settings = payload.get("settings")
         if isinstance(settings, dict):
-            if "service_tier" in settings:
-                tier = str(settings.get("service_tier") or "").lower()
-                state["fast"] = tier in ("fast", "priority")
+            tier = str(settings.get("service_tier") or "").lower()
+            state["fast"] = tier in ("fast", "priority")
             m = settings.get("model")
             if isinstance(m, str) and m.strip():
                 state["model"] = _normalize_model_id(m)
@@ -1592,36 +1733,20 @@ def _codex_rollout_parse_line(
 
     if require_ts and ts is None:
         return None
-    if ts is not None and ts <= _safe_int(state.get("fork_suppress_until_ms")):
-        info = payload.get("info")
-        if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
-            tot = info["total_token_usage"]
-            state["prev_totals"] = {
-                "in": _safe_int(tot.get("input_tokens")),
-                "cached": _safe_int(tot.get("cached_input_tokens")),
-                "write": _safe_int(tot.get("cache_write_input_tokens")),
-                "out": _safe_int(tot.get("output_tokens")),
-                "reason": _safe_int(tot.get("reasoning_output_tokens")),
-            }
-        return None
-
     info = payload.get("info")
     if not isinstance(info, dict):
         return None
 
-    tot = info.get("total_token_usage")
     last = info.get("last_token_usage")
     prev = state.get("prev_totals")
+    cur_tot = _codex_totals(info.get("total_token_usage"))
 
-    cur_tot = None
-    if isinstance(tot, dict):
-        cur_tot = {
-            "in": _safe_int(tot.get("input_tokens")),
-            "cached": _safe_int(tot.get("cached_input_tokens")),
-            "write": _safe_int(tot.get("cache_write_input_tokens")),
-            "out": _safe_int(tot.get("output_tokens")),
-            "reason": _safe_int(tot.get("reasoning_output_tokens")),
-        }
+    if state.get("fork_replay"):
+        if cur_tot is not None:
+            state["prev_totals"] = cur_tot
+        return None
+
+    if cur_tot is not None:
         if prev is not None and (
             cur_tot["in"] == prev.get("in")
             and cur_tot["cached"] == prev.get("cached")
@@ -1650,12 +1775,12 @@ def _codex_rollout_parse_line(
                     d_out = diff_out
                     d_reason = max(0, cur_tot["reason"] - _safe_int(prev.get("reason")))
     elif cur_tot is not None:
-        if prev is not None:
-            d_in = max(0, cur_tot["in"] - prev["in"])
-            d_cached = max(0, cur_tot["cached"] - prev["cached"])
-            d_write = max(0, cur_tot["write"] - prev["write"])
-            d_out = max(0, cur_tot["out"] - prev["out"])
-            d_reason = max(0, cur_tot["reason"] - prev["reason"])
+        if prev is not None and cur_tot["in"] >= _safe_int(prev.get("in")) and cur_tot["out"] >= _safe_int(prev.get("out")):
+            d_in = cur_tot["in"] - _safe_int(prev.get("in"))
+            d_cached = max(0, cur_tot["cached"] - _safe_int(prev.get("cached")))
+            d_write = max(0, cur_tot["write"] - _safe_int(prev.get("write")))
+            d_out = cur_tot["out"] - _safe_int(prev.get("out"))
+            d_reason = max(0, cur_tot["reason"] - _safe_int(prev.get("reason")))
         else:
             d_in = cur_tot["in"]
             d_cached = cur_tot["cached"]
@@ -3332,448 +3457,554 @@ def _scan_qoder(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list
     return list(deduped.values())
 
 
-def _read_varint(buf: bytes, pos: int, end: int) -> tuple[int, int] | None:
-    result = 0
-    shift = 0
-    while pos < end and shift < 64:
-        b = buf[pos]
-        pos += 1
-        result |= (b & 0x7F) << shift
-        if (b & 0x80) == 0:
-            return result, pos
-        shift += 7
-    return None
 
-def _iter_proto_fields(buf: bytes, start: int = 0, end: int | None = None):
-    if end is None:
-        end = len(buf)
-    pos = start
+_PB_VARINT, _PB_FIXED64, _PB_LEN, _PB_FIXED32 = 0, 1, 2, 5
+
+
+def _pb_uvarint(buf: bytes, pos: int) -> tuple[int | None, int]:
+    value = 0
+    for shift in range(0, 64, 7):
+        if pos >= len(buf):
+            return None, pos
+        byte = buf[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+    return None, pos
+
+
+def _pb_walk(buf: bytes):
+    pos, end = 0, len(buf)
     while pos < end:
-        tag_res = _read_varint(buf, pos, end)
-        if tag_res is None:
+        key, pos = _pb_uvarint(buf, pos)
+        if key is None or key >> 3 == 0:
             return
-        tag, pos = tag_res
-        field_no = tag >> 3
-        wire_type = tag & 0x07
-        if field_no <= 0:
-            return
-        if wire_type == 0:
-            v_res = _read_varint(buf, pos, end)
-            if v_res is None:
+        field, wire = key >> 3, key & 7
+        if wire == _PB_VARINT:
+            val, pos = _pb_uvarint(buf, pos)
+            if val is None:
                 return
-            val, pos = v_res
-            yield field_no, 0, val
-        elif wire_type == 1:
-            if pos + 8 > end:
+            yield field, wire, val
+            continue
+        if wire == _PB_LEN:
+            size, pos = _pb_uvarint(buf, pos)
+            if size is None:
                 return
-            yield field_no, 1, buf[pos : pos + 8]
-            pos += 8
-        elif wire_type == 2:
-            l_res = _read_varint(buf, pos, end)
-            if l_res is None:
-                return
-            length, pos = l_res
-            if length < 0 or pos + length > end:
-                return
-            yield field_no, 2, buf[pos : pos + length]
-            pos += length
-        elif wire_type == 5:
-            if pos + 4 > end:
-                return
-            yield field_no, 5, buf[pos : pos + 4]
-            pos += 4
+        elif wire == _PB_FIXED64:
+            size = 8
+        elif wire == _PB_FIXED32:
+            size = 4
         else:
             return
+        if pos + size > end:
+            return
+        yield field, wire, buf[pos : pos + size]
+        pos += size
 
-def _proto_fields(buf: bytes) -> dict[int, list[int | bytes]]:
-    res: dict[int, list[int | bytes]] = {}
-    for fno, wt, val in _iter_proto_fields(buf):
-        if wt in (0, 2):
-            res.setdefault(fno, []).append(val)
-    return res
 
-def _proto_num(fields: dict[int, list[int | bytes]], key: int) -> int:
-    vals = fields.get(key)
-    if vals and isinstance(vals[0], int):
-        return vals[0]
-    return 0
+class _PbMsg:
 
-def _proto_bytes(fields: dict[int, list[int | bytes]], key: int) -> bytes | None:
-    vals = fields.get(key)
-    if vals and isinstance(vals[0], bytes):
-        return vals[0]
-    return None
+    __slots__ = ("fields",)
 
-def _proto_nested(fields: dict[int, list[int | bytes]], key: int) -> dict[int, list[int | bytes]]:
-    b = _proto_bytes(fields, key)
-    return _proto_fields(b) if b is not None else {}
+    def __init__(self, buf: bytes | None = None):
+        self.fields: dict[int, list[int | bytes]] = {}
+        if buf:
+            for field, wire, val in _pb_walk(buf):
+                if wire in (_PB_VARINT, _PB_LEN):
+                    self.fields.setdefault(field, []).append(val)
 
-def _proto_text(fields: dict[int, list[int | bytes]], key: int) -> str:
-    b = _proto_bytes(fields, key)
-    if b is None:
+    def __contains__(self, field: int) -> bool:
+        return field in self.fields
+
+    def __bool__(self) -> bool:
+        return bool(self.fields)
+
+    def _first(self, field: int) -> int | bytes | None:
+        vals = self.fields.get(field)
+        return vals[0] if vals else None
+
+    def num(self, field: int) -> int:
+        val = self._first(field)
+        return val if isinstance(val, int) else 0
+
+    def blob(self, field: int) -> bytes | None:
+        val = self._first(field)
+        return val if isinstance(val, bytes) else None
+
+    def blobs(self, field: int) -> list[bytes]:
+        return [v for v in self.fields.get(field, ()) if isinstance(v, bytes)]
+
+    def sub(self, field: int) -> "_PbMsg":
+        return _PbMsg(self.blob(field))
+
+    def text(self, field: int) -> str:
+        val = self.blob(field)
+        if val is None:
+            return ""
+        try:
+            return val.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return ""
+
+    def epoch_ms(self) -> int | None:
+        seconds = self.num(1)
+        if 1_600_000_000 <= seconds <= 4_102_444_800:
+            return seconds * 1000 + self.num(2) // 1_000_000
+        return None
+
+
+def _db_blob(value: Any) -> bytes:
+    return value if isinstance(value, bytes) else bytes(value)
+
+
+
+_AGY_UNKNOWN = "antigravity-unknown"
+_AGY_PLACEHOLDER_MODELS = frozenset({"", "unknown", _AGY_UNKNOWN, "orchestrator", "gemini-flash"})
+_AGY_TOKEN_FIELDS = ("uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens", "reasoningTokens")
+_AGY_ORCHESTRATOR_SHORT_MODELS = {
+    "neon": "gemini-4-neon",
+    "carbon": "gemini-4-carbon",
+    "argon": "gemini-4-argon",
+    "hydrogen": "gemini-4-hydrogen",
+}
+_AGY_ORCHESTRATOR_LABEL_RE = re.compile(
+    r"^orchestrator\s*(?:\(([^)]+)\)|[·:\-/]\s*(.+))$",
+    re.IGNORECASE,
+)
+_AGY_LABEL_EFFORT_TAIL_RE = re.compile(
+    r"(?:\s*[·:\-/]\s*|\s+)(?:extra\s+high|xhigh|extra|high|medium|low|max|thinking|planner|executor|worker)\s*$",
+    re.IGNORECASE,
+)
+_CLAUDE_FAMILIES = frozenset({"sonnet", "opus", "haiku"})
+
+
+def _agy_is_role_wrapper(name: str, label: str = "", enum_id: int = 0) -> bool:
+    low_name = name.strip().lower()
+    low_label = label.strip().lower()
+    return (
+        low_name.startswith(("gemini-pro-orchestrator", "gemini-flash-worker", "orchestrator"))
+        or low_label.startswith("orchestrator")
+        or "(orchestrator)" in low_label
+        or enum_id in AGY_ROLE_WRAPPER_ENUMS
+    )
+
+
+def _agy_label_slug(label: str) -> str:
+    words = [w for w in re.sub(r"\s*\([^)]*\)\s*$", "", label.lower()).split(" ") if w]
+    if not words:
         return ""
-    try:
-        return b.decode("utf-8").strip()
-    except Exception:
+    if words[0] in _CLAUDE_FAMILIES and len(words) >= 2:
+        words = ["claude", *words]
+    if words[0] != "claude" or len(words) < 2:
+        return "-".join(words)
+    if len(words) >= 3 and re.fullmatch(r"\d+(?:\.\d+)?", words[1]) and words[2] in _CLAUDE_FAMILIES:
+        words[1], words[2] = words[2], words[1]
+    return "-".join(words).replace(".", "-")
+
+
+def _agy_extract_orchestrator_label_model(folded: str) -> str:
+    match = _AGY_ORCHESTRATOR_LABEL_RE.match(folded)
+    if not match:
         return ""
-
-def _proto_timestamp(fields: dict[int, list[int | bytes]]) -> int | None:
-    sec = _proto_num(fields, 1)
-    if 1_600_000_000 <= sec <= 4_102_444_800:
-        return sec * 1000 + (_proto_num(fields, 2) // 1_000_000)
-    return None
-
-def _agy_model_name(name: str, enum_id: int, is_ui_label: bool = False) -> str:
-    if name:
-        raw = name.strip()
-        low_compact = " ".join(raw.lower().split())
-        if low_compact == "orchestrator (carbon)":
-            return "gemini-4-carbon"
-        if low_compact == "orchestrator (neon)":
-            return "gemini-4-neon"
-        if low_compact == "orchestrator (argon)":
-            return "gemini-4-argon"
-        if enum_id == 1669 and low_compact == "gemini flash":
-            return "gemini-4-hydrogen"
-        if not is_ui_label and " " not in raw and "(" not in raw:
-            norm_raw = _normalize_model_id(raw)
-            return AGY_CANONICAL_MODELS.get(norm_raw, norm_raw)
-        norm = re.sub(r"\s*\([^)]*\)\s*$", "", raw.lower()).replace(" ", "-")
-        if norm.startswith("claude-"):
-            norm = re.sub(r"^claude-(4(?:\.\d+)?)-(sonnet|opus|haiku)", r"claude-\2-\1", norm).replace(".", "-")
-        norm_id = _normalize_model_id(norm)
-        return AGY_CANONICAL_MODELS.get(norm_id, norm_id)
-    return AGY_MODEL_ENUM.get(enum_id) or (f"antigravity-model-{enum_id}" if enum_id > 0 else "")
+    inner = " ".join((match.group(1) or match.group(2) or "").strip().lower().split())
+    while inner:
+        trimmed = _AGY_LABEL_EFFORT_TAIL_RE.sub("", inner).strip()
+        if trimmed == inner or not trimmed:
+            break
+        inner = trimmed
+    if not inner:
+        return ""
+    if inner in _AGY_ORCHESTRATOR_SHORT_MODELS:
+        return _AGY_ORCHESTRATOR_SHORT_MODELS[inner]
+    slug = _agy_label_slug(inner)
+    if not slug:
+        return ""
+    norm = _normalize_model_id(slug)
+    return AGY_CANONICAL_MODELS.get(norm, norm)
 
 
-def _extract_agy_usages(data: dict[int, list[int | bytes]], usage_field: int, retry_field: int) -> list[dict[int, list[int | bytes]]]:
-    usages: list[dict[int, list[int | bytes]]] = []
-    usage_bytes = _proto_bytes(data, usage_field)
-    if usage_bytes is not None:
-        usages.append(_proto_fields(usage_bytes))
-    for retry in data.get(retry_field, []):
-        if isinstance(retry, bytes):
-            ru = _proto_bytes(_proto_fields(retry), 2)
-            if ru is not None:
-                usages.append(_proto_fields(ru))
-    return usages
+def _agy_model_name(
+    name: str,
+    enum_id: int,
+    is_ui_label: bool = False,
+    enum_map: dict[int, str] | None = None,
+) -> str:
+    lookup_map = enum_map if enum_map is not None else AGY_MODEL_ENUM
+    raw = name.strip()
+    if not raw:
+        return lookup_map.get(enum_id) or (f"antigravity-model-{enum_id}" if enum_id > 0 else "")
+    folded = " ".join(raw.lower().split())
+    orch_label = _agy_extract_orchestrator_label_model(folded)
+    if orch_label:
+        return orch_label
+    if enum_id == 1669 and folded == "gemini flash":
+        return "gemini-4-hydrogen"
+    is_machine_id = not is_ui_label and " " not in raw and "(" not in raw
+    norm = _normalize_model_id(raw if is_machine_id else _agy_label_slug(raw))
+    return AGY_CANONICAL_MODELS.get(norm, norm)
+
+
+def _agy_usage_list(msg: _PbMsg, primary: int, retries: int) -> list[_PbMsg]:
+    found = []
+    first = msg.blob(primary)
+    if first is not None:
+        found.append(_PbMsg(first))
+    for retry in msg.blobs(retries):
+        attempt = _PbMsg(retry).blob(2)
+        if attempt is not None:
+            found.append(_PbMsg(attempt))
+    return found
+
+
+def _agy_usage_tokens(usage: _PbMsg) -> dict[str, int] | None:
+    thinking, response = usage.num(9), usage.num(10)
+    split = thinking > 0 or response > 0
+    tokens = {
+        "uncachedInputTokens": usage.num(2),
+        "cachedInputTokens": usage.num(5),
+        "cacheCreationTokens": usage.num(4),
+        "outputTokens": response if split else usage.num(3),
+        "reasoningTokens": thinking if split else 0,
+    }
+    return tokens if sum(tokens.values()) > 0 else None
+
+
+def _agy_usage_keys(usage: _PbMsg) -> list[str]:
+    return [f"{field}:{usage.text(field)}" for field in (11, 12, 7) if usage.text(field)]
+
+
+def _agy_usage_submodel(
+    base: str,
+    usage: _PbMsg,
+    orchestrated: bool,
+    outer_enum: int = 0,
+    enum_map: dict[int, str] | None = None,
+) -> str:
+    enum_id = usage.num(1)
+    lookup_map = enum_map if enum_map is not None else AGY_MODEL_ENUM
+    sub = lookup_map.get(enum_id, "")
+    if not sub:
+        return ""
+    if base in _AGY_PLACEHOLDER_MODELS:
+        return sub
+    if orchestrated and enum_id != outer_enum and enum_id not in AGY_ORCHESTRATOR_ENUMS:
+        return sub
+    return ""
+
+
+def _agy_is_concrete(model: str) -> bool:
+    return bool(model) and model.lower() != "gemini-default"
+
+
+class _AgyTimeline:
+
+    __slots__ = ("by_step", "by_response", "by_generation")
+
+    def __init__(self):
+        self.by_step: dict[int, int] = {}
+        self.by_response: dict[str, int] = {}
+        self.by_generation: dict[int, int] = {}
+
+    def lookup(self, direct: int | None, step: int | None, response_id: str, gen_idx: int) -> int | None:
+        return (
+            direct
+            or (self.by_step.get(step) if step is not None else None)
+            or (self.by_response.get(response_id) if response_id else None)
+            or self.by_generation.get(gen_idx)
+        )
+
+
+def _agy_scan_steps(con, timeline: _AgyTimeline) -> tuple[list[tuple], str]:
+    cols = {r[1] for r in con.execute("PRAGMA table_info(steps)")}
+    type_col = "step_type" if "step_type" in cols else "0"
+    rows: list[tuple] = []
+    latest = ""
+    for idx, step_type, blob in con.execute(
+        f"SELECT idx, {type_col}, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx"
+    ):
+        if not isinstance(idx, int):
+            continue
+        step = _PbMsg(_db_blob(blob))
+        at = step.sub(8).epoch_ms() or step.sub(1).epoch_ms()
+        link = step.sub(20)
+        gen_idx = link.num(3) if 3 in link else None
+        if at is not None:
+            timeline.by_step[idx] = at
+            if step_type == 15 or 9 in step:
+                rid = step.sub(9).text(11)
+                if rid:
+                    timeline.by_response.setdefault(rid, at)
+            if gen_idx is not None:
+                timeline.by_generation.setdefault(gen_idx, at)
+        model_msg = step.sub(24)
+        name = model_msg.text(12) or model_msg.text(8)
+        enum_id = model_msg.num(1)
+        model = _agy_model_name(name, enum_id)
+        if model and model != _AGY_UNKNOWN:
+            latest = _normalize_model_id(model)
+        usages = _agy_usage_list(step, 9, 28)
+        if usages:
+            orchestrated = _agy_is_role_wrapper(name, "", enum_id)
+            rows.append((idx, model, orchestrated, enum_id, at, gen_idx, usages))
+    return rows, latest
+
+
+def _agy_scan_generations(con) -> tuple[list[dict[str, Any]], int, int, str]:
+    gens: list[dict[str, Any]] = []
+    in_use = capacity = 0
+    latest = ""
+    for idx, blob in con.execute("SELECT idx, data FROM gen_metadata WHERE data IS NOT NULL ORDER BY idx"):
+        if not isinstance(idx, int):
+            continue
+        root = _PbMsg(_db_blob(blob))
+        if root.blob(1) is None:
+            continue
+        chat = root.sub(1)
+        timing = chat.sub(9)
+        window = timing.sub(10)
+        if window:
+            in_use = window.num(1) or in_use
+            capacity = window.num(4) or capacity
+        response_model = chat.text(19)
+        label = chat.text(21)
+        enum_id = chat.num(3)
+        usages = _agy_usage_list(chat, 4, 17)
+        if (
+            enum_id == 1669
+            and label.lower() == "gemini flash"
+            and all(u.num(1) in (0, 1669) for u in usages)
+        ):
+            label = "Gemini 4 Hydrogen (Orchestrator)"
+        if not usages:
+            model = _agy_model_name(response_model or label, enum_id, is_ui_label=bool(label and not response_model))
+            if model and model != _AGY_UNKNOWN:
+                latest = model
+            continue
+        gens.append({
+            "idx": idx,
+            "step": root.num(2) if 2 in root else None,
+            "responseModel": response_model,
+            "label": label,
+            "enum": enum_id,
+            "at": timing.sub(4).epoch_ms(),
+            "usages": usages,
+        })
+    return gens, in_use, capacity, latest
+
+
+def _agy_session_enum_map(gens: list[dict[str, Any]]) -> dict[int, str]:
+    learned = dict(AGY_MODEL_ENUM)
+    for g in gens:
+        eid = g["enum"]
+        if not eid or eid in learned or eid in AGY_ROLE_WRAPPER_ENUMS:
+            continue
+        rm, lbl = g["responseModel"], g["label"]
+        if _agy_is_role_wrapper(rm, lbl, eid):
+            continue
+        candidate = ""
+        if _agy_is_concrete(rm):
+            candidate = _agy_model_name(rm, 0)
+        elif lbl:
+            candidate = _agy_model_name(lbl, 0, is_ui_label=True)
+        if candidate and candidate not in _AGY_PLACEHOLDER_MODELS and not candidate.startswith("antigravity-model-"):
+            learned[eid] = candidate
+    return learned
+
+
+def _agy_label_models(gens: list[dict[str, Any]]) -> tuple[dict[str, str | None], str | None]:
+    by_label: dict[str, str | None] = {}
+    concrete: set[str] = set()
+    unlabelled = False
+    for g in gens:
+        if not _agy_is_concrete(g["responseModel"]) or _agy_is_role_wrapper(g["responseModel"], "", g["enum"]):
+            continue
+        model = _agy_model_name(g["responseModel"], 0)
+        concrete.add(model)
+        if not g["label"]:
+            unlabelled = True
+        elif by_label.setdefault(g["label"], model) != model:
+            by_label[g["label"]] = None
+    sole = next(iter(concrete)) if len(concrete) == 1 and not unlabelled else None
+    return by_label, sole
+
+
+def _agy_generation_model(
+    g: dict[str, Any],
+    by_label: dict[str, str | None],
+    sole: str | None,
+    enum_map: dict[int, str] | None = None,
+) -> tuple[str, int]:
+    response_model, label, enum_id = g["responseModel"], g["label"], g["enum"]
+    if _agy_is_concrete(response_model):
+        if _agy_is_role_wrapper(response_model, "", enum_id) and label:
+            label_model = _agy_model_name(label, 0, is_ui_label=True, enum_map=enum_map)
+            if label_model and label_model not in _AGY_PLACEHOLDER_MODELS and not label_model.startswith("antigravity-model-"):
+                return label_model, 3
+        return _agy_model_name(response_model, enum_id, enum_map=enum_map), 3
+    if label:
+        mapped = by_label.get(label) or sole
+        if mapped:
+            return mapped, 3
+        return _agy_model_name(label, enum_id, is_ui_label=True, enum_map=enum_map), 2
+    if response_model:
+        return _agy_model_name(response_model, enum_id, enum_map=enum_map), 1
+    model = _agy_model_name("", enum_id, enum_map=enum_map) or _AGY_UNKNOWN
+    return model, 0 if model == _AGY_UNKNOWN else 1
+
+
+def _agy_merge_candidates(cands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parent = list(range(len(cands)))
+
+    def root_of(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict[str, int] = {}
+    for i, cand in enumerate(cands):
+        for key in cand["keys"]:
+            j = owner.setdefault(key, i)
+            a, b = root_of(i), root_of(j)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+
+    merged: dict[int, dict[str, Any]] = {}
+    for i, cand in enumerate(cands):
+        acc = merged.setdefault(root_of(i), cand)
+        if acc is cand:
+            continue
+        if cand["confidence"] > acc["confidence"]:
+            acc["model"], acc["confidence"] = cand["model"], cand["confidence"]
+        if not acc["uiLabel"] and cand["uiLabel"]:
+            acc["uiLabel"] = cand["uiLabel"]
+        if cand["anchor"] > acc["anchor"]:
+            acc["timestampMs"], acc["anchor"] = cand["timestampMs"], cand["anchor"]
+        for field in _AGY_TOKEN_FIELDS:
+            acc[field] = max(acc[field], cand[field])
+
+    out = []
+    for acc in merged.values():
+        out.append({
+            "cli": "Antigravity",
+            "model": acc["model"],
+            "uiLabel": acc["uiLabel"],
+            "timestampMs": acc["timestampMs"],
+            **{field: acc[field] for field in _AGY_TOKEN_FIELDS},
+            "reportedCostUsd": None,
+        })
+    return out
 
 
 def _extract_agy_db_session_checked(
     db_path: Path,
     fallback_ts: int = 0,
 ) -> tuple[list[dict[str, Any]], int, int, str, bool]:
-    raw_candidates: list[dict[str, Any]] = []
-    est_used = 0
-    max_ctx = 0
-    latest_model = ""
+    cands: list[dict[str, Any]] = []
+    in_use = capacity = 0
+    latest = ""
     scan_ok = False
+    session_ms: int | None = None
+
+    def add(model: str, confidence: int, label: str | None, at: int | None, tokens: dict[str, int], keys: list[str]) -> None:
+        anchor = 2 if at is not None else (1 if session_ms is not None else 0)
+        cands.append({
+            "model": model,
+            "confidence": confidence,
+            "uiLabel": label,
+            "timestampMs": at or session_ms or fallback_ts,
+            "anchor": anchor,
+            **tokens,
+            "keys": keys,
+        })
+
     try:
         with _open_readonly_sqlite(db_path, timeout=2.0) as con:
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            traj_ts: int | None = None
             if "trajectory_metadata_blob" in tables:
                 for (blob,) in con.execute("SELECT data FROM trajectory_metadata_blob WHERE data IS NOT NULL"):
-                    b = bytes(blob) if not isinstance(blob, bytes) else blob
-                    traj_ts = traj_ts or _proto_timestamp(_proto_nested(_proto_fields(b), 2))
+                    session_ms = _PbMsg(_db_blob(blob)).sub(2).epoch_ms()
+                    if session_ms is not None:
+                        break
 
-            ts_by_step_idx: dict[int, int] = {}
-            ts_by_resp_id: dict[str, int] = {}
-            ts_by_gen_idx: dict[int, int] = {}
-            legacy_steps: list[tuple[int, str, bool, int | None, int | None, list[dict[int, list[int | bytes]]]]] = []
-
+            timeline = _AgyTimeline()
+            step_rows: list[tuple] = []
             if "steps" in tables:
-                step_cols = {r[1] for r in con.execute("PRAGMA table_info(steps)")}
-                step_sql = (
-                    "SELECT idx, step_type, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx"
-                    if "step_type" in step_cols
-                    else "SELECT idx, 0, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx"
-                )
-                for idx, step_type, blob in con.execute(step_sql):
-                    if not isinstance(idx, int):
-                        continue
-                    b = bytes(blob) if not isinstance(blob, bytes) else blob
-                    s_fields = _proto_fields(b)
-                    s_ts = _proto_timestamp(_proto_nested(s_fields, 8)) or _proto_timestamp(_proto_nested(s_fields, 1))
-                    g_link = _proto_nested(s_fields, 20)
-                    step_gidx: int | None = _proto_num(g_link, 3) if 3 in g_link else None
-                    if s_ts is not None:
-                        ts_by_step_idx[idx] = s_ts
-                        if step_type == 15 or 9 in s_fields:
-                            s_usage = _proto_nested(s_fields, 9)
-                            rid = _proto_text(s_usage, 11)
-                            if rid:
-                                ts_by_resp_id.setdefault(rid, s_ts)
-                        if step_gidx is not None:
-                            ts_by_gen_idx.setdefault(step_gidx, s_ts)
-                    s_usages = _extract_agy_usages(s_fields, 9, 28)
-                    m_fields = _proto_nested(s_fields, 24)
-                    s_raw = _proto_text(m_fields, 12) or _proto_text(m_fields, 8)
-                    s_enum = _proto_num(m_fields, 1)
-                    s_model = _agy_model_name(s_raw, s_enum)
-                    s_is_orch = s_raw.lower().startswith("gemini-pro-orchestrator") or s_enum in AGY_ORCHESTRATOR_ENUMS
-                    if s_model and s_model != "antigravity-unknown":
-                        latest_model = _normalize_model_id(s_model)
-                    if s_usages:
-                        legacy_steps.append((idx, s_model, s_is_orch, s_ts, step_gidx, s_usages))
+                step_rows, latest = _agy_scan_steps(con, timeline)
 
-            gen_rows: list[tuple[int, bool, int, str, str, int, int | None, list[dict[int, list[int | bytes]]]]] = []
+            gens: list[dict[str, Any]] = []
             if "gen_metadata" in tables:
-                for idx, blob in con.execute("SELECT idx, data FROM gen_metadata WHERE data IS NOT NULL ORDER BY idx"):
-                    if not isinstance(idx, int):
+                gens, in_use, capacity, gen_latest = _agy_scan_generations(con)
+                latest = gen_latest or latest
+
+            enum_map = _agy_session_enum_map(gens)
+            model_by_gen: dict[int, str] = {}
+            model_by_step: dict[int, str] = {}
+            by_label, sole = _agy_label_models(gens)
+            for pos, g in enumerate(gens):
+                model, confidence = _agy_generation_model(g, by_label, sole, enum_map=enum_map)
+                if model and model != _AGY_UNKNOWN:
+                    latest = model
+                    model_by_gen[g["idx"]] = model
+                    if g["step"] is not None:
+                        model_by_step[g["step"]] = model
+                orchestrated = _agy_is_role_wrapper(g["responseModel"], g["label"], g["enum"])
+                for u_pos, usage in enumerate(g["usages"]):
+                    tokens = _agy_usage_tokens(usage)
+                    if tokens is None:
                         continue
-                    b = bytes(blob) if not isinstance(blob, bytes) else blob
-                    root = _proto_fields(b)
-                    if _proto_bytes(root, 1) is None:
-                        continue
-                    has_step_ref = 2 in root
-                    step_idx_ref = _proto_num(root, 2)
-                    chat = _proto_nested(root, 1)
-                    ctx_meta = _proto_nested(_proto_nested(chat, 9), 10)
-                    if ctx_meta:
-                        u_est = _proto_num(ctx_meta, 1)
-                        m_ctx = _proto_num(ctx_meta, 4)
-                        if u_est > 0:
-                            est_used = u_est
-                        if m_ctx > 0:
-                            max_ctx = m_ctx
-                    resp_model = _proto_text(chat, 19).strip()
-                    ui_label = _proto_text(chat, 21).strip()
-                    enum_id = _proto_num(chat, 3)
-                    if enum_id == 1669 and ui_label.lower() == "gemini flash":
-                        ui_label = "Gemini 4 Hydrogen (Orchestrator)"
-                    direct_ts = _proto_timestamp(_proto_nested(_proto_nested(chat, 9), 4))
-                    usages = _extract_agy_usages(chat, 4, 17)
-                    if usages:
-                        gen_rows.append((idx, has_step_ref, step_idx_ref, resp_model, ui_label, enum_id, direct_ts, usages))
-                    else:
-                        cand_m = _agy_model_name(resp_model or ui_label, enum_id, is_ui_label=bool(ui_label and not resp_model))
-                        if cand_m and cand_m != "antigravity-unknown":
-                            latest_model = cand_m
-
-            def _is_concrete_resp_model(m: str) -> bool:
-                return bool(m) and m.lower() != "gemini-default"
-
-            gen_model_by_idx: dict[int, str] = {}
-            gen_model_by_step: dict[int, str] = {}
-
-            if gen_rows:
-                label_to_model: dict[str, str | None] = {}
-                concrete_models: set[str] = set()
-                has_unlabelled_concrete = False
-                for _, _, _, resp_m, ui_lbl, _, _, _ in gen_rows:
-                    if _is_concrete_resp_model(resp_m):
-                        norm_m = _agy_model_name(resp_m, 0, is_ui_label=False)
-                        concrete_models.add(norm_m)
-                        if ui_lbl:
-                            if ui_lbl not in label_to_model:
-                                label_to_model[ui_lbl] = norm_m
-                            elif label_to_model[ui_lbl] != norm_m:
-                                label_to_model[ui_lbl] = None
-                        else:
-                            has_unlabelled_concrete = True
-                sole_model = (
-                    next(iter(concrete_models))
-                    if len(concrete_models) == 1 and not has_unlabelled_concrete
-                    else None
-                )
-
-                for e_idx, (gen_idx, has_step_ref, step_idx_ref, resp_m, ui_lbl, enum_id, direct_ts, usages) in enumerate(gen_rows):
-                    if _is_concrete_resp_model(resp_m):
-                        resolved_model = _agy_model_name(resp_m, enum_id, is_ui_label=False)
-                        m_prio = 3
-                    elif ui_lbl and label_to_model.get(ui_lbl):
-                        resolved_model = label_to_model[ui_lbl] or "antigravity-unknown"
-                        m_prio = 3
-                    elif ui_lbl and sole_model:
-                        resolved_model = sole_model
-                        m_prio = 3
-                    elif ui_lbl:
-                        resolved_model = _agy_model_name(ui_lbl, enum_id, is_ui_label=True)
-                        m_prio = 2
-                    elif resp_m:
-                        resolved_model = _agy_model_name(resp_m, enum_id, is_ui_label=False)
-                        m_prio = 1
-                    else:
-                        resolved_model = _agy_model_name("", enum_id) or "antigravity-unknown"
-                        m_prio = 0 if resolved_model == "antigravity-unknown" else 1
-                    if resolved_model and resolved_model != "antigravity-unknown":
-                        latest_model = resolved_model
-                        gen_model_by_idx[gen_idx] = resolved_model
-                        if has_step_ref:
-                            gen_model_by_step[step_idx_ref] = resolved_model
-
-                    is_orch_chat = (
-                        resp_m.lower().startswith("gemini-pro-orchestrator")
-                        or ui_lbl.lower().startswith("orchestrator")
-                        or enum_id in AGY_ORCHESTRATOR_ENUMS
+                    sub = _agy_usage_submodel(model, usage, orchestrated, outer_enum=g["enum"], enum_map=enum_map)
+                    at = timeline.lookup(g["at"], g["step"], usage.text(11), g["idx"])
+                    add(
+                        sub or model or _AGY_UNKNOWN,
+                        max(confidence, 2) if sub else confidence,
+                        g["label"] or None,
+                        at,
+                        tokens,
+                        _agy_usage_keys(usage) or [f"{db_path.stem}:gen:{pos}:{u_pos}"],
                     )
-                    for u_idx, usage in enumerate(usages):
-                        uncached = _proto_num(usage, 2)
-                        c_read = _proto_num(usage, 5)
-                        c_write = _proto_num(usage, 4)
-                        u9 = _proto_num(usage, 9)
-                        u10 = _proto_num(usage, 10)
-                        u3 = _proto_num(usage, 3)
-                        if u9 > 0 or u10 > 0:
-                            reason_out = u9
-                            text_out = u10
-                        else:
-                            reason_out = 0
-                            text_out = u3
-                        if uncached + c_read + c_write + text_out + reason_out <= 0:
-                            continue
-                        u_enum_id = _proto_num(usage, 1)
-                        u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
-                        usage_model = resolved_model or "antigravity-unknown"
-                        usage_prio = m_prio
-                        if u_sub_model and (
-                            not resolved_model
-                            or resolved_model in ("antigravity-unknown", "orchestrator")
-                            or (is_orch_chat and u_enum_id not in AGY_ORCHESTRATOR_ENUMS)
-                        ):
-                            usage_model = u_sub_model
-                            usage_prio = max(m_prio, 2)
-                        keys = []
-                        for k in (11, 12, 7):
-                            kid = _proto_text(usage, k)
-                            if kid:
-                                keys.append(f"agy:{k}:{kid}")
-                        rid = _proto_text(usage, 11)
-                        u_ts = (
-                            direct_ts
-                            or (ts_by_step_idx.get(step_idx_ref) if has_step_ref else None)
-                            or (ts_by_resp_id.get(rid) if rid else None)
-                            or ts_by_gen_idx.get(gen_idx)
-                        )
-                        raw_candidates.append({
-                            "cli": "Antigravity",
-                            "model": usage_model,
-                            "uiLabel": ui_lbl or None,
-                            "modelPriority": usage_prio,
-                            "timestampMs": u_ts or traj_ts or fallback_ts,
-                            "tsQuality": 2 if u_ts is not None else (1 if traj_ts is not None else 0),
-                            "uncachedInputTokens": uncached,
-                            "cachedInputTokens": c_read,
-                            "cacheCreationTokens": c_write,
-                            "outputTokens": text_out,
-                            "reasoningTokens": reason_out,
-                            "reportedCostUsd": None,
-                            "keys": keys or [f"agy:{db_path.stem}:gen:{e_idx}:{u_idx}"],
-                        })
 
-            sorted_gen_steps = sorted(gen_model_by_step.keys()) if gen_rows else []
-            for e_idx, (step_idx, entry_model, entry_is_orch, entry_ts, step_gidx, usages) in enumerate(legacy_steps):
-                for u_idx, usage in enumerate(usages):
-                    uncached = _proto_num(usage, 2)
-                    c_read = _proto_num(usage, 5)
-                    c_write = _proto_num(usage, 4)
-                    u9 = _proto_num(usage, 9)
-                    u10 = _proto_num(usage, 10)
-                    u3 = _proto_num(usage, 3)
-                    text_out = u10 if (u9 > 0 or u10 > 0) else u3
-                    reason_out = u9 if (u9 > 0 or u10 > 0) else 0
-                    if uncached + c_read + c_write + text_out + reason_out <= 0:
+            linked_steps = sorted(model_by_step)
+            for pos, (step_idx, step_model, orchestrated, step_enum, at, gen_idx, usages) in enumerate(step_rows):
+                for u_pos, usage in enumerate(usages):
+                    tokens = _agy_usage_tokens(usage)
+                    if tokens is None:
                         continue
-                    keys = [f"agy:{k}:{_proto_text(usage, k)}" for k in (11, 12, 7) if _proto_text(usage, k)]
-                    if gen_rows and not keys:
+                    keys = _agy_usage_keys(usage)
+                    if gens and not keys:
                         continue
-                    u_enum_id = _proto_num(usage, 1)
-                    u_sub_model = AGY_MODEL_ENUM.get(u_enum_id, "")
-                    model_id = entry_model or ""
-                    explicit_model = False
-                    if u_sub_model and (
-                        not model_id
-                        or model_id in ("unknown", "antigravity-unknown", "orchestrator")
-                        or (entry_is_orch and u_enum_id not in AGY_ORCHESTRATOR_ENUMS)
-                    ):
-                        model_id = u_sub_model
-                        explicit_model = True
-                    elif model_id and model_id not in ("unknown", "antigravity-unknown", "orchestrator"):
-                        explicit_model = True
-                    if not explicit_model:
-                        cand_m = gen_model_by_idx.get(step_gidx, "") if step_gidx is not None else ""
-                        if not cand_m:
-                            for gs in reversed(sorted_gen_steps):
-                                if gs < step_idx:
-                                    cand_m = gen_model_by_step[gs]
-                                    break
-                        if not cand_m and latest_model and latest_model != "antigravity-unknown":
-                            cand_m = latest_model
-                        model_id = cand_m or "antigravity-unknown"
-                    if not gen_rows and model_id != "antigravity-unknown":
-                        latest_model = model_id
-                    raw_candidates.append({
-                        "cli": "Antigravity",
-                        "model": model_id,
-                        "uiLabel": None,
-                        "modelPriority": 1 if explicit_model else 0,
-                        "timestampMs": entry_ts or traj_ts or fallback_ts,
-                        "tsQuality": 2 if entry_ts is not None else (1 if traj_ts is not None else 0),
-                        "uncachedInputTokens": uncached,
-                        "cachedInputTokens": c_read,
-                        "cacheCreationTokens": c_write,
-                        "outputTokens": text_out,
-                        "reasoningTokens": reason_out,
-                        "reportedCostUsd": None,
-                        "keys": keys or [f"agy:{db_path.stem}:step:{e_idx}:{u_idx}"],
-                    })
+                    model = _agy_usage_submodel(
+                        step_model or "",
+                        usage,
+                        orchestrated,
+                        outer_enum=step_enum,
+                        enum_map=enum_map,
+                    )
+                    if not model and step_model not in _AGY_PLACEHOLDER_MODELS:
+                        model = step_model
+                    explicit = bool(model)
+                    if not explicit:
+                        prior = bisect.bisect_left(linked_steps, step_idx)
+                        model = (
+                            (model_by_gen.get(gen_idx, "") if gen_idx is not None else "")
+                            or (model_by_step[linked_steps[prior - 1]] if prior else "")
+                            or (latest if latest != _AGY_UNKNOWN else "")
+                            or _AGY_UNKNOWN
+                        )
+                    if not gens and model != _AGY_UNKNOWN:
+                        latest = model
+                    add(model, 1 if explicit else 0, None, at, tokens, keys or [f"{db_path.stem}:step:{pos}:{u_pos}"])
         scan_ok = True
     except Exception:
         scan_ok = False
 
-    key_to_group: dict[str, int] = {}
-    groups: dict[int, dict[str, Any]] = {}
-    for idx, cand in enumerate(raw_candidates):
-        ks = cand["keys"]
-        matched_gids = {key_to_group[k] for k in ks if k in key_to_group}
-        if not matched_gids:
-            gid = idx
-            groups[gid] = dict(cand)
-        else:
-            gid = min(matched_gids)
-            base = groups[gid]
-            for other_gid in matched_gids - {gid}:
-                other = groups.pop(other_gid, None)
-                if other:
-                    if other.get("modelPriority", 0) > base.get("modelPriority", 0):
-                        base["model"] = other["model"]
-                        base["modelPriority"] = other.get("modelPriority", 0)
-                    if not base.get("uiLabel") and other.get("uiLabel"):
-                        base["uiLabel"] = other["uiLabel"]
-                    if other["tsQuality"] > base["tsQuality"]:
-                        base["timestampMs"] = other["timestampMs"]
-                        base["tsQuality"] = other["tsQuality"]
-                    for tk in ("uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens", "reasoningTokens"):
-                        base[tk] = max(base[tk], other[tk])
-                for k2, g2 in list(key_to_group.items()):
-                    if g2 == other_gid:
-                        key_to_group[k2] = gid
-            if cand.get("modelPriority", 0) > base.get("modelPriority", 0):
-                base["model"] = cand["model"]
-                base["modelPriority"] = cand.get("modelPriority", 0)
-            if not base.get("uiLabel") and cand.get("uiLabel"):
-                base["uiLabel"] = cand["uiLabel"]
-            if cand["tsQuality"] > base["tsQuality"]:
-                base["timestampMs"] = cand["timestampMs"]
-                base["tsQuality"] = cand["tsQuality"]
-            for tk in ("uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens", "reasoningTokens"):
-                base[tk] = max(base[tk], cand[tk])
-        for k in ks:
-            key_to_group[k] = gid
-
-    db_records: list[dict[str, Any]] = []
-    for rec in groups.values():
-        rec.pop("keys", None)
-        rec.pop("tsQuality", None)
-        rec.pop("modelPriority", None)
-        db_records.append(rec)
-    return db_records, est_used, max_ctx, latest_model, scan_ok
+    return _agy_merge_candidates(cands), in_use, capacity, latest, scan_ok
 
 
 def _extract_agy_db_session(db_path: Path, fallback_ts: int = 0) -> tuple[list[dict[str, Any]], int, int, str]:
-    db_records, est_used, max_ctx, latest_model, _ = _extract_agy_db_session_checked(db_path, fallback_ts)
-    return db_records, est_used, max_ctx, latest_model
+    db_records, in_use, capacity, latest, _ = _extract_agy_db_session_checked(db_path, fallback_ts)
+    return db_records, in_use, capacity, latest
 
 
 def _scan_antigravity(home: Path, cache_files: dict[str, Any], cutoff_ms: int) -> list[dict[str, Any]]:
@@ -3942,6 +4173,7 @@ def _reprice_archived_entry(entry: dict[str, Any], catalog: dict[str, Any]) -> N
                 b_unc = _safe_int(rb.get("uncachedInputTokens"))
                 b_cr = _safe_int(rb.get("cachedInputTokens"))
                 b_cw = _safe_int(rb.get("cacheCreationTokens"))
+                b_cw1h = _safe_int(rb.get("cacheWrite1hTokens"))
                 b_out = _safe_int(rb.get("outputTokens"))
                 b_rea = _safe_int(rb.get("reasoningTokens"))
                 if b_unc + b_cr + b_cw + b_out + b_rea <= 0:
@@ -3953,6 +4185,7 @@ def _reprice_archived_entry(entry: dict[str, Any], catalog: dict[str, Any]) -> N
                         "uncachedInputTokens": b_unc,
                         "cachedInputTokens": b_cr,
                         "cacheCreationTokens": b_cw,
+                        "cacheWrite1hTokens": b_cw1h,
                         "outputTokens": b_out,
                         "reasoningTokens": b_rea,
                     },
@@ -3998,6 +4231,7 @@ def _reprice_archived_entry(entry: dict[str, Any], catalog: dict[str, Any]) -> N
             "uncachedInputTokens": uncached,
             "cachedInputTokens": cached,
             "cacheCreationTokens": cache_write,
+            "cacheWrite1hTokens": _safe_int(entry.get("cacheWrite1hTokens")),
             "outputTokens": out_tok,
             "reasoningTokens": reason_tok,
         },
@@ -4068,6 +4302,7 @@ def _merge_archived_daily_entry(target: dict[str, Any], source: dict[str, Any]) 
                         "uncachedInputTokens": _safe_int(src_entry.get("uncachedInputTokens")),
                         "cachedInputTokens": _safe_int(src_entry.get("cachedInputTokens")),
                         "cacheCreationTokens": _safe_int(src_entry.get("cacheCreationTokens")),
+                        "cacheWrite1hTokens": _safe_int(src_entry.get("cacheWrite1hTokens")),
                         "outputTokens": _safe_int(src_entry.get("outputTokens")),
                         "reasoningTokens": _safe_int(src_entry.get("reasoningTokens")),
                     },
@@ -4085,11 +4320,12 @@ def _merge_archived_daily_entry(target: dict[str, Any], source: dict[str, Any]) 
                         "uncachedInputTokens": 0,
                         "cachedInputTokens": 0,
                         "cacheCreationTokens": 0,
+                        "cacheWrite1hTokens": 0,
                         "outputTokens": 0,
                         "reasoningTokens": 0,
                     },
                 )
-                for bk in ("events", "uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens", "reasoningTokens"):
+                for bk in ("events", "uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "cacheWrite1hTokens", "outputTokens", "reasoningTokens"):
                     dst[bk] = _safe_int(dst.get(bk)) + _safe_int(rb_val.get(bk))
         target["repriceBuckets"] = out_rb
 
@@ -4098,6 +4334,7 @@ def _merge_archived_daily_entry(target: dict[str, Any], source: dict[str, Any]) 
         "uncachedInputTokens",
         "cachedInputTokens",
         "cacheCreationTokens",
+        "cacheWrite1hTokens",
         "outputTokens",
         "reasoningTokens",
         "totalTokens",
@@ -4243,12 +4480,22 @@ def collect_summary(
     by_tz_all: dict[str, Any] = archive.setdefault("byTz", {})
     tz_archive: dict[str, dict[str, Any]] = by_tz_all.setdefault(resolved_tz_key, {})
     pricing_changed = bool(pricing_digest) and archive.get("pricingDigest") != pricing_digest
-    scanner_changed = archive.get("scannerRev") != SCANNER_REV
+    archive_rev_changed = archive.get("scannerRev") != SCANNER_REV
+    raw_tz_revs = archive.get("scannerRevByTz")
+    if archive_rev_changed or not isinstance(raw_tz_revs, dict):
+        scanner_revs: dict[str, int] = {}
+        if archive_rev_changed:
+            archive["scannerRevByTz"] = scanner_revs
+    else:
+        scanner_revs = raw_tz_revs
+    scanner_changed = archive_rev_changed or (
+        isinstance(raw_tz_revs, dict) and scanner_revs.get(resolved_tz_key) != SCANNER_REV
+    )
 
-    if scanner_changed:
+    if archive_rev_changed:
         _migrate_archived_agy_aliases(by_tz_all)
 
-    if pricing_changed or scanner_changed:
+    if pricing_changed or archive_rev_changed:
         for tz_days in by_tz_all.values():
             if not isinstance(tz_days, dict):
                 continue
@@ -4328,6 +4575,7 @@ def collect_summary(
                 "uncachedInputTokens": 0,
                 "cachedInputTokens": 0,
                 "cacheCreationTokens": 0,
+                "cacheWrite1hTokens": 0,
                 "outputTokens": 0,
                 "reasoningTokens": 0,
                 "totalTokens": 0,
@@ -4355,6 +4603,7 @@ def collect_summary(
         d_entry["uncachedInputTokens"] += rec["uncachedInputTokens"]
         d_entry["cachedInputTokens"] += rec["cachedInputTokens"]
         d_entry["cacheCreationTokens"] += rec["cacheCreationTokens"]
+        d_entry["cacheWrite1hTokens"] = _safe_int(d_entry.get("cacheWrite1hTokens")) + _safe_int(rec.get("cacheWrite1hTokens"))
         d_entry["outputTokens"] += rec["outputTokens"]
         d_entry["reasoningTokens"] += rec["reasoningTokens"]
         d_entry["totalTokens"] += tot_tok
@@ -4397,6 +4646,7 @@ def collect_summary(
                     "uncachedInputTokens": 0,
                     "cachedInputTokens": 0,
                     "cacheCreationTokens": 0,
+                    "cacheWrite1hTokens": 0,
                     "outputTokens": 0,
                     "reasoningTokens": 0,
                 },
@@ -4405,6 +4655,7 @@ def collect_summary(
             rb["uncachedInputTokens"] += rec["uncachedInputTokens"]
             rb["cachedInputTokens"] += rec["cachedInputTokens"]
             rb["cacheCreationTokens"] += rec["cacheCreationTokens"]
+            rb["cacheWrite1hTokens"] = _safe_int(rb.get("cacheWrite1hTokens")) + _safe_int(rec.get("cacheWrite1hTokens"))
             rb["outputTokens"] += rec["outputTokens"]
             rb["reasoningTokens"] += rec["reasoningTokens"]
         ui_lbl = rec.get("uiLabel")
@@ -4415,7 +4666,11 @@ def collect_summary(
         arch_day = tz_archive.setdefault(day_key, {})
         for m_key, live_entry in live_models.items():
             existing = arch_day.get(m_key)
-            if not isinstance(existing, dict) or _safe_int(live_entry.get("totalTokens")) >= _safe_int(existing.get("totalTokens")):
+            if (
+                scanner_changed
+                or not isinstance(existing, dict)
+                or _safe_int(live_entry.get("totalTokens")) >= _safe_int(existing.get("totalTokens"))
+            ):
                 arch_day[m_key] = live_entry
 
     prune_before_key = (today_start - dt.timedelta(days=400)).strftime("%Y-%m-%d")
@@ -4425,6 +4680,8 @@ def collect_summary(
         seeded_tzs.append(resolved_tz_key)
     if pricing_digest:
         archive["pricingDigest"] = pricing_digest
+    scanner_revs[resolved_tz_key] = SCANNER_REV
+    archive["scannerRevByTz"] = scanner_revs
     archive["scannerRev"] = SCANNER_REV
     _save_daily_archive(archive)
 
@@ -5074,7 +5331,114 @@ def _probe_codex_limits(home: Path) -> dict[str, Any]:
         "credits": None,
     }
 
-def _extract_claude_oauth(home: Path) -> tuple[str, str | None] | None:
+QUOTA_COOLDOWN_DEFAULT_SECONDS = 300
+QUOTA_COOLDOWN_MIN_SECONDS = 30
+QUOTA_COOLDOWN_MAX_SECONDS = 3600
+_QUOTA_COOLDOWN_LOCK = threading.Lock()
+
+
+def _quota_cooldown_path() -> Path:
+    return _cache_dir() / "quota-cooldowns-v1.json"
+
+
+def _quota_account_hash(provider: str, secret: str) -> str:
+    digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+    return f"{provider}:{digest}"
+
+
+def _parse_retry_after_seconds(headers: Any, now_sec: float | None = None) -> int:
+    now = time.time() if now_sec is None else now_sec
+    raw_val: str | None = None
+    if headers is not None:
+        if hasattr(headers, "items"):
+            for k, v in headers.items():
+                if str(k).lower() == "retry-after" and v is not None:
+                    raw_val = str(v).strip()
+                    break
+        elif hasattr(headers, "get"):
+            cand = headers.get("Retry-After") or headers.get("retry-after")
+            if cand is not None:
+                raw_val = str(cand).strip()
+    if raw_val:
+        try:
+            secs = float(raw_val)
+            if math.isfinite(secs):
+                return max(QUOTA_COOLDOWN_MIN_SECONDS, min(QUOTA_COOLDOWN_MAX_SECONDS, int(math.ceil(secs))))
+        except ValueError:
+            pass
+        try:
+            parsed = email.utils.parsedate_to_datetime(raw_val)
+            if parsed is not None:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+                delta = parsed.timestamp() - now
+                if math.isfinite(delta):
+                    return max(QUOTA_COOLDOWN_MIN_SECONDS, min(QUOTA_COOLDOWN_MAX_SECONDS, int(math.ceil(delta))))
+        except Exception:
+            pass
+    return QUOTA_COOLDOWN_DEFAULT_SECONDS
+
+
+def _load_quota_cooldowns_locked(now_sec: float) -> dict[str, float]:
+    path = _quota_cooldown_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    active: dict[str, float] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > now_sec:
+            active[k] = float(v)
+    return active
+
+
+def _quota_cooldown_remaining(provider: str, secret: str, now_sec: float | None = None) -> int:
+    if not secret:
+        return 0
+    now = time.time() if now_sec is None else now_sec
+    key = _quota_account_hash(provider, secret)
+    with _QUOTA_COOLDOWN_LOCK:
+        active = _load_quota_cooldowns_locked(now)
+    until = active.get(key)
+    if until is None or until <= now:
+        return 0
+    return max(1, int(math.ceil(until - now)))
+
+
+def _quota_cooldown_record(
+    provider: str,
+    secret: str,
+    headers: Any = None,
+    now_sec: float | None = None,
+) -> int:
+    now = time.time() if now_sec is None else now_sec
+    wait_sec = _parse_retry_after_seconds(headers, now)
+    if not secret:
+        return wait_sec
+    key = _quota_account_hash(provider, secret)
+    with _QUOTA_COOLDOWN_LOCK:
+        active = _load_quota_cooldowns_locked(now)
+        active[key] = now + wait_sec
+        try:
+            _atomic_write_text(_quota_cooldown_path(), json.dumps(active, separators=(",", ":")), mode=0o600)
+        except Exception:
+            pass
+    return wait_sec
+
+
+def _format_cooldown_wait(seconds: int) -> str:
+    secs = max(1, int(seconds))
+    if secs >= 60:
+        mins = max(1, (secs + 59) // 60)
+        return _tr(f"请求过于频繁，请约 {mins} 分钟后再试", f"Rate limited; try again in about {mins}m")
+    return _tr(f"请求过于频繁，请 {secs} 秒后再试", f"Rate limited; try again in {secs}s")
+
+
+def _extract_claude_oauth(home: Path) -> dict[str, Any] | None:
     cred_paths = [
         home / ".claude" / ".credentials.json",
         home / ".config" / "claude" / ".credentials.json",
@@ -5090,18 +5454,30 @@ def _extract_claude_oauth(home: Path) -> tuple[str, str | None] | None:
                 t = oauth.get("accessToken") or oauth.get("access_token")
                 rt = oauth.get("refreshToken") or oauth.get("refresh_token")
                 sub_type = oauth.get("subscriptionType") or oauth.get("plan")
+                exp_ms = _parse_ts_ms(oauth.get("expiresAt") if "expiresAt" in oauth else oauth.get("expires_at"))
+                exp_sec = (exp_ms / 1000.0) if exp_ms is not None else None
                 if isinstance(t, str) and t.strip():
                     tok = t.strip()
                     if not has_oauth_container and tok.startswith("sk-ant-api"):
                         continue
-                    return (tok, str(sub_type) if sub_type else None)
+                    return {
+                        "token": tok,
+                        "subscriptionType": str(sub_type) if sub_type else None,
+                        "expiresAt": exp_sec,
+                    }
                 if has_oauth_container and isinstance(rt, str) and rt.strip():
-                    return ("", str(sub_type) if sub_type else None)
+                    return {
+                        "token": "",
+                        "subscriptionType": str(sub_type) if sub_type else None,
+                        "expiresAt": exp_sec,
+                    }
             except Exception:
                 pass
     return None
 
+
 def _probe_claude_limits(home: Path) -> dict[str, Any]:
+    now_sec = time.time()
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
     extracted = _extract_claude_oauth(home)
     if extracted is None:
@@ -5115,15 +5491,30 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "windows": [],
             "credits": None,
         }
-    token, sub_type = extracted
-    if not token:
+    token = str(extracted.get("token") or "").strip()
+    sub_type = extracted.get("subscriptionType")
+    exp_at = _safe_float(extracted.get("expiresAt"))
+    if not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec):
         return {
             "cli": "Claude Code",
             "planType": sub_type or "Claude OAuth",
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": _tr("Claude OAuth 令牌已失效，请在 Claude Code 中重新登录", "Claude OAuth token expired; sign in again in Claude Code"),
+            "message": _tr("Claude OAuth 令牌已过期，请在 Claude Code 中重新登录", "Claude OAuth token expired; sign in again in Claude Code"),
+            "windows": [],
+            "credits": None,
+        }
+
+    cooldown_wait = _quota_cooldown_remaining("claude", token, now_sec)
+    if cooldown_wait > 0:
+        return {
+            "cli": "Claude Code",
+            "planType": str(sub_type) if sub_type else "Claude OAuth",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _format_cooldown_wait(cooldown_wait),
             "windows": [],
             "credits": None,
         }
@@ -5135,21 +5526,26 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
                 "Authorization": f"Bearer {token}",
                 "anthropic-beta": "oauth-2025-04-20",
                 "Accept": "application/json",
-                "User-Agent": "claude-code/2.0",
+                "User-Agent": "luma-usage/1",
             },
         )
         with _urlopen_auth(req, timeout=3.5) as resp:
             body = json.loads(_read_response_bytes(resp).decode("utf-8"))
-        windows = []
+        if not isinstance(body, dict):
+            raise ValueError("Invalid Claude usage payload")
+        windows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         mapping = [
             ("five_hour", _tr("短期", "Session"), 5 * 3_600_000),
             ("seven_day", _tr("每周", "Weekly"), 7 * 86_400_000),
             ("seven_day_sonnet", _tr("每周 · Sonnet", "Weekly · Sonnet"), 7 * 86_400_000),
             ("seven_day_opus", _tr("每周 · Opus", "Weekly · Opus"), 7 * 86_400_000),
+            ("seven_day_oauth_apps", _tr("每周 · OAuth 应用", "Weekly · OAuth Apps"), 7 * 86_400_000),
         ]
         for key, label, dur_ms in mapping:
             slot = body.get(key)
             if isinstance(slot, dict) and _safe_float(slot.get("utilization")) is not None:
+                seen_ids.add(key)
                 windows.append(
                     _make_window(
                         key,
@@ -5159,6 +5555,32 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
                         dur_ms,
                     )
                 )
+        raw_limits = body.get("limits")
+        if isinstance(raw_limits, list):
+            for idx, item in enumerate(raw_limits):
+                if not isinstance(item, dict):
+                    continue
+                util = _safe_float(item.get("utilization"))
+                if util is None:
+                    continue
+                lim_type = str(item.get("type") or "").strip().lower()
+                family = str(item.get("model_family") or item.get("scope") or "").strip()
+                if lim_type == "five_hour":
+                    wid, label, dur_ms = "five_hour", _tr("短期", "Session"), 5 * 3_600_000
+                elif lim_type == "seven_day":
+                    wid, label, dur_ms = "seven_day", _tr("每周", "Weekly"), 7 * 86_400_000
+                elif lim_type == "weekly_scoped" and family:
+                    wid = f"seven_day_{family.lower()}"
+                    label = f"{_tr('每周', 'Weekly')} · {family.title()}"
+                    dur_ms = 7 * 86_400_000
+                else:
+                    wid = f"limit_{idx}"
+                    label = family.title() if family else _tr("限额", "Limit")
+                    dur_ms = None
+                if wid in seen_ids:
+                    continue
+                seen_ids.add(wid)
+                windows.append(_make_window(wid, label, util, item.get("resets_at"), dur_ms))
         credits = None
         extra = body.get("extra_usage")
         if isinstance(extra, dict) and extra.get("is_enabled"):
@@ -5182,6 +5604,30 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "windows": windows,
             "credits": credits,
         }
+    except urllib.error.HTTPError as he:
+        code = he.code
+        hdrs = he.headers
+        try:
+            he.close()
+        except Exception:
+            pass
+        if code == 429:
+            wait_sec = _quota_cooldown_record("claude", token, hdrs, now_sec)
+            msg = _format_cooldown_wait(wait_sec)
+        elif code in (401, 403):
+            msg = _tr("Claude OAuth 令牌已失效或无权限，请在 Claude Code 中重新登录", "Claude OAuth token expired or unauthorized; sign in again in Claude Code")
+        else:
+            msg = _tr(f"读取限额失败：HTTP {code}", f"Failed to read limits: HTTP {code}")
+        return {
+            "cli": "Claude Code",
+            "planType": str(sub_type) if sub_type else "Claude OAuth",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": msg,
+            "windows": [],
+            "credits": None,
+        }
     except Exception as exc:
         return {
             "cli": "Claude Code",
@@ -5194,66 +5640,58 @@ def _probe_claude_limits(home: Path) -> dict[str, Any]:
             "credits": None,
         }
 
-ANTIGRAVITY_QUOTA_URLS = (
-    "https://daily-cloudcode-pa.googleapis.com",
-    "https://cloudcode-pa.googleapis.com",
-)
-ANTIGRAVITY_USER_AGENT = (
-    "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=arm64; cl=963137146)"
-)
 
-def _antigravity_summary_reset_time(
-    bucket: dict[str, Any],
-    duration_ms: int | None,
-    requested_at_ms: int,
-) -> str | None:
-    reset_time = bucket.get("resetTime")
-    if not isinstance(reset_time, str) or not reset_time.strip():
+def _resolve_agy_binary(home: Path) -> str | None:
+    override = (os.environ.get("LUMA_AGY_BIN") or "").strip()
+    if override:
+        cand = Path(override).expanduser()
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
         return None
-    reset_ms = _parse_ts_ms(reset_time)
-    if reset_ms is None:
-        return None
-    rem_frac = _safe_float(bucket.get("remainingFraction"))
-    desc = bucket.get("description")
-    has_desc = isinstance(desc, str) and bool(desc.strip())
-    if (
-        rem_frac is not None
-        and abs(rem_frac - 1.0) < 1e-9
-        and not has_desc
-        and duration_ms is not None
-        and abs(reset_ms - requested_at_ms - duration_ms) <= 60_000
+    found = shutil.which("agy")
+    if found:
+        return found
+    for candidate in (
+        home / ".local" / "bin" / "agy",
+        home / ".npm-global" / "bin" / "agy",
+        home / ".local" / "share" / "pnpm" / "bin" / "agy",
+        Path("/usr/local/bin/agy"),
+        Path("/usr/bin/agy"),
     ):
-        return None
-    return reset_time.strip()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
-def _parse_antigravity_summary_windows(
-    payload: dict[str, Any],
-    requested_at_ms: int | None = None,
-) -> list[dict[str, Any]]:
-    req_ms = (
-        requested_at_ms
-        if requested_at_ms is not None
-        else int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-    )
-    groups = payload.get("groups")
-    if not (
-        isinstance(groups, list)
-        and any(isinstance(g, dict) and isinstance(g.get("buckets"), list) and g.get("buckets") for g in groups)
-    ):
-        groups = [{"buckets": payload.get("buckets")}]
 
-    windows: list[dict[str, Any]] = []
+def _has_antigravity_cli_dir(home: Path) -> bool:
+    return (home / ".gemini" / "antigravity-cli").is_dir() or (home / ".gemini" / "antigravity").is_dir()
+
+
+def _parse_agy_cli_usage(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    cmd = payload.get("command")
+    data = cmd.get("data") if isinstance(cmd, dict) and isinstance(cmd.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        return []
+    groups = data.get("groups")
+    if not isinstance(groups, list):
+        return []
+
+    by_id: dict[str, dict[str, Any]] = {}
     for g in groups:
         if not isinstance(g, dict):
             continue
-        g_name = str(g.get("displayName") or "").strip()
+        g_name = str(g.get("name") or g.get("displayName") or "").strip()
         for b in g.get("buckets") or []:
             if not isinstance(b, dict) or b.get("disabled") is True:
                 continue
-            rem_frac = _safe_float(b.get("remainingFraction"))
+            rem_frac = _safe_float(
+                b.get("remaining_fraction") if "remaining_fraction" in b else b.get("remainingFraction")
+            )
             if rem_frac is None:
                 continue
-            bid = str(b.get("bucketId") or "").strip()
+            bid = str(b.get("id") or b.get("bucketId") or "").strip()
             if not bid:
                 continue
             if bid.startswith("gemini-argon-"):
@@ -5264,102 +5702,37 @@ def _parse_antigravity_summary_windows(
                 family = "Claude & GPT"
             else:
                 family = g_name or bid
-            win_type = str(b.get("window") or "").strip()
-            dur_ms = (
-                (7 * 86_400_000)
-                if win_type == "weekly"
-                else ((5 * 3_600_000) if win_type == "5h" else None)
-            )
-            raw_display = re.sub(
-                r"(?i)\b(?:limits?|quotas?|windows?)\b|限额|配额|窗口",
-                "",
-                str(b.get("displayName") or ""),
-            ).strip()
-            win_lbl = (
-                _tr("每周", "Weekly")
-                if win_type == "weekly"
-                else (
-                    _tr("短期", "Session")
-                    if win_type == "5h"
-                    else (raw_display or _tr("短期", "Session"))
-                )
-            )
+            win_type = str(b.get("window") or "").strip().lower()
+            if win_type == "weekly":
+                dur_ms: int | None = 7 * 86_400_000
+                win_lbl = _tr("每周", "Weekly")
+            elif win_type == "5h":
+                dur_ms = 5 * 3_600_000
+                win_lbl = _tr("短期", "Session")
+            else:
+                dur_ms = None
+                raw_name = re.sub(
+                    r"(?i)\b(?:limits?|quotas?|windows?|remaining)\b|限额|配额|窗口|剩余",
+                    "",
+                    str(b.get("name") or b.get("displayName") or ""),
+                ).strip()
+                win_lbl = raw_name or _tr("短期", "Session")
             used_pct = max(0.0, min(100.0, (1.0 - rem_frac) * 100.0))
-            reset_time = _antigravity_summary_reset_time(b, dur_ms, req_ms)
-            windows.append(
-                _make_window(
-                    bid,
-                    f"{family} · {win_lbl}",
-                    used_pct,
-                    reset_time,
-                    dur_ms,
-                    group_label=family,
-                )
+            raw_reset = b.get("reset_time") if "reset_time" in b else b.get("resetTime")
+            reset_ms = _parse_ts_ms(raw_reset)
+            reset_iso = (
+                raw_reset.strip()
+                if isinstance(raw_reset, str) and reset_ms is not None and reset_ms > 0
+                else None
             )
-    return windows
-
-def _parse_antigravity_model_windows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    models_map = payload.get("models")
-    if not isinstance(models_map, dict) or not models_map:
-        return []
-    seen_groups: dict[str, dict[str, Any]] = {}
-    for m_id, m_info in models_map.items():
-        if not isinstance(m_info, dict):
-            continue
-        low = m_id.lower()
-        if low.startswith(("chat_", "tab_")):
-            continue
-        prov = str(m_info.get("modelProvider") or "")
-        if prov == "MODEL_PROVIDER_GOOGLE" or low.startswith("gemini-"):
-            gid, grp = "gemini", "Gemini"
-        elif prov == "MODEL_PROVIDER_ANTHROPIC" or low.startswith("claude-"):
-            gid, grp = "claude", "Claude"
-        elif prov == "MODEL_PROVIDER_OPENAI" or low.startswith("gpt-"):
-            gid, grp = "gpt", "GPT"
-        else:
-            continue
-
-        has_weekly = isinstance(m_info.get("weeklyQuotaInfo"), dict) and (
-            _safe_float(m_info["weeklyQuotaInfo"].get("remainingFraction")) is not None
-        )
-        for suffix, q_key, dur_ms, s_lbl in (
-            ("primary", "quotaInfo", None, f"{grp} · {_tr('短期', 'Session')}" if has_weekly else grp),
-            ("weekly", "weeklyQuotaInfo", 7 * 86_400_000, f"{grp} · {_tr('每周', 'Weekly')}"),
-        ):
-            q_info = m_info.get(q_key)
-            if not isinstance(q_info, dict):
-                continue
-            rem_frac = _safe_float(q_info.get("remainingFraction"))
-            if rem_frac is None:
-                continue
-            used_pct = max(0.0, min(100.0, (1.0 - rem_frac) * 100.0))
-            reset_time = q_info.get("resetTime") if isinstance(q_info.get("resetTime"), str) else None
-            wid = f"{gid}:{suffix}" if suffix == "weekly" else gid
-            cand = _make_window(wid, s_lbl, used_pct, reset_time, dur_ms, group_label=grp)
-            prev = seen_groups.get(wid)
-            if prev is None or cand["usedPercent"] > prev["usedPercent"]:
-                seen_groups[wid] = cand
-            elif cand["usedPercent"] == prev["usedPercent"]:
-                c_ms = _parse_ts_ms(cand.get("resetsAt"))
-                p_ms = _parse_ts_ms(prev.get("resetsAt"))
-                if c_ms is not None and (p_ms is None or c_ms < p_ms):
-                    seen_groups[wid] = cand
-    return list(seen_groups.values())
-
-def _select_antigravity_host_windows(
-    host_windows_list: list[list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    windows = next((ws for ws in host_windows_list if ws), [])
-    merged: dict[str, dict[str, Any]] = {}
-    for win in windows:
-        wid = str(win.get("id") or "")
-        if not wid:
-            continue
-        prev = merged.get(wid)
-        if prev is None or win["usedPercent"] > prev["usedPercent"]:
-            merged[wid] = win
-        elif win["usedPercent"] == prev["usedPercent"] and win.get("resetsAt") and not prev.get("resetsAt"):
-            merged[wid] = win
+            by_id[bid] = _make_window(
+                bid,
+                f"{family} · {win_lbl}",
+                used_pct,
+                reset_iso,
+                dur_ms,
+                group_label=family,
+            )
 
     def _sort_key(w: dict[str, Any]) -> tuple[int, int, str]:
         wid = str(w.get("id") or "")
@@ -5374,960 +5747,454 @@ def _select_antigravity_host_windows(
         win_rank = 0 if wid.endswith("-5h") else (1 if wid.endswith("-weekly") else 2)
         return (fam_rank, win_rank, wid)
 
-    return sorted(merged.values(), key=_sort_key)
+    return sorted(by_id.values(), key=_sort_key)
 
-def _refresh_antigravity_access_token(
-    refresh_token: str,
-    client_id: str,
-    client_secret: str,
-    timeout: float = 2.5,
-) -> str | None:
-    try:
-        form = urllib.parse.urlencode(
-            {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            "https://oauth2.googleapis.com/token",
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with _urlopen_auth(req, timeout=timeout) as resp:
-            payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
-        at = payload.get("access_token")
-        return at.strip() if isinstance(at, str) and at.strip() else None
-    except Exception:
+
+def _decode_json_output(text: str) -> Any:
+    stripped = text.strip()
+    if not stripped:
         return None
-
-def _extract_antigravity_oauth(home: Path) -> dict[str, Any] | None:
-    token_files = [
-        home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token",
-        home / ".gemini" / "antigravity" / "acp_token.json",
-    ]
-    access_token: str | None = None
-    refresh_token: str | None = None
-    client_id: str | None = None
-    client_secret: str | None = None
-    expiry_ms: int | None = None
-    email: str | None = None
-    project_id: str | None = None
-
-    for tf in token_files:
-        if tf.is_file():
+    try:
+        return json.loads(stripped)
+    except Exception:
+        pass
+    for line in reversed(stripped.splitlines()):
+        cand = line.strip()
+        if cand.startswith("{") and cand.endswith("}"):
             try:
-                raw = json.loads(tf.read_text("utf-8"))
-                if not isinstance(raw, dict):
-                    continue
-                email = raw.get("id_token_email") or raw.get("email") or email
-                proj = raw.get("project_id") or raw.get("projectId")
-                if isinstance(proj, str) and proj.strip():
-                    project_id = proj.strip()
-                tok = raw.get("token") if "token" in raw else raw
-                if isinstance(tok, str):
-                    tok = json.loads(tok)
-                if isinstance(tok, dict):
-                    at = tok.get("access_token") or tok.get("accessToken")
-                    rt = tok.get("refresh_token") or tok.get("refreshToken")
-                    cid = tok.get("client_id") or tok.get("clientId") or raw.get("client_id")
-                    csec = tok.get("client_secret") or tok.get("clientSecret") or raw.get("client_secret")
-                    exp = tok.get("expiry") or tok.get("expiry_date") or raw.get("expiry_date")
-                    if isinstance(rt, str) and rt.strip():
-                        refresh_token = rt.strip()
-                    if isinstance(cid, str) and cid.strip():
-                        client_id = cid.strip()
-                    if isinstance(csec, str) and csec.strip():
-                        client_secret = csec.strip()
-                    if exp is not None:
-                        expiry_ms = _parse_ts_ms(exp)
-                    if isinstance(at, str) and at.strip():
-                        access_token = at.strip()
-                        break
+                return json.loads(cand)
             except Exception:
                 continue
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if 0 <= start < end:
+        try:
+            return json.loads(stripped[start : end + 1])
+        except Exception:
+            return None
+    return None
 
-    if not access_token and not refresh_token:
-        return None
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "expiry_ms": expiry_ms,
-        "email": email,
-        "project_id": project_id,
-    }
 
-def _probe_antigravity_limits(home: Path) -> dict[str, Any]:
-    now_dt = dt.datetime.now(dt.timezone.utc)
-    now_iso = now_dt.isoformat()
-    now_ms = int(now_dt.timestamp() * 1000)
-    oauth = _extract_antigravity_oauth(home)
-    if oauth is None:
+def _probe_antigravity_limits(home: Path, timeout_sec: float = 18.0) -> dict[str, Any]:
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    agy_bin = _resolve_agy_binary(home)
+    if not agy_bin or not _has_antigravity_cli_dir(home):
         return {
             "cli": "Antigravity",
             "planType": None,
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": _tr("未检测到 Antigravity OAuth 登录凭证", "Antigravity OAuth credentials not detected"),
+            "message": _tr("未检测到 Antigravity CLI 登录环境", "Antigravity CLI environment not detected"),
             "windows": [],
             "credits": None,
         }
 
-    deadline = time.monotonic() + 5.0
-    access_token: str | None = oauth["access_token"]
-    refresh_token: str | None = oauth["refresh_token"]
-    client_id: str | None = oauth["client_id"]
-    client_secret: str | None = oauth["client_secret"]
-    expiry_ms: int | None = oauth["expiry_ms"]
-    email: str | None = oauth["email"]
-    project_id: str | None = oauth["project_id"]
-
-    if (
-        (not access_token or (expiry_ms is not None and expiry_ms <= now_ms + 60_000))
-        and refresh_token
-        and client_id
-        and client_secret
-    ):
-        rem = max(0.5, min(2.5, deadline - time.monotonic()))
-        refreshed = _refresh_antigravity_access_token(
-            refresh_token, client_id, client_secret, timeout=rem
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(
+            [agy_bin, "-p", "/usage", "--output-format", "json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(home),
+            env=env,
+            start_new_session=True,
         )
-        if refreshed:
-            access_token = refreshed
-
-    if not access_token:
+        out_bytes, err_bytes = proc.communicate(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                pass
         return {
             "cli": "Antigravity",
-            "planType": email or "Google OAuth",
+            "planType": "Antigravity CLI",
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": _tr("OAuth 令牌刷新失败，可在 Antigravity 会话中重新登录", "OAuth token refresh failed; sign in again in an Antigravity session"),
+            "message": _tr("Antigravity 限额查询超时，请稍后刷新重试", "Antigravity usage query timed out; refresh to retry"),
+            "windows": [],
+            "credits": None,
+        }
+    except Exception as exc:
+        return {
+            "cli": "Antigravity",
+            "planType": "Antigravity CLI",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _tr(f"调用 Antigravity CLI 失败：{type(exc).__name__}", f"Failed to run Antigravity CLI: {type(exc).__name__}"),
             "windows": [],
             "credits": None,
         }
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "User-Agent": ANTIGRAVITY_USER_AGENT,
-    }
-    body_bytes = json.dumps({"project": project_id} if project_id else {}).encode("utf-8")
-
-    def _query_hosts_concurrently(endpoint_suffix: str, parse_fn: Any, max_wait: float) -> list[list[dict[str, Any]]]:
-        if max_wait <= 0.2:
-            return []
-        req_timeout = max(0.5, min(2.8, max_wait))
-
-        def _fetch_one(host: str) -> list[dict[str, Any]] | None:
-            safe_url = _validate_http_url(f"{host}{endpoint_suffix}")
-            if safe_url is None:
-                return None
-            req_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-            req = urllib.request.Request(
-                safe_url,
-                data=body_bytes,
-                headers=headers,
-                method="POST",
-            )
-            with _urlopen_auth(req, timeout=req_timeout) as resp:
-                data = json.loads(_read_response_bytes(resp).decode("utf-8"))
-            if isinstance(data, dict):
-                return parse_fn(data, req_ms)
-            return None
-
-        task_res = _run_daemon_tasks(
-            {h: (lambda host=h: _fetch_one(host)) for h in ANTIGRAVITY_QUOTA_URLS},
-            timeout=max_wait,
-        )
-        collected: list[list[dict[str, Any]]] = []
-        for h in ANTIGRAVITY_QUOTA_URLS:
-            item = task_res.get(h)
-            if item is not None and item[0] and item[1] is not None:
-                collected.append(item[1])
-        return collected
-
-    summary_host_windows = _query_hosts_concurrently(
-        "/v1internal:retrieveUserQuotaSummary",
-        _parse_antigravity_summary_windows,
-        max_wait=min(3.0, deadline - time.monotonic()),
-    )
-    merged_windows = _select_antigravity_host_windows(summary_host_windows)
-
-    rem_budget = deadline - time.monotonic()
-    if not merged_windows and rem_budget > 0.6:
-        model_host_windows = _query_hosts_concurrently(
-            "/v1internal:fetchAvailableModels",
-            lambda data, _req_ms: _parse_antigravity_model_windows(data),
-            max_wait=min(2.5, rem_budget),
-        )
-        merged_windows = _select_antigravity_host_windows(model_host_windows)
-
-    if merged_windows:
+    out_text = out_bytes.decode("utf-8", errors="replace")
+    err_text = err_bytes.decode("utf-8", errors="replace")
+    payload = _decode_json_output(out_text)
+    windows = _parse_agy_cli_usage(payload) if isinstance(payload, dict) else []
+    if windows:
         return {
             "cli": "Antigravity",
-            "planType": email or "Google OAuth",
+            "planType": "Antigravity CLI",
             "updatedAt": now_iso,
             "source": "live",
             "status": "ok",
             "message": None,
-            "windows": merged_windows[:10],
+            "windows": windows[:10],
             "credits": None,
         }
 
+    combined = f"{out_text}\n{err_text}".lower()
+    if any(k in combined for k in ("login", "sign in", "unauthenticated", "unauthorized", "not logged in")):
+        msg = _tr("Antigravity 登录已失效，请在 Antigravity 会话中重新登录", "Antigravity sign-in expired; sign in again in an Antigravity session")
+    else:
+        msg = _tr("无法通过 agy /usage 读取限额，请检查网络或重新登录", "Unable to read limits via agy /usage; check network or sign in again")
     return {
         "cli": "Antigravity",
-        "planType": email or "Google OAuth",
+        "planType": "Antigravity CLI",
         "updatedAt": now_iso,
         "source": "unavailable",
         "status": "error",
-        "message": _tr("OAuth 令牌已过期或配额端点暂不可达，可在 Antigravity 会话中刷新登录", "OAuth token expired or quota endpoint unreachable; refresh sign-in in an Antigravity session"),
+        "message": msg,
         "windows": [],
         "credits": None,
     }
 
-class _GrpcStatusError(Exception):
-    def __init__(self, status_code: int, message: str = "") -> None:
-        super().__init__(f"gRPC {status_code}: {message}")
-        self.status_code = status_code
-        self.grpc_message = message
+def _resolve_grok_binary(home: Path) -> str | None:
+    for env_key in ("LUMA_GROK_BIN", "GROK_CLI_PATH"):
+        override = (os.environ.get(env_key) or "").strip()
+        if override:
+            cand = Path(override).expanduser()
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+            return None
+    found = shutil.which("grok")
+    if found:
+        return found
+    for candidate in (
+        home / ".grok" / "bin" / "grok",
+        home / ".local" / "bin" / "grok",
+        home / ".npm-global" / "bin" / "grok",
+        Path("/usr/local/bin/grok"),
+        Path("/usr/bin/grok"),
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
-def _decode_grok_grpc_web_billing(raw_bytes: bytes) -> dict[str, Any]:
-    pos = 0
-    n = len(raw_bytes)
-    payload_parts: list[bytes] = []
-    trailers: dict[str, str] = {}
-    while pos + 5 <= n:
-        flags = raw_bytes[pos]
-        ln = int.from_bytes(raw_bytes[pos + 1 : pos + 5], "big")
-        pos += 5
-        if pos + ln > n:
-            raise ValueError("Truncated gRPC-Web frame")
-        chunk = raw_bytes[pos : pos + ln]
-        pos += ln
-        if flags & 0x80:
-            for line in chunk.decode("utf-8", errors="replace").splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    trailers[k.strip().lower()] = v.strip()
-        else:
-            payload_parts.append(chunk)
-
-    grpc_status = trailers.get("grpc-status")
-    if grpc_status is not None and grpc_status != "0":
-        code_int = int(grpc_status) if grpc_status.lstrip("-").isdigit() else -1
-        msg = urllib.parse.unquote(trailers.get("grpc-message", ""))
-        raise _GrpcStatusError(code_int, msg)
-
-    raw_payload = b"".join(payload_parts)
-    top = _proto_fields(raw_payload)
-    cfg_bytes = _proto_bytes(top, 1) or raw_payload
-    cfg = _proto_fields(cfg_bytes)
-
-    used_pct: float | None = None
-    for fno, wt, val in _iter_proto_fields(cfg_bytes):
-        if fno != 1 or not isinstance(val, bytes):
-            continue
-        if wt == 5:
-            cand = struct.unpack("<f", val)[0]
-            if math.isfinite(cand) and 0.0 <= cand <= 100.0:
-                used_pct = cand
-                break
-        elif wt == 1:
-            cand = struct.unpack("<d", val)[0]
-            if math.isfinite(cand) and 0.0 <= cand <= 100.0:
-                used_pct = cand
-                break
-
-    start_ms = _proto_timestamp(_proto_nested(cfg, 4))
-    end_ms = _proto_timestamp(_proto_nested(cfg, 5))
-    period_msg = _proto_nested(cfg, 8)
-    period_enum = _proto_num(period_msg, 1)
-    if start_ms is None and period_msg:
-        start_ms = _proto_timestamp(_proto_nested(period_msg, 2))
-    if end_ms is None and period_msg:
-        end_ms = _proto_timestamp(_proto_nested(period_msg, 3))
-
-    if used_pct is None and (start_ms is not None or end_ms is not None or period_enum in (2, 3)):
-        used_pct = 0.0
-
-    windows: list[dict[str, Any]] = []
-    if used_pct is not None:
-        span_days = ((end_ms - start_ms) / 86_400_000.0) if (start_ms and end_ms and end_ms > start_ms) else None
-        if period_enum == 2 or (span_days is not None and 4.0 <= span_days <= 12.0):
-            dur_ms: int | None = 7 * 86_400_000
-            lbl = _tr("每周", "Weekly")
-        elif period_enum == 3 or (span_days is not None and 20.0 <= span_days <= 45.0):
-            dur_ms = 30 * 86_400_000
-            lbl = _tr("每月", "Monthly")
-        else:
-            dur_ms = int(end_ms - start_ms) if (start_ms and end_ms and end_ms > start_ms) else None
-            lbl = _tr("当前", "Current")
-        end_iso = _iso_from_epoch_sec(end_ms / 1000.0) if end_ms else None
-        windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
-
-    return {
-        "windows": windows,
-        "credits": None,
-        "plan": "SuperGrok" if windows else "xAI",
-    }
-
-
-def _extract_grok_oauth(home: Path) -> dict[str, Any] | None:
-    env_token = (os.environ.get("GROK_BEARER_TOKEN") or "").strip()
-    if env_token:
-        return {
-            "token": env_token,
-            "email": None,
-            "refreshToken": "",
-            "expiresAt": None,
-            "oidcIssuer": "https://auth.x.ai",
-            "oidcClientId": "",
-            "authFile": None,
-            "scopeKey": None,
-        }
+def _grok_login_hint(home: Path) -> tuple[bool, str | None]:
     grok_home = Path(os.environ.get("GROK_HOME") or str(home / ".grok")).expanduser()
     auth_file = grok_home / "auth.json"
     if not auth_file.is_file():
-        return None
+        return (False, None)
     try:
         raw = json.loads(auth_file.read_text("utf-8"))
     except Exception:
-        return None
+        return (False, None)
     if not isinstance(raw, dict):
-        return None
+        return (False, None)
 
-    scope_key: str | None = None
     cred: dict[str, Any] | None = None
-    for preferred in (
-        "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828",
-        "https://accounts.x.ai/sign-in",
-    ):
-        cand = raw.get(preferred)
-        if isinstance(cand, dict):
-            scope_key = preferred
-            cred = cand
+    for k, v in raw.items():
+        if isinstance(k, str) and k.startswith("https://auth.x.ai::") and isinstance(v, dict):
+            cred = v
             break
+    if cred is None and isinstance(raw.get("https://accounts.x.ai/sign-in"), dict):
+        cred = raw["https://accounts.x.ai/sign-in"]
     if cred is None:
-        for k, v in raw.items():
+        for v in raw.values():
             if isinstance(v, dict) and (v.get("key") or v.get("access_token") or v.get("refresh_token")):
-                scope_key = str(k)
                 cred = v
                 break
     if cred is None:
-        return None
+        return (False, None)
 
     auth_mode = str(cred.get("auth_mode") or "").strip().lower()
     if auth_mode in ("api_key", "apikey"):
-        return None
-    email = str(cred.get("email") or "").strip() or None
+        return (False, None)
     token = str(cred.get("key") or cred.get("access_token") or "").strip()
-    ref = str(cred.get("refresh_token") or "").strip()
+    has_refresh = bool(str(cred.get("refresh_token") or "").strip())
+    is_oauth_mode = auth_mode in ("oidc", "oauth")
     if not token:
-        if not ref and auth_mode not in ("oidc", "oauth"):
-            return None
-    elif token.startswith("xai-") and not ref and auth_mode not in ("oidc", "oauth"):
-        return None
+        if not has_refresh and not is_oauth_mode:
+            return (False, None)
+    elif token.startswith("xai-") and not has_refresh and not is_oauth_mode:
+        return (False, None)
 
-    exp_ms = _parse_ts_ms(cred.get("expires_at"))
-    exp_sec = (exp_ms / 1000.0) if exp_ms is not None else _safe_float(cred.get("expires_at"))
-    issuer = str(cred.get("oidc_issuer") or "https://auth.x.ai").strip().rstrip("/")
-    client_id = str(cred.get("oidc_client_id") or "").strip()
-    if not client_id and scope_key and "::" in scope_key:
-        client_id = scope_key.split("::", 1)[1].strip()
-
-    if scope_key and (_oauth_recovery_path("grok")).is_file():
-        with _oauth_refresh_lock("grok"):
-            recovered = _replay_grok_oauth_recovery(auth_file, scope_key)
-        if recovered is not None:
-            token = recovered["token"]
-            ref = recovered["refreshToken"]
-            if recovered.get("expiresAt") is not None:
-                exp_sec = recovered["expiresAt"]
-
-    return {
-        "token": token,
-        "email": email,
-        "refreshToken": ref,
-        "expiresAt": exp_sec,
-        "oidcIssuer": issuer,
-        "oidcClientId": client_id,
-        "authFile": auth_file,
-        "scopeKey": scope_key,
-    }
+    email = str(cred.get("email") or "").strip() or None
+    return (True, email)
 
 
-@contextlib.contextmanager
-def _oauth_refresh_lock(name: str):
-    lock_path = _cache_dir() / f".{name}-oauth.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+def _parse_grok_rpc_billing(body: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str]:
+    if not isinstance(body, dict):
+        return ([], None, "")
+    windows: list[dict[str, Any]] = []
+    credits: dict[str, Any] | None = None
+    cfg = body.get("config") if isinstance(body.get("config"), dict) else {}
+    period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else {}
+    raw_type = str(period.get("type") or "").upper()
+    if raw_type.endswith("WEEKLY"):
+        period_kind = "weekly"
+    elif raw_type.endswith("MONTHLY"):
+        period_kind = "monthly"
+    else:
+        period_kind = "other"
 
+    start_iso = period.get("start") if isinstance(period.get("start"), str) else cfg.get("billingPeriodStart")
+    end_iso = period.get("end") if isinstance(period.get("end"), str) else cfg.get("billingPeriodEnd")
+    if not isinstance(end_iso, str) or not end_iso.strip():
+        end_iso = None
+    else:
+        end_iso = end_iso.strip()
 
-def _oauth_recovery_path(name: str) -> Path:
-    return _cache_dir() / f"{name}-oauth-recovery.json"
-
-
-def _unlink_oauth_recovery(name: str) -> None:
-    try:
-        _oauth_recovery_path(name).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _read_oauth_recovery(name: str) -> dict[str, Any] | None:
-    target = _oauth_recovery_path(name)
-    if not target.is_file():
-        return None
-    try:
-        data = json.loads(target.read_text("utf-8"))
-    except Exception:
-        _unlink_oauth_recovery(name)
-        return None
-    if not isinstance(data, dict):
-        _unlink_oauth_recovery(name)
-        return None
-    return data
-
-
-def _write_oauth_recovery(name: str, payload: dict[str, Any]) -> None:
-    try:
-        target = _oauth_recovery_path(name)
-        tmp = target.parent / f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(raw)
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    pass
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, target)
-        except BaseException:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-    except Exception:
-        pass
-
-
-def _save_grok_entry(auth_file: Path, scope_key: str, new_tok: str, new_ref: str, new_exp: float | None) -> bool:
-    try:
-        raw = json.loads(auth_file.read_text("utf-8"))
-        if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
-            return False
-        entry = raw[scope_key]
-        if "access_token" in entry and "key" not in entry:
-            entry["access_token"] = new_tok
+    used_pct = _safe_float(cfg.get("creditUsagePercent"))
+    if used_pct is None and period_kind in ("weekly", "monthly") and start_iso and end_iso:
+        used_pct = 0.0
+    if used_pct is not None:
+        if period_kind == "weekly":
+            dur_ms: int | None = 7 * 86_400_000
+            lbl = _tr("每周", "Weekly")
+        elif period_kind == "monthly":
+            dur_ms = 30 * 86_400_000
+            lbl = _tr("每月", "Monthly")
         else:
-            entry["key"] = new_tok
-        entry["refresh_token"] = new_ref
-        if new_exp is not None:
-            old_exp = entry.get("expires_at")
-            if isinstance(old_exp, str) and "-" in old_exp:
-                entry["expires_at"] = dt.datetime.fromtimestamp(new_exp, tz=dt.timezone.utc).isoformat()
-            else:
-                entry["expires_at"] = int(new_exp)
-        _atomic_write_text(auth_file, json.dumps(raw, ensure_ascii=False, indent=2), mode=0o600)
-        return True
-    except Exception:
-        return False
+            s_ms = _parse_ts_ms(start_iso)
+            e_ms = _parse_ts_ms(end_iso)
+            dur_ms = (e_ms - s_ms) if (s_ms is not None and e_ms is not None and e_ms > s_ms) else None
+            lbl = _tr("当前", "Current")
+        windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
+
+    raw_rem = body.get("effectiveRemaining")
+    if raw_rem is None:
+        raw_rem = body.get("remainingCredits")
+    raw_tot = body.get("totalCredits")
+    if raw_tot is None:
+        raw_tot = body.get("monthlyCredits")
+    rem_cents = _safe_float(raw_rem)
+    tot_cents = _safe_float(raw_tot)
+    if rem_cents is not None:
+        rem_usd = rem_cents / 100.0
+        tot_usd = (tot_cents / 100.0) if (tot_cents and tot_cents > 0) else None
+        used_usd = max(0.0, tot_usd - rem_usd) if tot_usd is not None else 0.0
+        credits = {
+            "label": _tr("可用额度", "Available credits"),
+            "used": round(used_usd, 2),
+            "limit": round(tot_usd, 2) if tot_usd else None,
+            "remaining": round(rem_usd, 2),
+            "unit": "USD",
+        }
+        if not windows and tot_usd and tot_usd > 0:
+            windows.append(_make_window("credits", _tr("每月", "Monthly"), (used_usd / tot_usd) * 100.0, end_iso, 30 * 86_400_000))
+    else:
+        prepaid = cfg.get("prepaidBalance")
+        prepaid_cents = _safe_float(prepaid.get("val")) if isinstance(prepaid, dict) else None
+        if prepaid_cents is not None and (prepaid_cents > 0 or not windows):
+            credits = {
+                "label": _tr("可用额度", "Available credits"),
+                "used": 0.0,
+                "limit": None,
+                "remaining": round(prepaid_cents / 100.0, 2),
+                "unit": "USD",
+            }
+
+    raw_tier = body.get("subscription_tier") or body.get("subscriptionTier") or body.get("plan")
+    tier = str(raw_tier).strip() if isinstance(raw_tier, str) and raw_tier.strip() else ""
+    return (windows, credits, tier)
 
 
-def _save_kimi_entry(
-    cred_file: Path,
-    new_acc: str,
-    new_ref: str,
-    new_exp: float | None,
-    scope: str = "",
-    token_type: str = "",
-    exp_in: float | None = None,
-) -> bool:
-    try:
-        existing: dict[str, Any] = {}
-        if cred_file.is_file():
-            try:
-                loaded = json.loads(cred_file.read_text("utf-8"))
-                if isinstance(loaded, dict):
-                    existing = loaded
-            except Exception:
-                existing = {}
-        existing.update({
-            "access_token": new_acc,
-            "refresh_token": new_ref,
-            "scope": str(scope or existing.get("scope") or ""),
-            "token_type": str(token_type or existing.get("token_type") or "Bearer"),
-        })
-        if new_exp is not None:
-            existing["expires_at"] = new_exp
-        if exp_in is not None:
-            existing["expires_in"] = exp_in
-        _atomic_write_text(cred_file, json.dumps(existing, ensure_ascii=False), mode=0o600)
-        return True
-    except Exception:
-        return False
-
-
-def _same_path(first: Path, raw_second: Any) -> bool:
-    if not isinstance(raw_second, str) or not raw_second.strip():
-        return False
-    try:
-        return first.resolve() == Path(raw_second).resolve()
-    except OSError:
-        return str(first) == raw_second
-
-
-def _replay_grok_oauth_recovery(auth_file: Path, scope_key: str) -> dict[str, Any] | None:
-    rec = _read_oauth_recovery("grok")
-    if rec is None:
-        return None
-    rec_tok = str(rec.get("access_token") or "").strip()
-    rec_ref = str(rec.get("refresh_token") or "").strip()
-    if not rec_tok or not rec_ref:
-        _unlink_oauth_recovery("grok")
-        return None
-    if not _same_path(auth_file, rec.get("authFile")) or rec.get("scopeKey") != scope_key:
-        return None
-    rec_exp_ms = _parse_ts_ms(rec.get("expires_at"))
-    rec_exp = (rec_exp_ms / 1000.0) if rec_exp_ms is not None else _safe_float(rec.get("expires_at"))
-    saved_at = _safe_float(rec.get("savedAtEpoch")) or 0.0
-    replaced_tok = str(rec.get("replacedAccessToken") or "").strip()
-    replaced_ref = str(rec.get("replacedRefreshToken") or "").strip()
-    try:
-        raw = json.loads(auth_file.read_text("utf-8"))
-    except Exception:
-        return {"token": rec_tok, "refreshToken": rec_ref, "expiresAt": rec_exp}
-    if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
-        return None
-    entry = raw[scope_key]
-    disk_tok = str(entry.get("key") or entry.get("access_token") or "").strip()
-    disk_ref = str(entry.get("refresh_token") or "").strip()
-    disk_exp_ms = _parse_ts_ms(entry.get("expires_at"))
-    disk_exp = (disk_exp_ms / 1000.0) if disk_exp_ms is not None else _safe_float(entry.get("expires_at"))
-    if disk_tok == rec_tok and disk_ref == rec_ref:
-        _unlink_oauth_recovery("grok")
-        return None
-    disk_matches_replaced = (
-        (bool(replaced_ref) and disk_ref == replaced_ref)
-        or (bool(replaced_tok) and disk_tok == replaced_tok)
-    )
-    if not disk_matches_replaced:
-        try:
-            disk_mtime = auth_file.stat().st_mtime
-        except OSError:
-            disk_mtime = 0.0
-        disk_is_newer = (
-            (disk_exp is not None and rec_exp is not None and disk_exp >= rec_exp)
-            or (saved_at > 0.0 and disk_mtime > saved_at + 1.0)
-        )
-        if disk_is_newer:
-            _unlink_oauth_recovery("grok")
-            return None
-    if _save_grok_entry(auth_file, scope_key, rec_tok, rec_ref, rec_exp):
-        _unlink_oauth_recovery("grok")
-    return {"token": rec_tok, "refreshToken": rec_ref, "expiresAt": rec_exp}
-
-
-def _replay_kimi_oauth_recovery(cred_file: Path) -> dict[str, Any] | None:
-    rec = _read_oauth_recovery("kimi")
-    if rec is None:
-        return None
-    rec_acc = str(rec.get("access_token") or "").strip()
-    rec_ref = str(rec.get("refresh_token") or "").strip()
-    if not rec_acc or not rec_ref:
-        _unlink_oauth_recovery("kimi")
-        return None
-    if not _same_path(cred_file, rec.get("credFile")):
-        return None
-    rec_exp = _safe_float(rec.get("expires_at"))
-    rec_exp_in = _safe_float(rec.get("expires_in"))
-    rec_scope = str(rec.get("scope") or "")
-    rec_token_type = str(rec.get("token_type") or "")
-    saved_at = _safe_float(rec.get("savedAtEpoch")) or 0.0
-    replaced_acc = str(rec.get("replacedAccessToken") or "").strip()
-    replaced_ref = str(rec.get("replacedRefreshToken") or "").strip()
-    if cred_file.is_file():
-        try:
-            loaded = json.loads(cred_file.read_text("utf-8"))
-        except Exception:
-            loaded = None
-        if isinstance(loaded, dict):
-            disk_acc = str(loaded.get("access_token") or "").strip()
-            disk_ref = str(loaded.get("refresh_token") or "").strip()
-            disk_exp = _safe_float(loaded.get("expires_at"))
-            if disk_acc == rec_acc and disk_ref == rec_ref:
-                _unlink_oauth_recovery("kimi")
-                return None
-            disk_matches_replaced = (
-                (bool(replaced_ref) and disk_ref == replaced_ref)
-                or (bool(replaced_acc) and disk_acc == replaced_acc)
-            )
-            if not disk_matches_replaced:
-                try:
-                    disk_mtime = cred_file.stat().st_mtime
-                except OSError:
-                    disk_mtime = 0.0
-                disk_is_newer = (
-                    (disk_exp is not None and rec_exp is not None and disk_exp >= rec_exp)
-                    or (saved_at > 0.0 and disk_mtime > saved_at + 1.0)
-                )
-                if disk_is_newer:
-                    _unlink_oauth_recovery("kimi")
-                    return None
-    if _save_kimi_entry(cred_file, rec_acc, rec_ref, rec_exp, rec_scope, rec_token_type, rec_exp_in):
-        _unlink_oauth_recovery("kimi")
-    return {"accessToken": rec_acc, "refreshToken": rec_ref, "expiresAt": rec_exp}
-
-
-def _refresh_grok_access_token(auth: dict[str, Any]) -> str | None:
-    ref = str(auth.get("refreshToken") or "").strip()
-    client_id = str(auth.get("oidcClientId") or "").strip()
-    orig_tok = str(auth.get("token") or "").strip()
-    if not ref or not client_id:
-        return None
-    safe_issuer = _validate_http_url(auth.get("oidcIssuer") or "https://auth.x.ai")
-    if safe_issuer is None:
-        return None
-    auth_file = auth.get("authFile")
-    scope_key = auth.get("scopeKey")
-    if auth_file is not None:
-        if not isinstance(auth_file, Path) or not isinstance(scope_key, str) or not scope_key or not auth_file.is_file():
-            return None
-    issuer = safe_issuer.rstrip("/")
-    with _oauth_refresh_lock("grok"):
-        if isinstance(auth_file, Path) and isinstance(scope_key, str):
-            recovered = _replay_grok_oauth_recovery(auth_file, scope_key)
-            if recovered is not None:
-                rec_tok = recovered["token"]
-                rec_ref = recovered["refreshToken"]
-                rec_exp = recovered.get("expiresAt")
-                if (
-                    rec_tok
-                    and (rec_tok != orig_tok or (rec_ref and rec_ref != ref))
-                    and (rec_exp is None or rec_exp > time.time() + 60)
-                ):
-                    auth["token"] = rec_tok
-                    auth["refreshToken"] = rec_ref
-                    if rec_exp is not None:
-                        auth["expiresAt"] = rec_exp
-                    return rec_tok
-                if rec_ref:
-                    ref = rec_ref
-            try:
-                raw = json.loads(auth_file.read_text("utf-8"))
-            except Exception:
-                return None
-            if not isinstance(raw, dict) or not isinstance(raw.get(scope_key), dict):
-                return None
-            entry = raw[scope_key]
-            disk_tok = str(entry.get("key") or entry.get("access_token") or "").strip()
-            disk_ref = str(entry.get("refresh_token") or "").strip()
-            disk_exp_ms = _parse_ts_ms(entry.get("expires_at"))
-            disk_exp = (disk_exp_ms / 1000.0) if disk_exp_ms is not None else _safe_float(entry.get("expires_at"))
-            if (
-                disk_tok
-                and (disk_tok != orig_tok or (disk_ref and disk_ref != ref))
-                and (disk_exp is None or disk_exp > time.time() + 60)
-            ):
-                auth["token"] = disk_tok
-                if disk_ref:
-                    auth["refreshToken"] = disk_ref
-                if disk_exp is not None:
-                    auth["expiresAt"] = disk_exp
-                return disk_tok
-            if disk_ref and recovered is None:
-                ref = disk_ref
-        body_bytes = urllib.parse.urlencode({
-            "grant_type": "refresh_token",
-            "client_id": client_id,
-            "refresh_token": ref,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{issuer}/oauth2/token",
-            data=body_bytes,
-            method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": "Grok Build",
-            },
-        )
-        try:
-            with _urlopen_auth(req, timeout=4.5) as resp:
-                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        new_tok = str(payload.get("access_token") or "").strip()
-        if not new_tok:
-            return None
-        new_ref = str(payload.get("refresh_token") or ref).strip()
-        exp_in = _safe_float(payload.get("expires_in")) or 3600.0
-        new_exp = time.time() + exp_in
-
-        auth["token"] = new_tok
-        auth["refreshToken"] = new_ref
-        auth["expiresAt"] = new_exp
-
-        if isinstance(auth_file, Path) and isinstance(scope_key, str):
-            saved = _save_grok_entry(auth_file, scope_key, new_tok, new_ref, new_exp)
-            if saved:
-                _unlink_oauth_recovery("grok")
-            else:
-                _write_oauth_recovery("grok", {
-                    "authFile": str(auth_file),
-                    "scopeKey": scope_key,
-                    "access_token": new_tok,
-                    "refresh_token": new_ref,
-                    "expires_at": int(new_exp),
-                    "savedAtEpoch": int(time.time()),
-                    "replacedAccessToken": orig_tok,
-                    "replacedRefreshToken": ref,
-                })
-        return new_tok
-
-
-def _probe_grok_limits(home: Path) -> dict[str, Any]:
-    now_sec = time.time()
+def _probe_grok_limits(home: Path, timeout_sec: float = 10.0) -> dict[str, Any]:
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
-    auth = _extract_grok_oauth(home)
-    if auth is None:
+    grok_bin = _resolve_grok_binary(home)
+    has_login, email = _grok_login_hint(home)
+    if not grok_bin or not has_login:
         return {
             "cli": "Grok Build",
             "planType": None,
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "unconfigured",
-            "message": _tr("未检测到 Grok OAuth 登录凭证", "Grok OAuth credentials not detected"),
+            "message": _tr("未检测到 Grok Build 登录环境", "Grok Build sign-in environment not detected"),
             "windows": [],
             "credits": None,
         }
-    token = str(auth.get("token") or "").strip()
-    email = auth.get("email")
-    exp_at = _safe_float(auth.get("expiresAt"))
-    refreshed_once = False
-    if (not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec + 60)) and auth.get("refreshToken"):
-        refreshed = _refresh_grok_access_token(auth)
-        if refreshed:
-            token = refreshed
-            refreshed_once = True
-    if not token:
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    if not (env.get("GROK_HOME") or "").strip():
+        env["GROK_HOME"] = str(home / ".grok")
+
+    proc: subprocess.Popen[bytes] | None = None
+    deadline = time.monotonic() + max(0.5, float(timeout_sec))
+
+    def _read_rpc_response(target_id: int) -> dict[str, Any]:
+        assert proc is not None and proc.stdout is not None
+        fd = proc.stdout.fileno()
+        buf = b""
+        while True:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError("Grok RPC timed out")
+            ready, _, _ = select.select([fd], [], [], min(0.25, rem))
+            if not ready:
+                if proc.poll() is not None:
+                    raise EOFError("Grok RPC exited")
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                raise EOFError("Grok RPC closed stdout")
+            buf += chunk
+            while b"\n" in buf:
+                raw_line, buf = buf.split(b"\n", 1)
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == target_id:
+                    return msg
+
+    try:
+        proc = subprocess.Popen(
+            [grok_bin, "--no-auto-update", "agent", "--no-leader", "stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(home),
+            env=env,
+            start_new_session=True,
+        )
+        assert proc.stdin is not None
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "terminal": False,
+                },
+            },
+        }
+        proc.stdin.write((json.dumps(init_req) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+        init_resp = _read_rpc_response(1)
+        if isinstance(init_resp.get("error"), dict):
+            raise RuntimeError(str(init_resp["error"].get("message") or "initialize failed"))
+
+        billing_req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "_x.ai/billing",
+            "params": {},
+        }
+        proc.stdin.write((json.dumps(billing_req) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+        billing_resp = _read_rpc_response(2)
+        if isinstance(billing_resp.get("error"), dict):
+            err_msg = str(billing_resp["error"].get("message") or "billing failed")
+            low = err_msg.lower()
+            if any(k in low for k in ("auth", "login", "sign in", "unauthenticated", "expired", "token")):
+                return {
+                    "cli": "Grok Build",
+                    "planType": email or "xAI",
+                    "updatedAt": now_iso,
+                    "source": "unavailable",
+                    "status": "error",
+                    "message": _tr("Grok 登录已失效，请在 Grok Build 中重新登录", "Grok sign-in expired; sign in again in Grok Build"),
+                    "windows": [],
+                    "credits": None,
+                }
+            raise RuntimeError(err_msg)
+
+        result = billing_resp.get("result")
+        windows, credits, tier = _parse_grok_rpc_billing(result)
+        if not windows and credits is None:
+            return {
+                "cli": "Grok Build",
+                "planType": tier or email or "xAI",
+                "updatedAt": now_iso,
+                "source": "unavailable",
+                "status": "error",
+                "message": _tr("Grok 账单未返回额度信息", "Grok billing returned no quota data"),
+                "windows": [],
+                "credits": None,
+            }
+        return {
+            "cli": "Grok Build",
+            "planType": tier or email or "xAI",
+            "updatedAt": now_iso,
+            "source": "live",
+            "status": "ok",
+            "message": None,
+            "windows": windows,
+            "credits": credits,
+        }
+    except TimeoutError:
         return {
             "cli": "Grok Build",
             "planType": email or "xAI",
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": _tr("Grok OAuth 令牌已失效，请在 Grok Build 中重新登录", "Grok OAuth token expired; sign in again in Grok Build"),
+            "message": _tr("Grok 限额查询超时，请稍后刷新重试", "Grok usage query timed out; refresh to retry"),
             "windows": [],
             "credits": None,
         }
-
-    def _fetch_rest(bearer: str) -> dict[str, Any]:
-        req = urllib.request.Request(
-            "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
-            headers={
-                "Authorization": f"Bearer {bearer}",
-                "Accept": "application/json",
-                "User-Agent": "grok-cli/1.0",
-            },
-        )
-        with _urlopen_auth(req, timeout=3.0) as resp:
-            return json.loads(_read_response_bytes(resp).decode("utf-8"))
-
-    def _fetch_grpc_web(bearer: str) -> dict[str, Any]:
-        req = urllib.request.Request(
-            "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
-            data=b"\x00\x00\x00\x00\x00",
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {bearer}",
-                "X-XAI-Token-Auth": "xai-grok-cli",
-                "Accept": "*/*",
-                "Content-Type": "application/grpc-web+proto",
-                "User-Agent": "Grok Build",
-                "Origin": "https://grok.com",
-                "Referer": "https://grok.com/?_s=usage",
-                "x-grpc-web": "1",
-                "x-user-agent": "connect-es/2.1.1",
-            },
-        )
-        with _urlopen_auth(req, timeout=4.5) as resp:
-            return _decode_grok_grpc_web_billing(_read_response_bytes(resp))
-
-    privacy_blocked = False
-    rest_exc: Exception | None = None
-    try:
-        try:
-            body = _fetch_rest(token)
-        except urllib.error.HTTPError as he:
-            if he.code == 401 and not refreshed_once and auth.get("refreshToken"):
-                try:
-                    he.close()
-                except Exception:
-                    pass
-                refreshed = _refresh_grok_access_token(auth)
-                if refreshed:
-                    token = refreshed
-                    refreshed_once = True
-                    body = _fetch_rest(token)
-                else:
-                    raise
-            else:
-                err_txt = ""
-                try:
-                    err_txt = _read_response_bytes(he, 16384).decode("utf-8", errors="replace")
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        he.close()
-                    except Exception:
-                        pass
-                if he.code == 403 and "WKE=privacy-mode:" in err_txt:
-                    privacy_blocked = True
-                raise
-
-        windows: list[dict[str, Any]] = []
-        credits = None
-        cfg = body.get("config") if isinstance(body.get("config"), dict) else {}
-        period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else {}
-        p_type = str(period.get("type") or "").replace("USAGE_PERIOD_TYPE_", "")
-        used_pct = _safe_float(cfg.get("creditUsagePercent"))
-        if used_pct is None and p_type in ("WEEKLY", "MONTHLY") and period.get("start") and period.get("end"):
-            used_pct = 0.0
-        if used_pct is not None:
-            dur_ms = (7 * 86_400_000) if p_type == "WEEKLY" else ((30 * 86_400_000) if p_type == "MONTHLY" else None)
-            lbl = (
-                _tr("每周", "Weekly")
-                if p_type == "WEEKLY"
-                else (_tr("每月", "Monthly") if p_type == "MONTHLY" else _tr("当前", "Current"))
-            )
-            end_iso = period.get("end") if isinstance(period.get("end"), str) else None
-            windows.append(_make_window("subscription", lbl, used_pct, end_iso, dur_ms))
-
-        rem_cents = _safe_float(body.get("effectiveRemaining") or body.get("remainingCredits"))
-        tot_cents = _safe_float(body.get("totalCredits") or body.get("monthlyCredits"))
-        if rem_cents is not None:
-            rem_usd = rem_cents / 100.0
-            tot_usd = (tot_cents / 100.0) if (tot_cents and tot_cents > 0) else None
-            used_usd = max(0.0, tot_usd - rem_usd) if tot_usd is not None else 0.0
-            credits = {
-                "label": _tr("可用额度", "Available credits"),
-                "used": round(used_usd, 2),
-                "limit": round(tot_usd, 2) if tot_usd else None,
-                "remaining": round(rem_usd, 2),
-                "unit": "USD",
-            }
-            if not windows and tot_usd and tot_usd > 0:
-                windows.append(_make_window("credits", _tr("每月", "Monthly"), (used_usd / tot_usd) * 100.0, None, 30 * 86_400_000))
-        if windows or credits is not None:
-            return {
-                "cli": "Grok Build",
-                "planType": email or str(body.get("plan") or "xAI"),
-                "updatedAt": now_iso,
-                "source": "live",
-                "status": "ok",
-                "message": None,
-                "windows": windows,
-                "credits": credits,
-            }
     except Exception as exc:
-        rest_exc = exc
-
-    try:
-        try:
-            grpc_res = _fetch_grpc_web(token)
-        except (_GrpcStatusError, urllib.error.HTTPError) as g_err:
-            is_auth_err = (
-                (isinstance(g_err, urllib.error.HTTPError) and g_err.code == 401)
-                or (
-                    isinstance(g_err, _GrpcStatusError)
-                    and (
-                        g_err.status_code == 16
-                        or (
-                            g_err.status_code == 7
-                            and any(k in g_err.grpc_message.lower() for k in ("bad-credentials", "unauthenticated", "expired", "token"))
-                        )
-                    )
-                )
-            )
-            if is_auth_err and not refreshed_once and auth.get("refreshToken"):
-                refreshed = _refresh_grok_access_token(auth)
-                if refreshed:
-                    token = refreshed
-                    refreshed_once = True
-                    grpc_res = _fetch_grpc_web(token)
-                else:
-                    raise
-            else:
-                raise
-        if grpc_res.get("windows") or grpc_res.get("credits") is not None:
-            return {
-                "cli": "Grok Build",
-                "planType": email or str(grpc_res.get("plan") or "SuperGrok"),
-                "updatedAt": now_iso,
-                "source": "live",
-                "status": "ok",
-                "message": None,
-                "windows": grpc_res.get("windows") or [],
-                "credits": grpc_res.get("credits"),
-            }
-    except Exception as grpc_exc:
-        if privacy_blocked:
-            return {
-                "cli": "Grok Build",
-                "planType": email or "xAI",
-                "updatedAt": now_iso,
-                "source": "unavailable",
-                "status": "error",
-                "message": _tr("请在 xAI 账户设置中开启 Privacy Mode 以查看 Grok 限额", "Enable Privacy Mode in xAI account settings to view Grok limits"),
-                "windows": [],
-                "credits": None,
-            }
-        err_obj = rest_exc or grpc_exc
         return {
             "cli": "Grok Build",
-            "planType": email,
+            "planType": email or "xAI",
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": _tr(f"读取 Grok 额度失败：{type(err_obj).__name__}", f"Failed to read Grok credits: {type(err_obj).__name__}"),
+            "message": _tr(f"读取 Grok 限额失败：{type(exc).__name__}", f"Failed to read Grok limits: {type(exc).__name__}"),
             "windows": [],
             "credits": None,
         }
-
-    return {
-        "cli": "Grok Build",
-        "planType": email or "xAI",
-        "updatedAt": now_iso,
-        "source": "live",
-        "status": "ok",
-        "message": None,
-        "windows": [],
-        "credits": None,
-    }
+    finally:
+        if proc is not None:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
 
 
 def _extract_deepseek_auth(home: Path) -> dict[str, str] | None:
@@ -6491,11 +6358,6 @@ def _probe_deepseek_limits(home: Path) -> dict[str, Any]:
 
 def _extract_kimi_oauth(home: Path) -> dict[str, Any] | None:
     default_base = (os.environ.get("KIMI_CODE_BASE_URL") or "https://api.kimi.com/coding/v1").strip().rstrip("/")
-    oauth_host = (
-        os.environ.get("KIMI_CODE_OAUTH_HOST")
-        or os.environ.get("KIMI_OAUTH_HOST")
-        or "https://auth.kimi.com"
-    ).strip().rstrip("/")
 
     roots: list[Path] = []
     for raw_root in (
@@ -6541,163 +6403,30 @@ def _extract_kimi_oauth(home: Path) -> dict[str, Any] | None:
                 raw_cred = None
             if isinstance(raw_cred, dict):
                 acc = str(raw_cred.get("access_token") or "").strip()
-                ref = str(raw_cred.get("refresh_token") or "").strip()
-                exp = _safe_float(raw_cred.get("expires_at"))
-                if _oauth_recovery_path("kimi").is_file():
-                    with _oauth_refresh_lock("kimi"):
-                        recovered = _replay_kimi_oauth_recovery(cred_file)
-                    if recovered is not None:
-                        acc = recovered["accessToken"]
-                        ref = recovered["refreshToken"]
-                        if recovered.get("expiresAt") is not None:
-                            exp = recovered["expiresAt"]
-                if acc or ref:
+                has_ref = bool(str(raw_cred.get("refresh_token") or "").strip())
+                exp_ms = _parse_ts_ms(raw_cred.get("expires_at"))
+                exp = (exp_ms / 1000.0) if exp_ms is not None else _safe_float(raw_cred.get("expires_at"))
+                if acc or has_ref:
                     return {
                         "accessToken": acc,
-                        "refreshToken": ref,
                         "expiresAt": exp,
                         "baseUrl": base_url,
-                        "oauthHost": oauth_host,
-                        "credFile": cred_file,
                     }
 
         if cfg_api_key:
             return {
                 "accessToken": cfg_api_key,
-                "refreshToken": "",
                 "expiresAt": None,
                 "baseUrl": base_url,
-                "oauthHost": oauth_host,
-                "credFile": None,
             }
     env_key = (os.environ.get("KIMI_CODE_API_KEY") or "").strip()
     if env_key:
         return {
             "accessToken": env_key,
-            "refreshToken": "",
             "expiresAt": None,
             "baseUrl": default_base,
-            "oauthHost": oauth_host,
-            "credFile": None,
         }
     return None
-
-
-def _refresh_kimi_access_token(auth: dict[str, Any]) -> str | None:
-    ref = str(auth.get("refreshToken") or "").strip()
-    orig_acc = str(auth.get("accessToken") or "").strip()
-    if not ref:
-        return None
-    safe_oauth_host = _validate_http_url(auth.get("oauthHost") or "https://auth.kimi.com")
-    if safe_oauth_host is None:
-        return None
-    cred_file = auth.get("credFile")
-    if cred_file is not None:
-        if not isinstance(cred_file, Path) or (cred_file.exists() and not cred_file.is_file()):
-            return None
-    oauth_host = safe_oauth_host.rstrip("/")
-    with _oauth_refresh_lock("kimi"):
-        recovered = None
-        if isinstance(cred_file, Path):
-            recovered = _replay_kimi_oauth_recovery(cred_file)
-            if recovered is not None:
-                rec_acc = recovered["accessToken"]
-                rec_ref = recovered["refreshToken"]
-                rec_exp = recovered.get("expiresAt")
-                if (
-                    rec_acc
-                    and (rec_acc != orig_acc or (rec_ref and rec_ref != ref))
-                    and (rec_exp is None or rec_exp > time.time() + 60)
-                ):
-                    auth["accessToken"] = rec_acc
-                    auth["refreshToken"] = rec_ref
-                    if rec_exp is not None:
-                        auth["expiresAt"] = rec_exp
-                    return rec_acc
-                if rec_ref:
-                    ref = rec_ref
-        if isinstance(cred_file, Path) and cred_file.is_file():
-            try:
-                loaded = json.loads(cred_file.read_text("utf-8"))
-            except Exception:
-                loaded = None
-            if isinstance(loaded, dict):
-                disk_acc = str(loaded.get("access_token") or "").strip()
-                disk_ref = str(loaded.get("refresh_token") or "").strip()
-                disk_exp = _safe_float(loaded.get("expires_at"))
-                if (
-                    disk_acc
-                    and (disk_acc != orig_acc or (disk_ref and disk_ref != ref))
-                    and (disk_exp is None or disk_exp > time.time() + 60)
-                ):
-                    auth["accessToken"] = disk_acc
-                    if disk_ref:
-                        auth["refreshToken"] = disk_ref
-                    if disk_exp is not None:
-                        auth["expiresAt"] = disk_exp
-                    return disk_acc
-                if disk_ref and recovered is None:
-                    ref = disk_ref
-        form_body = urllib.parse.urlencode({
-            "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
-            "grant_type": "refresh_token",
-            "refresh_token": ref,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{oauth_host}/api/oauth/token",
-            data=form_body,
-            method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "X-Msh-Platform": "kimi_cli",
-                "User-Agent": "kimi-cli/1.0",
-            },
-        )
-        try:
-            with _urlopen_auth(req, timeout=4.0) as resp:
-                payload = json.loads(_read_response_bytes(resp).decode("utf-8"))
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        new_acc = str(payload.get("access_token") or "").strip()
-        if not new_acc:
-            return None
-        exp_in = _safe_float(payload.get("expires_in")) or 3600.0
-        new_ref = str(payload.get("refresh_token") or ref).strip()
-        new_exp = time.time() + exp_in
-
-        auth["accessToken"] = new_acc
-        auth["refreshToken"] = new_ref
-        auth["expiresAt"] = new_exp
-
-        if isinstance(cred_file, Path):
-            saved = _save_kimi_entry(
-                cred_file,
-                new_acc,
-                new_ref,
-                new_exp,
-                str(payload.get("scope") or ""),
-                str(payload.get("token_type") or ""),
-                exp_in,
-            )
-            if saved:
-                _unlink_oauth_recovery("kimi")
-            else:
-                _write_oauth_recovery("kimi", {
-                    "credFile": str(cred_file),
-                    "access_token": new_acc,
-                    "refresh_token": new_ref,
-                    "expires_at": new_exp,
-                    "expires_in": exp_in,
-                    "scope": str(payload.get("scope") or ""),
-                    "token_type": str(payload.get("token_type") or ""),
-                    "savedAtEpoch": int(time.time()),
-                    "replacedAccessToken": orig_acc,
-                    "replacedRefreshToken": ref,
-                })
-        return new_acc
 
 
 def _kimi_reset_iso(data: dict[str, Any], now_sec: float) -> str | None:
@@ -6731,18 +6460,27 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
         }
     token = str(auth.get("accessToken") or "").strip()
     exp_at = _safe_float(auth.get("expiresAt"))
-    if (not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec + 60)) and auth.get("refreshToken"):
-        refreshed = _refresh_kimi_access_token(auth)
-        if refreshed:
-            token = refreshed
-    if not token:
+    if not token or (exp_at is not None and exp_at > 0 and exp_at <= now_sec):
         return {
             "cli": "Kimi Code",
             "planType": "Kimi Code",
             "updatedAt": now_iso,
             "source": "unavailable",
             "status": "error",
-            "message": _tr("Kimi Code OAuth 令牌已过期，请重新登录", "Kimi Code OAuth token expired; sign in again"),
+            "message": _tr("Kimi Code OAuth 令牌已过期，请在 Kimi Code 中重新登录", "Kimi Code OAuth token expired; sign in again in Kimi Code"),
+            "windows": [],
+            "credits": None,
+        }
+
+    cooldown_wait = _quota_cooldown_remaining("kimi", token, now_sec)
+    if cooldown_wait > 0:
+        return {
+            "cli": "Kimi Code",
+            "planType": "Kimi Code",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": _format_cooldown_wait(cooldown_wait),
             "windows": [],
             "credits": None,
         }
@@ -6761,37 +6499,21 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
         }
     base_url = safe_base.rstrip("/")
     try:
-        def _fetch(bearer: str) -> dict[str, Any]:
-            req = urllib.request.Request(
-                f"{base_url}/usages",
-                headers={
-                    "Authorization": f"Bearer {bearer}",
-                    "Accept": "application/json",
-                    "X-Msh-Platform": "kimi_cli",
-                    "User-Agent": "kimi-cli/1.0",
-                },
-            )
-            with _urlopen_auth(req, timeout=4.0) as resp:
-                return json.loads(_read_response_bytes(resp).decode("utf-8"))
-
-        try:
-            body = _fetch(token)
-        except urllib.error.HTTPError as he:
-            if he.code == 401 and auth.get("refreshToken"):
-                try:
-                    he.close()
-                except Exception:
-                    pass
-                refreshed = _refresh_kimi_access_token(auth)
-                if refreshed:
-                    body = _fetch(refreshed)
-                else:
-                    raise
-            else:
-                raise
+        req = urllib.request.Request(
+            f"{base_url}/usages",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "User-Agent": "luma-usage/1",
+            },
+        )
+        with _urlopen_auth(req, timeout=4.0) as resp:
+            body = json.loads(_read_response_bytes(resp).decode("utf-8"))
 
         if isinstance(body, dict) and isinstance(body.get("data"), dict):
             body = body["data"]
+        if not isinstance(body, dict):
+            raise ValueError("Invalid Kimi usage payload")
 
         user_obj = body.get("user") if isinstance(body.get("user"), dict) else {}
         mem_obj = user_obj.get("membership") if isinstance(user_obj.get("membership"), dict) else {}
@@ -6931,6 +6653,30 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
             "windows": windows,
             "credits": None,
         }
+    except urllib.error.HTTPError as he:
+        code = he.code
+        hdrs = he.headers
+        try:
+            he.close()
+        except Exception:
+            pass
+        if code == 429:
+            wait_sec = _quota_cooldown_record("kimi", token, hdrs, now_sec)
+            msg = _format_cooldown_wait(wait_sec)
+        elif code in (401, 403):
+            msg = _tr("Kimi Code OAuth 令牌已失效，请在 Kimi Code 中重新登录", "Kimi Code OAuth token expired; sign in again in Kimi Code")
+        else:
+            msg = _tr(f"读取 Kimi Code 限额失败：HTTP {code}", f"Failed to read Kimi Code limits: HTTP {code}")
+        return {
+            "cli": "Kimi Code",
+            "planType": "Kimi Code",
+            "updatedAt": now_iso,
+            "source": "unavailable",
+            "status": "error",
+            "message": msg,
+            "windows": [],
+            "credits": None,
+        }
     except Exception as exc:
         return {
             "cli": "Kimi Code",
@@ -6945,126 +6691,101 @@ def _probe_kimi_limits(home: Path) -> dict[str, Any]:
 
 
 OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
-OPENCODE_CONSOLE_SERVER_URL = "https://opencode.ai/console"
 
 
-def _opencode_console_server_ok(metadata: Any) -> bool:
-    if not isinstance(metadata, dict):
+def _opencode_data_dir(home: Path) -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share")) / "opencode"
+
+
+def _is_default_opencode_console(raw_server: Any) -> bool:
+    if raw_server is None:
         return True
-    server = metadata.get("server")
-    if not isinstance(server, str):
-        return True
-    try:
-        parsed = urllib.parse.urlparse(server.strip())
-    except Exception:
+    if not isinstance(raw_server, str):
         return False
+    parsed = urllib.parse.urlparse(raw_server.strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return False
-    normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-    return normalized == OPENCODE_CONSOLE_SERVER_URL
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}" == "https://opencode.ai/console"
 
 
-def _parse_opencode_db_credential(raw_value: Any) -> str | None:
-    if not isinstance(raw_value, str):
-        return None
-    try:
-        stored = json.loads(raw_value)
-    except Exception:
-        return None
-    if not isinstance(stored, dict) or stored.get("type") != "key":
-        return None
-    if not _opencode_console_server_ok(stored.get("metadata")):
-        return None
-    raw_key = stored.get("key")
-    if isinstance(raw_key, str) and raw_key.strip():
-        return raw_key.strip()
-    return None
-
-
-def _read_opencode_db_api_keys(
-    db_path: Path,
-    integration_ids: tuple[str, ...] = ("opencode", "opencode-go"),
-) -> list[str | None]:
-    if not integration_ids or not db_path.is_file():
-        return [None for _ in integration_ids]
-    raw_rows: list[Any] = [None for _ in integration_ids]
-    try:
-        with _open_readonly_sqlite(db_path, timeout=1.5) as con:
-            has_table = con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'"
-            ).fetchone()
-            if not has_table:
-                return [None for _ in integration_ids]
-            for idx, integration_id in enumerate(integration_ids):
-                row = con.execute(
-                    "SELECT value FROM credential "
-                    "WHERE integration_id = ? AND active IS NOT 0 "
-                    "ORDER BY active DESC, time_created DESC, id DESC LIMIT 1",
-                    (integration_id,),
-                ).fetchone()
-                if row:
-                    raw_rows[idx] = row[0]
-    except Exception:
-        return [None for _ in integration_ids]
-    return [_parse_opencode_db_credential(raw_val) for raw_val in raw_rows]
-
-
-def _read_opencode_db_api_key(db_path: Path, integration_id: str) -> str | None:
-    return _read_opencode_db_api_keys(db_path, (integration_id,))[0]
-
-
-def _extract_opencode_go_keys(home: Path) -> list[str]:
-    data_home = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
-    opencode_dir = data_home / "opencode"
+def _read_opencode_go_tokens(home: Path) -> list[str]:
+    base_dir = _opencode_data_dir(home)
     inline_auth = os.environ.get("OPENCODE_AUTH_CONTENT")
-    raw_auth = ""
-    if inline_auth:
-        raw_auth = inline_auth
-    else:
-        auth_path = opencode_dir / "auth.json"
-        if auth_path.is_file():
+    raw_auth = inline_auth or ""
+    if not raw_auth:
+        auth_file = base_dir / "auth.json"
+        if auth_file.is_file():
             try:
-                raw_auth = auth_path.read_text("utf-8")
+                raw_auth = auth_file.read_text("utf-8")
             except (OSError, UnicodeError):
                 raw_auth = ""
 
-    auth_go_key: str | None = None
+    file_token: str | None = None
     if raw_auth:
         try:
-            auth_obj = json.loads(raw_auth)
-            if isinstance(auth_obj, dict):
-                entry = auth_obj.get("opencode-go")
-                if isinstance(entry, dict) and entry.get("type") == "api":
-                    candidate = entry.get("key")
-                    if isinstance(candidate, str) and candidate.strip():
-                        auth_go_key = candidate.strip()
+            auth_doc = json.loads(raw_auth)
+            entry = auth_doc.get("opencode-go") if isinstance(auth_doc, dict) else None
+            if isinstance(entry, dict) and entry.get("type") == "api":
+                cand = entry.get("key")
+                if isinstance(cand, str) and cand.strip():
+                    file_token = cand.strip()
         except Exception:
             pass
+    if not file_token:
+        env_tok = (os.environ.get("OPENCODE_API_KEY") or "").strip()
+        if env_tok:
+            file_token = env_tok
 
-    if not auth_go_key:
-        env_key = (os.environ.get("OPENCODE_API_KEY") or "").strip()
-        if env_key:
-            auth_go_key = env_key
+    db_tokens: dict[str, str | None] = {}
+    db_name = os.environ.get("OPENCODE_DB") or "opencode.db"
+    if not inline_auth and db_name != ":memory:":
+        db_path = (base_dir / db_name).resolve()
+        if db_path.is_file():
+            try:
+                with _open_readonly_sqlite(db_path, timeout=1.5) as con:
+                    exists = con.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'"
+                    ).fetchone()
+                    if exists:
+                        rows = con.execute(
+                            "SELECT integration_id, value FROM credential "
+                            "WHERE integration_id IN ('opencode', 'opencode-go') AND active IS NOT 0 "
+                            "ORDER BY active DESC, time_created DESC, id DESC"
+                        ).fetchall()
+                        for integ_id, raw_val in rows:
+                            if integ_id in db_tokens:
+                                continue
+                            parsed_tok: str | None = None
+                            if isinstance(raw_val, str):
+                                try:
+                                    rec = json.loads(raw_val)
+                                except Exception:
+                                    rec = None
+                                if isinstance(rec, dict) and rec.get("type") == "key":
+                                    meta = rec.get("metadata")
+                                    server_ok = True if meta is None else (
+                                        isinstance(meta, dict) and _is_default_opencode_console(meta.get("server"))
+                                    )
+                                    if server_ok and isinstance(rec.get("key"), str) and rec["key"].strip():
+                                        parsed_tok = rec["key"].strip()
+                            db_tokens[integ_id] = parsed_tok
+            except Exception:
+                db_tokens = {}
 
-    db_file = os.environ.get("OPENCODE_DB") or "opencode.db"
-    stored_keys: list[str | None] = []
-    if not inline_auth and db_file != ":memory:":
-        db_path = (opencode_dir / db_file).resolve()
-        stored_keys = _read_opencode_db_api_keys(db_path, ("opencode", "opencode-go"))
-
-    ordered: list[str] = []
+    result: list[str] = []
     seen: set[str] = set()
-    for item in [*stored_keys, auth_go_key]:
-        if isinstance(item, str) and item and item not in seen:
-            seen.add(item)
-            ordered.append(item)
-    return ordered
+    for tok in (db_tokens.get("opencode"), db_tokens.get("opencode-go"), file_token):
+        if isinstance(tok, str) and tok and tok not in seen:
+            seen.add(tok)
+            result.append(tok)
+    return result
 
 
-def _probe_opencode_limits(home: Path, keys: list[str] | None = None) -> dict[str, Any]:
+def _probe_opencode_limits(home: Path, tokens: list[str] | None = None) -> dict[str, Any]:
+    now_sec = time.time()
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
-    resolved_keys = keys if keys is not None else _extract_opencode_go_keys(home)
-    if not resolved_keys:
+    resolved = tokens if tokens is not None else _read_opencode_go_tokens(home)
+    if not resolved:
         return {
             "cli": "OpenCode",
             "planType": None,
@@ -7078,30 +6799,61 @@ def _probe_opencode_limits(home: Path, keys: list[str] | None = None) -> dict[st
 
     try:
         body: Any = None
-        last_status: int | None = None
-        for idx, api_key in enumerate(resolved_keys):
+        min_cooldown: int | None = None
+        candidates: list[str] = []
+        for tok in resolved:
+            wait_sec = _quota_cooldown_remaining("opencode", tok, now_sec)
+            if wait_sec > 0:
+                min_cooldown = wait_sec if min_cooldown is None else min(min_cooldown, wait_sec)
+            else:
+                candidates.append(tok)
+        if not candidates:
+            return {
+                "cli": "OpenCode",
+                "planType": "Go",
+                "updatedAt": now_iso,
+                "source": "unavailable",
+                "status": "error",
+                "message": _format_cooldown_wait(min_cooldown or QUOTA_COOLDOWN_DEFAULT_SECONDS),
+                "windows": [],
+                "credits": None,
+            }
+
+        for idx, tok in enumerate(candidates):
             req = urllib.request.Request(
                 OPENCODE_GO_USAGE_URL,
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {tok}",
                     "Accept": "application/json",
                     "User-Agent": "luma-usage/1",
                 },
             )
             try:
                 with _urlopen_auth(req, timeout=4.0) as resp:
-                    last_status = getattr(resp, "status", 200)
                     body = json.loads(_read_response_bytes(resp).decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
-                last_status = exc.code
+                status_code = exc.code
+                hdrs = exc.headers
                 try:
                     exc.close()
                 except Exception:
                     pass
-                if last_status in (401, 403) and idx + 1 < len(resolved_keys):
+                if status_code == 429:
+                    wait_sec = _quota_cooldown_record("opencode", tok, hdrs, now_sec)
+                    return {
+                        "cli": "OpenCode",
+                        "planType": "Go",
+                        "updatedAt": now_iso,
+                        "source": "unavailable",
+                        "status": "error",
+                        "message": _format_cooldown_wait(wait_sec),
+                        "windows": [],
+                        "credits": None,
+                    }
+                if status_code in (401, 403) and idx + 1 < len(candidates):
                     continue
-                if last_status == 403:
+                if status_code == 403:
                     return {
                         "cli": "OpenCode",
                         "planType": None,
@@ -7119,8 +6871,8 @@ def _probe_opencode_limits(home: Path, keys: list[str] | None = None) -> dict[st
                     "source": "unavailable",
                     "status": "error",
                     "message": _tr(
-                        f"读取 OpenCode Go 限额失败：HTTP {last_status}",
-                        f"Failed to read OpenCode Go limits: HTTP {last_status}",
+                        f"读取 OpenCode Go 限额失败：HTTP {status_code}",
+                        f"Failed to read OpenCode Go limits: HTTP {status_code}",
                     ),
                     "windows": [],
                     "credits": None,
@@ -7131,13 +6883,12 @@ def _probe_opencode_limits(home: Path, keys: list[str] | None = None) -> dict[st
             raise ValueError("Invalid OpenCode Go usage payload")
 
         windows: list[dict[str, Any]] = []
-        mapping = [
+        for field_name, wid, label, dur_ms in (
             ("rolling", "go_rolling", _tr("短期", "Session"), 5 * 3_600_000),
             ("weekly", "go_weekly", _tr("每周", "Weekly"), 7 * 86_400_000),
             ("monthly", "go_monthly", _tr("每月", "Monthly"), None),
-        ]
-        for field_key, wid, label, dur_ms in mapping:
-            slot = usage.get(field_key)
+        ):
+            slot = usage.get(field_name)
             if not isinstance(slot, dict):
                 continue
             pct = _safe_float(slot.get("percent"))
@@ -7180,10 +6931,10 @@ def _has_claude_oauth(home: Path) -> bool:
     return _extract_claude_oauth(home) is not None
 
 def _has_antigravity_oauth(home: Path) -> bool:
-    return _extract_antigravity_oauth(home) is not None
+    return bool(_has_antigravity_cli_dir(home) and _resolve_agy_binary(home))
 
 def _has_grok_oauth(home: Path) -> bool:
-    return _extract_grok_oauth(home) is not None
+    return bool(_resolve_grok_binary(home) and _grok_login_hint(home)[0])
 
 def _has_deepseek_auth(home: Path) -> bool:
     return _extract_deepseek_auth(home) is not None
@@ -7192,15 +6943,15 @@ def _has_kimi_oauth(home: Path) -> bool:
     return _extract_kimi_oauth(home) is not None
 
 def _has_opencode_go_auth(home: Path) -> bool:
-    return bool(_extract_opencode_go_keys(home))
+    return bool(_read_opencode_go_tokens(home))
 
 
 _DEFAULT_HAS_OPENCODE_GO_AUTH = _has_opencode_go_auth
 _DEFAULT_PROBE_OPENCODE_LIMITS = _probe_opencode_limits
 
 
-def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str, Any]:
-    cache_path = _cache_dir() / "usage-limits-cache-v4.json"
+def collect_limits(fresh: bool = False, probe_timeout: float = 20.0) -> dict[str, Any]:
+    cache_path = _cache_dir() / "usage-limits-cache-v5.json"
     now_sec = time.time()
     lang = _lang_code()
     if not fresh and cache_path.is_file():
@@ -7238,11 +6989,11 @@ def collect_limits(fresh: bool = False, probe_timeout: float = 7.5) -> dict[str,
             and fn is _DEFAULT_PROBE_OPENCODE_LIMITS
         ):
             try:
-                pre_keys = _extract_opencode_go_keys(home)
+                pre_tokens = _read_opencode_go_tokens(home)
             except Exception:
-                pre_keys = []
-            if pre_keys:
-                active_probes.append((name, lambda h, k=pre_keys: _probe_opencode_limits(h, keys=k)))
+                pre_tokens = []
+            if pre_tokens:
+                active_probes.append((name, lambda h, t=pre_tokens: _probe_opencode_limits(h, tokens=t)))
             continue
         try:
             configured = bool(has_oauth(home))

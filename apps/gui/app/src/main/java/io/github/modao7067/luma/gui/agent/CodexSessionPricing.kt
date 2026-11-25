@@ -45,6 +45,31 @@ class CodexPricingCatalog(
     val rates: Map<String, CodexModelRate>,
 ) {
     private val sortedKeys: List<String> = rates.keys.sortedByDescending { it.length }
+    private val sortedAliasKeys: List<String> = aliases.keys.sortedByDescending { it.length }
+
+    private fun scaleRate(rate: CodexModelRate, factor: Double): CodexModelRate = CodexModelRate(
+        inputPerM = rate.inputPerM * factor,
+        outputPerM = rate.outputPerM * factor,
+        cacheReadPerM = rate.cacheReadPerM * factor,
+        cacheWritePerM = rate.cacheWritePerM * factor,
+        tiered = rate.tiered?.let {
+            CodexTieredRate(
+                thresholdTokens = it.thresholdTokens,
+                inputPerM = it.inputPerM * factor,
+                outputPerM = it.outputPerM * factor,
+                cacheReadPerM = it.cacheReadPerM * factor,
+                cacheWritePerM = it.cacheWritePerM * factor,
+            )
+        },
+    )
+
+    private fun resolveAliasRate(aliasKey: String): CodexModelRate? {
+        val target = aliases[aliasKey] ?: return null
+        if (target.endsWith(":fast")) {
+            return rates[target.dropLast(5)]?.let { scaleRate(it, 2.0) }
+        }
+        return rates[target]
+    }
 
     fun lookupRate(modelId: String?): CodexModelRate? {
         var m = normalizeModelId(modelId)
@@ -54,7 +79,7 @@ class CodexPricingCatalog(
         if (m.isEmpty() || m in ignoredModels) return null
 
         fun resolve(candidate: String): CodexModelRate? {
-            aliases[candidate]?.let { rates[it] }?.let { return it }
+            resolveAliasRate(candidate)?.let { return it }
             rates[candidate]?.let { return it }
             return null
         }
@@ -81,6 +106,17 @@ class CodexPricingCatalog(
             }
             if (altHyphen == key || altHyphen.startsWith("$key-")) {
                 return rates[key]
+            }
+        }
+        for (alias in sortedAliasKeys) {
+            if (
+                cleaned == alias ||
+                cleaned.startsWith("$alias-") ||
+                cleaned.startsWith("$alias.") ||
+                altHyphen == alias ||
+                altHyphen.startsWith("$alias-")
+            ) {
+                resolveAliasRate(alias)?.let { return it }
             }
         }
         return null
@@ -116,10 +152,7 @@ class CodexPricingCatalog(
         )
         private val claudeSwapRegex = Regex("""^claude-(\d+(?:\.\d+)?)-(sonnet|opus|haiku)(.*)$""")
         private val claudeDotRegex = Regex("""^(claude-(?:sonnet|opus|haiku)-\d+)\.(\d+)(.*)$""")
-        private val aliasEntryRegex = Regex(""""([^"]+)"\s*:\s*"([^"]+)"""")
-        private val rateEntryRegex = Regex(
-            """"([^"]+)"\s*:\s*\(\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*(?:None|\(\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*([0-9._]+)\s*,\s*([0-9._]+)\s*\))\s*\)"""
-        )
+        private const val PRICING_ASSET_PATH = "cli_bridge/luma_cli/model_pricing.json"
 
         @Volatile
         private var cachedDefault: CodexPricingCatalog? = null
@@ -150,17 +183,20 @@ class CodexPricingCatalog(
 
         fun fromAssets(context: Context): CodexPricingCatalog {
             cachedDefault?.let { return it }
-            val source = runCatching {
-                context.assets.open("cli_bridge/luma_cli/global_usage.py").bufferedReader().use { it.readText() }
+            val raw = runCatching {
+                context.assets.open(PRICING_ASSET_PATH).bufferedReader().use { it.readText() }
             }.getOrNull() ?: return default()
-            return fromGlobalUsageSource(source).also { cachedDefault = it }
+            return fromJsonText(raw).also { cachedDefault = it }
         }
 
         fun default(): CodexPricingCatalog {
             cachedDefault?.let { return it }
-            val source = loadGlobalUsageSourceFallback() ?: return CodexPricingCatalog(emptyMap(), emptyMap())
-            return fromGlobalUsageSource(source).also { cachedDefault = it }
+            val raw = loadBuiltinPricingJsonFallback() ?: return CodexPricingCatalog(emptyMap(), emptyMap())
+            return fromJsonText(raw).also { cachedDefault = it }
         }
+
+        fun fromJsonText(raw: String): CodexPricingCatalog =
+            runCatching { fromJson(JSONObject(raw)) }.getOrElse { CodexPricingCatalog(emptyMap(), emptyMap()) }
 
         fun fromJson(obj: JSONObject): CodexPricingCatalog {
             val aliasesObj = obj.optJSONObject("aliases")
@@ -182,45 +218,6 @@ class CodexPricingCatalog(
                         val k = keys.next()
                         val arr = ratesObj.optJSONArray(k) ?: continue
                         parseRateJsonArray(arr)?.let { put(k.lowercase(Locale.ROOT), it) }
-                    }
-                }
-            }
-            return CodexPricingCatalog(aliases, rates)
-        }
-
-        fun fromGlobalUsageSource(source: String): CodexPricingCatalog {
-            val aliasesBlock = extractBraceBlock(source, "MODEL_PRICING_ALIASES")
-            val ratesBlock = extractBraceBlock(source, "MODEL_RATES_PER_M")
-            val aliases = buildMap {
-                if (aliasesBlock != null) {
-                    aliasEntryRegex.findAll(aliasesBlock).forEach { m ->
-                        put(m.groupValues[1].lowercase(Locale.ROOT), m.groupValues[2].lowercase(Locale.ROOT))
-                    }
-                }
-            }
-            val rates = buildMap {
-                if (ratesBlock != null) {
-                    rateEntryRegex.findAll(ratesBlock).forEach { m ->
-                        val key = m.groupValues[1].lowercase(Locale.ROOT)
-                        val inM = parseNumber(m.groupValues[2]) ?: return@forEach
-                        val outM = parseNumber(m.groupValues[3]) ?: return@forEach
-                        val readM = parseNumber(m.groupValues[4]) ?: return@forEach
-                        val writeM = parseNumber(m.groupValues[5]) ?: return@forEach
-                        val tiered = if (m.groupValues[6].isNotEmpty()) {
-                            val threshold = parseNumber(m.groupValues[6])?.toLong()
-                            val tIn = parseNumber(m.groupValues[7])
-                            val tOut = parseNumber(m.groupValues[8])
-                            val tRead = parseNumber(m.groupValues[9])
-                            val tWrite = parseNumber(m.groupValues[10])
-                            if (threshold != null && tIn != null && tOut != null && tRead != null && tWrite != null) {
-                                CodexTieredRate(threshold, tIn, tOut, tRead, tWrite)
-                            } else {
-                                null
-                            }
-                        } else {
-                            null
-                        }
-                        put(key, CodexModelRate(inM, outM, readM, writeM, tiered))
                     }
                 }
             }
@@ -252,52 +249,15 @@ class CodexPricingCatalog(
             return CodexModelRate(inM, outM, readM, writeM, tiered)
         }
 
-        private fun parseNumber(raw: String): Double? = raw.replace("_", "").toDoubleOrNull()
-
-        private fun extractBraceBlock(source: String, identifier: String): String? {
-            val anchor = Regex("""\b$identifier\b[^=]*=""").find(source) ?: return null
-            val startBrace = source.indexOf('{', anchor.range.last + 1)
-            if (startBrace < 0) return null
-            var depth = 0
-            var inString: Char? = null
-            var escaped = false
-            for (i in startBrace until source.length) {
-                val ch = source[i]
-                if (inString != null) {
-                    if (escaped) {
-                        escaped = false
-                    } else if (ch == '\\') {
-                        escaped = true
-                    } else if (ch == inString) {
-                        inString = null
-                    }
-                    continue
-                }
-                if (ch == '"' || ch == '\'') {
-                    inString = ch
-                    continue
-                }
-                if (ch == '{') {
-                    depth++
-                } else if (ch == '}') {
-                    depth--
-                    if (depth == 0) {
-                        return source.substring(startBrace, i + 1)
-                    }
-                }
-            }
-            return null
-        }
-
-        private fun loadGlobalUsageSourceFallback(): String? {
-            val stream = CodexPricingCatalog::class.java.classLoader?.getResourceAsStream("cli_bridge/luma_cli/global_usage.py")
+        private fun loadBuiltinPricingJsonFallback(): String? {
+            val stream = CodexPricingCatalog::class.java.classLoader?.getResourceAsStream(PRICING_ASSET_PATH)
             if (stream != null) {
                 return stream.bufferedReader().use { it.readText() }
             }
             val candidates = listOf(
-                "apps/gui/app/src/main/assets/cli_bridge/luma_cli/global_usage.py",
-                "src/main/assets/cli_bridge/luma_cli/global_usage.py",
-                "app/src/main/assets/cli_bridge/luma_cli/global_usage.py",
+                "apps/gui/app/src/main/assets/$PRICING_ASSET_PATH",
+                "src/main/assets/$PRICING_ASSET_PATH",
+                "app/src/main/assets/$PRICING_ASSET_PATH",
             )
             var dir: File? = File("").absoluteFile
             repeat(7) {

@@ -51,11 +51,12 @@ class CodexCapabilitiesTest {
         assertFalse(entry.detail.contains("hidden")); assertTrue(entry.detail.contains("read"))
         assertFalse(CodexCapabilities.redact("API_KEY=sk-privateplaceholdervalue\nAuthorization: Bearer not-a-real-token").contains("not-a-real-token"))
     }
-    @Test fun pricingCatalogParsesGlobalUsageSourceAndAvoidsCoarseFamilyPrefixPricing() {
+    @Test fun pricingCatalogLoadsBuiltinPricingJsonAndAvoidsCoarseFamilyPrefixPricing() {
         val catalog = CodexPricingCatalog.default()
         val sol = catalog.lookupRate("gpt-6.1-sol")!!
         val family = catalog.lookupRate("gpt-6")!!
         val luna = catalog.lookupRate("gpt-6-luna")!!
+        val kimiAlias = catalog.lookupRate("kimi-for-coding")!!
         assertEquals(2.0, sol.inputPerM, 1e-9)
         assertEquals(10.0, sol.outputPerM, 1e-9)
         assertEquals(0.1, sol.cacheReadPerM, 1e-9)
@@ -66,6 +67,16 @@ class CodexCapabilitiesTest {
         assertEquals(0.1, luna.inputPerM, 1e-9)
         assertEquals(0.5, luna.outputPerM, 1e-9)
         assertEquals(0.01, luna.cacheReadPerM, 1e-9)
+        assertEquals(0.95, kimiAlias.inputPerM, 1e-9)
+        assertEquals(4.0, kimiAlias.outputPerM, 1e-9)
+        val grokFast = catalog.lookupRate("grok-4.7-build-fast")!!
+        assertEquals(2.0, catalog.lookupRate("grok-4.7-build")!!.inputPerM, 1e-9)
+        assertEquals(4.0, grokFast.inputPerM, 1e-9)
+        assertEquals(12.0, grokFast.outputPerM, 1e-9)
+        assertEquals(CodexTieredRate(200_000L, 8.0, 24.0, 2.0, 8.0), grokFast.tiered)
+        assertEquals(1.5, catalog.lookupRate("codex-mini-latest")!!.inputPerM, 1e-9)
+        assertEquals(0.66, catalog.lookupRate("deepseek-v4")!!.inputPerM, 1e-9)
+        assertEquals(2.0, catalog.lookupRate("gemini-pro-orchestrator-v2")!!.inputPerM, 1e-9)
         val usage = obj("total" to obj("inputTokens" to 100_000, "cachedInputTokens" to 50_000, "outputTokens" to 10_000))
         val cost = CodexCapabilities.tokenMetrics(usage, model = "gpt-6.1-sol").last()
         assertEquals("$0.205000", cost.value)

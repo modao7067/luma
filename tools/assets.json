@@ -27,9 +27,9 @@
     "bytes": 1070,
     "sha256": "cebdde8a8fb9ee59e5eaaed19578bf8085aa7047562259c31f38f225c26f6812"
   },
-  "apps/gui/app/src/main/assets/cli_bridge/T3CODE-LICENSE.txt": {
-    "bytes": 1070,
-    "sha256": "935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43"
+  "apps/gui/app/src/main/assets/cli_bridge/TOKSCALE-LICENSE.txt": {
+    "bytes": 1066,
+    "sha256": "24a794f325f7625b5f124945dedb6dcec8188f88e76bf4b99557b52d6cc77be9"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/__init__.py": {
     "bytes": 0,
@@ -64,8 +64,8 @@
     "sha256": "52b9c1ea7466fd2647303d61a612a23e870494cf083f9cd290f35702b242b5f4"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/claude.py": {
-    "bytes": 52583,
-    "sha256": "aebed9fb9bbd61e3e95c81c8c3edae1e20696ed355685920d3afdddf71f6a439"
+    "bytes": 53078,
+    "sha256": "421a809960c62d04edcca923ed83b639082ea0219cc17ade84a317dec2031340"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/claude_history.py": {
     "bytes": 12060,
@@ -100,8 +100,8 @@
     "sha256": "67cd01303a7845376c46c13d27a5f8e174e5d811ab6a7681d33b5c33ccd2ef2f"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/global_usage.py": {
-    "bytes": 306752,
-    "sha256": "27a7efa24d93ff5a3aa3696bff19118d4adfc617026e1f5f8e655e91106cd092"
+    "bytes": 289875,
+    "sha256": "46e888d6b4e55051db4e36ae04a042a063d1b6a55430669063fc6912872f7567"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/grok.py": {
     "bytes": 77365,
@@ -128,8 +128,12 @@
     "sha256": "92d6aadb2f2f4d4b92878e987cd6659b041fba0fbaadd82b6405864a94479588"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/metrics.py": {
-    "bytes": 34449,
-    "sha256": "37e845fa2600957979f93bfe7f6423de634dae76a59e83403d544f1ea96dcfdb"
+    "bytes": 34883,
+    "sha256": "938e83d9683e95cc465ab0252aed0a406f974f0e3ea7c803bb802e69491c187b"
+  },
+  "apps/gui/app/src/main/assets/cli_bridge/luma_cli/model_pricing.json": {
+    "bytes": 6351,
+    "sha256": "60835acae17150d1133d0e2280803d47c0a3c4d387e99706e6c8c4020cf2ba12"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/native_owner.py": {
     "bytes": 51236,

@@ -36,11 +36,11 @@ Copyright Anthropic. The MIT license is retained in `app/src/main/assets/cli_bri
 
 ## Global usage and quota probes
 
-`cli_bridge/luma_cli/global_usage.py` adapts usage aggregation, rate-limit window semantics, and provider quota probing (including OpenCode Go `packages/provider-opencode/src/server/usageLimits.ts`, Codex, Claude, Antigravity, and Grok) from T3 Code (`pingdotgg/t3code`), revision `6577c6b6185167c0e502fa01f9e8e8f2dee6ff25`, along with usage-scanning references from `junhoyeo/tokscale` (CLI/core, MIT) and `MoonshotAI/kimi-cli` (Apache-2.0).
+`cli_bridge/luma_cli/global_usage.py` uses usage-format and session-database references from `junhoyeo/tokscale` (CLI/core, MIT) and `MoonshotAI/kimi-cli` (Apache-2.0). Quota probes read only official CLI outputs or the user's existing credentials without refreshing or rewriting them.
 
-Source: https://github.com/pingdotgg/t3code/tree/6577c6b6185167c0e502fa01f9e8e8f2dee6ff25
+Source: https://github.com/junhoyeo/tokscale
 
-Copyright (c) 2026 T3 Tools Inc. The MIT license is retained in `app/src/main/assets/cli_bridge/T3CODE-LICENSE.txt`.
+Copyright (c) 2025 Junho Yeo. The MIT license is retained in `app/src/main/assets/cli_bridge/TOKSCALE-LICENSE.txt`.
 
 ## Termux and terminal provenance
 

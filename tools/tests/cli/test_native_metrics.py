@@ -298,4 +298,29 @@ class MetricsTest(unittest.TestCase):
             ctx = tr('上下文', 'Context')
             self.assertEqual([r for r in rows if r['label'] == ctx], [row(ctx, '600 / 200000 · 0.3%')])
 
+        res_1h = {
+            'model': 'claude-sonnet-4-6',
+            'usage': {
+                'input_tokens': 0,
+                'cache_read_input_tokens': 0,
+                'cache_creation_input_tokens': 1000,
+                'cache_creation': {'ephemeral_5m_input_tokens': 400, 'ephemeral_1h_input_tokens': 600},
+                'output_tokens': 0,
+            },
+        }
+        est_usd = tr('CLI 累计估算', 'CLI estimated cost') + ' · USD'
+        cost_1h = float([r for r in claude_result(res_1h) if r['label'] == est_usd][0]['value'])
+        res_5m = {
+            'model': 'claude-sonnet-4-6',
+            'usage': {
+                'input_tokens': 0,
+                'cache_read_input_tokens': 0,
+                'cache_creation_input_tokens': 1000,
+                'output_tokens': 0,
+            },
+        }
+        cost_5m = float([r for r in claude_result(res_5m) if r['label'] == est_usd][0]['value'])
+        self.assertGreater(cost_1h, cost_5m)
+        self.assertAlmostEqual(cost_1h, (400 * 3.75 + 600 * 6.0) / 1_000_000.0, places=8)
+
 if __name__ == '__main__': unittest.main()

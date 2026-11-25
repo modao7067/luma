@@ -4,6 +4,7 @@ import datetime as dt
 import io
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import struct
@@ -83,6 +84,81 @@ class GlobalUsageTest(unittest.TestCase):
             self.assertGreater(priced["costUsd"], 0.0)
             self.assertGreater(priced["cacheSavingsUsd"], 0.0)
 
+    def test_claude_one_hour_cache_writes_price_at_double_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proj = home / ".claude" / "projects" / "demo"
+            proj.mkdir(parents=True)
+            line = {
+                "type": "assistant",
+                "timestamp": "2026-11-06T12:00:00Z",
+                "requestId": "req_1h",
+                "message": {
+                    "id": "msg_1h",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 1000,
+                        "cache_creation": {"ephemeral_5m_input_tokens": 400, "ephemeral_1h_input_tokens": 600},
+                        "output_tokens": 0,
+                    },
+                },
+            }
+            (proj / "s.jsonl").write_text(json.dumps(line) + "\n", "utf-8")
+            rec = gu._scan_claude(home, {}, cutoff_ms=0)[0]
+            self.assertEqual(rec["cacheCreationTokens"], 1000)
+            self.assertEqual(rec["cacheWrite1hTokens"], 600)
+
+            in_m, _, _, write_m, tiered = gu._lookup_model_rate("claude-sonnet-4-6")
+            priced = gu._price_record(rec)
+            expected = (400 * write_m + 600 * in_m * 2.0) / 1_000_000.0
+            self.assertAlmostEqual(priced["categoryCostUsd"]["cacheWrite"], expected)
+            five_min_only = gu._price_record({**rec, "cacheWrite1hTokens": 0})
+            self.assertAlmostEqual(five_min_only["categoryCostUsd"]["cacheWrite"], 1000 * write_m / 1_000_000.0)
+            self.assertGreater(priced["costUsd"], five_min_only["costUsd"])
+
+            self.assertIsNotNone(tiered)
+            _, t_in_m, _, _, t_write_m = tiered
+            tiered_rec = {
+                **rec,
+                "uncachedInputTokens": 210_000,
+                "cacheCreationTokens": 1000,
+                "cacheWrite1hTokens": 600,
+            }
+            tiered_priced = gu._price_record(tiered_rec)
+            self.assertAlmostEqual(
+                tiered_priced["categoryCostUsd"]["cacheWrite"],
+                (400 * t_write_m + 600 * t_in_m * 2.0) / 1_000_000.0,
+            )
+
+            split_only = {
+                "type": "assistant",
+                "timestamp": "2026-11-06T12:01:00Z",
+                "requestId": "req_1h_split",
+                "message": {
+                    "id": "msg_1h_split",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 300},
+                        "output_tokens": 0,
+                    },
+                },
+            }
+            (proj / "split.jsonl").write_text(json.dumps(split_only) + "\n", "utf-8")
+            with (
+                patch.object(gu.Path, "home", return_value=home),
+                patch.object(gu, "_cache_dir", return_value=home / ".cache"),
+            ):
+                summary = gu.collect_summary(period="all", tz_name="UTC", refresh=True, sync_pricing=False)
+                expected_cw = (500 * write_m + 900 * in_m * 2.0) / 1_000_000.0
+                self.assertAlmostEqual(summary["totals"]["categoryCostUsd"]["cacheWrite"], expected_cw)
+                archive = gu._load_daily_archive()
+                entry = archive["byTz"]["UTC"]["2026-11-06"]["Claude Code::claude-sonnet-4-6"]
+                self.assertEqual(entry["cacheWrite1hTokens"], 900)
+                gu._reprice_archived_entry(entry, gu._get_pricing_catalog())
+                self.assertAlmostEqual(entry["categoryCostUsd"]["cacheWrite"], expected_cw)
+
     def test_opencode_v2_session_message_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -120,148 +196,131 @@ class GlobalUsageTest(unittest.TestCase):
             self.assertEqual(priced["costSource"], "providerReported")
             self.assertAlmostEqual(priced["costUsd"], 0.42)
 
-    def test_antigravity_prefers_daily_endpoint_without_cross_host_merge(self):
-        requested_at_ms = gu._parse_ts_ms("2026-11-07T01:36:14Z")
-        assert requested_at_ms is not None
-
-        daily_payload = {
-            "groups": [
-                {
-                    "displayName": "Gemini Models",
-                    "buckets": [
+    def test_antigravity_cli_usage_parser_and_subprocess_probe(self):
+        cli_payload = {
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
                         {
-                            "bucketId": "gemini-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.9749,
-                            "resetTime": "2026-11-11T17:58:23Z",
-                            "description": "97% remaining",
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.8868,
+                                    "reset_time": "2026-12-01T00:47:41Z",
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.9096,
+                                    "reset_time": "2026-11-25T08:09:23Z",
+                                },
+                                {
+                                    "id": "gemini-disabled",
+                                    "name": "Disabled Limit",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.5,
+                                    "disabled": True,
+                                },
+                            ],
                         },
                         {
-                            "bucketId": "gemini-5h",
-                            "displayName": "5-Hour Limit",
-                            "window": "5h",
-                            "remainingFraction": 0.9096,
-                            "resetTime": "2026-11-07T02:56:04Z",
-                            "description": "90% remaining",
+                            "name": "Gemini 4 Argon",
+                            "buckets": [
+                                {
+                                    "id": "gemini-argon-wtu-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.65,
+                                    "reset_time": "2026-12-02T10:00:00Z",
+                                },
+                            ],
                         },
-                    ],
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.0127,
+                                    "reset_time": "2026-12-01T10:25:17Z",
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00Z",
+                                },
+                            ],
+                        },
+                    ]
                 },
-                {
-                    "displayName": "Gemini 4 Argon",
-                    "buckets": [
-                        {
-                            "bucketId": "gemini-argon-wtu-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.65,
-                            "resetTime": "2026-11-12T10:00:00Z",
-                            "description": "65% remaining",
-                        },
-                    ],
-                },
-                {
-                    "displayName": "Claude and GPT models",
-                    "buckets": [
-                        {
-                            "bucketId": "3p-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.0127,
-                            "resetTime": "2026-11-10T10:25:17Z",
-                            "description": "1% remaining",
-                        },
-                        {
-                            "bucketId": "3p-5h",
-                            "displayName": "5-Hour Limit",
-                            "window": "5h",
-                            "remainingFraction": 1.0,
-                            "resetTime": "2026-11-07T06:36:14Z",
-                        },
-                    ],
-                },
-            ]
+            },
         }
 
-        prod_payload = {
-            "groups": [
-                {
-                    "displayName": "Gemini Models",
-                    "buckets": [
-                        {
-                            "bucketId": "gemini-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.8924,
-                            "resetTime": "2026-11-11T17:58:23Z",
-                            "description": "89% remaining",
-                        },
-                        {
-                            "bucketId": "gemini-5h",
-                            "displayName": "5-Hour Limit",
-                            "window": "5h",
-                            "remainingFraction": 1.0,
-                            "resetTime": "2026-11-07T06:36:14Z",
-                        },
-                    ],
-                },
-                {
-                    "displayName": "Claude and GPT models",
-                    "buckets": [
-                        {
-                            "bucketId": "3p-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.0127,
-                            "resetTime": "2026-11-10T10:25:17Z",
-                            "description": "1% remaining",
-                        },
-                        {
-                            "bucketId": "3p-5h",
-                            "displayName": "5-Hour Limit",
-                            "window": "5h",
-                            "remainingFraction": 1.0,
-                            "resetTime": "2026-11-07T06:36:14Z",
-                        },
-                    ],
-                },
-            ]
-        }
-
-        daily_wins = gu._parse_antigravity_summary_windows(daily_payload, requested_at_ms)
-        prod_wins = gu._parse_antigravity_summary_windows(prod_payload, requested_at_ms)
-        merged = gu._select_antigravity_host_windows([daily_wins, prod_wins])
-
-        by_id = {w["id"]: w for w in merged}
+        parsed = gu._parse_agy_cli_usage(cli_payload)
+        by_id = {w["id"]: w for w in parsed}
         self.assertEqual(
-            [w["id"] for w in merged],
+            [w["id"] for w in parsed],
             ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", "3p-5h", "3p-weekly"],
         )
-        self.assertAlmostEqual(by_id["gemini-5h"]["usedPercent"], 9.04, places=1)
+        self.assertAlmostEqual(by_id["gemini-5h"]["usedPercent"], 9.0, places=1)
         self.assertEqual(by_id["gemini-5h"]["label"], f"Gemini · {gu._tr('短期', 'Session')}")
-        self.assertAlmostEqual(by_id["gemini-weekly"]["usedPercent"], 2.51, places=1)
+        self.assertAlmostEqual(by_id["gemini-weekly"]["usedPercent"], 11.3, places=1)
         self.assertEqual(by_id["gemini-weekly"]["label"], f"Gemini · {gu._tr('每周', 'Weekly')}")
         self.assertEqual(by_id["gemini-argon-wtu-weekly"]["label"], f"Gemini 4 Argon · {gu._tr('每周', 'Weekly')}")
         self.assertAlmostEqual(by_id["gemini-argon-wtu-weekly"]["usedPercent"], 35.0, places=1)
         self.assertEqual(by_id["3p-5h"]["usedPercent"], 0.0)
         self.assertIsNone(by_id["3p-5h"]["resetsAt"])
-        self.assertAlmostEqual(by_id["3p-weekly"]["usedPercent"], 98.73, places=1)
-        self.assertEqual(by_id["3p-weekly"]["resetsAt"], "2026-11-10T10:25:17Z")
+        self.assertAlmostEqual(by_id["3p-weekly"]["usedPercent"], 98.7, places=1)
+        self.assertEqual(by_id["3p-weekly"]["resetsAt"], "2026-12-01T10:25:17Z")
 
-        stale_prod = gu._parse_antigravity_summary_windows({"groups": [{"displayName": "Claude and GPT models", "buckets": [
-            {"bucketId": "3p-weekly", "displayName": "Weekly Limit", "window": "weekly",
-             "remainingFraction": 0.0187, "resetTime": "2026-11-20T10:00:00Z"},
-        ]}]}, requested_at_ms)
-        fresh_daily = gu._parse_antigravity_summary_windows({"groups": [{"displayName": "Claude and GPT models", "buckets": [
-            {"bucketId": "3p-weekly", "displayName": "Weekly Limit", "window": "weekly",
-             "remainingFraction": 0.9046, "resetTime": "2026-11-25T10:00:00Z"},
-        ]}]}, requested_at_ms)
-        chosen = {w["id"]: w for w in gu._select_antigravity_host_windows([fresh_daily, stale_prod])}
-        self.assertAlmostEqual(chosen["3p-weekly"]["usedPercent"], 9.54, places=1)
-        self.assertEqual(chosen["3p-weekly"]["resetsAt"], "2026-11-25T10:00:00Z")
-        fallback = {w["id"]: w for w in gu._select_antigravity_host_windows([[], stale_prod])}
-        self.assertAlmostEqual(fallback["3p-weekly"]["usedPercent"], 98.13, places=1)
-        self.assertEqual(gu._select_antigravity_host_windows([[], []]), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".gemini" / "antigravity-cli").mkdir(parents=True)
+            fake_agy = home / "fake-agy"
+            fake_agy.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys, time\n"
+                "assert sys.argv[1:] == ['-p', '/usage', '--output-format', 'json']\n"
+                "mode = os.environ.get('FAKE_AGY_MODE', 'ok')\n"
+                "if mode == 'sleep':\n"
+                "    time.sleep(5)\n"
+                "elif mode == 'auth_err':\n"
+                "    sys.stderr.write('Not logged in; please sign in\\n')\n"
+                "    raise SystemExit(1)\n"
+                f"print(json.dumps({cli_payload!r}))\n",
+                "utf-8",
+            )
+            fake_agy.chmod(0o755)
+
+            with patch.dict(os.environ, {"LUMA_AGY_BIN": str(fake_agy), "FAKE_AGY_MODE": "ok"}, clear=False):
+                self.assertTrue(gu._has_antigravity_oauth(home))
+                res = gu._probe_antigravity_limits(home, timeout_sec=5.0)
+            self.assertEqual(res["cli"], "Antigravity")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["source"], "live")
+            self.assertEqual([w["id"] for w in res["windows"]], ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", "3p-5h", "3p-weekly"])
+
+            with patch.dict(os.environ, {"LUMA_AGY_BIN": str(fake_agy), "FAKE_AGY_MODE": "auth_err"}, clear=False):
+                err_res = gu._probe_antigravity_limits(home, timeout_sec=5.0)
+            self.assertEqual(err_res["status"], "error")
+            self.assertIn(gu._tr("重新登录", "sign in"), err_res["message"])
+
+            with patch.dict(os.environ, {"LUMA_AGY_BIN": str(fake_agy), "FAKE_AGY_MODE": "sleep"}, clear=False):
+                t0 = time.monotonic()
+                to_res = gu._probe_antigravity_limits(home, timeout_sec=0.15)
+            self.assertLess(time.monotonic() - t0, 1.5)
+            self.assertEqual(to_res["status"], "error")
+            self.assertIn(gu._tr("超时", "timed out"), to_res["message"])
 
     def test_oauth_gate_skips_unconfigured_and_apikey_only_providers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -328,10 +387,9 @@ class GlobalUsageTest(unittest.TestCase):
             )
             agy_dir = home / ".gemini" / "antigravity-cli"
             agy_dir.mkdir(parents=True)
-            (agy_dir / "antigravity-oauth-token").write_text(
-                json.dumps({"token": {"access_token": "tok_agy", "refresh_token": "ref_agy"}}),
-                "utf-8",
-            )
+            fake_agy = home / "fake-agy-slow"
+            fake_agy.write_text("#!/bin/sh\nexit 0\n", "utf-8")
+            fake_agy.chmod(0o755)
 
             def fast_codex(_h: Path):
                 return {
@@ -349,7 +407,7 @@ class GlobalUsageTest(unittest.TestCase):
                 time.sleep(0.45)
                 return {
                     "cli": "Antigravity",
-                    "planType": "Google OAuth",
+                    "planType": "Antigravity CLI",
                     "updatedAt": "2026-11-07T10:00:00Z",
                     "source": "live",
                     "status": "ok",
@@ -362,7 +420,7 @@ class GlobalUsageTest(unittest.TestCase):
             with (
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
-                patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}, clear=False),
+                patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex"), "LUMA_AGY_BIN": str(fake_agy)}, clear=False),
                 patch.object(gu, "_probe_codex_limits", side_effect=fast_codex),
                 patch.object(gu, "_probe_antigravity_limits", side_effect=slow_agy),
             ):
@@ -376,7 +434,7 @@ class GlobalUsageTest(unittest.TestCase):
             self.assertEqual(providers[0]["windows"][0]["usedPercent"], 22.0)
             self.assertEqual(providers[1]["status"], "error")
             self.assertIn(gu._tr("超时", "timed out"), providers[1]["message"])
-            self.assertFalse((cache_dir / "usage-limits-cache-v4.json").exists())
+            self.assertFalse((cache_dir / "usage-limits-cache-v5.json").exists())
 
     def _probe_codex_rpc_server(self, mode, with_history=True):
         with tempfile.TemporaryDirectory() as tmp:
@@ -949,7 +1007,7 @@ sys.stdin.read()
                 self.assertAlmostEqual(week_models["gemini-4-carbon"]["costUsd"], 0.35, places=6)
 
                 migrated_arch = gu._load_daily_archive()
-                self.assertEqual(migrated_arch.get("scannerRev"), 5)
+                self.assertEqual(migrated_arch.get("scannerRev"), gu.SCANNER_REV)
                 utc_days = migrated_arch["byTz"]["UTC"]
                 self.assertNotIn("Antigravity::gemini-flash-worker-agy", utc_days["2026-11-19"])
                 self.assertNotIn("Antigravity::gemini-pro-orchestrator-neon", utc_days["2026-11-19"])
@@ -1131,7 +1189,7 @@ sys.stdin.read()
             ):
                 offline_summary = gu.collect_summary(period="week", tz_name="UTC", refresh=True)
                 self.assertEqual(offline_summary["pricingSource"]["mode"], "builtin")
-                self.assertAlmostEqual(offline_summary["totals"]["costUsd"], 3.10, places=5)
+                self.assertAlmostEqual(offline_summary["totals"]["costUsd"], 3.60, places=5)
 
                 rollout.unlink()
 
@@ -1190,7 +1248,7 @@ sys.stdin.read()
                     self.assertTrue(all(s["active"] for s in online_s1["pricingSource"]["sources"]))
                     self.assertAlmostEqual(online_s1["totals"]["costUsd"], 4.80, places=5)
                     self.assertEqual(gu._lookup_model_rate("deepseek-v4-pro"), (0.66, 1.98, 0.022, 0.66, None))
-                    self.assertEqual(gu._lookup_model_rate("qwen3-coder-plus"), (1.0, 5.0, 1.0, 1.0, None))
+                    self.assertEqual(gu._lookup_model_rate("qwen3-coder-plus"), (1.0, 5.0, 0.1, 1.0, None))
                     self.assertEqual(gu._lookup_model_rate("gpt-5.4"), (2.5, 15.0, 0.25, 2.5, (272000, 5.0, 22.5, 0.5, 5.0)))
 
                     calls_after_first = len(fetch_calls)
@@ -1570,91 +1628,81 @@ sys.stdin.read()
                 "utf-8",
             )
 
-            scope_key = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
-            (grok_home / "auth.json").write_text(
-                json.dumps({
-                    scope_key: {
-                        "auth_mode": "oidc",
-                        "email": "dev@example.com",
-                        "key": "expired-oidc-tok",
-                        "refresh_token": "ref-oidc-1",
-                        "expires_at": int(now_utc.timestamp()) - 120,
-                        "oidc_issuer": "https://auth.x.ai",
-                        "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
-                    }
-                }),
+            scope_key = "https://auth.x.ai::test-client-id"
+            grok_auth_path = grok_home / "auth.json"
+            grok_auth_raw = json.dumps({
+                scope_key: {
+                    "auth_mode": "oidc",
+                    "email": "dev@example.com",
+                    "key": "valid-oidc-tok",
+                    "refresh_token": "ref-oidc-1",
+                    "expires_at": int(now_utc.timestamp()) + 3600,
+                }
+            })
+            grok_auth_path.write_text(grok_auth_raw, "utf-8")
+
+            start_iso = (now_utc - dt.timedelta(days=1)).isoformat()
+            end_iso = (now_utc + dt.timedelta(days=6)).isoformat()
+            fake_grok = home / "fake-grok"
+            fake_grok.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys, time\n"
+                "assert sys.argv[1:] == ['--no-auto-update', 'agent', '--no-leader', 'stdio']\n"
+                "mode = os.environ.get('FAKE_GROK_MODE', 'ok')\n"
+                "init = json.loads(sys.stdin.readline())\n"
+                "assert init['method'] == 'initialize'\n"
+                "print(json.dumps({'jsonrpc': '2.0', 'id': init['id'], 'result': {'protocolVersion': 1}}), flush=True)\n"
+                "req = json.loads(sys.stdin.readline())\n"
+                "assert req['method'] == '_x.ai/billing'\n"
+                "print(json.dumps({'jsonrpc': '2.0', 'method': '_x.ai/mcp/servers_updated', 'params': {'mcpServers': []}}), flush=True)\n"
+                "if mode == 'sleep':\n"
+                "    time.sleep(5)\n"
+                "elif mode == 'auth_err':\n"
+                "    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -32001, 'message': 'Authentication required: please login'}}), flush=True)\n"
+                "else:\n"
+                "    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {\n"
+                "        'config': {\n"
+                "            'creditUsagePercent': 88.0,\n"
+                f"            'currentPeriod': {{'type': 'USAGE_PERIOD_TYPE_WEEKLY', 'start': {start_iso!r}, 'end': {end_iso!r}}},\n"
+                "        },\n"
+                "        'subscription_tier': 'SuperGrok',\n"
+                "    }}), flush=True)\n",
                 "utf-8",
             )
-
-            def _varint(v: int) -> bytes:
-                out = bytearray()
-                while True:
-                    b = v & 0x7F
-                    v >>= 7
-                    if v:
-                        out.append(b | 0x80)
-                    else:
-                        out.append(b)
-                        break
-                return bytes(out)
-
-            start_sec = int(now_utc.timestamp()) - 86_400
-            end_sec = start_sec + 7 * 86_400
-            ts_start = b"\x08" + _varint(start_sec)
-            ts_end = b"\x08" + _varint(end_sec)
-            cfg_msg = (
-                b"\x0d" + struct.pack("<f", 88.0)
-                + b"\x22" + _varint(len(ts_start)) + ts_start
-                + b"\x2a" + _varint(len(ts_end)) + ts_end
-            )
-            top_msg = b"\x0a" + _varint(len(cfg_msg)) + cfg_msg
-            trailer_bytes = b"grpc-status: 0\r\n"
-            grpc_wire = (
-                b"\x00" + len(top_msg).to_bytes(4, "big") + top_msg
-                + b"\x80" + len(trailer_bytes).to_bytes(4, "big") + trailer_bytes
-            )
-
-            class FakeBytesResp:
-                def __init__(self, raw: bytes):
-                    self._raw = raw
-                def read(self):
-                    return self._raw
-                def __enter__(self):
-                    return self
-                def __exit__(self, *args):
-                    return False
-
-            seen_auth_headers: list[str] = []
-
-            def fake_urlopen(req, timeout=None):
-                url = req.full_url
-                if "/oauth2/token" in url:
-                    return FakeBytesResp(json.dumps({"access_token": "fresh-oidc-tok", "refresh_token": "ref-oidc-2", "expires_in": 3600}).encode("utf-8"))
-                seen_auth_headers.append(req.headers.get("Authorization") or req.headers.get("authorization") or "")
-                if "cli-chat-proxy.grok.com" in url:
-                    import io
-                    raise urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b"WKE=privacy-mode: blocked"))
-                if "GetGrokCreditsConfig" in url:
-                    return FakeBytesResp(grpc_wire)
-                raise AssertionError(f"Unexpected URL: {url}")
+            fake_grok.chmod(0o755)
 
             with (
                 patch.object(gu.Path, "home", return_value=home),
                 patch.object(gu, "_cache_dir", return_value=cache_dir),
-                patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False),
-                patch.object(gu, "_urlopen_auth", side_effect=fake_urlopen),
+                patch.dict(os.environ, {"GROK_HOME": str(grok_home), "LUMA_GROK_BIN": str(fake_grok), "FAKE_GROK_MODE": "ok"}, clear=False),
+                patch.object(gu, "_urlopen_auth") as mock_open,
             ):
                 s = gu.collect_summary(period="today", tz_name="UTC", refresh=True, sync_pricing=False)
                 by_cli = {row["cli"]: row for row in s["byProvider"]}
                 self.assertEqual(by_cli["Grok Build"]["totalTokens"], 10_500 + 31_000)
 
-                lim = gu._probe_grok_limits(home)
+                self.assertTrue(gu._has_grok_oauth(home))
+                lim = gu._probe_grok_limits(home, timeout_sec=5.0)
+                mock_open.assert_not_called()
                 self.assertEqual(lim["status"], "ok")
-                self.assertEqual(lim["planType"], "dev@example.com")
+                self.assertEqual(lim["source"], "live")
+                self.assertEqual(lim["planType"], "SuperGrok")
                 self.assertEqual(len(lim["windows"]), 1)
                 self.assertAlmostEqual(lim["windows"][0]["usedPercent"], 88.0, places=2)
                 self.assertEqual(lim["windows"][0]["windowDurationMs"], 7 * 86_400_000)
-                self.assertIn("Bearer fresh-oidc-tok", seen_auth_headers)
+                self.assertEqual(grok_auth_path.read_text("utf-8"), grok_auth_raw)
+
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home), "LUMA_GROK_BIN": str(fake_grok), "FAKE_GROK_MODE": "auth_err"}, clear=False):
+                auth_res = gu._probe_grok_limits(home, timeout_sec=5.0)
+            self.assertEqual(auth_res["status"], "error")
+            self.assertIn(gu._tr("重新登录", "sign in"), auth_res["message"])
+
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home), "LUMA_GROK_BIN": str(fake_grok), "FAKE_GROK_MODE": "sleep"}, clear=False):
+                t0 = time.monotonic()
+                to_res = gu._probe_grok_limits(home, timeout_sec=0.25)
+            self.assertLess(time.monotonic() - t0, 2.0)
+            self.assertEqual(to_res["status"], "error")
+            self.assertIn(gu._tr("超时", "timed out"), to_res["message"])
 
     def test_deepseek_v3_seed_cut_limits_and_kimi_usages_pools(self):
         now_utc = dt.datetime.now(dt.timezone.utc)
@@ -1841,221 +1889,131 @@ sys.stdin.read()
             acc = balances._account("deepseek-account-platform/default:\n  token: tok\n")
         self.assertEqual(acc, {"status": "ready", "wallets": [], "bonus": [], "spent": []})
 
-    def test_oauth_atomic_refresh_preserves_keys_sets_0600_and_aborts_on_write_failure(self):
+    def test_quota_probes_are_strictly_readonly_and_respect_429_cooldown(self):
         class _JsonResp:
             def __init__(self, data: dict):
                 self._raw = json.dumps(data).encode("utf-8")
-            def read(self):
-                return self._raw
+            def read(self, n: int = -1):
+                return self._raw if n < 0 else self._raw[:n]
             def __enter__(self):
                 return self
             def __exit__(self, *args):
                 return False
 
+        now_sec = time.time()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            grok_file = root / "auth.json"
-            grok_orig = {
-                "other_scope": {"keep": 1},
-                "https://accounts.x.ai/sign-in": {
-                    "auth_mode": "oidc",
-                    "access_token": "old_g_acc",
-                    "refresh_token": "old_g_ref",
-                    "oidc_issuer": "https://auth.x.ai",
-                    "oidc_client_id": "cid-1",
-                    "expires_at": 1000,
-                    "email": "u@example.com",
-                },
-            }
-            grok_file.write_text(json.dumps(grok_orig), "utf-8")
-            grok_auth = {
-                "token": "old_g_acc",
-                "refreshToken": "old_g_ref",
-                "oidcIssuer": "file:///etc/passwd",
-                "oidcClientId": "cid-1",
-                "authFile": grok_file,
-                "scopeKey": "https://accounts.x.ai/sign-in",
-            }
-            self.assertIsNone(gu._refresh_grok_access_token(grok_auth))
+            cache_dir = root / ".cache-quota"
+            cache_dir.mkdir(parents=True)
 
-            grok_auth["oidcIssuer"] = "https://auth.x.ai"
-            missing_scope = {**grok_auth, "scopeKey": "missing-scope"}
-            with patch.object(gu, "_urlopen_auth") as m_open:
-                self.assertIsNone(gu._refresh_grok_access_token(missing_scope))
-                m_open.assert_not_called()
-
-            with patch.object(
-                gu,
-                "_urlopen_auth",
-                return_value=_JsonResp({"access_token": "new_g_acc", "refresh_token": "new_g_ref", "expires_in": 1800}),
-            ):
-                tok = gu._refresh_grok_access_token(grok_auth)
-            self.assertEqual(tok, "new_g_acc")
-            self.assertEqual(stat.S_IMODE(grok_file.stat().st_mode), 0o600)
-            saved_grok = json.loads(grok_file.read_text("utf-8"))
-            self.assertEqual(saved_grok["other_scope"], {"keep": 1})
-            self.assertEqual(saved_grok["https://accounts.x.ai/sign-in"]["email"], "u@example.com")
-            self.assertEqual(saved_grok["https://accounts.x.ai/sign-in"]["refresh_token"], "new_g_ref")
-
-            stale_grok_auth = {**grok_auth, "token": "old_g_acc", "refreshToken": "old_g_ref", "expiresAt": 1000}
-            with patch.object(gu, "_urlopen_auth") as m_open:
-                reused = gu._refresh_grok_access_token(stale_grok_auth)
-                m_open.assert_not_called()
-            self.assertEqual(reused, "new_g_acc")
-            self.assertEqual(stale_grok_auth["refreshToken"], "new_g_ref")
-
-            with (
-                patch.object(gu, "_urlopen_auth", return_value=_JsonResp({"access_token": "rot_g", "refresh_token": "rot_g_ref"})),
-                patch.object(gu, "_atomic_write_text", side_effect=OSError("disk full")),
-            ):
-                self.assertEqual(gu._refresh_grok_access_token(grok_auth), "rot_g")
-            self.assertEqual(grok_auth["token"], "rot_g")
-            self.assertEqual(grok_auth["refreshToken"], "rot_g_ref")
-            grok_rec = gu._cache_dir() / "grok-oauth-recovery.json"
-            self.assertTrue(grok_rec.is_file())
-            self.assertEqual(stat.S_IMODE(grok_rec.stat().st_mode), 0o600)
-            self.assertEqual(json.loads(grok_rec.read_text("utf-8"))["refresh_token"], "rot_g_ref")
-
-            kimi_file = root / "kimi-code.json"
-            kimi_file.write_text(
-                json.dumps({"access_token": "old_k", "refresh_token": "old_k_ref", "email": "k@example.com", "device_id": "d1"}),
-                "utf-8",
-            )
-            kimi_auth = {
-                "accessToken": "old_k",
-                "refreshToken": "old_k_ref",
-                "oauthHost": "ftp://bad.host",
-                "credFile": kimi_file,
-            }
-            self.assertIsNone(gu._refresh_kimi_access_token(kimi_auth))
-
-            kimi_auth["oauthHost"] = "https://auth.kimi.com"
-            with patch.object(
-                gu,
-                "_urlopen_auth",
-                return_value=_JsonResp({"access_token": "new_k", "refresh_token": "new_k_ref", "expires_in": 3600}),
-            ):
-                ktok = gu._refresh_kimi_access_token(kimi_auth)
-            self.assertEqual(ktok, "new_k")
-            self.assertEqual(stat.S_IMODE(kimi_file.stat().st_mode), 0o600)
-            saved_kimi = json.loads(kimi_file.read_text("utf-8"))
-            self.assertEqual(saved_kimi["email"], "k@example.com")
-            self.assertEqual(saved_kimi["device_id"], "d1")
-            self.assertEqual(saved_kimi["refresh_token"], "new_k_ref")
-
-            stale_kimi_auth = {**kimi_auth, "accessToken": "old_k", "refreshToken": "old_k_ref", "expiresAt": 1000}
-            with patch.object(gu, "_urlopen_auth") as m_open:
-                reused_k = gu._refresh_kimi_access_token(stale_kimi_auth)
-                m_open.assert_not_called()
-            self.assertEqual(reused_k, "new_k")
-            self.assertEqual(stale_kimi_auth["refreshToken"], "new_k_ref")
-
-            with (
-                patch.object(gu, "_urlopen_auth", return_value=_JsonResp({"access_token": "rot_k", "refresh_token": "rot_k_ref"})),
-                patch.object(gu, "_atomic_write_text", side_effect=OSError("ro")),
-            ):
-                self.assertEqual(gu._refresh_kimi_access_token(kimi_auth), "rot_k")
-            self.assertEqual(kimi_auth["accessToken"], "rot_k")
-            self.assertEqual(kimi_auth["refreshToken"], "rot_k_ref")
-            kimi_rec = gu._cache_dir() / "kimi-oauth-recovery.json"
-            self.assertTrue(kimi_rec.is_file())
-            self.assertEqual(stat.S_IMODE(kimi_rec.stat().st_mode), 0o600)
-            self.assertEqual(json.loads(kimi_rec.read_text("utf-8"))["refresh_token"], "rot_k_ref")
-
-            grok_home = root / ".grok"
-            grok_home.mkdir()
-            grok_home_file = grok_home / "auth.json"
-            grok_home_file.write_text(
-                json.dumps({"https://accounts.x.ai/sign-in": {"key": "init_g", "refresh_token": "init_g_ref", "expires_at": int(time.time()) - 60}}),
-                "utf-8",
-            )
-            grok_rec_data = json.loads(grok_rec.read_text("utf-8"))
-            grok_rec_data["authFile"] = str(grok_home_file)
-            grok_rec_data["replacedAccessToken"] = "init_g"
-            grok_rec_data["replacedRefreshToken"] = "init_g_ref"
-            grok_rec_data["expires_at"] = int(time.time()) + 1800
-            grok_rec.write_text(json.dumps(grok_rec_data), "utf-8")
-            with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False):
-                reloaded_grok = gu._extract_grok_oauth(root)
-            self.assertIsNotNone(reloaded_grok)
-            self.assertEqual(reloaded_grok["token"], "rot_g")
-            self.assertEqual(reloaded_grok["refreshToken"], "rot_g_ref")
-            self.assertFalse(grok_rec.exists())
-            self.assertEqual(json.loads(grok_home_file.read_text("utf-8"))["https://accounts.x.ai/sign-in"]["refresh_token"], "rot_g_ref")
-
-            grok_rec_expired = {
-                "authFile": str(grok_home_file),
-                "scopeKey": "https://accounts.x.ai/sign-in",
-                "access_token": "exp_g_tok",
-                "refresh_token": "exp_g_ref",
-                "expires_at": int(time.time()) - 30,
-                "savedAtEpoch": int(time.time()),
-                "replacedAccessToken": "rot_g",
-                "replacedRefreshToken": "rot_g_ref",
-            }
-            gu._write_oauth_recovery("grok", grok_rec_expired)
-            sent_bodies = []
-
-            def _capture_grok_refresh(req, timeout=4.5):
-                sent_bodies.append(req.data.decode("utf-8"))
-                return _JsonResp({"access_token": "next_g_tok", "refresh_token": "next_g_ref", "expires_in": 1800})
-
-            stale_next_proc_grok = {
-                "token": "rot_g",
-                "refreshToken": "rot_g_ref",
-                "oidcIssuer": "https://auth.x.ai",
-                "oidcClientId": "cid-1",
-                "authFile": grok_home_file,
-                "scopeKey": "https://accounts.x.ai/sign-in",
-            }
-            with patch.object(gu, "_urlopen_auth", side_effect=_capture_grok_refresh):
-                self.assertEqual(gu._refresh_grok_access_token(stale_next_proc_grok), "next_g_tok")
-            self.assertEqual(len(sent_bodies), 1)
-            self.assertIn("refresh_token=exp_g_ref", sent_bodies[0])
-            self.assertNotIn("rot_g_ref", sent_bodies[0])
-            self.assertFalse(grok_rec.exists())
-
-            gu._write_oauth_recovery("grok", {
-                "authFile": str(grok_home_file),
-                "scopeKey": "https://accounts.x.ai/sign-in",
-                "access_token": "old_rec_tok",
-                "refresh_token": "old_rec_ref",
-                "expires_at": int(time.time()) + 100,
-                "savedAtEpoch": int(time.time()) - 100,
-                "replacedAccessToken": "ancient_tok",
-                "replacedRefreshToken": "ancient_ref",
+            claude_dir = root / ".claude"
+            claude_dir.mkdir(parents=True)
+            claude_cred = claude_dir / ".credentials.json"
+            expired_claude_raw = json.dumps({
+                "claudeAiOauth": {
+                    "accessToken": "claude-expired-secret",
+                    "refreshToken": "claude-ref",
+                    "subscriptionType": "max",
+                    "expiresAt": int((now_sec - 120) * 1000),
+                }
             })
-            with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}, clear=False):
-                kept_newer = gu._extract_grok_oauth(root)
-            self.assertEqual(kept_newer["token"], "next_g_tok")
-            self.assertFalse(grok_rec.exists())
+            claude_cred.write_text(expired_claude_raw, "utf-8")
 
-            kimi_home = root / ".kimi"
-            (kimi_home / "credentials").mkdir(parents=True)
-            kimi_home_file = kimi_home / "credentials" / "kimi-code.json"
-            kimi_home_file.write_text(
-                json.dumps({"access_token": "init_k", "refresh_token": "init_k_ref", "expires_at": time.time() - 60}),
+            kimi_dir = root / ".kimi" / "credentials"
+            kimi_dir.mkdir(parents=True)
+            kimi_cred = kimi_dir / "kimi-code.json"
+            expired_kimi_raw = json.dumps({
+                "access_token": "kimi-expired-secret",
+                "refresh_token": "kimi-ref",
+                "expires_at": now_sec - 120,
+            })
+            kimi_cred.write_text(expired_kimi_raw, "utf-8")
+
+            with (
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.dict(os.environ, {"KIMI_SHARE_DIR": str(root / ".kimi")}, clear=False),
+                patch.object(gu, "_urlopen_auth") as mock_open,
+            ):
+                c_exp = gu._probe_claude_limits(root)
+                k_exp = gu._probe_kimi_limits(root)
+                mock_open.assert_not_called()
+
+            self.assertEqual(c_exp["status"], "error")
+            self.assertEqual(k_exp["status"], "error")
+            self.assertEqual(claude_cred.read_text("utf-8"), expired_claude_raw)
+            self.assertEqual(kimi_cred.read_text("utf-8"), expired_kimi_raw)
+
+            valid_claude_token = "claude-live-token-xyz"
+            claude_cred.write_text(
+                json.dumps({
+                    "claudeAiOauth": {
+                        "accessToken": valid_claude_token,
+                        "subscriptionType": "pro",
+                        "expiresAt": int((now_sec + 3600) * 1000),
+                    }
+                }),
                 "utf-8",
             )
-            kimi_rec_data = json.loads(kimi_rec.read_text("utf-8"))
-            kimi_rec_data["credFile"] = str(kimi_home_file)
-            kimi_rec_data["replacedAccessToken"] = "init_k"
-            kimi_rec_data["replacedRefreshToken"] = "init_k_ref"
-            kimi_rec_data["expires_at"] = time.time() + 1800
-            kimi_rec.write_text(json.dumps(kimi_rec_data), "utf-8")
-            with patch.dict(os.environ, {"KIMI_SHARE_DIR": str(kimi_home)}, clear=False):
-                reloaded_kimi = gu._extract_kimi_oauth(root)
-            self.assertIsNotNone(reloaded_kimi)
-            self.assertEqual(reloaded_kimi["accessToken"], "rot_k")
-            self.assertEqual(reloaded_kimi["refreshToken"], "rot_k_ref")
-            self.assertFalse(kimi_rec.exists())
-            self.assertEqual(json.loads(kimi_home_file.read_text("utf-8"))["refresh_token"], "rot_k_ref")
+            valid_kimi_token = "kimi-live-token-xyz"
+            kimi_cred.write_text(
+                json.dumps({"access_token": valid_kimi_token, "expires_at": now_sec + 3600}),
+                "utf-8",
+            )
 
-            kimi_rec.write_text("{corrupt", "utf-8")
-            with patch.dict(os.environ, {"KIMI_SHARE_DIR": str(kimi_home)}, clear=False):
-                after_corrupt = gu._extract_kimi_oauth(root)
-            self.assertEqual(after_corrupt["accessToken"], "rot_k")
-            self.assertFalse(kimi_rec.exists())
+            seen_headers: list[dict[str, str]] = []
+
+            def fake_ok_headers(req, timeout=None):
+                seen_headers.append({k.lower(): v for k, v in req.header_items()})
+                if "anthropic.com" in req.full_url:
+                    return _JsonResp({
+                        "five_hour": {"utilization": 25.0, "resets_at": "2026-11-25T15:00:00Z"},
+                        "limits": [
+                            {"type": "weekly_scoped", "model_family": "sonnet", "utilization": 42.0, "resets_at": "2026-12-01T00:00:00Z"},
+                        ],
+                    })
+                return _JsonResp({"usage": {"limit": "100", "used": "10"}})
+
+            with (
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.dict(os.environ, {"KIMI_SHARE_DIR": str(root / ".kimi")}, clear=False),
+                patch.object(gu, "_urlopen_auth", side_effect=fake_ok_headers),
+            ):
+                c_ok = gu._probe_claude_limits(root)
+                k_ok = gu._probe_kimi_limits(root)
+            self.assertEqual(c_ok["status"], "ok")
+            self.assertEqual([w["id"] for w in c_ok["windows"]], ["five_hour", "seven_day_sonnet"])
+            self.assertEqual(k_ok["status"], "ok")
+            for hdrs in seen_headers:
+                self.assertEqual(hdrs.get("user-agent"), "luma-usage/1")
+                self.assertNotIn("x-msh-platform", hdrs)
+
+            call_count = 0
+
+            def fake_429(req, timeout=None):
+                nonlocal call_count
+                call_count += 1
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "180"}, None)
+
+            with (
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.object(gu, "_urlopen_auth", side_effect=fake_429),
+            ):
+                first_429 = gu._probe_claude_limits(root)
+                second_cached = gu._probe_claude_limits(root)
+            self.assertEqual(first_429["status"], "error")
+            self.assertEqual(second_cached["status"], "error")
+            self.assertEqual(call_count, 1)
+            cd_file = cache_dir / "quota-cooldowns-v1.json"
+            self.assertTrue(cd_file.is_file())
+            self.assertEqual(stat.S_IMODE(cd_file.stat().st_mode), 0o600)
+            self.assertNotIn(valid_claude_token, cd_file.read_text("utf-8"))
+
+            http_date = "Wed, 25 Nov 2026 12:10:00 GMT"
+            base_epoch = dt.datetime(2026, 11, 25, 12, 0, 0, tzinfo=dt.timezone.utc).timestamp()
+            self.assertEqual(gu._parse_retry_after_seconds({"Retry-After": http_date}, base_epoch), 600)
+            self.assertEqual(gu._parse_retry_after_seconds({"Retry-After": "5"}, base_epoch), 30)
+            self.assertEqual(gu._parse_retry_after_seconds({"Retry-After": "99999"}, base_epoch), 3600)
+            self.assertEqual(gu._parse_retry_after_seconds({}, base_epoch), 300)
 
     def test_scan_cache_prunes_dead_entries_and_preserves_history_above_per_source_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2104,6 +2062,272 @@ sys.stdin.read()
                 self.assertNotIn(f"kimi::{home / 'deleted-wire.jsonl'}", pruned)
                 self.assertIn(f"kimi::{live_kimi}", pruned)
                 self.assertIn(str(db_path), pruned)
+
+    def test_codex_fork_child_skips_replayed_parent_history(self):
+        def tok(ts, total_in, total_out, last_in, last_out):
+            return {"type": "event_msg", "timestamp": ts, "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": total_in, "output_tokens": total_out},
+                "last_token_usage": {"input_tokens": last_in, "output_tokens": last_out},
+            }}}
+
+        child_id = "01a20000-1000-7000-8000-000000000002"
+        lines = [
+            {"type": "session_meta", "timestamp": "2026-11-20T10:00:00Z", "payload": {
+                "id": child_id, "source": {"subagent": {"thread_spawn": {"parent_thread_id": "01a1ffff-0000-7000-8000-000000000001"}}}}},
+            {"type": "turn_context", "timestamp": "2026-11-20T09:00:00Z", "payload": {"turn_id": "01a1ffff-1000-7000-8000-000000000003", "model": "gpt-5"}},
+            tok("2026-11-20T09:00:05Z", 1000, 100, 1000, 100),
+            tok("2026-11-20T09:01:05Z", 3000, 300, 2000, 200),
+            {"type": "event_msg", "timestamp": "2026-11-20T10:00:01Z", "payload": {"type": "task_started", "turn_id": "01a20000-2000-7000-8000-000000000004"}},
+            {"type": "turn_context", "timestamp": "2026-11-20T10:00:01Z", "payload": {"turn_id": "01a20000-2000-7000-8000-000000000004", "model": "gpt-5"}},
+            tok("2026-11-20T10:00:02Z", 3000, 300, 2000, 200),
+            tok("2026-11-20T10:00:09Z", 3500, 340, 500, 40),
+        ]
+        state = gu._codex_rollout_init_state()
+        recs = [r for r in (gu._codex_rollout_parse_line(obj, state) for obj in lines) if r]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["uncachedInputTokens"], 500)
+        self.assertEqual(recs[0]["outputTokens"], 40)
+
+        plain = gu._codex_rollout_init_state()
+        self.assertEqual(len([r for r in (gu._codex_rollout_parse_line(obj, plain) for obj in lines[1:]) if r]), 3)
+
+    def test_codex_thread_settings_snapshot_sets_and_clears_fast_tier(self):
+        state = gu._codex_rollout_init_state()
+
+        def settings(extra):
+            return {"type": "event_msg", "timestamp": "2026-11-20T10:00:00Z", "payload": {
+                "type": "thread_settings_applied", "thread_settings": {"model": "gpt-6.1-sol", **extra}}}
+
+        tok = {"type": "event_msg", "timestamp": "2026-11-20T10:00:05Z", "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 10, "output_tokens": 5}}}}
+        gu._codex_rollout_parse_line(settings({"service_tier": "priority"}), state)
+        self.assertEqual(gu._codex_rollout_parse_line(tok, state)["speed"], "codex:fast")
+        gu._codex_rollout_parse_line(settings({}), state)
+        self.assertIsNone(gu._codex_rollout_parse_line(tok, state)["speed"])
+        self.assertEqual(state["model"], gu._normalize_model_id("gpt-6.1-sol"))
+
+    def test_incremental_scan_resumes_appends_and_rescans_rewrites(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "append.jsonl"
+            log.write_text(
+                json.dumps({"ts": 1, "usage": 10}) + "\n" + json.dumps({"ts": 2, "usage": 20}) + "\n",
+                encoding="utf-8",
+            )
+            cache_files = {}
+            seen = []
+
+            def parser(obj, _state):
+                seen.append(obj["ts"])
+                return {"timestampMs": obj["ts"], "usage": obj["usage"]}
+
+            first = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+            self.assertEqual([r["timestampMs"] for r in first], [1, 2])
+            entry = cache_files[str(log)]
+            self.assertEqual(entry["offset"], log.stat().st_size)
+            self.assertNotIn("guard_hash", entry)
+
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"ts": 3, "usage": 30}) + "\n" + '{"ts": 4, "usa')
+            seen.clear()
+            appended = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+            self.assertEqual(seen, [3])
+            self.assertEqual([r["timestampMs"] for r in appended], [1, 2, 3])
+
+            ino = log.stat().st_ino
+            with log.open("r+", encoding="utf-8") as handle:
+                handle.write(json.dumps({"ts": 7, "usage": 70}) + "\n" + json.dumps({"ts": 8, "usage": 80}) + "\n")
+                handle.write(json.dumps({"ts": 9, "usage": 90}) + "\n" * 40)
+            self.assertEqual(log.stat().st_ino, ino)
+            seen.clear()
+            rewritten = gu._read_jsonl_incremental(str(log), cache_files, parser, cutoff_ms=0)
+            self.assertEqual(seen, [7, 8, 9])
+            self.assertEqual([r["timestampMs"] for r in rewritten], [7, 8, 9])
+
+    def test_audit_regressions_archive_upgrade_fork_reset_same_size_rewrite_and_grok_empty(self):
+        now_utc = dt.datetime.now(dt.timezone.utc).replace(minute=10, second=0, microsecond=0)
+        today_key = now_utc.strftime("%Y-%m-%d")
+        yesterday_key = (now_utc - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+        def tok(ts, total_in, total_out, last_in=None, last_out=None):
+            info = {"total_token_usage": {"input_tokens": total_in, "output_tokens": total_out}}
+            if last_in is not None and last_out is not None:
+                info["last_token_usage"] = {"input_tokens": last_in, "output_tokens": last_out}
+            return {"type": "event_msg", "timestamp": ts, "payload": {"type": "token_count", "info": info}}
+
+        parent_id = "01a1ffff-0000-7000-8000-000000000001"
+        child_id = "01a20000-1000-7000-8000-000000000002"
+        parent_turn = "01a1ffff-1000-7000-8000-000000000003"
+        child_turn = "01a20000-2000-7000-8000-000000000004"
+
+        for with_last in (False, True):
+            reset_lines = [
+                {"type": "session_meta", "timestamp": now_utc.isoformat(), "payload": {"id": child_id, "forked_from_id": parent_id}},
+                {"type": "turn_context", "timestamp": now_utc.isoformat(), "payload": {"turn_id": parent_turn, "model": "gpt-5"}},
+                tok(now_utc.isoformat(), 3000, 300, 3000 if with_last else None, 300 if with_last else None),
+                {"type": "event_msg", "timestamp": now_utc.isoformat(), "payload": {"type": "task_started", "turn_id": child_turn}},
+                tok(now_utc.isoformat(), 10, 1, 10 if with_last else None, 1 if with_last else None),
+                tok(now_utc.isoformat(), 20, 2, 10 if with_last else None, 1 if with_last else None),
+            ]
+            st = gu._codex_rollout_init_state()
+            recs = [r for r in (gu._codex_rollout_parse_line(obj, st) for obj in reset_lines) if r]
+            self.assertEqual([(r["uncachedInputTokens"], r["outputTokens"]) for r in recs], [(10, 1), (10, 1)])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cache_dir = home / ".cache-audit"
+            cache_dir.mkdir(parents=True)
+            sess_dir = home / ".codex" / "sessions" / "2026" / "11"
+            sess_dir.mkdir(parents=True)
+
+            parent_lines = [
+                {"type": "session_meta", "timestamp": now_utc.isoformat(), "payload": {"id": parent_id, "model": "gpt-5"}},
+                {"type": "turn_context", "timestamp": now_utc.isoformat(), "payload": {"turn_id": parent_turn, "model": "gpt-5"}},
+                tok(now_utc.isoformat(), 3000, 300, 3000, 300),
+            ]
+            child_lines = [
+                {"type": "session_meta", "timestamp": now_utc.isoformat(), "payload": {"id": child_id, "forked_from_id": parent_id, "model": "gpt-5"}},
+                {"type": "turn_context", "timestamp": now_utc.isoformat(), "payload": {"turn_id": parent_turn, "model": "gpt-5"}},
+                tok(now_utc.isoformat(), 3000, 300, 3000, 300),
+                {"type": "event_msg", "timestamp": now_utc.isoformat(), "payload": {"type": "task_started", "turn_id": child_turn}},
+                tok(now_utc.isoformat(), 3500, 340, 500, 40),
+            ]
+            (sess_dir / "parent.jsonl").write_text("\n".join(json.dumps(x) for x in parent_lines) + "\n", "utf-8")
+            (sess_dir / "child.jsonl").write_text("\n".join(json.dumps(x) for x in child_lines) + "\n", "utf-8")
+
+            old_archive = {
+                "version": gu.ARCHIVE_VERSION,
+                "scannerRev": gu.SCANNER_REV - 1,
+                "seededTimezones": ["UTC"],
+                "byTz": {
+                    "UTC": {
+                        today_key: {
+                            "Codex::gpt-5": {
+                                "cli": "Codex",
+                                "model": "gpt-5",
+                                "events": 3,
+                                "uncachedInputTokens": 6500,
+                                "cachedInputTokens": 0,
+                                "cacheCreationTokens": 0,
+                                "outputTokens": 640,
+                                "reasoningTokens": 0,
+                                "totalTokens": 7140,
+                                "costUsd": 0.05,
+                                "providerReportedCostUsd": 0.0,
+                                "modelPricedCostUsd": 0.05,
+                                "unpricedEvents": 0,
+                                "unpricedTokens": 0,
+                                "cacheSavingsUsd": 0.0,
+                                "categoryCostUsd": {"input": 0.03, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.02},
+                                "uiLabels": [],
+                            }
+                        },
+                        yesterday_key: {
+                            "Codex::gpt-5": {
+                                "cli": "Codex",
+                                "model": "gpt-5",
+                                "events": 1,
+                                "uncachedInputTokens": 3600,
+                                "cachedInputTokens": 0,
+                                "cacheCreationTokens": 0,
+                                "outputTokens": 400,
+                                "reasoningTokens": 0,
+                                "totalTokens": 4000,
+                                "costUsd": 0.02,
+                                "providerReportedCostUsd": 0.0,
+                                "modelPricedCostUsd": 0.02,
+                                "unpricedEvents": 0,
+                                "unpricedTokens": 0,
+                                "cacheSavingsUsd": 0.0,
+                                "categoryCostUsd": {"input": 0.01, "cacheRead": 0.0, "cacheWrite": 0.0, "output": 0.01},
+                                "uiLabels": [],
+                            }
+                        },
+                    }
+                },
+            }
+            (cache_dir / "usage-daily-archive-v1.json").write_text(json.dumps(old_archive), "utf-8")
+
+            with (
+                patch.object(gu.Path, "home", return_value=home),
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}, clear=False),
+            ):
+                today_summary = gu.collect_summary(period="today", tz_name="UTC", refresh=False, sync_pricing=False)
+                self.assertEqual(today_summary["totals"]["totalTokens"], 3840)
+                self.assertEqual(sum(b["totalTokens"] for b in today_summary["buckets"]), 3840)
+                all_summary = gu.collect_summary(period="all", tz_name="UTC", refresh=False, sync_pricing=False)
+                self.assertEqual(all_summary["totals"]["totalTokens"], 7840)
+
+            pad = "x" * (gu.HEAD_FINGERPRINT_BYTES + 256)
+            same_size_log = home / "same-size.jsonl"
+            line1 = json.dumps({"ts": 1, "usage": 1, "pad": pad}) + "\n"
+            line2_old = json.dumps({"ts": 2, "usage": 2}) + "\n"
+            line2_new = json.dumps({"ts": 2, "usage": 7}) + "\n"
+            self.assertEqual(len(line2_old), len(line2_new))
+            same_size_log.write_text(line1 + line2_old, "utf-8")
+            cf = {}
+            seen_u = []
+
+            def parse_u(obj, _state):
+                seen_u.append(obj["usage"])
+                return {"timestampMs": obj["ts"], "usage": obj["usage"]}
+
+            first_u = gu._read_jsonl_incremental(str(same_size_log), cf, parse_u, cutoff_ms=0)
+            self.assertEqual([r["usage"] for r in first_u], [1, 2])
+            orig_st = same_size_log.stat()
+            with same_size_log.open("r+b") as fh:
+                fh.seek(len(line1.encode("utf-8")))
+                fh.write(line2_new.encode("utf-8"))
+            os.utime(same_size_log, ns=(orig_st.st_atime_ns, orig_st.st_mtime_ns + 1_000_000_000))
+            self.assertEqual(same_size_log.stat().st_ino, orig_st.st_ino)
+            self.assertEqual(same_size_log.stat().st_size, orig_st.st_size)
+            seen_u.clear()
+            rescanned_u = gu._read_jsonl_incremental(str(same_size_log), cf, parse_u, cutoff_ms=0)
+            self.assertEqual([r["usage"] for r in rescanned_u], [1, 7])
+            self.assertEqual(seen_u, [1, 7])
+
+            with same_size_log.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": 3, "usage": 9}) + "\n")
+            seen_u.clear()
+            appended_u = gu._read_jsonl_incremental(str(same_size_log), cf, parse_u, cutoff_ms=0)
+            self.assertEqual(seen_u, [9])
+            self.assertEqual([r["usage"] for r in appended_u], [1, 7, 9])
+
+            grok_home = home / ".grok"
+            grok_home.mkdir(parents=True)
+            (grok_home / "auth.json").write_text(
+                json.dumps({"https://auth.x.ai::cid": {"auth_mode": "oidc", "key": "tok"}}),
+                "utf-8",
+            )
+            fake_grok = home / "fake-grok-audit"
+            fake_grok.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "init = json.loads(sys.stdin.readline())\n"
+                "print(json.dumps({'jsonrpc': '2.0', 'id': init['id'], 'result': {'protocolVersion': 1}}), flush=True)\n"
+                "req = json.loads(sys.stdin.readline())\n"
+                "payload = json.loads(os.environ['FAKE_GROK_BILLING_JSON'])\n"
+                "print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': payload}), flush=True)\n",
+                "utf-8",
+            )
+            fake_grok.chmod(0o755)
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home), "LUMA_GROK_BIN": str(fake_grok), "FAKE_GROK_BILLING_JSON": "{}"}, clear=False):
+                empty_res = gu._probe_grok_limits(home, timeout_sec=5.0)
+            self.assertEqual(empty_res["status"], "error")
+            self.assertEqual(empty_res["source"], "unavailable")
+            self.assertIn(gu._tr("未返回额度", "no quota data"), empty_res["message"])
+
+            for zero_payload in ({"effectiveRemaining": 0}, {"config": {"prepaidBalance": {"val": 0}}}):
+                with patch.dict(
+                    os.environ,
+                    {"GROK_HOME": str(grok_home), "LUMA_GROK_BIN": str(fake_grok), "FAKE_GROK_BILLING_JSON": json.dumps(zero_payload)},
+                    clear=False,
+                ):
+                    zero_res = gu._probe_grok_limits(home, timeout_sec=5.0)
+                self.assertEqual(zero_res["status"], "ok")
+                self.assertEqual(zero_res["source"], "live")
+                self.assertIsNotNone(zero_res["credits"])
+                self.assertEqual(zero_res["credits"]["remaining"], 0.0)
 
     def test_incremental_scan_preserves_truncated_coverage_bound(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2723,7 +2947,7 @@ sys.stdin.read()
 
             clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
             with patch.dict(os.environ, clean_env, clear=True):
-                keys = gu._extract_opencode_go_keys(home)
+                keys = gu._read_opencode_go_tokens(home)
                 self.assertEqual(keys, ["db-go-key", "auth-go-key"])
 
                 seen_tokens: list[str] = []
@@ -2789,7 +3013,7 @@ sys.stdin.read()
                 {**clean_env, "OPENCODE_AUTH_CONTENT": json.dumps({"opencode-go": {"type": "api", "key": "inline-key"}})},
                 clear=True,
             ):
-                self.assertEqual(gu._extract_opencode_go_keys(home), ["inline-key"])
+                self.assertEqual(gu._read_opencode_go_tokens(home), ["inline-key"])
 
     def test_auth_redirect_blocks_cross_origin_and_https_downgrade(self):
         import http.server
@@ -2869,7 +3093,7 @@ sys.stdin.read()
             cache_dir.mkdir()
             clean_env = {k: v for k, v in os.environ.items() if k not in ("XDG_DATA_HOME", "OPENCODE_API_KEY", "OPENCODE_AUTH_CONTENT", "OPENCODE_DB")}
             with patch.dict(os.environ, clean_env, clear=True):
-                self.assertEqual(gu._extract_opencode_go_keys(home), [])
+                self.assertEqual(gu._read_opencode_go_tokens(home), [])
                 fake_claude = {
                     "cli": "Claude Code",
                     "planType": "Max",
@@ -3028,6 +3252,223 @@ sys.stdin.read()
                 labels,
                 [f"{short_lbl} · Model A", f"{short_lbl} · Model B", short_lbl, short_lbl],
             )
+
+    def test_builtin_model_pricing_json_contract_and_staged_execution(self):
+        pricing_path = REPO / "apps/gui/app/src/main/assets/cli_bridge/luma_cli/model_pricing.json"
+        self.assertTrue(pricing_path.is_file())
+        data = json.loads(pricing_path.read_text("utf-8"))
+        self.assertIsInstance(data.get("aliases"), dict)
+        self.assertIsInstance(data.get("rates"), dict)
+        self.assertGreater(len(data["rates"]), 0)
+        self.assertEqual(set(gu.MODEL_PRICING_ALIASES.keys()), {k.lower() for k in data["aliases"]})
+        self.assertEqual(set(gu.MODEL_RATES_PER_M.keys()), {k.lower() for k in data["rates"]})
+        self.assertEqual(set(gu.MODEL_PRICING_ALIASES) & set(gu.MODEL_RATES_PER_M), set())
+        for alias, target in gu.MODEL_PRICING_ALIASES.items():
+            base_target = target[:-5] if target.endswith(":fast") else target
+            self.assertIn(base_target, gu.MODEL_RATES_PER_M, f"alias {alias} -> missing target {target}")
+        builtin_cat = gu._build_runtime_catalog({}, mode="builtin", updated_at="", active_sources=[])
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("grok-4.7-build", builtin_cat),
+            gu.MODEL_RATES_PER_M["grok-4.7"],
+        )
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("grok-4.7-build-fast", builtin_cat),
+            (4.0, 12.0, 1.0, 4.0, (200_000, 8.0, 24.0, 2.0, 8.0)),
+        )
+        online_cat = gu._build_runtime_catalog(
+            {"grok-4.7": (3.0, 9.0, 0.75, 3.0, None)},
+            mode="online",
+            updated_at="2026-11-25T00:00:00Z",
+            active_sources=["models.dev"],
+        )
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("grok-4.7-build-fast", online_cat),
+            (6.0, 18.0, 1.5, 6.0, None),
+        )
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("codex-mini-latest", builtin_cat),
+            gu.MODEL_RATES_PER_M["codex-mini"],
+        )
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("deepseek-v4", builtin_cat),
+            gu.MODEL_RATES_PER_M["deepseek-v4-pro"],
+        )
+        self.assertEqual(
+            gu._lookup_model_rate_in_catalog("gemini-pro-orchestrator-v2", builtin_cat),
+            gu.MODEL_RATES_PER_M["gemini-4-carbon"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_dir = Path(tmp)
+            shutil.copyfile(
+                REPO / "apps/gui/app/src/main/assets/cli_bridge/luma_cli/global_usage.py",
+                stage_dir / "global-usage.py",
+            )
+            shutil.copyfile(pricing_path, stage_dir / "model_pricing.json")
+            proc = subprocess.run(
+                [sys.executable, "-I", str(stage_dir / "global-usage.py"), "codex-session"],
+                env={"PATH": os.environ.get("PATH", ""), "HOME": tmp, "XDG_CACHE_HOME": tmp},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertIn("gpt-6.1-sol", payload["catalog"]["rates"])
+            self.assertEqual(payload["catalog"]["aliases"]["kimi-for-coding"], "kimi-k2.7-code")
+
+    def test_online_pricing_parser_filters_reseller_pollution_and_regional_markups(self):
+        md_raw = {
+            "alibaba-cn": {
+                "models": {
+                    "deepseek-r1": {"cost": {"input": 0.574, "output": 2.294}},
+                    "kimi-k2.5": {"cost": {"input": 0.574, "output": 3.011}},
+                    "qwen3-max": {"cost": {"input": 1.5, "output": 7.5, "cache_read": 0.3}},
+                },
+            },
+            "anthropic": {
+                "models": {
+                    "claude-opus-4-6": {"cost": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}},
+                },
+            },
+            "google": {
+                "models": {
+                    "gemini-3.1-pro-preview": {
+                        "cost": {
+                            "input": 2.0,
+                            "output": 12.0,
+                            "cache_read": 0.2,
+                            "tiers": [{"input": 4.0, "output": 18.0, "cache_read": 0.4, "tier": {"type": "context", "size": 200000}}],
+                        },
+                    },
+                },
+            },
+            "poe": {
+                "models": {
+                    "anthropic/claude-opus-4": {"cost": {"input": 13.0, "output": 64.0, "cache_read": 1.3, "cache_write": 16.0}},
+                },
+            },
+            "helicone": {
+                "models": {
+                    "claude-opus-4": {"cost": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75}},
+                },
+            },
+            "openrouter": {
+                "models": {
+                    "anthropic/claude-opus-4.6": {
+                        "cost": {
+                            "input": 5.0,
+                            "output": 25.0,
+                            "cache_read": 0.5,
+                            "cache_write": 6.25,
+                            "tiers": [{"input": 10.0, "output": 37.5, "cache_read": 1.0, "cache_write": 12.5, "tier": {"type": "context", "size": 200000}}],
+                        },
+                    },
+                },
+            },
+        }
+        ll_raw = {
+            "deepseek/deepseek-r1": {"input_cost_per_token": 0.55e-6, "output_cost_per_token": 2.19e-6, "cache_read_input_token_cost": 0.14e-6},
+            "moonshot/kimi-k2.5": {"input_cost_per_token": 0.6e-6, "output_cost_per_token": 3.0e-6, "cache_read_input_token_cost": 0.1e-6},
+            "us.anthropic.claude-sonnet-4-6": {"input_cost_per_token": 3.3e-6, "output_cost_per_token": 16.5e-6},
+            "deepinfra/google/gemini-3.1-pro": {"input_cost_per_token": 2.0e-6, "output_cost_per_token": 12.0e-6},
+        }
+
+        def fake_fetch(url, timeout=6.5):
+            if url == gu.MODELS_DEV_API_URL:
+                return md_raw
+            if url == gu.LITELLM_PRICES_URLS[0]:
+                return ll_raw
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / ".cache"
+            cache_dir.mkdir()
+            with (
+                patch.object(gu, "_cache_dir", return_value=cache_dir),
+                patch.object(gu, "_fetch_remote_json", side_effect=fake_fetch),
+            ):
+                cat = gu._sync_pricing_catalog(force=True)
+                self.assertEqual(gu._lookup_model_rate_in_catalog("deepseek-r1", cat), (0.55, 2.19, 0.14, 0.55, None))
+                self.assertEqual(gu._lookup_model_rate_in_catalog("kimi-k2.5", cat), (0.6, 3.0, 0.1, 0.6, None))
+                self.assertEqual(gu._lookup_model_rate_in_catalog("qwen3-max", cat), (1.5, 7.5, 0.3, 1.5, None))
+                self.assertEqual(gu._lookup_model_rate_in_catalog("claude-opus-4", cat), (15.0, 75.0, 1.5, 18.75, None))
+                self.assertEqual(gu._lookup_model_rate_in_catalog("claude-opus-4-6", cat), (5.0, 25.0, 0.5, 6.25, None))
+                self.assertEqual(
+                    gu._lookup_model_rate_in_catalog("gemini-3.1-pro", cat),
+                    (2.0, 12.0, 0.2, 2.0, (200_000, 4.0, 18.0, 0.4, 4.0)),
+                )
+                self.assertEqual(gu._lookup_model_rate_in_catalog("claude-sonnet-4-6", cat)[0], 3.0)
+
+    def test_antigravity_custom_orchestrator_planner_executor_and_dynamic_enums(self):
+        def pb_varint(val: int) -> bytes:
+            out = bytearray()
+            v = int(val)
+            while v >= 0x80:
+                out.append((v & 0x7F) | 0x80)
+                v >>= 7
+            out.append(v)
+            return bytes(out)
+
+        def pb_num(field: int, val: int) -> bytes:
+            return pb_varint((field << 3) | 0) + pb_varint(val)
+
+        def pb_bytes(field: int, raw: bytes) -> bytes:
+            return pb_varint((field << 3) | 2) + pb_varint(len(raw)) + raw
+
+        def pb_str(field: int, s: str) -> bytes:
+            return pb_bytes(field, s.encode("utf-8"))
+
+        def pb_ts(sec: int) -> bytes:
+            return pb_num(1, sec)
+
+        now_sec = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 30
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "conv-custom-orch.db"
+            con = sqlite3.connect(str(db_path))
+            con.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)")
+            con.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+            for idx in range(7):
+                con.execute("INSERT INTO steps VALUES (?, 15, ?)", (idx, pb_bytes(1, pb_ts(now_sec + idx))))
+
+            u0 = pb_num(1, 1402) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "custom-plan-enum")
+            c0 = pb_num(3, 1667) + pb_str(19, "gemini-pro-orchestrator") + pb_str(21, "Orchestrator (Claude Opus 5.5)") + pb_bytes(4, u0)
+            con.execute("INSERT INTO gen_metadata VALUES (0, ?)", (pb_bytes(1, c0) + pb_num(2, 0),))
+
+            u1 = pb_num(1, 1667) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "custom-plan-label")
+            c1 = pb_num(3, 1667) + pb_str(19, "gemini-pro-orchestrator") + pb_str(21, "Orchestrator (Claude Opus 5.5 High)") + pb_bytes(4, u1)
+            con.execute("INSERT INTO gen_metadata VALUES (1, ?)", (pb_bytes(1, c1) + pb_num(2, 1),))
+
+            u2 = pb_num(1, 1405) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "custom-exec-enum")
+            c2 = pb_num(3, 1669) + pb_str(19, "gemini-flash-worker-agy") + pb_str(21, "Gemini Flash") + pb_bytes(4, u2)
+            con.execute("INSERT INTO gen_metadata VALUES (2, ?)", (pb_bytes(1, c2) + pb_num(2, 2),))
+
+            u3 = pb_num(1, 1669) + pb_num(2, 100_000) + pb_num(10, 10_000) + pb_str(11, "custom-exec-label")
+            c3 = pb_num(3, 1669) + pb_str(19, "gemini-flash-worker-agy") + pb_str(21, "Claude Sonnet 5.5 (Orchestrator)") + pb_bytes(4, u3)
+            con.execute("INSERT INTO gen_metadata VALUES (3, ?)", (pb_bytes(1, c3) + pb_num(2, 3),))
+
+            u4 = pb_num(1, 1899) + pb_num(2, 50_000) + pb_num(10, 5_000) + pb_str(11, "future-gen")
+            c4 = pb_num(3, 1899) + pb_str(19, "claude-opus-5-5-max") + pb_str(21, "Claude Opus 5.5 (Max)") + pb_bytes(4, u4)
+            con.execute("INSERT INTO gen_metadata VALUES (4, ?)", (pb_bytes(1, c4) + pb_num(2, 4),))
+
+            u5 = pb_num(1, 1532) + pb_num(2, 50_000) + pb_num(10, 5_000) + pb_str(11, "neon-high-step")
+            con.execute("UPDATE steps SET metadata = ? WHERE idx = 5", (pb_bytes(1, pb_ts(now_sec + 5)) + pb_bytes(9, u5),))
+
+            u6 = pb_num(1, 1899) + pb_num(2, 50_000) + pb_num(10, 5_000) + pb_str(11, "future-step")
+            con.execute("UPDATE steps SET metadata = ? WHERE idx = 6", (pb_bytes(1, pb_ts(now_sec + 6)) + pb_bytes(9, u6),))
+
+            con.commit()
+            con.close()
+
+            recs, *_ = gu._extract_agy_db_session(db_path)
+            self.assertEqual(len(recs), 7)
+            self.assertEqual(recs[0]["model"], "claude-opus-5-5")
+            self.assertEqual(recs[1]["model"], "claude-opus-5-5")
+            self.assertEqual(recs[2]["model"], "claude-sonnet-5-5")
+            self.assertEqual(recs[2]["uiLabel"], "Gemini Flash")
+            self.assertEqual(recs[3]["model"], "claude-sonnet-5-5")
+            self.assertEqual(recs[4]["model"], "claude-opus-5-5-max")
+            self.assertEqual(recs[5]["model"], "gemini-4-neon")
+            self.assertEqual(recs[6]["model"], "claude-opus-5-5-max")
 
 
 if __name__ == "__main__":

@@ -517,12 +517,11 @@ class AgentRuntime(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    private fun stageGlobalUsageScript(environment: String): String = synchronized(globalUsageStageLock) {
-        val dir = privateDirectory(environment)
-        val target = File(dir, "global-usage.py")
-        val content = app.assets.open("cli_bridge/luma_cli/global_usage.py").bufferedReader().use { it.readText() }
+    private fun stageGlobalUsageAsset(dir: File, assetPath: String, fileName: String) {
+        val target = File(dir, fileName)
+        val content = app.assets.open(assetPath).bufferedReader().use { it.readText() }
         if (!target.isFile || runCatching { target.readText() }.getOrNull() != content) {
-            val tmp = File(dir, "global-usage.py.${UUID.randomUUID()}.tmp")
+            val tmp = File(dir, "$fileName.${UUID.randomUUID()}.tmp")
             try {
                 writePrivate(tmp, content)
                 if (!tmp.renameTo(target)) writePrivate(target, content)
@@ -530,6 +529,12 @@ class AgentRuntime(context: Context) {
                 if (tmp.exists()) tmp.delete()
             }
         }
+    }
+
+    private fun stageGlobalUsageScript(environment: String): String = synchronized(globalUsageStageLock) {
+        val dir = privateDirectory(environment)
+        stageGlobalUsageAsset(dir, "cli_bridge/luma_cli/model_pricing.json", "model_pricing.json")
+        stageGlobalUsageAsset(dir, "cli_bridge/luma_cli/global_usage.py", "global-usage.py")
         return runtimePath(environment, "global-usage.py")
     }
 

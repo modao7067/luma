@@ -158,6 +158,7 @@ def estimate_cost(
     output: int | float = 0,
     reasoning: int | float = 0,
     speed: str | None = None,
+    cache_write_1h: int | float = 0,
 ) -> list[dict[str, str]]:
     clean_model = _clean_model_name(model)
     if not clean_model:
@@ -176,6 +177,7 @@ def estimate_cost(
         'uncachedInputTokens': u_in,
         'cachedInputTokens': c_read,
         'cacheCreationTokens': c_write,
+        'cacheWrite1hTokens': int(number(cache_write_1h) or 0),
         'outputTokens': out,
         'reasoningTokens': reason,
         'speed': speed,
@@ -278,12 +280,17 @@ def claude_result(result, model=None):
         resolved_model = model or result.get('model')
         if not resolved_model and isinstance(model_usage, dict) and model_usage:
             resolved_model = next(iter(model_usage.keys()), None)
+        cc = usage.get('cache_creation') if isinstance(usage.get('cache_creation'), dict) else {}
+        c_write_1h = number(cc.get('ephemeral_1h_input_tokens')) or 0
+        c_write_5m = number(cc.get('ephemeral_5m_input_tokens')) or 0
+        c_write = max(number(usage.get('cache_creation_input_tokens')) or 0, c_write_1h + c_write_5m)
         cost_rows = estimate_cost(
             resolved_model,
             uncached_input=number(usage.get('input_tokens')) or 0,
             cache_read=number(usage.get('cache_read_input_tokens')) or 0,
-            cache_write=number(usage.get('cache_creation_input_tokens')) or 0,
+            cache_write=c_write,
             output=number(usage.get('output_tokens')) or 0,
+            cache_write_1h=c_write_1h,
         )
     return rows + cost_rows
 

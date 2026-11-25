@@ -229,5 +229,58 @@ class StaticRunnerTest(unittest.TestCase):
         self.assertIn('needs: static-gates', workflow.split('  android:', 1)[1])
 
 
+class QuotaProbeSecurityGateTest(unittest.TestCase):
+    def test_app_sources_forbid_internal_google_quota_and_third_party_oauth_refresh(self):
+        forbidden = (
+            'cloudcode-pa.' + 'googleapis.com',
+            'retrieveUser' + 'QuotaSummary',
+            'fetchAvailable' + 'Models',
+            'oauth2.' + 'googleapis.com/token',
+            'antigravity/' + 'hub/',
+            'antigravity-oauth-' + 'token',
+            'acp_token.' + 'json',
+            'X-Msh-' + 'Platform',
+            'kimi-cli/' + '1.0',
+            'claude-code/' + '2.0',
+            'grok-cli/' + '1.0',
+            'cli-chat-proxy.' + 'grok.com',
+            'GrokBuild' + 'Billing',
+            'GetGrokCredits' + 'Config',
+            'X-XAI-Token-' + 'Auth',
+            '/oauth2/' + 'token',
+            '/api/oauth/' + 'token',
+        )
+        root = REPO / 'apps/gui/app/src/main'
+        findings = []
+        for path in sorted(root.rglob('*')):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text('utf-8')
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = path.relative_to(REPO).as_posix()
+            for token in forbidden:
+                if token in text:
+                    findings.append(f'{rel}: forbidden token {token}')
+        self.assertEqual(findings, [])
+
+    def test_app_sources_and_notices_carry_no_t3_code_derivation(self):
+        forbidden = ('t3' + 'code', 'T3 ' + 'Code', 'T3' + 'CODE', 'T3 ' + 'Tools')
+        roots = [REPO / 'apps/gui/app/src/main']
+        files = [REPO / 'THIRD_PARTY_NOTICES.md', REPO / 'apps/gui/NOTICE.md', REPO / 'tools/assets.json']
+        for root in roots:
+            files.extend(p for p in sorted(root.rglob('*')) if p.is_file())
+        findings = []
+        for path in files:
+            try:
+                text = path.read_text('utf-8')
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = path.relative_to(REPO).as_posix()
+            findings.extend(f'{rel}: forbidden token {token}' for token in forbidden if token in text)
+        self.assertEqual(findings, [])
+
+
 if __name__ == '__main__':
     unittest.main()

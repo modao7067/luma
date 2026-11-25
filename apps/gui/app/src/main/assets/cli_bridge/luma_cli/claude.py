@@ -227,12 +227,20 @@ class ClaudeProjectionMixin:
                 if by_msg:
                     tot_in = sum(number(u.get("input_tokens")) or 0 for _, u in by_msg.values())
                     tot_read = sum(number(u.get("cache_read_input_tokens")) or 0 for _, u in by_msg.values())
-                    tot_write = sum(number(u.get("cache_creation_input_tokens")) or 0 for _, u in by_msg.values())
+                    tot_write = 0
+                    tot_write_1h = 0
+                    for _, u in by_msg.values():
+                        cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
+                        w1h = number(cc.get("ephemeral_1h_input_tokens")) or 0
+                        w5m = number(cc.get("ephemeral_5m_input_tokens")) or 0
+                        w_tot = max(number(u.get("cache_creation_input_tokens")) or 0, w1h + w5m)
+                        tot_write += w_tot
+                        tot_write_1h += min(w_tot, w1h)
                     tot_out = sum(number(u.get("output_tokens")) or 0 for _, u in by_msg.values())
                     last_m = next((m for m, _ in reversed(list(by_msg.values())) if m), self.data.get("model"))
                     self.usage_rows = (
                         cache_ratio(tot_read, tot_in + tot_read + tot_write, tr("累计输入缓存命中", "Total input cache hit"))
-                        + estimate_cost(last_m, uncached_input=tot_in, cache_read=tot_read, cache_write=tot_write, output=tot_out)
+                        + estimate_cost(last_m, uncached_input=tot_in, cache_read=tot_read, cache_write=tot_write, output=tot_out, cache_write_1h=tot_write_1h)
                     )
             self.publish_usage()
         self._discover_history_subagents(content)

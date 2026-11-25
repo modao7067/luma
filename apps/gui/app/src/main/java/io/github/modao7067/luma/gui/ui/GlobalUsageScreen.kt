@@ -167,14 +167,6 @@ internal enum class UsagePeriodOption(val periodId: String, private val zh: Stri
     val label: String get() = tr(zh, en)
 }
 
-internal enum class UsagePace(private val zh: String, private val en: String) {
-    AHEAD("消耗偏快", "Burning fast"),
-    ON_TRACK("匀速", "On pace"),
-    UNDER("余量充裕", "Plenty left"),
-    ;
-    val label: String get() = tr(zh, en)
-}
-
 internal data class CategoryCostBreakdown(
     val input: Double = 0.0,
     val cacheRead: Double = 0.0,
@@ -625,26 +617,16 @@ internal fun parseIsoInstantMs(iso: String?): Long? {
     }
 }
 
-internal fun computeElapsedShare(resetsAtIso: String?, windowDurationMs: Long?, nowMs: Long = System.currentTimeMillis()): Double? {
-    val dur = windowDurationMs?.takeIf { it > 0L } ?: return null
+internal fun computeResetTimeFraction(
+    resetsAtIso: String?,
+    windowDurationMs: Long?,
+    nowMs: Long = System.currentTimeMillis(),
+): Float? {
+    val totalMs = windowDurationMs?.takeIf { it > 0L } ?: return null
     val resetMs = parseIsoInstantMs(resetsAtIso) ?: return null
-    val remainingMs = resetMs - nowMs
-    if (remainingMs < 0L || remainingMs > dur) return null
-    return ((dur - remainingMs).toDouble() / dur.toDouble()).coerceIn(0.0, 1.0)
-}
-
-internal fun computePaceRemainingPercent(elapsedShare: Double?): Int? =
-    elapsedShare?.takeIf { it.isFinite() }?.let { ((1.0 - it.coerceIn(0.0, 1.0)) * 100.0).roundToInt().coerceIn(0, 100) }
-
-internal fun computeUsagePace(usedPercent: Double, elapsedShare: Double?): UsagePace? {
-    if (!usedPercent.isFinite()) return null
-    val share = elapsedShare?.takeIf { it.isFinite() } ?: return null
-    val gap = usedPercent - share * 100.0
-    return when {
-        gap > 5.0 -> UsagePace.AHEAD
-        gap < -5.0 -> UsagePace.UNDER
-        else -> UsagePace.ON_TRACK
-    }
+    val leftMs = resetMs - nowMs
+    if (leftMs <= 0L || leftMs >= totalMs) return null
+    return (leftMs.toDouble() / totalMs.toDouble()).toFloat()
 }
 
 internal fun formatCompactTokens(tokens: Long): String = when {
@@ -1634,10 +1616,9 @@ private fun LimitWindowRow(
     val isDark = isDarkScheme(colors)
     val langCode = LumaI18n.langCode()
     val remaining = (window.remainingPercent.takeIf { it.isFinite() } ?: 100.0).coerceIn(0.0, 100.0)
-    val elapsedShare = remember(window.resetsAt, window.windowDurationMs, nowMs) {
-        computeElapsedShare(window.resetsAt, window.windowDurationMs, nowMs)
+    val resetTimeFraction = remember(window.resetsAt, window.windowDurationMs, nowMs) {
+        computeResetTimeFraction(window.resetsAt, window.windowDurationMs, nowMs)
     }
-    val paceRemaining = remember(elapsedShare) { computePaceRemainingPercent(elapsedShare) }
     val countdown = remember(window.resetsAt, nowMs, langCode) { formatResetCountdown(window.resetsAt, nowMs) }
     val displayLabel = remember(window.label, langCode) { formatUsageLimitLabel(window.label) }
 
@@ -1721,22 +1702,22 @@ private fun LimitWindowRow(
                 }
             }
 
-            if (paceRemaining != null && paceRemaining in 2..98) {
+            if (resetTimeFraction != null && resetTimeFraction in 0.02f..0.98f) {
                 val inset = 4.dp.toPx()
-                val tickX = (w * (paceRemaining / 100f)).coerceIn(inset, max(inset, w - inset))
+                val markerX = (w * resetTimeFraction).coerceIn(inset, max(inset, w - inset))
                 val gapHalf = 2.dp.toPx()
-                val tickW = 1.6.dp.toPx()
-                val tickVPad = 1.5.dp.toPx()
+                val markerW = 1.6.dp.toPx()
+                val markerVPad = 1.5.dp.toPx()
                 drawRect(
                     color = surfaceColor,
-                    topLeft = Offset(max(0f, tickX - gapHalf), 0f),
+                    topLeft = Offset(max(0f, markerX - gapHalf), 0f),
                     size = Size(min(w, gapHalf * 2f), h),
                 )
                 drawRoundRect(
                     color = tickColor,
-                    topLeft = Offset(max(0f, tickX - tickW / 2f), tickVPad),
-                    size = Size(tickW, (h - tickVPad * 2f).coerceAtLeast(2f)),
-                    cornerRadius = CornerRadius(tickW / 2f, tickW / 2f),
+                    topLeft = Offset(max(0f, markerX - markerW / 2f), markerVPad),
+                    size = Size(markerW, (h - markerVPad * 2f).coerceAtLeast(2f)),
+                    cornerRadius = CornerRadius(markerW / 2f, markerW / 2f),
                 )
             }
         }
