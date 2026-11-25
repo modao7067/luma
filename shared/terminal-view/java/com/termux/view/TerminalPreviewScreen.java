@@ -122,7 +122,7 @@ public final class TerminalPreviewScreen implements AutoCloseable {
     }
     @Override public void close(){checkOwner();if(closed)return;releaseCore();closed=true;image=null;text=null;invalidator=()->{};}
     private static final TerminalSessionClient CLIENT=new TerminalSessionClient(){
-        public void onTextChanged(TerminalSession s){}public void onTitleChanged(TerminalSession s){}public void onSessionFinished(TerminalSession s){}public void onCopyTextToClipboard(TerminalSession s,String t){}public void onPasteTextFromClipboard(TerminalSession s){}public void onBell(TerminalSession s){}public void onColorsChanged(TerminalSession s){}public void onTerminalCursorStateChange(boolean s){}public void setTerminalShellPid(TerminalSession s,int p){}public Integer getTerminalCursorStyle(){return 1;}
+        public void onTextChanged(TerminalSession s){}public void onTitleChanged(TerminalSession s){}public void onSessionFinished(TerminalSession s){}public void onCopyTextToClipboard(TerminalSession s,String t){}public void onPasteTextFromClipboard(TerminalSession s){}public void onBell(TerminalSession s){}public void onColorsChanged(TerminalSession s){}public void onTerminalCursorStateChange(boolean s){}public void setTerminalShellPid(TerminalSession s,int p){}public Integer getTerminalCursorStyle(){return 0;}
         public void logError(String t,String m){}public void logWarn(String t,String m){}public void logInfo(String t,String m){}public void logDebug(String t,String m){}public void logVerbose(String t,String m){}public void logStackTraceWithMessage(String t,String m,Exception e){}public void logStackTrace(String t,Exception e){}
     };
 }

@@ -43,19 +43,23 @@ def probe_pi_native(binary=None):
     index_js = package / "dist/index.js"
     core_trust = package / "dist/core/project-trust.js"
     cli_trust = package / "dist/cli/project-trust.js"
+    http_dispatcher = package / "dist/core/http-dispatcher.js"
     agent_session = package / "dist/core/agent-session.js"
-    if not (index_js.is_file() and core_trust.is_file() and cli_trust.is_file()):
+    if not (index_js.is_file() and core_trust.is_file() and cli_trust.is_file() and http_dispatcher.is_file()):
         return True, False, tr("当前 Pi SDK 目录缺少原生双端所需模块；原有 RPC 会话入口保持可用", "Current Pi SDK directory is missing modules required for native dual-ended mode; legacy RPC entry remains available"), package
     try:
         index_src = index_js.read_text(encoding="utf-8", errors="ignore")
         core_trust_src = core_trust.read_text(encoding="utf-8", errors="ignore")
         cli_trust_src = cli_trust.read_text(encoding="utf-8", errors="ignore")
+        http_dispatcher_src = http_dispatcher.read_text(encoding="utf-8", errors="ignore")
         session_src = agent_session.read_text(encoding="utf-8", errors="ignore") if agent_session.is_file() else index_src
     except OSError:
         return True, False, tr("无法读取已安装 Pi SDK 模块", "Unable to read installed Pi SDK modules"), package
     if (not all(sym in index_src for sym in REQUIRED_SDK_EXPORTS)
             or "resolveProjectTrusted" not in core_trust_src
             or "createProjectTrustContext" not in cli_trust_src
+            or "applyHttpProxySettings" not in http_dispatcher_src
+            or "configureHttpDispatcher" not in http_dispatcher_src
             or ("preflightResult" not in session_src and "preflightResult" not in index_src)):
         return True, False, tr("当前 Pi SDK 内部契约已变更（缺少双端同步或预检回执接口）；原有 RPC 会话入口保持可用", "Current Pi SDK internal contract changed (missing sync or preflight receipt hooks); legacy RPC entry remains available"), package
     return True, True, "", package

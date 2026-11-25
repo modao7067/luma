@@ -52,6 +52,7 @@ private data class PunctCacheKey(
     val typefaceIdentity: Int,
     val sizeTenthsPx: Int,
     val ch: Char,
+    val fontFeatureSettings: String?,
 )
 
 private val punctuationTrimCache = object : LruCache<PunctCacheKey, PunctuationTrim>(512) {
@@ -293,12 +294,57 @@ internal data class TypesetInlineObjectSpec(
 
 private const val INLINE_CONTENT_TAG = "androidx.compose.foundation.text.inlineContent"
 
+private const val CJK_TYPESET_DISABLED_FEATURES = "'chws' 0, 'halt' 0, 'palt' 0"
+
+internal fun resolveTypesetFontFeatureSettings(
+    fontFeatureSettings: String?,
+    isCode: Boolean,
+): String? {
+    if (isCode) return fontFeatureSettings
+    val raw = fontFeatureSettings?.trim().orEmpty()
+    if (raw.isEmpty()) return CJK_TYPESET_DISABLED_FEATURES
+    val extras = ArrayList<String>(3)
+    if (!raw.contains("chws", ignoreCase = true)) extras.add("'chws' 0")
+    if (!raw.contains("halt", ignoreCase = true)) extras.add("'halt' 0")
+    if (!raw.contains("palt", ignoreCase = true)) extras.add("'palt' 0")
+    return if (extras.isEmpty()) raw else "$raw, ${extras.joinToString(", ")}"
+}
+
+internal fun resolveCjkPunctuationWidth(
+    ch: Char,
+    isolatedAdvance: Float,
+    contextRunAdvance: Float,
+    contextMeasureAdvance: Float,
+    shapedContextAdvance: Float,
+    shapedAdjacentAdvance: Float,
+    drawnInkLeft: Float,
+    drawnInkRight: Float,
+    emWidth: Float,
+): Float {
+    var resolved = isolatedAdvance
+    if (contextRunAdvance.isFinite() && contextRunAdvance > resolved) resolved = contextRunAdvance
+    if (contextMeasureAdvance.isFinite() && contextMeasureAdvance > resolved) resolved = contextMeasureAdvance
+    if (shapedContextAdvance.isFinite() && shapedContextAdvance > resolved) resolved = shapedContextAdvance
+    if (shapedAdjacentAdvance.isFinite() && shapedAdjacentAdvance > resolved) resolved = shapedAdjacentAdvance
+    if (TypesetEngine.isCjkOpenPunct(ch) &&
+        drawnInkLeft.isFinite() &&
+        drawnInkRight.isFinite() &&
+        emWidth > 0f &&
+        drawnInkLeft >= emWidth * 0.30f &&
+        drawnInkRight >= emWidth * 0.72f &&
+        drawnInkRight > resolved + emWidth * 0.05f
+    ) {
+        resolved = max(resolved, emWidth)
+    }
+    return resolved
+}
+
 internal fun buildTextPaint(style: TypesetResolvedStyle): TextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
     typeface = style.typeface
     textSize = style.textSizePx
     letterSpacing = style.letterSpacingEm
     color = style.colorArgb
-    fontFeatureSettings = style.fontFeatureSettings
+    fontFeatureSettings = resolveTypesetFontFeatureSettings(style.fontFeatureSettings, style.isCode)
 }
 
 internal class TypesetStyleMeasurementCache {
@@ -314,6 +360,9 @@ internal class TypesetStyleMeasurementCache {
         var spaceWidth: Float = -1f
         var hyphenWidth: Float = -1f
         var emWidth: Float = -1f
+        var hanSingleShapedWidth: Float = -1f
+        var hanPairShapedWidth: Float = -1f
+        var hanPairMeasureWidth: Float = -1f
         val singleCharWidths = HashMap<Char, Float>(64)
         val sliceWidths = HashMap<String, Float>(128)
     }
@@ -406,12 +455,19 @@ internal class AndroidTypesetMeasurer(
 
     override fun measureWidth(text: String, start: Int, end: Int, styleId: Int): Float {
         if (end <= start) return 0f
-        val entry = boundEntries[styleId.coerceIn(0, boundEntries.lastIndex)]
+        val safeId = styleId.coerceIn(0, boundEntries.lastIndex)
+        val entry = boundEntries[safeId]
         val paint = entry.paint
         val len = end - start
         if (len == 1) {
             val ch = text[start]
-            return entry.singleCharWidths.getOrPut(ch) { measureSlice(paint, text, start, end) }
+            return entry.singleCharWidths.getOrPut(ch) {
+                if (TypesetEngine.isCjkPunctuation(ch)) {
+                    measureCjkPunctuationWidth(entry, safeId, ch, text, start, end)
+                } else {
+                    measureSlice(paint, text, start, end)
+                }
+            }
         }
         if (len <= TypesetStyleMeasurementCache.MAX_CACHED_SLICE_LEN) {
             val key = text.substring(start, end)
@@ -480,21 +536,137 @@ internal class AndroidTypesetMeasurer(
 
     override fun measurePunctuationTrim(ch: Char, styleId: Int): PunctuationTrim {
         val safeId = styleId.coerceIn(0, boundEntries.lastIndex)
-        val paint = boundEntries[safeId].paint
+        val entry = boundEntries[safeId]
+        val paint = entry.paint
         val style = boundStyles[safeId]
         val key = PunctCacheKey(
             typefaceIdentity = System.identityHashCode(style.typeface),
             sizeTenthsPx = (style.textSizePx * 10f).roundToInt(),
             ch = ch,
+            fontFeatureSettings = paint.fontFeatureSettings,
         )
         synchronized(punctuationTrimCache) {
             punctuationTrimCache.get(key)?.let { return it }
         }
-        val computed = computePunctuationTrim(ch, paint)
+        val chStr = ch.toString()
+        val measuredAdvance = measureWidth(chStr, 0, 1, safeId)
+        val computed = computePunctuationTrim(ch, entry, measuredAdvance)
         synchronized(punctuationTrimCache) {
             punctuationTrimCache.put(key, computed)
         }
         return computed
+    }
+
+    private fun hanSingleShapedWidth(entry: TypesetStyleMeasurementCache.Entry): Float {
+        if (entry.hanSingleShapedWidth >= 0f) return entry.hanSingleShapedWidth
+        val measured = if (Build.VERSION.SDK_INT >= 31 && checkRunShaperSupport(entry.paint)) {
+            runCatching {
+                TextRunShaper.shapeTextRun("汉", 0, 1, 0, 1, 0f, 0f, false, entry.paint).getAdvance()
+            }.getOrDefault(0f)
+        } else {
+            0f
+        }
+        entry.hanSingleShapedWidth = if (measured > 0f && measured.isFinite()) measured else 0f
+        return entry.hanSingleShapedWidth
+    }
+
+    private fun hanPairShapedWidth(entry: TypesetStyleMeasurementCache.Entry): Float {
+        if (entry.hanPairShapedWidth >= 0f) return entry.hanPairShapedWidth
+        val measured = if (Build.VERSION.SDK_INT >= 31 && checkRunShaperSupport(entry.paint)) {
+            runCatching {
+                TextRunShaper.shapeTextRun("汉汉", 0, 2, 0, 2, 0f, 0f, false, entry.paint).getAdvance()
+            }.getOrDefault(0f)
+        } else {
+            0f
+        }
+        entry.hanPairShapedWidth = if (measured > 0f && measured.isFinite()) measured else 0f
+        return entry.hanPairShapedWidth
+    }
+
+    private fun hanPairMeasureWidth(entry: TypesetStyleMeasurementCache.Entry): Float {
+        if (entry.hanPairMeasureWidth >= 0f) return entry.hanPairMeasureWidth
+        val measured = runCatching { entry.paint.measureText("汉汉") }.getOrDefault(0f)
+        entry.hanPairMeasureWidth = if (measured > 0f && measured.isFinite()) measured else 0f
+        return entry.hanPairMeasureWidth
+    }
+
+    private fun measureCjkPunctuationWidth(
+        entry: TypesetStyleMeasurementCache.Entry,
+        safeId: Int,
+        ch: Char,
+        text: String,
+        start: Int,
+        end: Int,
+    ): Float {
+        val paint = entry.paint
+        val isoAdv = measureSlice(paint, text, start, end)
+        val em = measureEmWidth(safeId)
+        val midProbe = "汉${ch}汉"
+        val adjacentProbe = if (TypesetEngine.isCjkOpenPunct(ch)) "${ch}汉" else "汉${ch}"
+
+        val ctxRunAdv = if (checkRunAdvanceSupport(paint)) {
+            runCatching { paint.getRunAdvance(midProbe, 1, 2, 0, 3, false, 2) }.getOrDefault(0f)
+        } else {
+            0f
+        }
+        val hanPairMeas = hanPairMeasureWidth(entry)
+        val ctxMeasAdv = if (hanPairMeas > 0f) {
+            runCatching { paint.measureText(midProbe) - hanPairMeas }.getOrDefault(0f)
+        } else {
+            0f
+        }
+
+        var shapedContextAdv = 0f
+        var shapedAdjacentAdv = 0f
+        var drawnInkLeft = Float.NaN
+        var drawnInkRight = Float.NaN
+        if (Build.VERSION.SDK_INT >= 31 && checkRunShaperSupport(paint)) {
+            val hanPairShaped = hanPairShapedWidth(entry)
+            if (hanPairShaped > 0f) {
+                shapedContextAdv = runCatching {
+                    TextRunShaper.shapeTextRun(midProbe, 0, 3, 0, 3, 0f, 0f, false, paint).getAdvance() - hanPairShaped
+                }.getOrDefault(0f)
+            }
+            val hanSingleShaped = hanSingleShapedWidth(entry)
+            if (hanSingleShaped > 0f) {
+                runCatching {
+                    val glyphs = TextRunShaper.shapeTextRun(
+                        adjacentProbe,
+                        0,
+                        adjacentProbe.length,
+                        0,
+                        adjacentProbe.length,
+                        0f,
+                        0f,
+                        false,
+                        paint,
+                    )
+                    val adv = glyphs.getAdvance() - hanSingleShaped
+                    if (adv > 0f && adv.isFinite()) {
+                        shapedAdjacentAdv = adv
+                    }
+                    if (TypesetEngine.isCjkOpenPunct(ch) && glyphs.glyphCount() >= 2) {
+                        val rect = RectF()
+                        glyphs.getFont(0).getGlyphBounds(glyphs.getGlyphId(0), paint, rect)
+                        val glyphX0 = glyphs.getGlyphX(0)
+                        drawnInkLeft = glyphX0 + rect.left
+                        drawnInkRight = glyphX0 + rect.right
+                    }
+                }
+            }
+        }
+
+        return resolveCjkPunctuationWidth(
+            ch = ch,
+            isolatedAdvance = isoAdv,
+            contextRunAdvance = ctxRunAdv,
+            contextMeasureAdvance = ctxMeasAdv,
+            shapedContextAdvance = shapedContextAdv,
+            shapedAdjacentAdvance = shapedAdjacentAdv,
+            drawnInkLeft = drawnInkLeft,
+            drawnInkRight = drawnInkRight,
+            emWidth = em,
+        )
     }
 
     private fun measureSlice(paint: TextPaint, text: String, start: Int, end: Int): Float {
@@ -507,17 +679,42 @@ internal class AndroidTypesetMeasurer(
         return (end - start) * paint.textSize * 0.6f
     }
 
-    private fun computePunctuationTrim(ch: Char, paint: TextPaint): PunctuationTrim {
-        val advance = measureSlice(paint, ch.toString(), 0, 1).coerceAtLeast(paint.textSize * 0.5f)
+    private fun computePunctuationTrim(
+        ch: Char,
+        entry: TypesetStyleMeasurementCache.Entry,
+        measuredAdvance: Float,
+    ): PunctuationTrim {
+        val paint = entry.paint
+        val advance = measuredAdvance.coerceAtLeast(paint.textSize * 0.5f)
         if (Build.VERSION.SDK_INT >= 31 && checkRunShaperSupport(paint)) {
             val optical = runCatching {
-                val glyphs = TextRunShaper.shapeTextRun(ch.toString(), 0, 1, 0, 1, 0f, 0f, false, paint)
-                if (glyphs.glyphCount() > 0) {
+                val isOpen = TypesetEngine.isCjkOpenPunct(ch)
+                val probe = if (isOpen) "${ch}汉" else "汉${ch}"
+                val hanAdv = hanSingleShapedWidth(entry)
+                val glyphs = TextRunShaper.shapeTextRun(probe, 0, probe.length, 0, probe.length, 0f, 0f, false, paint)
+                val usePaired = hanAdv > 0f && glyphs.glyphCount() >= 2
+                val targetGlyphs = if (usePaired) {
+                    glyphs
+                } else {
+                    TextRunShaper.shapeTextRun(ch.toString(), 0, 1, 0, 1, 0f, 0f, false, paint)
+                }
+                if (targetGlyphs.glyphCount() > 0) {
+                    val targetIdx = if (usePaired && !isOpen) targetGlyphs.glyphCount() - 1 else 0
                     val rect = RectF()
-                    val glyphAdvance = glyphs.getAdvance().coerceAtLeast(advance)
-                    glyphs.getFont(0).getGlyphBounds(glyphs.getGlyphId(0), paint, rect)
-                    val inkLeft = rect.left.coerceIn(0f, glyphAdvance)
-                    val inkRight = rect.right.coerceIn(inkLeft, glyphAdvance)
+                    val shapedAdv = if (usePaired) {
+                        (targetGlyphs.getAdvance() - hanAdv).takeIf { it > 0f && it.isFinite() } ?: advance
+                    } else {
+                        targetGlyphs.getAdvance()
+                    }
+                    val glyphAdvance = max(shapedAdv, advance)
+                    val glyphOffsetX = if (usePaired && !isOpen) {
+                        targetGlyphs.getGlyphX(targetIdx) - hanAdv
+                    } else {
+                        targetGlyphs.getGlyphX(targetIdx)
+                    }
+                    targetGlyphs.getFont(targetIdx).getGlyphBounds(targetGlyphs.getGlyphId(targetIdx), paint, rect)
+                    val inkLeft = (glyphOffsetX + rect.left).coerceIn(0f, glyphAdvance)
+                    val inkRight = (glyphOffsetX + rect.right).coerceIn(inkLeft, glyphAdvance)
                     val leftSpace = max(0f, inkLeft - glyphAdvance * 0.06f)
                     val rightSpace = max(0f, glyphAdvance - inkRight - glyphAdvance * 0.06f)
                     when {
@@ -591,7 +788,7 @@ internal fun drawTypesetLayout(
             var runEndPiece = pIdx
             var runCharEnd = first.charEnd
             var runWidth = first.width
-            var expectedNextX = first.drawX + first.width
+            var expectedNextX = first.x + first.width
             while (runEndPiece + 1 < pieces.size) {
                 val next = pieces[runEndPiece + 1]
                 if (next.kind == first.kind &&

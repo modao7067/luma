@@ -378,6 +378,10 @@ public final class GhosttyTerminalEmulator extends TerminalEmulator {
         return f.withCursorVisible(false);
     }
 
+    @Override public TerminalRenderFrame getRawRenderFrame() {
+        return frame();
+    }
+
     @Override public TerminalBuffer getScreen() { return frame().screen; }
     @Override public int getCursorRow() { return frame().cursorRow; }
     @Override public int getCursorCol() { return frame().cursorColumn; }

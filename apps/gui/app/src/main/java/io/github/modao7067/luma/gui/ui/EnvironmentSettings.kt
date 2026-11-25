@@ -40,7 +40,7 @@ internal fun SettingsNavigationRow(title: String, symbol: MenuSymbol, detail: St
 }
 
 @Composable
-private fun SettingsToggleRow(title: String, symbol: MenuSymbol, detail: String, checked: Boolean, enabled: Boolean = true, onToggle: () -> Unit) {
+internal fun SettingsToggleRow(title: String, symbol: MenuSymbol, detail: String, checked: Boolean, enabled: Boolean = true, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val haptic = LocalHapticFeedback.current
     Surface(onClick = { haptic.tick(); onToggle() }, enabled = enabled, shape = LumaCardShape(20.dp), color = colors.surfaceContainerLow,

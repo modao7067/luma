@@ -15,15 +15,12 @@ try{
  sdk=await import(sdkUrl);
  ({resolveProjectTrusted}=await import(new URL('./core/project-trust.js',sdkUrl)));
  ({createProjectTrustContext}=await import(new URL('./cli/project-trust.js',sdkUrl)));
+ ({applyHttpProxySettings,configureHttpDispatcher}=await import(new URL('./core/http-dispatcher.js',sdkUrl)));
 }catch{
  failContract(tr('当前 Pi SDK 模块结构不兼容；原有 RPC 会话入口保持可用','Current Pi SDK module layout is incompatible; legacy RPC session entry remains available'));
 }
-try{
- ({applyHttpProxySettings}=await import(new URL('./utils/http-proxy.js',sdkUrl)));
- ({configureHttpDispatcher}=await import(new URL('./core/http-client.js',sdkUrl)));
-}catch{}
 const {createAgentSessionRuntime,createAgentSessionServices,createAgentSessionFromServices,SessionManager,InteractiveMode,ExtensionEditorComponent,SettingsManager,ProjectTrustStore,hasTrustRequiringProjectResources,initTheme,resolveModelScopeWithDiagnostics,parseSkillBlock}=sdk;
-if([createAgentSessionRuntime,createAgentSessionServices,createAgentSessionFromServices,SessionManager,InteractiveMode,ExtensionEditorComponent,SettingsManager,ProjectTrustStore,hasTrustRequiringProjectResources,resolveProjectTrusted,createProjectTrustContext].some(fn=>typeof fn!=='function')){
+if([createAgentSessionRuntime,createAgentSessionServices,createAgentSessionFromServices,SessionManager,InteractiveMode,ExtensionEditorComponent,SettingsManager,ProjectTrustStore,hasTrustRequiringProjectResources,resolveProjectTrusted,createProjectTrustContext,applyHttpProxySettings,configureHttpDispatcher].some(fn=>typeof fn!=='function')){
  failContract(tr('当前 Pi SDK 导出契约不兼容；原有 RPC 会话入口保持可用','Current Pi SDK export contract is incompatible; legacy RPC session entry remains available'));
 }
 let runtime;const identity=()=>runtime?.session.sessionId??options.nativeId;
@@ -81,10 +78,13 @@ const factory=async ({cwd,agentDir,sessionManager,sessionStartEvent,projectTrust
  const created=await createAgentSessionFromServices({services,sessionManager,sessionStartEvent,model,thinkingLevel,scopedModels});decorate(created.session,services);
  return {...created,services,diagnostics:services.diagnostics};
 };
+const bootstrapSettings=SettingsManager.create(process.cwd(),options.agentDir,{projectTrusted:false});
+applyHttpProxySettings(bootstrapSettings.getGlobalSettings().httpProxy);
+configureHttpDispatcher(bootstrapSettings.getHttpIdleTimeoutMs());
 const manager=savedSessionFile?SessionManager.open(savedSessionFile):SessionManager.create(process.cwd(),undefined,{id:options.nativeId});
 runtime=await createAgentSessionRuntime(factory,{cwd:process.cwd(),agentDir:options.agentDir,sessionManager:manager});
-applyHttpProxySettings?.(runtime.services.settingsManager.getGlobalSettings().httpProxy);
-configureHttpDispatcher?.(runtime.services.settingsManager.getHttpIdleTimeoutMs());
+applyHttpProxySettings(runtime.services.settingsManager.getGlobalSettings().httpProxy);
+configureHttpDispatcher(runtime.services.settingsManager.getHttpIdleTimeoutMs());
 initTheme?.(runtime.services.settingsManager.getTheme(),true);
 transport=hostServer(options,identity,async p=>{
  const s=runtime.session;

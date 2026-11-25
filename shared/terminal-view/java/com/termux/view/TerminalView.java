@@ -36,6 +36,7 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.view.inputmethod.SurroundingText;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -43,6 +44,7 @@ import androidx.annotation.RequiresApi;
 import com.termux.terminal.KeyHandler;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalBuffer;
+import com.termux.terminal.TerminalRenderFrame;
 import com.termux.terminal.TerminalSession;
 import com.termux.view.textselection.TextSelectionCursorController;
 
@@ -64,8 +66,101 @@ public final class TerminalView extends View {
 
     public TerminalViewClient mClient;
     private TerminalPreviewView mFilePreview;
+    private CursorTrailView mCursorTrailView;
+    private boolean mForceBlockCursor;
+    public void setForceBlockCursor(boolean forceBlockCursor) {
+        mForceBlockCursor = forceBlockCursor;
+        if (mRenderer != null) mRenderer.setForceBlockCursor(forceBlockCursor);
+        invalidate();
+        if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) {
+            mCursorTrailView.resetTrail();
+            mCursorTrailView.invalidate();
+        }
+    }
     public int getTextSize(){return mRenderer==null ? 20 : mRenderer.mTextSize;}
     public int[] getTerminalPalette(){return mEmulator.mColors.mCurrentColors.clone();}
+    public void setCursorTrailView(CursorTrailView view) {
+        if (mCursorTrailView == view) return;
+        if (mCursorTrailView != null) {
+            mCursorTrailView.setOnSettledListener(null);
+        }
+        mCursorTrailView = view;
+        if (view != null) {
+            view.setOnSettledListener(this::invalidate);
+            view.resetTrail();
+            syncCursorTrail();
+        }
+    }
+    public void syncCursorTrail() {
+        if (mEmulator == null) {
+            if (mCursorTrailView != null) mCursorTrailView.resetTrail();
+            return;
+        }
+        syncCursorTrail(mEmulator.getRawRenderFrame());
+    }
+    private void syncCursorTrail(TerminalRenderFrame frame) {
+        CursorTrailView trail = mCursorTrailView;
+        if (trail == null || !trail.isTrailEnabled()) return;
+        if (mEmulator == null || mRenderer == null || getVisibility() != VISIBLE || frame == null) {
+            trail.resetTrail();
+            return;
+        }
+        int visibleRow = frame.nativeViewport ? frame.cursorRow : (frame.cursorRow - mTopRow);
+        boolean inBounds = frame.cursorVisible
+                && visibleRow >= 0 && visibleRow < frame.rows
+                && frame.cursorColumn >= 0 && frame.cursorColumn < frame.columns;
+        int startCol = frame.cursorColumn;
+        int cellSpan = 1;
+        if (inBounds && frame.screen != null) {
+            com.termux.terminal.TerminalRow row = frame.screen.allocateFullLineIfNecessary(
+                    frame.screen.externalToInternalRow(visibleRow));
+            if (row != null && row.hasFrameGeometry()) {
+                int width = row.frameColumnWidth(startCol);
+                if (width == 0 && startCol > 0) {
+                    int prevWidth = row.frameColumnWidth(startCol - 1);
+                    if (prevWidth == 2) {
+                        startCol -= 1;
+                        cellSpan = 2;
+                    }
+                } else if (width == 2) {
+                    cellSpan = 2;
+                }
+            }
+        }
+        float cellWidth = mRenderer.mFontWidth;
+        int lineSpacing = mRenderer.mFontLineSpacing;
+        int topOffset = mRenderer.mFontLineSpacingAndAscent;
+        float left = startCol * cellWidth;
+        float right = left + cellSpan * cellWidth;
+        float bottom = topOffset + (visibleRow + 1) * lineSpacing;
+        int effectiveCursorStyle = mForceBlockCursor
+                ? TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK
+                : frame.cursorStyle;
+        float cursorHeight = lineSpacing;
+        if (effectiveCursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_UNDERLINE) {
+            cursorHeight = lineSpacing / 4f;
+        } else if (effectiveCursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_BAR) {
+            right -= (right - left) * 3f / 4f;
+        }
+        float top = bottom - cursorHeight;
+        int cursorColor = frame.palette[com.termux.terminal.TextStyle.COLOR_INDEX_CURSOR];
+        int sessionToken = System.identityHashCode(mTermSession);
+        trail.onCursorFrame(
+                inBounds,
+                left,
+                top,
+                right,
+                bottom,
+                cursorColor,
+                frame.sourceTopRow,
+                frame.totalRows,
+                mEmulator.isAlternateBufferActive(),
+                frame.rows,
+                frame.columns,
+                cellWidth,
+                lineSpacing,
+                sessionToken);
+    }
     public void setFilePreview(TerminalPreviewView view){
         mFilePreview=view;resetScrollGesture();
         if(view!=null&&isSelectingText())stopTextSelectionMode();
@@ -379,11 +474,51 @@ public final class TerminalView extends View {
         // keyboard on Android TV (see https://github.com/termux/termux-app/issues/221).
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
             | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
-        outAttrs.initialSelStart = outAttrs.initialSelEnd = 0;
+        final boolean virtualBeforeCursor = mClient.isTerminalViewSelected() && mClient.getInputMode() != 1;
+        if (virtualBeforeCursor) {
+            outAttrs.initialSelStart = 1024;
+            outAttrs.initialSelEnd = 1024;
+            if (Build.VERSION.SDK_INT >= 30) {
+                outAttrs.setInitialSurroundingSubText(" ", 1023);
+            }
+        } else {
+            outAttrs.initialSelStart = outAttrs.initialSelEnd = 0;
+        }
 
         return new BaseInputConnection(this, true) {
 
             private int composingDeleteKey = -1;
+            private int virtualCursor = 1024;
+
+            private void syncVirtualSelection() {
+                if (!virtualBeforeCursor || mFilePreview != null || getEditable().length() != 0) return;
+                virtualCursor = (virtualCursor == 1024) ? 1023 : 1024;
+                notifyImeVirtualSelection(virtualCursor);
+            }
+
+            @Override public CharSequence getTextBeforeCursor(int n, int flags) {
+                if (virtualBeforeCursor && mFilePreview == null && getEditable().length() == 0) {
+                    return n > 0 ? " " : "";
+                }
+                return super.getTextBeforeCursor(n, flags);
+            }
+
+            @Override public CharSequence getTextAfterCursor(int n, int flags) {
+                if (virtualBeforeCursor && mFilePreview == null && getEditable().length() == 0) {
+                    return "";
+                }
+                return super.getTextAfterCursor(n, flags);
+            }
+
+            @Override public SurroundingText getSurroundingText(int beforeLength, int afterLength, int flags) {
+                if (virtualBeforeCursor && mFilePreview == null && getEditable().length() == 0) {
+                    if (beforeLength > 0) {
+                        return new SurroundingText(" ", 1, 1, virtualCursor - 1);
+                    }
+                    return new SurroundingText("", 0, 0, virtualCursor);
+                }
+                return super.getSurroundingText(beforeLength, afterLength, flags);
+            }
 
             @Override public boolean sendKeyEvent(KeyEvent event) {
                 if(mFilePreview!=null){if(event.getAction()==KeyEvent.ACTION_DOWN)mFilePreview.key(event.getKeyCode());return true;}
@@ -407,7 +542,11 @@ public final class TerminalView extends View {
                     }
                     return true;
                 }
-                return super.sendKeyEvent(event);
+                boolean handled = super.sendKeyEvent(event);
+                if (deleting && event.getAction() == KeyEvent.ACTION_UP) {
+                    syncVirtualSelection();
+                }
+                return handled;
             }
 
             @Override
@@ -420,9 +559,8 @@ public final class TerminalView extends View {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
                 super.finishComposingText();
 
-                // Finishing composition also happens on focus loss or keyboard dismissal.
-                // Only commitText() confirms text; never flush unconfirmed pinyin here.
                 getEditable().clear();
+                syncVirtualSelection();
                 return true;
             }
 
@@ -436,6 +574,7 @@ public final class TerminalView extends View {
                 super.commitText(committed, newCursorPosition);
                 if (mEmulator != null) sendTextToTerminal(committed);
                 getEditable().clear();
+                syncVirtualSelection();
                 return true;
             }
 
@@ -448,11 +587,20 @@ public final class TerminalView extends View {
                 if (getEditable().length() != 0) return super.deleteSurroundingText(leftLength, rightLength);
                 int clampedLeft = Math.max(0, Math.min(leftLength, 128));
                 int clampedRight = Math.max(0, Math.min(rightLength, 128));
-                KeyEvent deleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
-                for (int i = 0; i < clampedLeft; i++) sendKeyEvent(deleteKey);
-                KeyEvent forwardDeleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_FORWARD_DEL);
-                for (int i = 0; i < clampedRight; i++) sendKeyEvent(forwardDeleteKey);
-                return super.deleteSurroundingText(clampedLeft, clampedRight);
+                KeyEvent deleteDown = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
+                KeyEvent deleteUp = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL);
+                for (int i = 0; i < clampedLeft; i++) {
+                    super.sendKeyEvent(deleteDown);
+                    super.sendKeyEvent(deleteUp);
+                }
+                KeyEvent forwardDown = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_FORWARD_DEL);
+                KeyEvent forwardUp = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_FORWARD_DEL);
+                for (int i = 0; i < clampedRight; i++) {
+                    super.sendKeyEvent(forwardDown);
+                    super.sendKeyEvent(forwardUp);
+                }
+                syncVirtualSelection();
+                return true;
             }
 
             @Override public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
@@ -528,6 +676,14 @@ public final class TerminalView extends View {
         return mEmulator == null ? 1 : mEmulator.getViewportTotalRows();
     }
 
+    private void notifyImeVirtualSelection(int position) {
+        if (!isAttachedToWindow()) return;
+        InputMethodManager imm = getContext().getSystemService(InputMethodManager.class);
+        if (imm != null) {
+            imm.updateSelection(this, position, position, -1, -1);
+        }
+    }
+
     @Override
     protected int computeVerticalScrollExtent() {
         return mEmulator == null ? 1 : mEmulator.mRows;
@@ -551,6 +707,9 @@ public final class TerminalView extends View {
         // Android already merges View invalidations into the next traversal.
         // Posting an extra animation callback delays updates that arrive before traversal.
         invalidate();
+        if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) {
+            mCursorTrailView.invalidate();
+        }
         if (mAccessibilityEnabled && !mAccessibilityUpdatePending) {
             mAccessibilityUpdatePending = true;
             postOnAnimation(mUpdateAccessibilityText);
@@ -641,6 +800,7 @@ public final class TerminalView extends View {
         resetScrollGesture();
         if (mRenderer != null) mRenderer.clearRowCache();
         mRenderer = new TerminalRenderer(textSize, mRenderer == null ? BundledTerminalFonts.typeface() : mRenderer.mTypeface);
+        mRenderer.setForceBlockCursor(mForceBlockCursor);
         updateSize();
     }
 
@@ -648,6 +808,7 @@ public final class TerminalView extends View {
         resetScrollGesture();
         mRenderer.clearRowCache();
         mRenderer = new TerminalRenderer(mRenderer.mTextSize, newTypeface);
+        mRenderer.setForceBlockCursor(mForceBlockCursor);
         updateSize();
         invalidate();
     }
@@ -806,6 +967,7 @@ public final class TerminalView extends View {
                         Math.min(0, mEmulator.getViewportTopRow()));
                     mFollowBottom = mTopRow == 0;
                     if (!awakenScrollBars()) invalidate();
+                    if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) mCursorTrailView.invalidate();
                 }
                 return;
             }
@@ -814,6 +976,7 @@ public final class TerminalView extends View {
             if (newTopRow != mTopRow) {
                 mTopRow = newTopRow;
                 if (!awakenScrollBars()) invalidate();
+                if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) mCursorTrailView.invalidate();
             }
             return;
         }
@@ -1028,6 +1191,39 @@ public final class TerminalView extends View {
     private boolean writeEncoded(byte[] bytes){
         if(bytes==null)return false;
         if(bytes.length>0)mTermSession.write(bytes,0,bytes.length);
+        return true;
+    }
+
+    @Override
+    public boolean onKeyMultiple(int keyCode, int repeatCount, KeyEvent event) {
+        if (mFilePreview != null) {
+            return mFilePreview.key(keyCode);
+        }
+        if (mEmulator == null) return true;
+        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
+            String chars = event.getCharacters();
+            if (chars != null && !chars.isEmpty() && mTermSession != null) {
+                scrollToBottom();
+                mTermSession.write(chars);
+            }
+            return true;
+        }
+        int clamped = Math.max(1, Math.min(repeatCount, 128));
+        long now = event.getEventTime();
+        for (int i = 0; i < clamped; i++) {
+            KeyEvent down = new KeyEvent(
+                    now,
+                    now,
+                    KeyEvent.ACTION_DOWN,
+                    keyCode,
+                    i,
+                    event.getMetaState(),
+                    event.getDeviceId(),
+                    event.getScanCode(),
+                    event.getFlags(),
+                    event.getSource());
+            onKeyDown(keyCode, down);
+        }
         return true;
     }
 
@@ -1439,6 +1635,7 @@ public final class TerminalView extends View {
     protected void onDraw(Canvas canvas) {
         if (mEmulator == null) {
             canvas.drawColor(0XFF000000);
+            if (mCursorTrailView != null) mCursorTrailView.resetTrail();
         } else {
             // render the terminal view and highlight any selected text
             int[] sel = mDefaultSelectors;
@@ -1446,7 +1643,14 @@ public final class TerminalView extends View {
                 mTextSelectionCursorController.getSelectors(sel);
             }
 
-            mRenderer.render(mEmulator, canvas, mTopRow, sel[0], sel[1], sel[2], sel[3]);
+            syncCursorTrail(mEmulator.getRawRenderFrame());
+            TerminalRenderFrame renderFrame = mEmulator.getRenderFrame();
+            if (mCursorTrailView != null
+                    && mCursorTrailView.shouldSuppressStaticCursor()
+                    && renderFrame.cursorVisible) {
+                renderFrame = renderFrame.withCursorVisible(false);
+            }
+            mRenderer.render(renderFrame, canvas, mTopRow, sel[0], sel[1], sel[2], sel[3]);
 
             // render the text selection handles
             renderTextSelection();
@@ -1494,6 +1698,7 @@ public final class TerminalView extends View {
             mFollowBottom = true;
             mScrollRemainder = 0;
             invalidate();
+            if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) mCursorTrailView.invalidate();
             return;
         }
         if (mTopRow == 0) { mFollowBottom = true; return; }
@@ -1501,6 +1706,7 @@ public final class TerminalView extends View {
         mFollowBottom = true;
         mScrollRemainder = 0;
         invalidate();
+        if (mCursorTrailView != null && mCursorTrailView.isTrailEnabled()) mCursorTrailView.invalidate();
     }
 
     public void setTopRow(int mTopRow) {

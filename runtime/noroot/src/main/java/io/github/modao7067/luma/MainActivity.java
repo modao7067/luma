@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 
 public final class MainActivity extends Activity {
     private TerminalView terminal;
+    private CursorTrailView cursorTrail;
     private TerminalLinkOpener linkOpener;
     private final LinkedHashMap<TerminalSession, TerminalView> terminalViews = new LinkedHashMap<>();
     private TerminalHeader terminalHeader;
@@ -102,6 +103,7 @@ public final class MainActivity extends Activity {
                 }
                 public void onCursorChanged() {
                     if (terminal != null) terminal.invalidate();
+                    if (cursorTrail != null && cursorTrail.isTrailEnabled()) cursorTrail.invalidate();
                 }
                 public void onSessionStateChanged(TerminalSession session) {
                     scheduleStatusUpdate();
@@ -197,6 +199,7 @@ public final class MainActivity extends Activity {
             WindowManager.LayoutParams attributes = getWindow().getAttributes();
             terminalFrameRate = best.getRefreshRate();
             attributes.preferredDisplayModeId = best.getModeId();
+            attributes.preferredRefreshRate = terminalFrameRate;
             getWindow().setAttributes(attributes);
         }
         prefs = getSharedPreferences("appearance", MODE_PRIVATE);
@@ -257,6 +260,12 @@ public final class MainActivity extends Activity {
         terminalArea = new FrameLayout(this);
         terminalArea.setPadding(0, 0, 0, 0);
         terminalArea.addView(terminal, new FrameLayout.LayoutParams(-1, -1));
+        cursorTrail = new CursorTrailView(this);
+        cursorTrail.setTargetFrameRate(terminalFrameRate);
+        cursorTrail.setTrailEnabled(TerminalCursorTrailPrefs.isEnabled(this));
+        cursorTrail.setActive(false);
+        terminalArea.addView(cursorTrail, new FrameLayout.LayoutParams(-1, -1));
+        terminal.setCursorTrailView(cursorTrail);
         content.addView(terminalArea, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         View keysDivider = new View(this);
@@ -332,6 +341,7 @@ public final class MainActivity extends Activity {
         view.setTerminalViewClient(new ViewClient(view));
         view.setTextSize(TerminalFontSize.pixels(fontSize, getResources().getDisplayMetrics().density));
         view.setTypeface(BundledTerminalFonts.typeface());
+        view.setForceBlockCursor(true);
         view.setBackgroundColor(Color.TRANSPARENT);
         if (Build.VERSION.SDK_INT >= 35) {
             view.setRequestedFrameRate(terminalFrameRate);
@@ -348,11 +358,12 @@ public final class MainActivity extends Activity {
     private void selectWindow(TerminalSession session) {
         if (service == null || !service.allowsSelection(managedTerminalRequest,session)) return;
         if(terminal!=null&&terminal.getCurrentSession()==session){
-            service.selectSession(session);terminal.setVisibility(View.VISIBLE);updateTitle();return;
+            service.selectSession(session);terminal.setVisibility(View.VISIBLE);terminal.setCursorTrailView(cursorTrail);updateTitle();return;
         }
         for(java.util.Iterator<java.util.Map.Entry<TerminalSession,TerminalView>> entries=terminalViews.entrySet().iterator();entries.hasNext();){
             java.util.Map.Entry<TerminalSession,TerminalView> entry=entries.next();
             if(service.getSessions().contains(entry.getKey()))continue;
+            entry.getValue().setCursorTrailView(null);
             entry.getValue().setTerminalCursorBlinkerState(false,true);
             terminalArea.removeView(entry.getValue());entries.remove();
         }
@@ -360,6 +371,7 @@ public final class MainActivity extends Activity {
         if (extraKeys != null) extraKeys.cancelPendingPresses();
         if (terminal != null) {
             terminal.stopTextSelectionMode();
+            terminal.setCursorTrailView(null);
             terminal.setTerminalCursorBlinkerState(false, true);
             terminal.setVisibility(View.GONE);
         }
@@ -371,6 +383,7 @@ public final class MainActivity extends Activity {
             } else {
                 selected = createTerminalView();
                 terminalArea.addView(selected, new FrameLayout.LayoutParams(-1, -1));
+                if (cursorTrail != null) cursorTrail.bringToFront();
             }
             terminalViews.put(session, selected);
         }
@@ -379,6 +392,7 @@ public final class MainActivity extends Activity {
         terminal.setVisibility(View.VISIBLE);
         terminal.setTextSize(TerminalFontSize.pixels(fontSize, getResources().getDisplayMetrics().density));
         terminal.attachSession(session);
+        terminal.setCursorTrailView(cursorTrail);
         terminal.setTerminalCursorBlinkerState(resumed, true);
         terminal.requestFocus();
         for (SpecialButtonState state : extraKeys.getSpecialButtons().values()) {
@@ -449,6 +463,7 @@ public final class MainActivity extends Activity {
                     sheet.dismiss();
                     TerminalView oldView = terminalViews.remove(window);
                     if (oldView != null) {
+                        oldView.setCursorTrailView(null);
                         oldView.setTerminalCursorBlinkerState(false, true);
                         terminalArea.removeView(oldView);
                     }
@@ -530,6 +545,7 @@ public final class MainActivity extends Activity {
             TerminalView view = terminalViews.remove(closing);
             if (view != null) {
                 view.stopTextSelectionMode();
+                view.setCursorTrailView(null);
                 view.setTerminalCursorBlinkerState(false, true);
                 terminalArea.removeView(view);
             }
@@ -783,6 +799,24 @@ public final class MainActivity extends Activity {
             applyAppearance();
         });
         sheet.body.addView(blurSlider, LumaUi.vSpace(this, 8));
+
+        boolean trailOn = TerminalCursorTrailPrefs.isEnabled(this);
+        View trailRow = LumaUi.menuRow(
+            this,
+            com.termux.terminal.LumaLang.tr("光标拖尾", "Cursor trail"),
+            null,
+            trailOn ? com.termux.terminal.LumaLang.tr("已开启", "On") : com.termux.terminal.LumaLang.tr("已关闭", "Off"),
+            trailOn,
+            v -> {
+                boolean next = !TerminalCursorTrailPrefs.isEnabled(this);
+                TerminalCursorTrailPrefs.setEnabled(this, next);
+                if (cursorTrail != null) cursorTrail.setTrailEnabled(next);
+                if (terminal != null) terminal.syncCursorTrail();
+                sheet.dismiss();
+                appearance();
+            }
+        );
+        sheet.body.addView(trailRow, LumaUi.vSpace(this, 8));
 
         File customWallpaper = new File(getFilesDir(), "wallpaper");
         TextView changeWp = LumaUi.secondaryButton(this, com.termux.terminal.LumaLang.tr("更换壁纸", "Change wallpaper"), v -> {
@@ -1190,10 +1224,15 @@ public final class MainActivity extends Activity {
         openTerminalIfReady();
         syncForegroundTerminal();
         updateTitle();
+        if (cursorTrail != null) {
+            cursorTrail.setTrailEnabled(TerminalCursorTrailPrefs.isEnabled(this));
+            cursorTrail.setActive(true);
+        }
         if (terminal != null) {
             terminal.updateAccessibilityState();
             terminal.setTerminalCursorBlinkerState(true, true);
             terminal.invalidate();
+            terminal.syncCursorTrail();
         }
         boolean granted = LinuxEnvironment.storageGranted();
         if (granted != storageWasGranted) {
@@ -1205,6 +1244,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        if (cursorTrail != null) cursorTrail.setActive(false);
         if (titleDot != null) titleDot.setActivityActive(false);
         for (StatusDot dot : windowDots.values()) dot.setActivityActive(false);
         if (extraKeys != null) extraKeys.cancelPendingPresses();
@@ -1261,7 +1301,9 @@ public final class MainActivity extends Activity {
         if (service != null) {
             service.unregisterListener(MainActivity.this);
         }
+        if (cursorTrail != null) cursorTrail.setActive(false);
         for (TerminalView view : terminalViews.values()) {
+            view.setCursorTrailView(null);
             view.setTerminalCursorBlinkerState(false, true);
         }
         if (bound) unbindService(connection);

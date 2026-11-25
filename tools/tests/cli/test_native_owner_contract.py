@@ -53,17 +53,45 @@ class Contracts(unittest.TestCase):
    (dist/'index.js').write_text('\n'.join(f'export function {s}(){{}}' for s in REQUIRED_SDK_EXPORTS))
    (dist/'core/project-trust.js').write_text('export function resolveProjectTrusted(){}')
    (dist/'cli/project-trust.js').write_text('export function createProjectTrustContext(){}')
+   (dist/'core/http-dispatcher.js').write_text('export function applyHttpProxySettings(){}\nexport function configureHttpDispatcher(){}')
    (dist/'core/agent-session.js').write_text('const preflightResult = options?.preflightResult;')
-   for ver in ('1.5.0','1.5.7','1.6.0-rc.1'):
+   for ver in ('1.5.0','1.5.7','1.6.0-rc.1','1.6.1'):
     (pkg/'package.json').write_text(json.dumps({'version':ver}))
     found,ok,reason,resolved=probe_pi_native(str(cli_bin))
     self.assertTrue(found and ok,reason);self.assertEqual(resolved,pkg)
    (pkg/'package.json').write_text(json.dumps({'version':'1.4.9'}))
    self.assertEqual(probe_pi_native(str(cli_bin))[:2],(True,False))
-   (pkg/'package.json').write_text(json.dumps({'version':'1.6.0'}))
+   (pkg/'package.json').write_text(json.dumps({'version':'1.6.1'}))
+   (dist/'core/http-dispatcher.js').write_text('export function applyHttpProxySettings(){}')
+   found,ok,reason,_=probe_pi_native(str(cli_bin))
+   self.assertEqual((found,ok),(True,False));self.assertIn(tr('契约','contract'),reason)
+   (dist/'core/http-dispatcher.js').unlink()
+   self.assertEqual(probe_pi_native(str(cli_bin))[:2],(True,False))
+   (dist/'core/http-dispatcher.js').write_text('export function applyHttpProxySettings(){}\nexport function configureHttpDispatcher(){}')
    (dist/'core/agent-session.js').write_text('// preflight removed')
    found,ok,reason,_=probe_pi_native(str(cli_bin))
    self.assertEqual((found,ok),(True,False));self.assertIn(tr('契约','contract'),reason)
+ def test_pi_host_fails_contract_when_http_dispatcher_is_missing(self):
+  with tempfile.TemporaryDirectory(prefix='luma-pi-host-contract-') as tmp:
+   root=pathlib.Path(tmp);dist=root/'pi-pkg/dist';(dist/'core').mkdir(parents=True);(dist/'cli').mkdir(parents=True)
+   (dist/'index.js').write_text('\n'.join(f'export function {s}(){{}}' for s in REQUIRED_SDK_EXPORTS))
+   (dist/'core/project-trust.js').write_text('export function resolveProjectTrusted(){}')
+   (dist/'cli/project-trust.js').write_text('export function createProjectTrustContext(){}')
+   sock=str(root/'host.sock')
+   opts=root/'host.json'
+   opts.write_text(json.dumps({'socket':sock,'receipts':str(root/'receipts.json'),'sdk':str(dist/'index.js'),'nativeId':'n1','agentDir':str(root/'agent')}))
+   host=ROOT/'apps/gui/app/src/main/assets/cli_bridge/native/pi-host.mjs'
+   proc=subprocess.run(['node',str(host),str(opts)],capture_output=True,text=True)
+   self.assertNotEqual(proc.returncode,0)
+   err=pathlib.Path(sock+'.error')
+   self.assertTrue(err.is_file())
+   self.assertIn('SDK',err.read_text(encoding='utf-8'))
+   (dist/'core/http-dispatcher.js').write_text('export function applyHttpProxySettings(){}')
+   err.unlink()
+   proc=subprocess.run(['node',str(host),str(opts)],capture_output=True,text=True)
+   self.assertNotEqual(proc.returncode,0)
+   self.assertTrue(err.is_file())
+   self.assertIn('SDK',err.read_text(encoding='utf-8'))
  def test_new_session_falls_back_to_standard_protocol_without_migrating_existing_or_explicit_sessions(self):
   with tempfile.TemporaryDirectory(prefix='luma-protocol-fallback-') as tmp:
    work=pathlib.Path(tmp)/'work';work.mkdir();state=pathlib.Path(tmp)/'state'

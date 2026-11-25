@@ -33,6 +33,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -498,8 +499,22 @@ internal fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (page == "main") {
+                        val context = LocalContext.current
+                        var cursorTrailEnabled by remember(context) {
+                            mutableStateOf(com.termux.view.TerminalCursorTrailPrefs.isEnabled(context))
+                        }
                         SettingsNavigationRow(tr("CLI 工具", "CLI tools"), MenuSymbol.TERMINAL) { go("profile") }
                         if (hasEnvironmentSettings) SettingsNavigationRow(tr("环境设置", "Environment"), MenuSymbol.SETTINGS) { go("environment") }
+                        SettingsToggleRow(
+                            title = tr("终端光标拖尾", "Terminal cursor trail"),
+                            symbol = MenuSymbol.SPEED,
+                            detail = "",
+                            checked = cursorTrailEnabled,
+                        ) {
+                            val next = !cursorTrailEnabled
+                            com.termux.view.TerminalCursorTrailPrefs.setEnabled(context, next)
+                            cursorTrailEnabled = next
+                        }
                     } else if (page == "environment" && hasEnvironmentSettings) {
                         EnvironmentSettingsContent(environmentAccess)
                     } else {

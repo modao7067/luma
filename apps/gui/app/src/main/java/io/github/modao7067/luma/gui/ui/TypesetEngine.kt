@@ -1011,6 +1011,7 @@ internal object TypesetEngine {
             addGlue(KpGlue(sw, 0f, 0f, TIER_RIGID, pendingSpaceStart, pendingSpaceEnd))
         }
 
+        items.add(KpPenalty(0f, INF_PENALTY))
         items.add(KpGlue(0f, 1_000_000f, 0f, TIER_RIGID))
         items.add(KpPenalty(0f, -INF_PENALTY))
 
@@ -1287,7 +1288,7 @@ internal object TypesetEngine {
                 }
 
                 val ratio = when {
-                    isFinal && actualW <= targetWidth -> 0f
+                    isFinal -> if (actualW <= targetWidth) 0f else Float.NEGATIVE_INFINITY
                     actualW < targetWidth -> if (actualStretch > 0.001f) (targetWidth - actualW) / actualStretch else Float.POSITIVE_INFINITY
                     actualW > targetWidth -> if (actualShrink > 0.001f) (targetWidth - actualW) / actualShrink else Float.NEGATIVE_INFINITY
                     else -> 0f
@@ -2054,6 +2055,9 @@ internal object TypesetEngine {
 
     internal fun isCjkMidPunct(ch: Char): Boolean =
         ch == '：' || ch == '；' || ch == '！' || ch == '？'
+
+    internal fun isCjkPunctuation(ch: Char): Boolean =
+        isCjkOpenPunct(ch) || isCjkClosePunct(ch) || isCjkStopPunct(ch) || isCjkMidPunct(ch)
 
     private fun isAlnumOrIdeographCodePoint(cp: Int): Boolean =
         Character.isLetterOrDigit(cp) || isCjkIdeographCodePoint(cp)

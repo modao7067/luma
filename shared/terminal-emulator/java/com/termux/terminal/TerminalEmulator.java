@@ -50,6 +50,7 @@ public abstract class TerminalEmulator {
     public int getKeyboardRestoreStatus(){return KEYBOARD_RESTORE_UNAVAILABLE;}
     public boolean isKeeperKeyboardTracking(){return false;}
     public abstract TerminalRenderFrame getRenderFrame();
+    public TerminalRenderFrame getRawRenderFrame(){return getRenderFrame();}
     public abstract TerminalBuffer getScreen();
     public abstract int getViewportTopRow();
     public abstract void setViewportTopRow(int topRow);

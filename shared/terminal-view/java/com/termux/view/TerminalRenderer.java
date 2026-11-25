@@ -177,6 +177,15 @@ public final class TerminalRenderer {
     private final Rect mImageSource = new Rect();
     private final RectF mImageDestination = new RectF();
     private final Paint mKittyPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private boolean mForceBlockCursor;
+
+    public void setForceBlockCursor(boolean forceBlockCursor) {
+        mForceBlockCursor = forceBlockCursor;
+    }
+
+    public boolean isForceBlockCursor() {
+        return mForceBlockCursor;
+    }
 
     private static final class RowFrame {
         final RenderNode node = new RenderNode("terminal row");
@@ -270,7 +279,9 @@ public final class TerminalRenderer {
         final boolean cursorVisible = renderFrame.cursorVisible;
         final TerminalBuffer screen = renderFrame.screen;
         final int[] palette = renderFrame.palette;
-        final int cursorShape = renderFrame.cursorStyle;
+        final int cursorShape = mForceBlockCursor
+                ? TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK
+                : renderFrame.cursorStyle;
         final float graphicsBottom=Math.min(canvas.getHeight(),mFontLineSpacingAndAscent+rows*mFontLineSpacing);
         boolean kittyUnderText=false;
         for(TerminalImage image:renderFrame.images)if(image.z<0&&image.z>=Integer.MIN_VALUE/2)kittyUnderText=true;

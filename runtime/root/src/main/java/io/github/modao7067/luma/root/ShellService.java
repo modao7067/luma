@@ -584,7 +584,7 @@ public final class ShellService extends Service {
         public void onColorsChanged(TerminalSession s){if(listener!=null && sessions.contains(s))listener.onColorsChanged(s);}
         public void onTerminalCursorStateChange(boolean b){if(listener!=null)listener.onCursorChanged();}
         public void setTerminalShellPid(TerminalSession s,int pid){android.util.Log.i("UbuntuGlass","PTY shell pid="+pid);}
-        public Integer getTerminalCursorStyle(){return 1;}
+        public Integer getTerminalCursorStyle(){return 0;}
         public void onBell(TerminalSession s){}
         public void onCopyTextToClipboard(TerminalSession s,String text){
             if(text==null)return;

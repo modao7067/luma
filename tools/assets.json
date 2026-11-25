@@ -144,8 +144,8 @@
     "sha256": "a0efefdff19ab978c360e893d791176f6c27308d17d256a86da7501aebf300d3"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/pi_native.py": {
-    "bytes": 12047,
-    "sha256": "7fa8a530ebbf9ef7622ece6045e6f9fbd1ffdeface6f3c004412f6c966f24418"
+    "bytes": 12366,
+    "sha256": "188abc80cd914d16e7bccdea455d69f7a8e213e1b4ce7d018fd374ea93ab4432"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/pty_tui.py": {
     "bytes": 11554,
@@ -176,8 +176,8 @@
     "sha256": "3949af2a5b1b279d12da3c3abf1efef694672e9d92ca5bd7ebce72986a31bb56"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/pi-host.mjs": {
-    "bytes": 10824,
-    "sha256": "6fb73b7f7bfba48a87b9395c03a7a821d63e704a5fe3c35774afce1aa42daa74"
+    "bytes": 11040,
+    "sha256": "ded75b4927d493483264facd83c3d5e82e03f46f2c794c5bd5111a6102e95998"
   },
   "apps/gui/app/src/main/assets/cli_bridge/native/tmux-debian-arm64.zip": {
     "bytes": 801339,

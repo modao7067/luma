@@ -360,4 +360,106 @@ class TypesetEngineTest {
         assertArrayEquals(fresh.charLeft, inc.charLeft, 0.01f)
         assertArrayEquals(fresh.charRight, inc.charRight, 0.01f)
     }
+
+    @Test fun resolveTypesetFontFeatureSettingsDisablesCjkAutoSqueezeForProseOnly() {
+        assertEquals("'chws' 0, 'halt' 0, 'palt' 0", resolveTypesetFontFeatureSettings(null, isCode = false))
+        assertEquals("'chws' 0, 'halt' 0, 'palt' 0", resolveTypesetFontFeatureSettings("   ", isCode = false))
+        assertEquals("'tnum' 1, 'chws' 0, 'halt' 0, 'palt' 0", resolveTypesetFontFeatureSettings("'tnum' 1", isCode = false))
+        assertEquals("'chws' 1, 'halt' 0, 'palt' 0", resolveTypesetFontFeatureSettings("'chws' 1", isCode = false))
+        assertEquals("'calt' 0, 'liga' 0", resolveTypesetFontFeatureSettings("'calt' 0, 'liga' 0", isCode = true))
+        assertNull(resolveTypesetFontFeatureSettings(null, isCode = true))
+    }
+
+    @Test fun resolveCjkPunctuationWidthRecoversFullAdvanceWhenIsolatedOpenBracketCollapses() {
+        assertEquals(
+            36f,
+            resolveCjkPunctuationWidth(
+                ch = '（',
+                isolatedAdvance = 18f,
+                contextRunAdvance = 36f,
+                contextMeasureAdvance = 36f,
+                shapedContextAdvance = 36f,
+                shapedAdjacentAdvance = 36f,
+                drawnInkLeft = 23f,
+                drawnInkRight = 33f,
+                emWidth = 36f,
+            ),
+            0.01f,
+        )
+        assertEquals(
+            36f,
+            resolveCjkPunctuationWidth(
+                ch = '（',
+                isolatedAdvance = 18f,
+                contextRunAdvance = 18f,
+                contextMeasureAdvance = 18f,
+                shapedContextAdvance = 18f,
+                shapedAdjacentAdvance = 18f,
+                drawnInkLeft = 23f,
+                drawnInkRight = 33f,
+                emWidth = 36f,
+            ),
+            0.01f,
+        )
+        assertEquals(
+            18f,
+            resolveCjkPunctuationWidth(
+                ch = '（',
+                isolatedAdvance = 18f,
+                contextRunAdvance = 18f,
+                contextMeasureAdvance = 18f,
+                shapedContextAdvance = 18f,
+                shapedAdjacentAdvance = 18f,
+                drawnInkLeft = 4.6f,
+                drawnInkRight = 14.6f,
+                emWidth = 36f,
+            ),
+            0.01f,
+        )
+        assertEquals(
+            13f,
+            resolveCjkPunctuationWidth(
+                ch = '“',
+                isolatedAdvance = 13f,
+                contextRunAdvance = 13f,
+                contextMeasureAdvance = 13f,
+                shapedContextAdvance = 13f,
+                shapedAdjacentAdvance = 13f,
+                drawnInkLeft = 4f,
+                drawnInkRight = 20f,
+                emWidth = 36f,
+            ),
+            0.01f,
+        )
+    }
+
+    @Test fun tightFinalLineEndingWithFullStopDoesNotEmitPhantomEmptyLineOrJustify() {
+        val text = "非同一控制下合并（购买法）是市场买卖观：花多少钱（对价公允价值）买东西，成本就是多少。"
+        val openIdx1 = text.indexOf('（')
+        val openIdx2 = text.indexOf('（', openIdx1 + 1)
+        for (w in 280..360 step 4) {
+            val width = w.toFloat()
+            val layout = TypesetEngine.layout(
+                text = text,
+                runs = listOf(TypesetRunInput(0, text.length, 0, TypesetSpanKind.NORMAL)),
+                maxWidthPx = width,
+                mode = TypesetMode.JUSTIFY,
+                measurer = measurer,
+            )
+            assertTrue("Expected multi-line layout at width=$width", layout.lines.size >= 2)
+            assertTrue("Final paragraph must not emit an empty trailing line at width=$width", layout.lines.all { it.pieces.isNotEmpty() })
+            assertFalse("Last line must not be justified at width=$width", layout.lines.last().justified)
+            assertTrue("Last line right=${layout.lines.last().right} overflowed $width", layout.lines.last().right <= width + 0.5f)
+            for (openIdx in intArrayOf(openIdx1, openIdx2)) {
+                val c1 = openIdx + 1
+                val c2 = openIdx + 2
+                if (layout.charLine[c1] == layout.charLine[c2]) {
+                    assertTrue(
+                        "Characters inside parentheses overlapped at width=$width",
+                        layout.charLeft[c2] - layout.charLeft[c1] >= 14.5f,
+                    )
+                }
+            }
+        }
+    }
 }

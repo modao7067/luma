@@ -54,8 +54,9 @@ result={};old=dict(os.environ);session=None;tui=None
 with tempfile.TemporaryDirectory(prefix='luma-pi-production-') as tmp:
  home=pathlib.Path(tmp);agent=home/'agent';agent.mkdir();work=home/'work';work.mkdir();state=home/'state';state.mkdir()
  (agent/'models.json').write_text(json.dumps({'providers':{'fixture':{'baseUrl':f'http://127.0.0.1:{srv.server_port}/v1','apiKey':'fixture-public','api':'openai-completions','models':[{'id':m,'name':m,'reasoning':True,'input':['text','image'],'cost':{'input':0,'output':0,'cacheRead':0,'cacheWrite':0},'contextWindow':32000,'maxTokens':1024} for m in ['fixture','fixture-other']]}}}))
- (agent/'extensions').mkdir();(agent/'extensions/dual.ts').write_text('import fs from \"node:fs\"; export default function(pi){pi.registerCommand(\"dual-select\",{handler:async(args,ctx)=>{const value= args===\"editor\" ? await ctx.ui.editor(\"DUAL_EDITOR\",\"prefill\") : await ctx.ui.select(\"DUAL_APPROVAL\",[\"APPROVE\",\"REJECT\"]);fs.writeFileSync('+json.dumps(str(agent/'selected.txt'))+',value??\"cancel\");}})}')
- os.environ.clear();os.environ.update({'HOME':tmp,'PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color','PI_CODING_AGENT_DIR':str(agent),'DO_NOT_TRACK':'1','PI_OFFLINE':'1','HTTP_PROXY':'http://127.0.0.1:9','HTTPS_PROXY':'http://127.0.0.1:9','ALL_PROXY':'http://127.0.0.1:9','NO_PROXY':'127.0.0.1,localhost'})
+ (agent/'settings.json').write_text(json.dumps({'httpProxy':'http://127.0.0.1:9','httpIdleTimeoutMs':60000}))
+ (agent/'extensions').mkdir();(agent/'extensions/dual.ts').write_text('import fs from \"node:fs\"; const selectedPath='+json.dumps(str(agent/'selected.txt'))+'; const proxyPath='+json.dumps(str(agent/'proxy-env.txt'))+'; const writeAtomic=(p,v)=>{const t=p+\".tmp\";fs.writeFileSync(t,v);fs.renameSync(t,p);}; export default function(pi){writeAtomic(proxyPath,JSON.stringify({http:process.env.HTTP_PROXY??\"\",https:process.env.HTTPS_PROXY??\"\"}));pi.registerCommand(\"dual-select\",{handler:async(args,ctx)=>{const value= args===\"editor\" ? await ctx.ui.editor(\"DUAL_EDITOR\",\"prefill\") : await ctx.ui.select(\"DUAL_APPROVAL\",[\"APPROVE\",\"REJECT\"]);writeAtomic(selectedPath,value??\"cancel\");}})}')
+ os.environ.clear();os.environ.update({'HOME':tmp,'PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color','PI_CODING_AGENT_DIR':str(agent),'DO_NOT_TRACK':'1','PI_OFFLINE':'1','ALL_PROXY':'http://127.0.0.1:9','NO_PROXY':'127.0.0.1,localhost'})
  config={'id':'production-pi','cli':'pi','cwd':str(work),'nativeProtocol':'pi-native-sdk-v1','ownerDirectory':str(state),'model':'fixture/fixture'}
  def save():
   f=home/'config.json';f.write_text(json.dumps(config))
@@ -79,14 +80,20 @@ with tempfile.TemporaryDirectory(prefix='luma-pi-production-') as tmp:
   tui.send(b'TUI_SENTINEL\r');wait(lambda:any('TUI_SENTINEL' in r.get('text','') for r in session.rows.values()));wait(lambda:not session.data['running'])
   tui.send(b'/name DualRenamed\r');wait(lambda:session.data['title']=='DualRenamed')
   session.configure({'model':'fixture/fixture-other','effort':'high'});assert session.data['model']=='fixture/fixture-other' and session.data['effort']=='high'
+  selected_file=agent/'selected.txt'
+  def selected_text():
+   try:return selected_file.read_text() if selected_file.is_file() else None
+   except OSError:return None
+  wait(lambda:(agent/'proxy-env.txt').is_file())
+  assert json.loads((agent/'proxy-env.txt').read_text())=={'http':'http://127.0.0.1:9','https':'http://127.0.0.1:9'},(agent/'proxy-env.txt').read_text()
   command_errors=[]
   def command(ident,body):
    try:session.submit(payload(ident,body))
    except Exception as exc:command_errors.append(repr(exc))
-  threading.Thread(target=command,args=('extension-remote','/dual-select remote'),daemon=True).start();wait(lambda:bool(session.data['requests']))
-  request=session.data['requests'][0];assert request['title']=='DUAL_APPROVAL';session.answer({'id':request['id'],'choice':'0'});wait(lambda:(agent/'selected.txt').exists());assert (agent/'selected.txt').read_text()=='APPROVE'
-  (agent/'selected.txt').unlink();tui.send(b'/dual-select native\r');wait(lambda:bool(session.data['requests']));time.sleep(.2);tui.send(b'\r');wait(lambda:(agent/'selected.txt').exists());wait(lambda:not session.data['requests']);assert (agent/'selected.txt').read_text()=='APPROVE'
-  (agent/'selected.txt').unlink();threading.Thread(target=command,args=('extension-editor','/dual-select editor'),daemon=True).start();wait(lambda:any(r['title']=='DUAL_EDITOR' for r in session.data['requests']));request=session.data['requests'][0];assert request['questions'][0]['prompt']=='prefill';session.answer({'id':request['id'],'choice':'accept','answers':{'value':['GUI_EDITED']}});wait(lambda:(agent/'selected.txt').exists());assert (agent/'selected.txt').read_text()=='GUI_EDITED';assert not command_errors,command_errors
+  t1=threading.Thread(target=command,args=('extension-remote','/dual-select remote'),daemon=True);t1.start();wait(lambda:any(r['title']=='DUAL_APPROVAL' for r in session.data['requests']))
+  request=next(r for r in session.data['requests'] if r['title']=='DUAL_APPROVAL');session.answer({'id':request['id'],'choice':'0'});wait(lambda:selected_text()=='APPROVE' and not session.data['requests']);t1.join(10);assert not t1.is_alive()
+  selected_file.unlink();tui.send(b'/dual-select native\r');wait(lambda:any(r['title']=='DUAL_APPROVAL' for r in session.data['requests']));time.sleep(.2);tui.send(b'\r');wait(lambda:selected_text()=='APPROVE' and not session.data['requests'])
+  selected_file.unlink();t2=threading.Thread(target=command,args=('extension-editor','/dual-select editor'),daemon=True);t2.start();wait(lambda:any(r['title']=='DUAL_EDITOR' for r in session.data['requests']));request=next(r for r in session.data['requests'] if r['title']=='DUAL_EDITOR');assert request['questions'][0]['prompt']=='prefill';session.answer({'id':request['id'],'choice':'accept','answers':{'value':['GUI_EDITED']}});wait(lambda:selected_text()=='GUI_EDITED' and not session.data['requests']);t2.join(10);assert not t2.is_alive();assert not command_errors,command_errors
 
   session.submit(payload('hold','HOLD_SENTINEL'));assert hold.wait(10)
   a=payload('same-a','IDENTICAL_TEXT');b=payload('same-b','IDENTICAL_TEXT');session.submit(a);session.submit(b)
@@ -99,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='luma-pi-production-') as tmp:
   session=session2;release.set();wait(lambda:config.get('consumedSubmissions',{}).get('same-a') and config.get('consumedSubmissions',{}).get('same-b'));wait(lambda:not session.data['running'])
   hold.clear();release.clear();session.submit(payload('abort-separate','HOLD_SENTINEL'));assert hold.wait(10);session.stop();release.set();wait(lambda:not session.data['running'])
   tui.send(b'/new\r');wait(lambda:not session.data['connected']);assert config['nativeId']==sid;assert config['receipts']['same-a']=='accepted'
-  tui.close();tui=None;assert session.owner.alive();result={'passed':True,'sameNativeId':sid,'twoWay':True,'extensionSelectBothSides':True,'nativeEditorAnsweredFromGui':True,'duplicateTextDistinctIds':True,'sameIdNoReplay':True,'observerReconnectReceipt':True,'queuedConsumptionUsesExactObjectIdentity':True,'realTerminalAttachAndDetach':True,'modelThinkingReadBack':True,'abort':True,'nativeNewDoesNotRebindOldGui':True,'localRequests':len(calls)}
+  tui.close();tui=None;assert session.owner.alive();result={'passed':True,'sameNativeId':sid,'twoWay':True,'httpProxySettingsApplied':True,'extensionSelectBothSides':True,'nativeEditorAnsweredFromGui':True,'duplicateTextDistinctIds':True,'sameIdNoReplay':True,'observerReconnectReceipt':True,'queuedConsumptionUsesExactObjectIdentity':True,'realTerminalAttachAndDetach':True,'modelThinkingReadBack':True,'abort':True,'nativeNewDoesNotRebindOldGui':True,'localRequests':len(calls)}
  except Exception as exc:
   result={'passed':False,'error':repr(exc),'traceback':__import__('traceback').format_exc(),'modelState':[session.data.get('model'),session.data.get('effort')],'localRequests':len(calls)}
   if session and hasattr(session,'owner'):
