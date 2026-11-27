@@ -193,7 +193,9 @@ class KimiWebNativeTest(unittest.TestCase):
             'nativeProtocol': 'kimi-web-v1', 'model': 'fixture/fixture'}
         s = self.create_session('initial-model', config)
         self.assertEqual(s.snapshot()['model'], 'fixture/fixture')
-        self.assertEqual(s.api.request('GET', s.path)['agent_config']['model'], 'fixture/fixture')
+        record = s.api.request('GET', s.path)
+        native_model = (record.get('agent_config') or s.api.request('POST', s.path + '/profile', {}).get('agent') or {}).get('model')
+        self.assertEqual(native_model, 'fixture/fixture')
         s.submit({'submissionId': 'initial-model-input', 'text': 'Hello fixture'})
         wait_for(lambda: any(r['role'] == 'assistant' and r['text'] == 'Fixture complete' for r in s.rows.values()))
 
@@ -238,6 +240,10 @@ class KimiWebNativeTest(unittest.TestCase):
         wait_for(lambda: any(p['id'] == 'queued-input' for p in s.data['queue']))
         self.assertFalse(s.config.get('consumedSubmissions', {}).get('queued-input'))
         s.queue_change({'id': 'queued-input', 'steer': False})
+        wait_for(lambda: not s.data['queue'])
+        s.submit({'submissionId': 'steer-input', 'text': 'Steer fixture'})
+        wait_for(lambda: any(p['id'] == 'steer-input' for p in s.data['queue']))
+        s.queue_change({'id': 'steer-input', 'steer': True})
         wait_for(lambda: not s.data['queue'])
         s.stop()
         ModelFixture.held.set()

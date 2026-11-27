@@ -100,8 +100,8 @@
     "sha256": "67cd01303a7845376c46c13d27a5f8e174e5d811ab6a7681d33b5c33ccd2ef2f"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/global_usage.py": {
-    "bytes": 289875,
-    "sha256": "46e888d6b4e55051db4e36ae04a042a063d1b6a55430669063fc6912872f7567"
+    "bytes": 290190,
+    "sha256": "d3ab74b762e42220bfa61020c4a5c989ef6dce53d88a8d94d5e152b0eba801d4"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/grok.py": {
     "bytes": 77365,
@@ -116,12 +116,12 @@
     "sha256": "c4b25bc3c56289dcb9e6916ead08784c620f5c59fbf53780e8cfd4ecabe87351"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/kimi_web.py": {
-    "bytes": 45860,
-    "sha256": "da60b3be00d56af4fc2fb468fa238af6a4b9c6388f95d92b15d6a175000e3f39"
+    "bytes": 49472,
+    "sha256": "961152abc251ac8dda96f57eaab4f864ac4793e8418ae91292583a40dabdc8f4"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/kimi_web_transport.py": {
-    "bytes": 23013,
-    "sha256": "be7feb1337ffc8e60be65c230ff1a6aceebd8f9e225ae49f9caab77e57a62bfa"
+    "bytes": 24232,
+    "sha256": "ca5f941e43fbb209167a4d565576713e16eb6e8b60a06b16c611b5f163cfa357"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/media.py": {
     "bytes": 7916,
@@ -156,8 +156,8 @@
     "sha256": "ad0b1dba43216fbdc73b9522e703f2aaf980cdabb72d6299ed5f8d8daa0e0981"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/server.py": {
-    "bytes": 46502,
-    "sha256": "38c2213114edd1673e29f6772bbf5d5b2617f96562b8443bb1ed4fb478af9784"
+    "bytes": 46503,
+    "sha256": "4013eaeddd0b118ef18355444eabe5a2b984057f9cfda687a5ac50c0318b77f9"
   },
   "apps/gui/app/src/main/assets/cli_bridge/luma_cli/transport.py": {
     "bytes": 10154,

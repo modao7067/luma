@@ -914,5 +914,180 @@ class KimiWebTest(unittest.TestCase):
             self.assertEqual(ids[0], 'ws-notice:8')
             self.assertEqual(ids[-1], 'ws-notice:39')
 
+    def test_kap_1_0_meta_profile_reconnect_interactions_actions_context_and_idle_shutdown(self):
+        with tempfile.TemporaryDirectory() as root:
+            gw = KimiWebGateway(pathlib.Path(root) / '.kimi-web')
+            gw.handle = {'pid': 99999, 'processStart': 'fixture', 'port': 12345, 'token': 'tok'}
+            gw.api = mock.Mock()
+            gw.api.request.return_value = {
+                'kimi_agent_protocol_version': '1.0.0',
+                'server_version': '2.8.1',
+                'product': 'kimi-code-cli',
+                'capabilities': {'websocket': True, 'interactions_list': True, 'file_upload': True},
+                'dangerous_bypass_auth': False,
+            }
+            gw.validate()
+            self.assertTrue(gw.is_kap)
+            self.assertTrue(gw.uses_turns_api)
+            self.assertTrue(gw.capabilities['interactions_list'])
+
+            gw.api.request.return_value = {
+                'kimi_agent_protocol_version': '2.0.0',
+                'server_version': '3.0.0',
+                'capabilities': {'websocket': True},
+                'dangerous_bypass_auth': False,
+            }
+            with self.assertRaises(KimiWebIncompatible):
+                gw.validate()
+
+            gw.api.request.return_value = {
+                'kimi_agent_protocol_version': '1.0.0',
+                'server_version': '2.8.1',
+                'capabilities': {'websocket': False},
+                'dangerous_bypass_auth': False,
+            }
+            with self.assertRaises(KimiWebIncompatible):
+                gw.validate()
+
+            gw.api.request.return_value = {
+                'kimi_agent_protocol_version': '1.0.0',
+                'server_version': '2.8.1',
+                'capabilities': {'websocket': True, 'interactions_list': True},
+                'dangerous_bypass_auth': False,
+            }
+            gw.validate()
+
+            calls = []
+            session_record = {
+                'id': 'native',
+                'cwd': root,
+                'workspace_root': root,
+                'title': 'KAP session',
+                'activity': 'idle',
+                'pending_interaction': 'approval',
+            }
+            agent_state = {
+                'status': 'idle',
+                'compacting': False,
+                'model': 'fixture/existing',
+                'thinking': 'off',
+                'permission_mode': 'yolo',
+                'plan_mode': False,
+            }
+            interactions_items = [{
+                'interaction_id': 'int-kap-1',
+                'session_id': 'native',
+                'agent_id': 'main',
+                'tool_call_id': 'tc-1',
+                'kind': 'approval',
+                'request': {'tool_name': 'Bash', 'action': 'ls', 'tool_input_display': {'command': 'ls'}},
+            }]
+
+            def kap_request(method, path, body=None, binary=False):
+                calls.append((method, path, copy.deepcopy(body)))
+                if method == 'GET' and path == '/sessions/native':
+                    return copy.deepcopy(session_record)
+                if method == 'GET' and path == '/models':
+                    return {'items': [{'provider': 'fixture', 'model': 'fixture/existing', 'display_name': 'Existing', 'max_context_size': 64000}]}
+                if method == 'POST' and path == '/sessions/native/profile':
+                    if body and 'agent_config' in body:
+                        agent_state.update(body['agent_config'])
+                    return {'session': copy.deepcopy(session_record), 'agent': copy.deepcopy(agent_state)}
+                if method == 'GET' and path == '/sessions/native/prompts':
+                    return {'active': None, 'queued': []}
+                if method == 'GET' and path == '/sessions/native/agents/main/turns?page_size=200':
+                    return {'turns': [], 'has_more': False}
+                if method == 'GET' and path == '/sessions/native/interactions':
+                    return {'items': copy.deepcopy(interactions_items)}
+                if method == 'POST' and path in ('/sessions/native:cancel', '/sessions/native/prompts:steer', '/sessions/native/prompts/q1:abort'):
+                    return {'ok': True}
+                raise AssertionError(f'Unexpected KAP request: {method} {path} {body}')
+
+            gw.api = mock.Mock()
+            gw.api.request.side_effect = kap_request
+
+            s = KimiWebSession({
+                'id': 'local',
+                'cli': 'Kimi Code',
+                'cwd': root,
+                'nativeId': 'native',
+                'model': 'fixture/stale',
+                'ownerDirectory': str(pathlib.Path(root) / 'local.native'),
+                'nativeProtocol': PROTOCOL,
+            }, lambda: None)
+            with mock.patch('luma_cli.kimi_web.gateway_for', return_value=gw), mock.patch('luma_cli.kimi_web.KimiWebPeer', Peer):
+                s.connect()
+                try:
+                    self.assertEqual(s.snapshot()['model'], 'fixture/existing')
+                    self.assertEqual(s.snapshot()['permission'], 'yolo')
+                    self.assertEqual([r['id'] for r in s.data['requests']], ['int-kap-1'])
+                    self.assertNotIn(('POST', '/sessions/native/profile', {'agent_config': {'model': 'fixture/stale'}}), calls)
+
+                    s.event({'session_id': 'native', 'agent_id': 'main', 'type': 'context', 'context_tokens': 4096, 'max_context_tokens': 64000})
+                    session_record['activity'] = 'turn'
+                    session_record['pending_interaction'] = 'none'
+                    interactions_items.clear()
+                    s.refresh()
+                    self.assertTrue(s.data['running'])
+                    self.assertEqual(s.data['requests'], [])
+                    labels = {m['label']: m['value'] for m in s.data['metrics']}
+                    self.assertIn('4096 / 64000', labels['上下文'])
+
+                    session_record['activity'] = 'idle'
+                    s.event({'session_id': 'native', 'agent_id': 'main', 'type': 'agent', 'status': 'running', 'compacting': False, 'model': 'fixture/existing'})
+                    s.refresh()
+                    self.assertFalse(s.data['running'])
+
+                    s.stop()
+                    self.assertIn(('POST', '/sessions/native:cancel', {}), calls)
+                    s.queue_change({'id': 'q1', 'steer': True})
+                    self.assertIn(('POST', '/sessions/native/prompts:steer', {'prompt_ids': ['q1']}), calls)
+                    s.queue_change({'id': 'q1', 'steer': False})
+                    self.assertIn(('POST', '/sessions/native/prompts/q1:abort', {}), calls)
+                finally:
+                    s.stop_observation()
+
+            gw2 = KimiWebGateway(pathlib.Path(root) / 'reap-gw' / '.kimi-web')
+            gw2.handle = {'pid': 99999, 'processStart': 'fixture', 'port': 12345, 'token': 'tok', 'detachedAt': 0}
+            gw2._save_handle_locked()
+            gw2.api = mock.Mock()
+            alive = [True]
+
+            def reaper_req(method, path, body=None, binary=False):
+                if path == '/sessions?busy=true&page_size=1':
+                    return {'items': []}
+                if path == '/connections':
+                    raise KimiWebRejected(404, 'Not Found')
+                if path == '/shutdown?if_idle=true':
+                    if alive[0] == 'busy_ws':
+                        return {'ok': False}
+                    alive[0] = False
+                    return {'ok': True}
+                raise AssertionError(f'Unexpected reaper request: {method} {path}')
+
+            gw2.api.request.side_effect = reaper_req
+            with mock.patch.object(KimiWebGateway, 'alive', side_effect=lambda: bool(alive[0])), \
+                    mock.patch('luma_cli.kimi_web_transport.KimiWebHttp', return_value=gw2.api):
+                alive[0] = 'busy_ws'
+                reap_idle_kimi_gateway(pathlib.Path(root) / 'reap-gw', 300)
+                self.assertTrue((gw2.directory / 'gateway.json').exists())
+                alive[0] = True
+                reap_idle_kimi_gateway(pathlib.Path(root) / 'reap-gw', 300)
+                self.assertFalse((gw2.directory / 'gateway.json').exists())
+                gw2.api.request.assert_any_call('POST', '/shutdown?if_idle=true', {})
+
+    def test_kimi_web_http_omits_content_type_when_body_is_none(self):
+        from luma_cli.kimi_web_transport import KimiWebHttp
+        fake_conn = mock.Mock()
+        fake_resp = mock.Mock(status=200)
+        fake_resp.read.return_value = json.dumps({'code': 0, 'data': {'ok': True}}).encode()
+        fake_conn.getresponse.return_value = fake_resp
+        with mock.patch('luma_cli.kimi_web_transport.http.client.HTTPConnection', return_value=fake_conn):
+            api = KimiWebHttp(12345, 'tok')
+            api.request('DELETE', '/files/f1')
+            self.assertEqual(fake_conn.request.call_args.args[3], {'Authorization': 'Bearer tok'})
+            api.request('POST', '/shutdown', {})
+            self.assertEqual(fake_conn.request.call_args.args[3], {'Authorization': 'Bearer tok', 'Content-Type': 'application/json'})
+
 if __name__ == '__main__':
     unittest.main()

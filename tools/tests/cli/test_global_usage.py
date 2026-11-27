@@ -3315,6 +3315,19 @@ sys.stdin.read()
             payload = json.loads(proc.stdout)
             self.assertIn("gpt-6.1-sol", payload["catalog"]["rates"])
             self.assertEqual(payload["catalog"]["aliases"]["kimi-for-coding"], "kimi-k2.7-code")
+            with unittest.mock.patch.object(gu, "__file__", str(stage_dir / "global-usage.py")), \
+                    unittest.mock.patch.object(Path, "resolve", return_value=stage_dir / "missing" / "global-usage.py"):
+                aliases, rates = gu._load_builtin_pricing_table()
+            self.assertEqual(aliases.get("k3.1-pro"), "kimi-k3.1-pro")
+            self.assertIn("kimi-k3.1-pro", rates)
+            link_dir = Path(tmp) / "linked"
+            link_dir.mkdir()
+            linked_script = link_dir / "global-usage.py"
+            linked_script.symlink_to(stage_dir / "global-usage.py")
+            with unittest.mock.patch.object(gu, "__file__", str(linked_script)):
+                linked_aliases, linked_rates = gu._load_builtin_pricing_table()
+            self.assertEqual(linked_aliases.get("k3.1-pro"), "kimi-k3.1-pro")
+            self.assertIn("kimi-k3.1-pro", linked_rates)
 
     def test_online_pricing_parser_filters_reseller_pollution_and_regional_markups(self):
         md_raw = {

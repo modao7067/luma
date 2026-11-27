@@ -360,4 +360,76 @@ class CursorTrailStateTest {
         assertTrue(state.isAnimating())
         assertTrue("After hold timeout, cursor should fly toward col 0", state.boundsLeft < 30 * cellW)
     }
+
+    @Test
+    fun taperedHullNarrowsHorizontalTailWhileKeepingLeadingHeadFullHeight() {
+        val state = CursorTrailState()
+        var now = 10_000_000_000L
+        push(state, 2, 4, now)
+        now += 8_333_333L
+        assertTrue(push(state, 18, 4, now))
+        now += 16_666_667L
+        assertTrue(state.step(now))
+        assertEquals(cellW, state.axisCellExtent, 0.5f)
+        assertTrue(state.stretchFactor > 0.5f)
+
+        val tx = FloatArray(8)
+        val ty = FloatArray(8)
+        val count = state.fillTaperedHull(tx, ty)
+        assertEquals(4, count)
+
+        val headCut = state.axisMinProj + state.axisSpan * 0.8f
+        val clipX = FloatArray(8)
+        val clipY = FloatArray(8)
+        val clipCount = CursorTrailState.clipConvexHalfPlane(
+            tx, ty, count, state.axisDirX, state.axisDirY, headCut, clipX, clipY,
+        )
+        assertTrue("Half-plane clip at leading head must yield a valid polygon", clipCount in 3..5)
+
+        var tailMinY = Float.POSITIVE_INFINITY
+        var tailMaxY = Float.NEGATIVE_INFINITY
+        var headMinY = Float.POSITIVE_INFINITY
+        var headMaxY = Float.NEGATIVE_INFINITY
+        for (i in 0 until count) {
+            val proj = tx[i] * state.axisDirX + ty[i] * state.axisDirY
+            if (proj <= state.axisMinProj + state.axisSpan * 0.2f) {
+                if (ty[i] < tailMinY) tailMinY = ty[i]
+                if (ty[i] > tailMaxY) tailMaxY = ty[i]
+            } else {
+                if (ty[i] < headMinY) headMinY = ty[i]
+                if (ty[i] > headMaxY) headMaxY = ty[i]
+            }
+        }
+        val tailHeight = tailMaxY - tailMinY
+        val headHeight = headMaxY - headMinY
+        assertEquals("Leading cursor head must preserve exact full cell height", cellH, headHeight, 0.5f)
+        assertTrue(
+            "Trailing tail should taper smoothly narrower than head ($tailHeight < $headHeight)",
+            tailHeight < headHeight - 2f && tailHeight > cellH * 0.62f,
+        )
+    }
+
+    @Test
+    fun crossLineFlightStretchesLongSweptTailWhileLandingHeadQuickly() {
+        val state = CursorTrailState()
+        var now = 11_000_000_000L
+        push(state, 28, 4, now)
+
+        now += 8_333_333L
+        assertTrue(push(state, 4, 8, now))
+        var maxSpan = 0f
+        var steps = 0
+        while (state.isAnimating() && steps < 90) {
+            now += 8_333_333L
+            state.step(now)
+            if (state.axisSpan > maxSpan) maxSpan = state.axisSpan
+            steps++
+        }
+        val jumpDist = hypot((24 * cellW).toDouble(), (4 * cellH).toDouble()).toFloat()
+        assertFalse("Cross-line trail should converge cleanly", state.isAnimating())
+        assertTrue(
+            "Cross-line flight should stretch a dramatic tail (> 70% of jump distance), got $maxSpan vs $jumpDist",
+            maxSpan > jumpDist * 0.70f,
+        )
+    }
 }

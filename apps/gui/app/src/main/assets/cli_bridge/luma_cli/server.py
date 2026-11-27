@@ -45,7 +45,7 @@ NATIVE_PROTOCOLS = {"CodeBuddy Code": ["codebuddy-http-acp"], "Antigravity": [AG
     "Grok Build": ["grok-acp", "grok-private-leader-v1"]}
 
 def carrier_revision():
-    directory = Path(__file__).resolve().parent.parent.name
+    directory = Path(__file__).absolute().parent.parent.name
     return directory if re.fullmatch(r"cli-bridge-v[0-9]+", directory) else None
 
 def default_new_protocol(cli):

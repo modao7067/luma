@@ -21,6 +21,28 @@ def frame_status(state):
     return {"done": "completed", "error": "failed", "completed": "completed",
         "failed": "failed", "cancelled": "cancelled", "interrupted": "cancelled"}.get(state, "running")
 
+def _record_cwd(record):
+    if not isinstance(record, dict):
+        return ""
+    return (
+        record.get("environment_cwd")
+        or record.get("cwd")
+        or record.get("workspace_root")
+        or (record.get("metadata") or {}).get("cwd")
+        or ""
+    )
+
+def _profile_agent(payload):
+    if not isinstance(payload, dict):
+        return {}
+    agent = payload.get("agent")
+    if isinstance(agent, dict):
+        return agent
+    agent_config = payload.get("agent_config")
+    if isinstance(agent_config, dict):
+        return agent_config
+    return {}
+
 def _web_tool_kind(name, display):
     if isinstance(display, dict) and display.get("kind") == "command":
         return "execute"
@@ -90,7 +112,7 @@ class KimiWebSession(Session):
                 record = self.api.request("GET", "/sessions/" + encoded(native))
                 if record.get("id") != native:
                     raise Rejected(tr("Kimi Web 返回了不同会话身份", "Kimi Web returned a different session identity"))
-                cwd = record.get("metadata", {}).get("cwd")
+                cwd = _record_cwd(record)
                 if not cwd or os.path.realpath(cwd) != os.path.realpath(self.config["cwd"]):
                     raise Rejected(tr("Kimi 会话工作目录与原记录不符", "Kimi session working directory does not match the original record"))
             else:
@@ -115,13 +137,24 @@ class KimiWebSession(Session):
             self.update(nativeId=self.config["nativeId"])
             self.path = "/sessions/" + encoded(self.config["nativeId"])
             self.models = self.api.request("GET", "/models")["items"]
-            native_model = record.get("agent_config", {}).get("model")
+            agent_cfg = record.get("agent_config") if isinstance(record.get("agent_config"), dict) else None
+            if agent_cfg is None and getattr(self.gateway, "is_kap", False) is True:
+                profile = self.api.request("POST", self.path + "/profile", {})
+                agent_cfg = _profile_agent(profile)
+                if agent_cfg:
+                    with self.lock:
+                        self.agent_state = dict(agent_cfg)
+            native_model = (agent_cfg or {}).get("model")
             model = self.config.get("model") if creating else native_model
             if not native_model:
                 model = self.config.get("model") or self.api.request("GET", "/config").get("default_model")
             if model and model != native_model:
                 configured = self.api.request("POST", self.path + "/profile", {"agent_config": {"model": model}})
-                configured_model = configured.get("agent_config", {}).get("model")
+                configured_agent = _profile_agent(configured)
+                if isinstance(configured, dict) and isinstance(configured.get("agent"), dict):
+                    with self.lock:
+                        self.agent_state = dict(configured["agent"])
+                configured_model = configured_agent.get("model")
                 equiv = {model}
                 for m in self.models:
                     names = {m.get("alias"), m.get("id"), m.get("model")} - {None, ""}
@@ -193,7 +226,7 @@ class KimiWebSession(Session):
             if ftype == "agent":
                 with self.lock:
                     self.agent_state = dict(frame)
-            elif ftype == "usage":
+            elif ftype in ("usage", "context"):
                 with self.lock:
                     self.usage_state = dict(frame)
             elif ftype == "notice":
@@ -569,6 +602,24 @@ class KimiWebSession(Session):
                     self.rows = rows
                     self.seq += 1
                 ws_ints = list(self.ws_interactions.values())
+            gateway_caps = getattr(getattr(self, "gateway", None), "capabilities", None) or {}
+            if gateway_caps.get("interactions_list") and (record.get("pending_interaction") not in (None, "", "none") or ws_ints):
+                listed = self.api.request("GET", self.path + "/interactions")
+                live_ints = [
+                    {
+                        "interactionId": item_obj["interaction_id"],
+                        "interactionKind": item_obj.get("kind", ""),
+                        "agentId": item_obj.get("agent_id", "main"),
+                        "state": "pending",
+                        "toolCallId": item_obj.get("tool_call_id", ""),
+                        "request": item_obj.get("request") or {},
+                    }
+                    for item_obj in (listed.get("items") or [])
+                    if isinstance(item_obj, dict) and item_obj.get("interaction_id")
+                ]
+                with self.lock:
+                    self.ws_interactions = {i["interactionId"]: i for i in live_ints}
+                ws_ints = live_ints
             interactions = list(snapshot.get("interactions", []))
             children = {}
             child_snapshots = []
@@ -650,7 +701,10 @@ class KimiWebSession(Session):
             settings = {**record.get("agent_config", {}), **ws_agent}
             active_model = settings.get("model") or ""
             metrics = kimi_web_metrics(record, snapshot, child_snapshots, self.models, ws_usage, active_model)
-            running = bool(record.get("main_turn_active", record.get("busy")) or ws_agent.get("status") == "running" or ws_agent.get("compacting"))
+            if "activity" in record:
+                running = bool(record.get("activity") == "turn" or ws_agent.get("compacting"))
+            else:
+                running = bool(record.get("main_turn_active", record.get("busy")) or ws_agent.get("status") == "running" or ws_agent.get("compacting"))
             self.update(title=record.get("title", ""), model=active_model,
                 effort=settings.get("thinking") or "", permission=settings.get("permission_mode", "manual"),
                 planModeSupported=True, planMode=bool(settings.get("plan_mode", False)),
@@ -815,7 +869,10 @@ class KimiWebSession(Session):
         for key, target in (("model", "model"), ("effort", "thinking"), ("permission", "permission_mode"), ("planMode", "plan_mode")):
             if key in payload and (key != "effort" or payload[key]):
                 settings[target] = payload[key]
-        self.api.request("POST", self.path + "/profile", {"agent_config": settings})
+        configured = self.api.request("POST", self.path + "/profile", {"agent_config": settings})
+        if isinstance(configured, dict) and isinstance(configured.get("agent"), dict):
+            with self.lock:
+                self.agent_state = dict(configured["agent"])
         return self.refresh()
 
     def rename(self, title):
@@ -828,13 +885,31 @@ class KimiWebSession(Session):
         return {}
 
     def stop(self):
-        self.api.request("POST", self.path + ":abort", {})
+        if getattr(getattr(self, "gateway", None), "is_kap", False) is True:
+            self.api.request("POST", self.path + ":cancel", {})
+        else:
+            try:
+                self.api.request("POST", self.path + ":abort", {})
+            except KimiWebRejected as error:
+                if error.code not in (404, 40001):
+                    raise
+                self.api.request("POST", self.path + ":cancel", {})
         self.refresh_wake.set()
         return {}
 
     def queue_change(self, payload):
-        action = "steer" if payload.get("steer") else "abort"
-        self.api.request("POST", self.path + "/prompts/" + encoded(payload["id"]) + ":" + action, {})
+        if payload.get("steer"):
+            if getattr(getattr(self, "gateway", None), "is_kap", False) is True:
+                self.api.request("POST", self.path + "/prompts:steer", {"prompt_ids": [payload["id"]]})
+            else:
+                try:
+                    self.api.request("POST", self.path + "/prompts/" + encoded(payload["id"]) + ":steer", {})
+                except KimiWebRejected as error:
+                    if error.code not in (404, 40001):
+                        raise
+                    self.api.request("POST", self.path + "/prompts:steer", {"prompt_ids": [payload["id"]]})
+        else:
+            self.api.request("POST", self.path + "/prompts/" + encoded(payload["id"]) + ":abort", {})
         return self.refresh()
 
     def release_mode(self):

@@ -42,9 +42,12 @@ class KimiWebHttp:
     def request(self, method, path, body=None, binary=False):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
+            headers = {"Authorization": "Bearer " + self.token}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
             connection.request(method, "/api/v1" + path,
                 None if body is None else json.dumps(body, ensure_ascii=False).encode(),
-                {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
+                headers)
             response = connection.getresponse()
             raw = response.read(MAX_RESPONSE + 1)
             if len(raw) > MAX_RESPONSE:
@@ -208,6 +211,8 @@ class KimiWebGateway:
         self.observers = set()
         self.idle_timer = None
         self.uses_turns_api = False
+        self.is_kap = False
+        self.capabilities = {}
 
     def alive(self):
         return bool(self.handle.get("pid") and process_start(self.handle["pid"]) == self.handle.get("processStart"))
@@ -254,12 +259,26 @@ class KimiWebGateway:
             raise KimiWebIncompatible(str(error)) from error
         if meta.get("dangerous_bypass_auth") is not False:
             raise Rejected(tr("Kimi Web 必须启用认证", "Kimi Web authentication must be enabled"))
-        if meta.get("backend") != "v2" or not meta.get("capabilities", {}).get("websocket"):
+        capabilities = meta.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+        if not capabilities.get("websocket"):
             raise KimiWebIncompatible(tr("Kimi Web 协议能力不匹配", "Kimi Web protocol capabilities do not match"))
-        ver = _server_version_tuple(meta.get("server_version"))
-        if ver and ver >= (3, 0):
-            raise KimiWebIncompatible(tr("Kimi Web 服务版本不兼容", "Incompatible Kimi Web server version"))
-        self.uses_turns_api = bool(ver and ver >= (2, 6))
+        kap = _server_version_tuple(meta.get("kimi_agent_protocol_version"))
+        if kap:
+            if kap[0] != 1:
+                raise KimiWebIncompatible(tr("Kimi Web 服务版本不兼容", "Incompatible Kimi Web server version"))
+            self.is_kap = True
+            self.uses_turns_api = True
+        else:
+            if meta.get("backend") != "v2":
+                raise KimiWebIncompatible(tr("Kimi Web 协议能力不匹配", "Kimi Web protocol capabilities do not match"))
+            ver = _server_version_tuple(meta.get("server_version"))
+            if ver and ver >= (3, 0):
+                raise KimiWebIncompatible(tr("Kimi Web 服务版本不兼容", "Incompatible Kimi Web server version"))
+            self.is_kap = False
+            self.uses_turns_api = bool(ver and ver >= (2, 6))
+        self.capabilities = capabilities
 
     def launch(self, session):
         binary = resolve_kimi_binary()
@@ -338,10 +357,19 @@ class KimiWebGateway:
         page = self.api.request("GET", "/sessions?busy=true&page_size=1")
         if page["items"]:
             return False
-        connections = self.api.request("GET", "/connections")
-        if connections["connections"]:
+        use_if_idle = self.is_kap
+        if not use_if_idle:
+            try:
+                connections = self.api.request("GET", "/connections")
+                if connections["connections"]:
+                    return False
+            except KimiWebRejected as error:
+                if error.code != 404:
+                    raise
+                use_if_idle = True
+        result = self.api.request("POST", "/shutdown?if_idle=true" if use_if_idle else "/shutdown", {})
+        if use_if_idle and isinstance(result, dict) and result.get("ok") is False:
             return False
-        self.api.request("POST", "/shutdown", {})
         deadline = time.monotonic() + 3
         while self.alive() and time.monotonic() < deadline:
             time.sleep(.05)

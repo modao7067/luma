@@ -3,14 +3,16 @@ package com.termux.view;
 public final class CursorTrailState {
     public static final float DEFAULT_SHORT_FAST_SECONDS = 0.022f;
     public static final float DEFAULT_SHORT_SLOW_SECONDS = 0.095f;
-    public static final float DEFAULT_LONG_FAST_SECONDS = 0.044f;
-    public static final float DEFAULT_LONG_SLOW_SECONDS = 0.150f;
+    public static final float DEFAULT_LONG_FAST_SECONDS = 0.032f;
+    public static final float DEFAULT_LONG_SLOW_SECONDS = 0.220f;
+    public static final float DEFAULT_CROSS_LINE_EXTRA_SLOW_SECONDS = 0.055f;
     public static final float DEFAULT_BURST_EXTRA_SLOW_SECONDS = 0.220f;
     public static final float CONVERGENCE_EPSILON_PX = 1.25f;
     public static final float CONVERGENCE_SPEED_PX_PER_SEC = 45f;
     public static final long HIDE_GRACE_NANOS = 350_000_000L;
     public static final long COL_ZERO_HOLD_NANOS = 140_000_000L;
     private static final float SPRING_OMEGA_SCALE = 5.0f;
+    private static final float SPRING_RANK_EXPONENT = 0.85f;
     private static final float BURST_WINDOW_SECONDS = 0.220f;
     private static final float BURST_DECAY_SECONDS = 0.280f;
     private static final float BURST_STEP_GAIN = 0.50f;
@@ -20,6 +22,8 @@ public final class CursorTrailState {
     private static final long FALLBACK_STEP_NANOS = 8_333_333L;
     private static final float MIN_DT_SECONDS = 0.001f;
     private static final float MAX_DT_SECONDS = 0.050f;
+    private static final float MAX_TAIL_TAPER = 0.30f;
+    private static final float TAIL_EDGE_FRACTION = 0.18f;
     private static final float[] CORNER_SIGN_X = {-1f, 1f, 1f, -1f};
     private static final float[] CORNER_SIGN_Y = {-1f, -1f, 1f, 1f};
 
@@ -34,6 +38,7 @@ public final class CursorTrailState {
     private final float[] mTrailY = new float[4];
     private final float[] mVelX = new float[4];
     private final float[] mVelY = new float[4];
+    private final float[] mCornerProjections = new float[4];
     private final int[] mSortedIndices = new int[4];
     private final int[] mHullIndices = new int[8];
     private final float[] mHullX = new float[4];
@@ -72,6 +77,7 @@ public final class CursorTrailState {
     private float mBurstHeat;
     private long mLastMoveNanos;
     private int mLastMoveSignX;
+    private int mLastMoveSignY;
     private float mMoveDirX = 1f;
     private float mMoveDirY = 0f;
 
@@ -82,6 +88,7 @@ public final class CursorTrailState {
     private float mBoundsBottom;
     private float mAxisMinProj;
     private float mAxisSpan = 1f;
+    private float mAxisCellExtent = 1f;
     private float mStretchFactor;
 
     public CursorTrailState() {
@@ -122,10 +129,12 @@ public final class CursorTrailState {
         mLastStepNanos = 0L;
         mHiddenSinceNanos = 0L;
         mHullCount = 0;
+        mAxisCellExtent = 1f;
         mStretchFactor = 0f;
         mBurstHeat = 0f;
         mLastMoveNanos = 0L;
         mLastMoveSignX = 0;
+        mLastMoveSignY = 0;
         clearVelocities();
     }
 
@@ -205,8 +214,101 @@ public final class CursorTrailState {
         return mAxisSpan;
     }
 
+    public float getAxisCellExtent() {
+        return mAxisCellExtent;
+    }
+
     public float getStretchFactor() {
         return mStretchFactor;
+    }
+
+    public int fillTaperedHull(float[] outX, float[] outY) {
+        int count = mHullCount;
+        if (count < 3) return 0;
+        float taper = MAX_TAIL_TAPER * mStretchFactor;
+        if (taper <= 0.005f || mAxisSpan <= 1e-3f) {
+            for (int i = 0; i < count; i++) {
+                outX[i] = mHullX[i];
+                outY[i] = mHullY[i];
+            }
+            return count;
+        }
+        float tailThreshold = mAxisMinProj + mAxisSpan * TAIL_EDGE_FRACTION;
+        float tailSumX = 0f;
+        float tailSumY = 0f;
+        int tailCount = 0;
+        for (int i = 0; i < count; i++) {
+            float proj = mHullX[i] * mMoveDirX + mHullY[i] * mMoveDirY;
+            if (proj <= tailThreshold) {
+                tailSumX += mHullX[i];
+                tailSumY += mHullY[i];
+                tailCount++;
+            }
+        }
+        if (tailCount != 2) {
+            for (int i = 0; i < count; i++) {
+                outX[i] = mHullX[i];
+                outY[i] = mHullY[i];
+            }
+            return count;
+        }
+        float midX = tailSumX * 0.5f;
+        float midY = tailSumY * 0.5f;
+        for (int i = 0; i < count; i++) {
+            float x = mHullX[i];
+            float y = mHullY[i];
+            float proj = x * mMoveDirX + y * mMoveDirY;
+            if (proj <= tailThreshold) {
+                outX[i] = x + (midX - x) * taper;
+                outY[i] = y + (midY - y) * taper;
+            } else {
+                outX[i] = x;
+                outY[i] = y;
+            }
+        }
+        return count;
+    }
+
+    public static int clipConvexHalfPlane(
+            float[] inX,
+            float[] inY,
+            int inCount,
+            float dirX,
+            float dirY,
+            float minProj,
+            float[] outX,
+            float[] outY) {
+        if (inCount < 3) return 0;
+        int outCount = 0;
+        float prevX = inX[inCount - 1];
+        float prevY = inY[inCount - 1];
+        float prevD = prevX * dirX + prevY * dirY - minProj;
+        boolean prevIn = prevD >= 0f;
+        for (int i = 0; i < inCount; i++) {
+            float curX = inX[i];
+            float curY = inY[i];
+            float curD = curX * dirX + curY * dirY - minProj;
+            boolean curIn = curD >= 0f;
+            if (curIn != prevIn) {
+                float denom = prevD - curD;
+                if (Math.abs(denom) > 1e-6f) {
+                    float t = prevD / denom;
+                    outX[outCount] = prevX + (curX - prevX) * t;
+                    outY[outCount] = prevY + (curY - prevY) * t;
+                    outCount++;
+                }
+            }
+            if (curIn) {
+                outX[outCount] = curX;
+                outY[outCount] = curY;
+                outCount++;
+            }
+            prevX = curX;
+            prevY = curY;
+            prevD = curD;
+            prevIn = curIn;
+        }
+        return outCount;
     }
 
     public void fillEdgeUniforms(float[] edges16) {
@@ -499,12 +601,13 @@ public final class CursorTrailState {
 
     private void updateBurstHeat(float stepDx, float stepDy, long nowNanos) {
         int signX = Math.abs(stepDx) > 0.5f ? (stepDx > 0f ? 1 : -1) : 0;
-        boolean sameLine = mCellHeight <= 0f || Math.abs(stepDy) < mCellHeight * 0.5f;
-        if (mLastMoveNanos != 0L && nowNanos > mLastMoveNanos && sameLine && signX != 0) {
+        int signY = Math.abs(stepDy) > 0.5f ? (stepDy > 0f ? 1 : -1) : 0;
+        boolean axisAligned = (signX != 0 && signY == 0) || (signY != 0 && signX == 0);
+        if (mLastMoveNanos != 0L && nowNanos > mLastMoveNanos && axisAligned) {
             float gapSec = (nowNanos - mLastMoveNanos) * 1e-9f;
             if (gapSec <= BURST_WINDOW_SECONDS) {
                 float decayed = mBurstHeat * (float) Math.exp(-gapSec / BURST_DECAY_SECONDS);
-                if (signX == mLastMoveSignX) {
+                if (signX == mLastMoveSignX && signY == mLastMoveSignY) {
                     mBurstHeat = Math.min(1f, decayed + BURST_STEP_GAIN);
                 } else {
                     mBurstHeat = Math.min(0.25f, decayed * 0.5f);
@@ -517,6 +620,7 @@ public final class CursorTrailState {
         }
         mLastMoveNanos = nowNanos;
         mLastMoveSignX = signX;
+        mLastMoveSignY = signY;
     }
 
     private void dampOpposingVelocities() {
@@ -539,11 +643,19 @@ public final class CursorTrailState {
         float targetCy = (mTargetTop + mTargetBottom) * 0.5f;
         float dxCells = mCellWidth > 0f ? Math.abs(targetCx - trailCx) / mCellWidth : 0f;
         float dyCells = mCellHeight > 0f ? Math.abs(targetCy - trailCy) / mCellHeight : 0f;
-        float distCells = (float) Math.hypot(dxCells, dyCells * 1.4f);
+        boolean crossLine = dyCells >= 0.5f;
+        float distCells = (float) Math.hypot(dxCells, dyCells * 1.6f);
         float blend = Math.max(0f, Math.min(1f, (distCells - 1.2f) / 2.8f));
+        if (crossLine) {
+            float lineBlend = Math.min(1f, 0.72f + Math.max(0f, dyCells - 1f) * 0.14f);
+            if (lineBlend > blend) blend = lineBlend;
+        }
         mActiveFastSeconds = mShortFastSeconds + (mLongFastSeconds - mShortFastSeconds) * blend;
         float baseSlow = mShortSlowSeconds + (mLongSlowSeconds - mShortSlowSeconds) * blend;
-        mActiveSlowSeconds = baseSlow + DEFAULT_BURST_EXTRA_SLOW_SECONDS * mBurstHeat;
+        float crossLineExtra = crossLine
+                ? DEFAULT_CROSS_LINE_EXTRA_SLOW_SECONDS * Math.min(1f, 0.55f + (dyCells - 0.5f) * 0.35f)
+                : 0f;
+        mActiveSlowSeconds = baseSlow + crossLineExtra + DEFAULT_BURST_EXTRA_SLOW_SECONDS * mBurstHeat;
     }
 
     private void shiftVertical(float deltaY) {
@@ -565,7 +677,7 @@ public final class CursorTrailState {
     private void advanceCorners(float dt) {
         float minProj = Float.POSITIVE_INFINITY;
         float maxProj = Float.NEGATIVE_INFINITY;
-        float[] projections = new float[4];
+        float[] projections = mCornerProjections;
         for (int i = 0; i < 4; i++) {
             float p = CORNER_SIGN_X[i] * mMoveDirX + CORNER_SIGN_Y[i] * mMoveDirY;
             projections[i] = p;
@@ -576,7 +688,7 @@ public final class CursorTrailState {
         float projRange = maxProj - minProj;
         for (int i = 0; i < 4; i++) {
             float rank = projRange > 1e-4f ? (projections[i] - minProj) / projRange : 1f;
-            float shaped = (float) Math.pow(rank, 0.65);
+            float shaped = (float) Math.pow(rank, SPRING_RANK_EXPONENT);
             float duration = mActiveSlowSeconds + (mActiveFastSeconds - mActiveSlowSeconds) * shaped;
             float omega = SPRING_OMEGA_SCALE / Math.max(0.008f, duration);
             float exp = (float) Math.exp(-omega * dt);
@@ -604,10 +716,12 @@ public final class CursorTrailState {
         mHoldStartNanos = 0L;
         mLastStepNanos = nowNanos;
         mHullCount = 0;
+        mAxisCellExtent = 1f;
         mStretchFactor = 0f;
         mBurstHeat = 0f;
         mLastMoveNanos = 0L;
         mLastMoveSignX = 0;
+        mLastMoveSignY = 0;
     }
 
     private void setTarget(float left, float top, float right, float bottom) {
@@ -759,6 +873,7 @@ public final class CursorTrailState {
             if (tp > targetMaxProj) targetMaxProj = tp;
         }
         float cellExtent = Math.max(1f, targetMaxProj - targetMinProj);
+        mAxisCellExtent = cellExtent;
         mStretchFactor = Math.max(0f, Math.min(1f, (mAxisSpan - cellExtent) / Math.max(cellExtent * 1.15f, 1f)));
     }
 

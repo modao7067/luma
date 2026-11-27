@@ -215,6 +215,8 @@ final class RuntimeAssets {
         }
         byte[] managed=(rootManaged.toString()+"\n").getBytes(StandardCharsets.UTF_8);
         write(new File(guest,"managed-workspace.json"),managed);digest.update(managed);
+        File guestSync=new File(directory(c),"guest-sync.py");
+        if(guestSync.isFile())digest.update(Files.readAllBytes(guestSync.toPath()));
         StringBuilder stamp=new StringBuilder();for(byte b:digest.digest())stamp.append(String.format("%02x",b&255));
         write(new File(guest,"stamp"),(stamp+"\n").getBytes(StandardCharsets.UTF_8));
     }
@@ -265,14 +267,22 @@ final class RuntimeAssets {
         "deb https://deb.debian.org/debian trixie-updates main\n"+
         "deb https://deb.debian.org/debian-security trixie-security main\n";
     private static final String CHINA_APT_SOURCES=
+        "deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie main\n"+
+        "deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie-updates main\n"+
+        "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security trixie-security main\n";
+    private static final String LEGACY_CHINA_APT_SOURCES=
         "deb https://mirrors.aliyun.com/debian trixie main\n"+
         "deb https://mirrors.aliyun.com/debian trixie-updates main\n"+
         "deb https://mirrors.aliyun.com/debian-security trixie-security main\n";
     private static final String OFFICIAL_PIP_CONF=
         "[global]\nbreak-system-packages = true\n";
     private static final String CHINA_PIP_CONF=
+        "[global]\nbreak-system-packages = true\nindex-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/\n";
+    private static final String LEGACY_CHINA_PIP_CONF=
         "[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n";
     private static final String CHINA_UV_TOML=
+        "[[index]]\nurl = \"https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/\"\ndefault = true\n";
+    private static final String LEGACY_CHINA_UV_TOML=
         "[[index]]\nurl = \"https://mirrors.aliyun.com/pypi/simple/\"\ndefault = true\n";
     private static final String CHINA_NPMRC=
         "registry=https://registry.npmmirror.com/\ndisturl=https://npmmirror.com/mirrors/node\n";
@@ -285,11 +295,13 @@ final class RuntimeAssets {
     private static final String CHINA_CARGO_CONFIG=
         "[source.crates-io]\nreplace-with = \"rsproxy-sparse\"\n\n[source.rsproxy-sparse]\nregistry = \"sparse+https://rsproxy.cn/index/\"\n";
     private static final String CHINA_GEMRC=
+        ":sources:\n- https://mirrors.tuna.tsinghua.edu.cn/rubygems/\n";
+    private static final String LEGACY_CHINA_GEMRC=
         ":sources:\n- https://mirrors.aliyun.com/rubygems/\n";
     private static String normalizeConfig(String text){
         return text.replace("\r\n","\n").trim();
     }
-    private static void syncManagedConfig(File target,String officialContent,String chinaContent,boolean chinaMirror,boolean onlyIfExists,int mode)throws Exception {
+    private static void syncManagedConfig(File target,String officialContent,String chinaContent,boolean chinaMirror,boolean onlyIfExists,int mode,String... legacyChinaContents)throws Exception {
         Path path=target.toPath();
         if(Files.isSymbolicLink(path))return;
         boolean exists=Files.exists(path,LinkOption.NOFOLLOW_LINKS);
@@ -306,6 +318,14 @@ final class RuntimeAssets {
         String current=normalizeConfig(new String(Files.readAllBytes(path),StandardCharsets.UTF_8));
         boolean matchesOfficial=officialContent!=null && current.equals(normalizeConfig(officialContent));
         boolean matchesChina=current.equals(normalizeConfig(chinaContent));
+        if(!matchesChina && legacyChinaContents!=null){
+            for(String legacy:legacyChinaContents){
+                if(legacy!=null && current.equals(normalizeConfig(legacy))){
+                    matchesChina=true;
+                    break;
+                }
+            }
+        }
         if(!matchesOfficial && !matchesChina)return;
         if(desired==null){
             Files.deleteIfExists(path);
@@ -321,15 +341,15 @@ final class RuntimeAssets {
     }
     static void syncMirrorConfigs(File root,boolean chinaMirror)throws Exception {
         if(!new File(root,"etc/debian_version").isFile())return;
-        syncManagedConfig(new File(root,"etc/apt/sources.list"),OFFICIAL_APT_SOURCES,CHINA_APT_SOURCES,chinaMirror,true,0644);
-        syncManagedConfig(new File(root,"etc/pip.conf"),OFFICIAL_PIP_CONF,CHINA_PIP_CONF,chinaMirror,false,0644);
-        syncManagedConfig(new File(root,"etc/uv/uv.toml"),null,CHINA_UV_TOML,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"etc/apt/sources.list"),OFFICIAL_APT_SOURCES,CHINA_APT_SOURCES,chinaMirror,true,0644,LEGACY_CHINA_APT_SOURCES);
+        syncManagedConfig(new File(root,"etc/pip.conf"),OFFICIAL_PIP_CONF,CHINA_PIP_CONF,chinaMirror,false,0644,LEGACY_CHINA_PIP_CONF);
+        syncManagedConfig(new File(root,"etc/uv/uv.toml"),null,CHINA_UV_TOML,chinaMirror,false,0644,LEGACY_CHINA_UV_TOML);
         syncManagedConfig(new File(root,"usr/local/etc/npmrc"),null,CHINA_NPMRC,chinaMirror,false,0644);
         syncManagedConfig(new File(root,"etc/npmrc"),null,CHINA_NPMRC,chinaMirror,false,0644);
         syncManagedConfig(new File(root,"root/.config/pnpm/config.yaml"),OFFICIAL_PNPM_CONFIG,CHINA_PNPM_CONFIG,chinaMirror,false,0644);
         syncManagedConfig(new File(root,"root/.bunfig.toml"),null,CHINA_BUNFIG,chinaMirror,false,0644);
         syncManagedConfig(new File(root,"root/.cargo/config.toml"),null,CHINA_CARGO_CONFIG,chinaMirror,false,0644);
-        syncManagedConfig(new File(root,"etc/gemrc"),null,CHINA_GEMRC,chinaMirror,false,0644);
+        syncManagedConfig(new File(root,"etc/gemrc"),null,CHINA_GEMRC,chinaMirror,false,0644,LEGACY_CHINA_GEMRC);
     }
     static void repairDebianRoot(File root)throws Exception {
         if(!new File(root,"etc/debian_version").isFile())return;

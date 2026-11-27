@@ -744,7 +744,7 @@ china_mirror = tz in ('Asia/Shanghai', 'Asia/Urumqi', 'Asia/Chongqing', 'Asia/Ch
 def norm(text):
     return text.replace('\r\n', '\n').strip()
 
-def sync_managed(path, official, china, only_if_exists=False, mode=0o644):
+def sync_managed(path, official, china, only_if_exists=False, mode=0o644, legacy_china=()):
     if os.path.islink(path):
         return
     exists = os.path.exists(path)
@@ -759,7 +759,7 @@ def sync_managed(path, official, china, only_if_exists=False, mode=0o644):
         return
     current = norm(read(path).decode('utf-8', 'replace'))
     matches_official = official is not None and current == norm(official)
-    matches_china = current == norm(china)
+    matches_china = current == norm(china) or any(current == norm(item) for item in legacy_china)
     if not matches_official and not matches_china:
         return
     if desired is None:
@@ -774,18 +774,27 @@ def sync_managed(path, official, china, only_if_exists=False, mode=0o644):
 sync_managed(
     '/etc/apt/sources.list',
     'deb https://deb.debian.org/debian trixie main\ndeb https://deb.debian.org/debian trixie-updates main\ndeb https://deb.debian.org/debian-security trixie-security main\n',
-    'deb https://mirrors.aliyun.com/debian trixie main\ndeb https://mirrors.aliyun.com/debian trixie-updates main\ndeb https://mirrors.aliyun.com/debian-security trixie-security main\n',
+    'deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian trixie-updates main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian-security trixie-security main\n',
     only_if_exists=True,
+    legacy_china=(
+        'deb https://mirrors.aliyun.com/debian trixie main\ndeb https://mirrors.aliyun.com/debian trixie-updates main\ndeb https://mirrors.aliyun.com/debian-security trixie-security main\n',
+    ),
 )
 sync_managed(
     '/etc/pip.conf',
     '[global]\nbreak-system-packages = true\n',
-    '[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n',
+    '[global]\nbreak-system-packages = true\nindex-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/\n',
+    legacy_china=(
+        '[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n',
+    ),
 )
 sync_managed(
     '/etc/uv/uv.toml',
     None,
-    '[[index]]\nurl = "https://mirrors.aliyun.com/pypi/simple/"\ndefault = true\n',
+    '[[index]]\nurl = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"\ndefault = true\n',
+    legacy_china=(
+        '[[index]]\nurl = "https://mirrors.aliyun.com/pypi/simple/"\ndefault = true\n',
+    ),
 )
 sync_managed(
     '/usr/local/etc/npmrc',
@@ -815,7 +824,10 @@ sync_managed(
 sync_managed(
     '/etc/gemrc',
     None,
-    ':sources:\n- https://mirrors.aliyun.com/rubygems/\n',
+    ':sources:\n- https://mirrors.tuna.tsinghua.edu.cn/rubygems/\n',
+    legacy_china=(
+        ':sources:\n- https://mirrors.aliyun.com/rubygems/\n',
+    ),
 )
 
 bashrc = '/root/.bashrc'

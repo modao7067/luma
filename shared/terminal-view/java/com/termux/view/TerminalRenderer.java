@@ -339,16 +339,9 @@ public final class TerminalRenderer {
         } else {
             drawNativeImages(canvas, renderFrame.images, 0, 0, graphicsBottom, columns);
         }
-        float canvasHeight = canvas.getHeight();
         float heightOffset = mFontLineSpacingAndAscent;
         for (int row = topRow; row < endRow; row++) {
             heightOffset += mFontLineSpacing;
-
-            // Compute the background rect bounds for this row.
-            // First row extends to the top of the view (y=0),
-            // last row extends to the bottom of the canvas.
-            float rowBgTop = (row == topRow) ? 0 : heightOffset - mFontLineSpacing;
-            float rowBgBottom = (row == endRow - 1) ? canvasHeight : heightOffset;
 
             final int cursorX = (row == cursorRow && cursorVisible) ? cursorCol : -1;
             int selx1 = -1, selx2 = -1;
@@ -370,9 +363,8 @@ public final class TerminalRenderer {
                 canvas = frame.node.beginRecording(mCachedWidth, mCachedHeight);
             }
 
-            // Italic Han ink extends beyond its own cells. Paint all backgrounds
-            // before any glyphs so the following cell cannot erase that overhang.
-            final boolean separateBackground = kittyUnderText || hasItalicHan(lineObject, columns);
+            final boolean separateBackground = kittyUnderText
+                || needsSeparateBackground(lineObject, columns, palette[TextStyle.COLOR_INDEX_BACKGROUND], reverseVideo, selx1, selx2, cursorX);
             for (int pass = 0; pass < (separateBackground ? 2 : 1); pass++) {
                 final boolean paintBackground = !separateBackground || pass == 0;
                 final boolean paintText = !separateBackground || pass == 1;
@@ -458,7 +450,7 @@ public final class TerminalRenderer {
                             if (lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK) {
                                 invertCursorTextColor = true;
                             }
-                            drawTextRun(canvas, line, palette, heightOffset, rowBgTop, rowBgBottom, lastRunStartColumn, columnWidthSinceLastRun,
+                            drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
                                 lastRunStartIndex, charsSinceLastRun, measuredWidthForRun,
                                 cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection, paintBackground, paintText);
                         }
@@ -491,7 +483,7 @@ public final class TerminalRenderer {
                 if (lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK) {
                     invertCursorTextColor = true;
                 }
-                if (lastRunStartColumn >= 0 && columnWidthSinceLastRun > 0) drawTextRun(canvas, line, palette, heightOffset, rowBgTop, rowBgBottom, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
+                if (lastRunStartColumn >= 0 && columnWidthSinceLastRun > 0) drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
                     measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection, paintBackground, paintText);
                 if (kittyUnderText && pass == 0) {
 
@@ -528,43 +520,35 @@ public final class TerminalRenderer {
         canvas.restoreToCount(save);
     }
 
-    private static boolean hasItalicHan(TerminalRow row, int columns) {
-        if (row.hasFrameGeometry()) {
-            boolean italic = false;
-            for (int column = 0; column < columns; column++) {
-                if ((TextStyle.decodeEffect(row.getStyle(column)) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0) { italic = true; break; }
-            }
-            if (!italic) return false;
-            for (int column = 0; column < columns; column++) {
-                int start = row.frameColumnStart(column);
-                if (start >= row.getSpaceUsed()) break;
-                int cp = Character.codePointAt(row.mText, start);
-                if (isHanCharacter(cp) && (TextStyle.decodeEffect(row.getStyle(column)) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0)
-                    return true;
-            }
-            return false;
-        }
-        if (!row.hasNonOneWidthOrSurrogateChars()) return false;
-        boolean italic = false;
+    private static boolean needsSeparateBackground(TerminalRow row, int columns, int defaultBg,
+                                                   boolean reverseVideo, int selx1, int selx2, int cursorX) {
+        boolean hasPaintedBg = reverseVideo || selx1 >= 0 || cursorX >= 0;
+        boolean hasItalic = false;
         for (int column = 0; column < columns; column++) {
-            if ((TextStyle.decodeEffect(row.getStyle(column)) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0) {
-                italic = true;
-                break;
+            final long style = row.getStyle(column);
+            final int effect = TextStyle.decodeEffect(style);
+            if ((effect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0) {
+                hasItalic = true;
             }
+            if (!hasPaintedBg) {
+                int backColor = TextStyle.decodeBackColor(style);
+                boolean inverse = (effect & TextStyle.CHARACTER_ATTRIBUTE_INVERSE) != 0;
+                if (inverse || (backColor != TextStyle.COLOR_INDEX_BACKGROUND && backColor != defaultBg)) {
+                    hasPaintedBg = true;
+                }
+            }
+            if (hasPaintedBg && hasItalic) return true;
         }
-        if (!italic) return false;
-        for (int index = 0, column = 0; index < row.getSpaceUsed() && column < columns; ) {
-            int codePoint = Character.codePointAt(row.mText, index, row.getSpaceUsed());
-            if (isHanCharacter(codePoint)
-                    && (TextStyle.decodeEffect(row.getStyle(column)) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0)
-                return true;
-            index += Character.charCount(codePoint);
-            column += WcWidth.width(codePoint);
+        if (!hasPaintedBg) return false;
+        final int used = row.getSpaceUsed();
+        final char[] text = row.mText;
+        for (int i = 0; i < used; i++) {
+            if (text[i] >= 127) return true;
         }
         return false;
     }
 
-    private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, float rowBgTop, float rowBgBottom, int startColumn, int runWidthColumns,
+    private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,
                              int startCharIndex, int runWidthChars, float mes, int cursor, int cursorStyle,
                              long textStyle, boolean reverseVideo, boolean paintBackground, boolean paintText) {
         int foreColor = TextStyle.decodeForeColor(textStyle);
@@ -603,20 +587,8 @@ public final class TerminalRenderer {
         float cellBottom = y;
 
         if (paintBackground && backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
-            // Draw standard cell background.
             mTextPaint.setColor(backColor);
             canvas.drawRect(left, cellTop, right, cellBottom, mTextPaint);
-
-            // Extend into row margins (first row top / last row bottom) ONLY for
-            // non-cursor runs, to fill the TUI gap without stretching the cursor.
-            if (cursor == 0) {
-                if (rowBgTop < cellTop) {
-                    canvas.drawRect(left, rowBgTop, right, cellTop, mTextPaint);
-                }
-                if (rowBgBottom > cellBottom) {
-                    canvas.drawRect(left, cellBottom, right, rowBgBottom, mTextPaint);
-                }
-            }
         }
 
         if (paintBackground && cursor != 0) {

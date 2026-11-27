@@ -159,21 +159,21 @@ public final class EnvironmentPreservationCheck {
             "deb https://deb.debian.org/debian-security trixie-security main\n");
         write(mirrorRoot.resolve("root/.npmrc"),"user-kept=true\n");
         RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),true);
-        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.aliyun.com/debian")
-            &&Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.aliyun.com/debian-security")
-            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.aliyun.com/pypi/simple/")
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.tuna.tsinghua.edu.cn/debian")
+            &&Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.tuna.tsinghua.edu.cn/debian-security")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/")
             &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("break-system-packages = true")
-            &&Files.readString(mirrorRoot.resolve("etc/uv/uv.toml")).contains("mirrors.aliyun.com/pypi/simple/")
+            &&Files.readString(mirrorRoot.resolve("etc/uv/uv.toml")).contains("mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/")
             &&Files.readString(mirrorRoot.resolve("usr/local/etc/npmrc")).contains("registry.npmmirror.com")
             &&Files.readString(mirrorRoot.resolve("etc/npmrc")).contains("registry.npmmirror.com")
             &&Files.readString(mirrorRoot.resolve("root/.config/pnpm/config.yaml")).contains("registry.npmmirror.com")
             &&Files.readString(mirrorRoot.resolve("root/.bunfig.toml")).contains("registry.npmmirror.com")
             &&Files.readString(mirrorRoot.resolve("root/.cargo/config.toml")).contains("rsproxy.cn")
-            &&Files.readString(mirrorRoot.resolve("etc/gemrc")).contains("mirrors.aliyun.com/rubygems/")
+            &&Files.readString(mirrorRoot.resolve("etc/gemrc")).contains("mirrors.tuna.tsinghua.edu.cn/rubygems/")
             &&Files.readString(mirrorRoot.resolve("root/.npmrc")).equals("user-kept=true\n"),"China timezone adapts all package mirrors while keeping user .npmrc");
         RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),false);
         check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("deb.debian.org/debian")
-            &&!Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.aliyun.com")
+            &&!Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.tuna.tsinghua.edu.cn")
             &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("break-system-packages = true")
             &&!Files.exists(mirrorRoot.resolve("etc/uv/uv.toml"))
             &&!Files.exists(mirrorRoot.resolve("usr/local/etc/npmrc"))
@@ -182,6 +182,31 @@ public final class EnvironmentPreservationCheck {
             &&!Files.exists(mirrorRoot.resolve("root/.bunfig.toml"))
             &&!Files.exists(mirrorRoot.resolve("root/.cargo/config.toml"))
             &&!Files.exists(mirrorRoot.resolve("etc/gemrc")),"non-China timezone reverts managed mirrors cleanly");
+        write(mirrorRoot.resolve("etc/apt/sources.list"),
+            "deb https://mirrors.aliyun.com/debian trixie main\n"+
+            "deb https://mirrors.aliyun.com/debian trixie-updates main\n"+
+            "deb https://mirrors.aliyun.com/debian-security trixie-security main\n");
+        write(mirrorRoot.resolve("etc/pip.conf"),"[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n");
+        write(mirrorRoot.resolve("etc/uv/uv.toml"),"[[index]]\nurl = \"https://mirrors.aliyun.com/pypi/simple/\"\ndefault = true\n");
+        write(mirrorRoot.resolve("etc/gemrc"),":sources:\n- https://mirrors.aliyun.com/rubygems/\n");
+        RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),true);
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.tuna.tsinghua.edu.cn/debian")
+            &&!Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("mirrors.aliyun.com")
+            &&Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/")
+            &&Files.readString(mirrorRoot.resolve("etc/uv/uv.toml")).contains("mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/")
+            &&Files.readString(mirrorRoot.resolve("etc/gemrc")).contains("mirrors.tuna.tsinghua.edu.cn/rubygems/"),"legacy Aliyun managed mirrors migrate to Tsinghua TUNA");
+        write(mirrorRoot.resolve("etc/apt/sources.list"),
+            "deb https://mirrors.aliyun.com/debian trixie main\n"+
+            "deb https://mirrors.aliyun.com/debian trixie-updates main\n"+
+            "deb https://mirrors.aliyun.com/debian-security trixie-security main\n");
+        write(mirrorRoot.resolve("etc/pip.conf"),"[global]\nbreak-system-packages = true\nindex-url = https://mirrors.aliyun.com/pypi/simple/\n");
+        write(mirrorRoot.resolve("etc/uv/uv.toml"),"[[index]]\nurl = \"https://mirrors.aliyun.com/pypi/simple/\"\ndefault = true\n");
+        write(mirrorRoot.resolve("etc/gemrc"),":sources:\n- https://mirrors.aliyun.com/rubygems/\n");
+        RuntimeAssets.syncMirrorConfigs(mirrorRoot.toFile(),false);
+        check(Files.readString(mirrorRoot.resolve("etc/apt/sources.list")).contains("deb.debian.org/debian")
+            &&!Files.readString(mirrorRoot.resolve("etc/pip.conf")).contains("mirrors.aliyun.com")
+            &&!Files.exists(mirrorRoot.resolve("etc/uv/uv.toml"))
+            &&!Files.exists(mirrorRoot.resolve("etc/gemrc")),"legacy Aliyun managed mirrors revert cleanly for non-China timezones");
         write(mirrorRoot.resolve("etc/apt/sources.list"),"deb https://custom.example/debian trixie main\n");
         write(mirrorRoot.resolve("etc/pip.conf"),"[global]\nindex-url = https://custom.example/simple\n");
         write(mirrorRoot.resolve("root/.config/pnpm/config.yaml"),"packageImportMethod: copy\nregistry: https://custom.example/\n");

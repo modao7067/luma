@@ -362,11 +362,21 @@ def _serialize_rate_tuple(rate: RateTuple) -> list[Any]:
 
 
 def _load_builtin_pricing_table() -> tuple[dict[str, str], dict[str, RateTuple]]:
-    path = Path(__file__).resolve().with_name(BUILTIN_PRICING_FILENAME)
+    raw_path = Path(__file__).absolute().with_name(BUILTIN_PRICING_FILENAME)
+    candidates = [raw_path]
     try:
-        obj = json.loads(path.read_text("utf-8"))
-    except Exception:
-        return {}, {}
+        resolved_path = Path(__file__).resolve().with_name(BUILTIN_PRICING_FILENAME)
+        if resolved_path != raw_path:
+            candidates.append(resolved_path)
+    except OSError:
+        pass
+    obj = None
+    for path in candidates:
+        try:
+            obj = json.loads(path.read_text("utf-8"))
+            break
+        except Exception:
+            continue
     if not isinstance(obj, dict):
         return {}, {}
     aliases: dict[str, str] = {}
